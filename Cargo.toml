@@ -1,0 +1,49 @@
+[package]
+name = "vigil-acceptance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[workspace]
+resolver = "2"
+members = ["crates/vigil"]
+default-members = ["crates/vigil"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["John Cyriac <lucidprogrammer@hotmail.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/context-graph-ai/vigil"
+description = "Local-first Home Assistant camera intelligence daemon"
+keywords = ["home-assistant", "camera", "nvr", "local-first"]
+categories = ["command-line-utilities"]
+
+[workspace.dependencies]
+context-graph = { path = "../context-graph/crates/context-graph" }
+tempfile = "3"
+
+[dependencies]
+context-graph.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[workspace.metadata.release]
+shared-version = true
+tag-name = "v{{version}}"
+tag-message = "v{{version}}"
+pre-release-commit-message = "release: v{{version}}"
+publish = false
+push = true
+
+[[test]]
+name = "acceptance"
+path = "tests/acceptance.rs"
+
+[[bin]]
+name = "vigil-store-probe"
+path = "tests/ha-os-vm/store_probe.rs"

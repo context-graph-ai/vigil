@@ -1,0 +1,1139 @@
+use std::ffi::OsStr;
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use context_graph::{EmbedderConfig, Store, StoreConfig};
+use tempfile::TempDir;
+
+pub(crate) struct VigilBinary {
+    path: PathBuf,
+}
+
+impl VigilBinary {
+    pub(crate) fn new() -> Self {
+        if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
+            return Self {
+                path: PathBuf::from(path),
+            };
+        }
+        if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
+            return Self {
+                path: PathBuf::from(path),
+            };
+        }
+        let path = workspace_root()
+            .join("target")
+            .join("debug")
+            .join(binary_name("vigil"));
+        ensure_vigil_binary();
+        Self { path }
+    }
+
+    pub(crate) fn command(&self) -> Command {
+        Command::new(&self.path)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+pub(crate) struct VigilProcess {
+    child: Child,
+    stdout: Arc<Mutex<String>>,
+    stderr: Arc<Mutex<String>>,
+    port: u16,
+    trace_prefix: Option<PathBuf>,
+    signal_group: bool,
+    _trace_dir: Option<TempDir>,
+    _isolation_dir: TempDir,
+}
+
+impl VigilProcess {
+    pub(crate) fn spawn(
+        binary: &VigilBinary,
+        config_path: &Path,
+        health_port: u16,
+    ) -> std::io::Result<Self> {
+        Self::spawn_inner(binary, config_path, health_port, false)
+    }
+
+    pub(crate) fn spawn_network_traced(
+        binary: &VigilBinary,
+        config_path: &Path,
+        health_port: u16,
+    ) -> std::io::Result<Self> {
+        Self::spawn_inner(binary, config_path, health_port, true)
+    }
+
+    fn spawn_inner(
+        binary: &VigilBinary,
+        config_path: &Path,
+        health_port: u16,
+        trace_network: bool,
+    ) -> std::io::Result<Self> {
+        let isolation_dir = tempfile::tempdir()?;
+        let trace_dir = if trace_network {
+            Some(tempfile::tempdir()?)
+        } else {
+            None
+        };
+        let trace_prefix = trace_dir.as_ref().map(|dir| dir.path().join("network"));
+        let mut command = if let Some(prefix) = trace_prefix.as_ref() {
+            let mut command = Command::new("setsid");
+            command
+                .arg("strace")
+                .arg("-ff")
+                .arg("-e")
+                .arg("trace=network")
+                .arg("-o")
+                .arg(prefix)
+                .arg(binary.path());
+            command
+        } else {
+            binary.command()
+        };
+        let mut child = command
+            .arg("run")
+            .arg("--config")
+            .arg(config_path)
+            .env("VIGIL_HEALTH_PORT", health_port.to_string())
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("HOME", isolation_dir.path())
+            .env("XDG_CACHE_HOME", isolation_dir.path().join("cache"))
+            .env("XDG_CONFIG_HOME", isolation_dir.path().join("config"))
+            .env("HF_HOME", isolation_dir.path().join("hf-home"))
+            .env(
+                "TRANSFORMERS_CACHE",
+                isolation_dir.path().join("transformers"),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdout = capture_pipe(child.stdout.take());
+        let stderr = capture_pipe(child.stderr.take());
+        Ok(Self {
+            child,
+            stdout,
+            stderr,
+            port: health_port,
+            trace_prefix,
+            signal_group: trace_network,
+            _trace_dir: trace_dir,
+            _isolation_dir: isolation_dir,
+        })
+    }
+
+    pub(crate) fn health(&self) -> HealthProbe {
+        HealthProbe::new(self.port)
+    }
+
+    pub(crate) fn logs(&self) -> String {
+        let stdout = self
+            .stdout
+            .lock()
+            .map(|logs| logs.clone())
+            .unwrap_or_default();
+        let stderr = self
+            .stderr
+            .lock()
+            .map(|logs| logs.clone())
+            .unwrap_or_default();
+        format!("{stdout}{stderr}")
+    }
+
+    pub(crate) fn wait_for_log(&self, needle: &str, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.logs().contains(needle) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    pub(crate) fn terminate(&mut self) -> Option<ExitStatus> {
+        signal_child(self.child.id(), "TERM", self.signal_group);
+        self.wait(Duration::from_secs(10))
+    }
+
+    pub(crate) fn kill9(&mut self) -> Option<ExitStatus> {
+        signal_child(self.child.id(), "KILL", self.signal_group);
+        self.wait(Duration::from_secs(10))
+    }
+
+    pub(crate) fn wait(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        let start = Instant::now();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if start.elapsed() < timeout => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Ok(None) => return None,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    pub(crate) fn network_trace(&self) -> NetworkTrace {
+        let Some(prefix) = self.trace_prefix.as_ref() else {
+            return NetworkTrace {
+                tool_available: true,
+                outbound_attempts: Vec::new(),
+                raw: String::new(),
+            };
+        };
+        let dir = prefix.parent().unwrap_or_else(|| Path::new("."));
+        let prefix_name = prefix
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("network");
+        let mut raw = String::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+                    continue;
+                };
+                if (name == prefix_name || name.starts_with(&format!("{prefix_name}.")))
+                    && let Ok(text) = fs::read_to_string(&path)
+                {
+                    raw.push_str(&text);
+                }
+            }
+        }
+        let outbound_attempts = raw
+            .lines()
+            .filter(|line| network_line_is_outbound(line))
+            .map(str::to_string)
+            .collect();
+        NetworkTrace {
+            tool_available: command_status("strace", ["-V"])
+                && command_status("setsid", ["--version"]),
+            outbound_attempts,
+            raw,
+        }
+    }
+
+    pub(crate) fn runtime_pid(&self) -> Option<u32> {
+        if !self.signal_group {
+            return Some(self.child.id());
+        }
+        descendant_pids(self.child.id())
+            .into_iter()
+            .find(|pid| process_comm(*pid).as_deref() == Some("vigil"))
+    }
+}
+
+impl Drop for VigilProcess {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+pub(crate) struct HealthProbe {
+    address: SocketAddr,
+}
+
+impl HealthProbe {
+    pub(crate) fn new(port: u16) -> Self {
+        Self {
+            address: SocketAddr::from(([127, 0, 0, 1], port)),
+        }
+    }
+
+    pub(crate) fn status(&self) -> Option<u16> {
+        let mut stream =
+            TcpStream::connect_timeout(&self.address, Duration::from_millis(200)).ok()?;
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.write_all(b"GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n");
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|status| status.parse::<u16>().ok())
+    }
+
+    pub(crate) fn wait_for_status(&self, expected: u16, timeout: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if self.status() == Some(expected) {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    pub(crate) fn listener_owned_by_pid(&self, pid: u32) -> HealthOwnerProbeResult {
+        let inodes = listening_socket_inodes(self.address.port());
+        if inodes.is_empty() {
+            return HealthOwnerProbeResult {
+                owned: false,
+                detail: format!(
+                    "no listening socket inode found for health port {}",
+                    self.address.port()
+                ),
+            };
+        }
+        let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
+        let Ok(entries) = fs::read_dir(&fd_dir) else {
+            return HealthOwnerProbeResult {
+                owned: false,
+                detail: format!(
+                    "could not inspect process fd directory {} for health listener ownership",
+                    fd_dir.display()
+                ),
+            };
+        };
+        for entry in entries.flatten() {
+            if let Ok(target) = fs::read_link(entry.path()) {
+                let target = target.to_string_lossy();
+                if inodes
+                    .iter()
+                    .any(|inode| target.as_ref() == format!("socket:[{inode}]"))
+                {
+                    return HealthOwnerProbeResult {
+                        owned: true,
+                        detail: format!(
+                            "health port {} listener is owned by pid {pid}",
+                            self.address.port()
+                        ),
+                    };
+                }
+            }
+        }
+        HealthOwnerProbeResult {
+            owned: false,
+            detail: format!(
+                "health port {} listener socket inodes {inodes:?} were not owned by pid {pid}",
+                self.address.port()
+            ),
+        }
+    }
+}
+
+pub(crate) struct StoreProbe {
+    path: PathBuf,
+}
+
+impl StoreProbe {
+    pub(crate) fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub(crate) fn open_existing(&self) -> StoreProbeResult {
+        if !self.path.exists() {
+            return StoreProbeResult {
+                opened: false,
+                detail: format!("store path does not exist: {}", self.path.display()),
+            };
+        }
+        let config = StoreConfig {
+            db_path: self.path.clone(),
+            default_text_embedder: Some(EmbedderConfig::disabled()),
+            ..StoreConfig::default()
+        };
+        match Store::open(config) {
+            Ok(store) => StoreProbeResult {
+                opened: true,
+                detail: format!("opened {}", store.db_path().display()),
+            },
+            Err(error) => StoreProbeResult {
+                opened: false,
+                detail: format!("store open failed for {}: {error}", self.path.display()),
+            },
+        }
+    }
+
+    pub(crate) fn identity(&self) -> Option<StoreIdentity> {
+        let metadata = fs::metadata(&self.path).ok()?;
+        Some(StoreIdentity {
+            path: self.path.clone(),
+            len: metadata.len(),
+            #[cfg(unix)]
+            dev: metadata.dev(),
+            #[cfg(unix)]
+            ino: metadata.ino(),
+        })
+    }
+
+    pub(crate) fn live_lock_held(&self) -> StoreLockProbeResult {
+        let lock_path = self.path.with_extension("lock");
+        if !lock_path.exists() {
+            return StoreLockProbeResult {
+                locked: false,
+                detail: format!("store lock file does not exist: {}", lock_path.display()),
+            };
+        }
+        match Command::new("flock")
+            .arg("-n")
+            .arg(&lock_path)
+            .arg("true")
+            .output()
+        {
+            Ok(output) if output.status.success() => StoreLockProbeResult {
+                locked: false,
+                detail: format!("store lock was not held: {}", lock_path.display()),
+            },
+            Ok(output) => StoreLockProbeResult {
+                locked: true,
+                detail: format!("store lock was held; flock exited with {}", output.status),
+            },
+            Err(error) => StoreLockProbeResult {
+                locked: false,
+                detail: format!("could not run flock for {}: {error}", lock_path.display()),
+            },
+        }
+    }
+
+    pub(crate) fn live_database_file_open(&self, pid: u32) -> StoreFileProbeResult {
+        let Ok(expected) = fs::canonicalize(&self.path) else {
+            return StoreFileProbeResult {
+                open: false,
+                detail: format!(
+                    "store path was not canonicalizable: {}",
+                    self.path.display()
+                ),
+            };
+        };
+        let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
+        let Ok(entries) = fs::read_dir(&fd_dir) else {
+            return StoreFileProbeResult {
+                open: false,
+                detail: format!(
+                    "could not inspect process fd directory {}",
+                    fd_dir.display()
+                ),
+            };
+        };
+        for entry in entries.flatten() {
+            if let Ok(target) = fs::read_link(entry.path())
+                && target == expected
+            {
+                return StoreFileProbeResult {
+                    open: true,
+                    detail: format!("store database file is open: {}", expected.display()),
+                };
+            }
+        }
+        StoreFileProbeResult {
+            open: false,
+            detail: format!(
+                "process {pid} did not have the store database file open: {}",
+                expected.display()
+            ),
+        }
+    }
+
+    pub(crate) fn public_open_blocked_by_process(&self, pid: u32) -> StoreContentionProbeResult {
+        let config = StoreConfig {
+            db_path: self.path.clone(),
+            default_text_embedder: Some(EmbedderConfig::disabled()),
+            ..StoreConfig::default()
+        };
+        match Store::open(config) {
+            Ok(store) => StoreContentionProbeResult {
+                blocked: false,
+                detail: format!(
+                    "public Store::open unexpectedly succeeded while process {pid} should hold {}",
+                    store.db_path().display()
+                ),
+            },
+            Err(error) => {
+                let detail = format!("{error:?}");
+                let pid_text = format!("pid {pid}");
+                StoreContentionProbeResult {
+                    blocked: detail.contains("database is locked") && detail.contains(&pid_text),
+                    detail: format!("public Store::open contention result: {detail}"),
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct StoreProbeResult {
+    pub(crate) opened: bool,
+    pub(crate) detail: String,
+}
+
+pub(crate) struct StoreLockProbeResult {
+    pub(crate) locked: bool,
+    pub(crate) detail: String,
+}
+
+pub(crate) struct StoreFileProbeResult {
+    pub(crate) open: bool,
+    pub(crate) detail: String,
+}
+
+pub(crate) struct StoreContentionProbeResult {
+    pub(crate) blocked: bool,
+    pub(crate) detail: String,
+}
+
+pub(crate) struct HealthOwnerProbeResult {
+    pub(crate) owned: bool,
+    pub(crate) detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StoreIdentity {
+    pub(crate) path: PathBuf,
+    pub(crate) len: u64,
+    #[cfg(unix)]
+    pub(crate) dev: u64,
+    #[cfg(unix)]
+    pub(crate) ino: u64,
+}
+
+pub(crate) struct DockerProbe;
+
+impl DockerProbe {
+    pub(crate) fn image_healthcheck(image: &str) -> DockerObservation {
+        let build = Self::build_current_image(image);
+        if !build.command_succeeded {
+            return build;
+        }
+        let inspect = command_output(
+            "docker",
+            [
+                "image",
+                "inspect",
+                image,
+                "--format",
+                "{{json .Config.Healthcheck}}",
+            ],
+        );
+        DockerObservation {
+            docker_available: true,
+            command_succeeded: inspect
+                .as_ref()
+                .map(|output| output.status.success())
+                .unwrap_or(false),
+            stdout: build.stdout,
+            healthcheck: inspect.map(output_combined_text).unwrap_or_default(),
+        }
+    }
+
+    pub(crate) fn run_volume_probe(image: &str, volume: &Path) -> DockerObservation {
+        Self::run_detached_probe(image, volume, Some(free_port()), false)
+    }
+
+    pub(crate) fn run_network_none_probe(image: &str, volume: &Path) -> DockerObservation {
+        Self::run_detached_probe(image, volume, None, true)
+    }
+
+    fn run_detached_probe(
+        image: &str,
+        volume: &Path,
+        host_port: Option<u16>,
+        network_none: bool,
+    ) -> DockerObservation {
+        let build = Self::build_current_image(image);
+        if !build.command_succeeded {
+            return build;
+        }
+        let name = unique_container_name();
+        let volume_arg = format!("{}:/data", volume.display());
+        let mut args = vec![
+            "run",
+            "-d",
+            "--pull",
+            "never",
+            "--name",
+            &name,
+            "-e",
+            "VIGIL_STORE_PATH=/data/store.contextgraph",
+            "-e",
+            "VIGIL_HEALTH_PORT=8099",
+            "-v",
+            &volume_arg,
+        ];
+        let port_arg;
+        if network_none {
+            args.extend(["--network", "none"]);
+        } else if let Some(port) = host_port {
+            port_arg = format!("127.0.0.1:{port}:8099");
+            args.extend(["-p", &port_arg]);
+        }
+        args.extend([image, "run"]);
+
+        let _ = command_output("docker", ["rm", "-f", &name]);
+        let mut output = build.stdout;
+        let started = command_output("docker", args)
+            .map(|run| {
+                let success = run.status.success();
+                output.push_str(&output_combined_text(run));
+                success
+            })
+            .unwrap_or(false);
+        if !started {
+            let _ = command_output("docker", ["rm", "-f", &name]);
+            return DockerObservation {
+                docker_available: true,
+                command_succeeded: false,
+                stdout: output,
+                healthcheck: String::new(),
+            };
+        }
+
+        let ready = if network_none {
+            wait_for_docker_health(&name, Duration::from_secs(30), &mut output)
+        } else {
+            host_port
+                .map(|port| HealthProbe::new(port).wait_for_status(200, Duration::from_secs(30)))
+                .unwrap_or(false)
+        };
+        let live_runtime =
+            ready && verify_container_live_store_and_health(&name, volume, &mut output);
+        if let Some(logs) = command_output("docker", ["logs", &name]) {
+            output.push_str(&output_combined_text(logs));
+        }
+        let stopped = command_output("docker", ["stop", "--time", "10", &name])
+            .map(|stop| {
+                let success = stop.status.success();
+                output.push_str(&output_combined_text(stop));
+                success
+            })
+            .unwrap_or(false);
+        let clean_exit = inspect_clean_container_exit(&name, &mut output);
+        let _ = command_output("docker", ["rm", "-f", &name]);
+
+        DockerObservation {
+            docker_available: true,
+            command_succeeded: ready && live_runtime && stopped && clean_exit,
+            stdout: output,
+            healthcheck: String::new(),
+        }
+    }
+
+    fn build_current_image(image: &str) -> DockerObservation {
+        if !docker_available() {
+            return DockerObservation::unavailable();
+        }
+        let mut stdout = String::new();
+        for args in [
+            vec!["build", "-p", "vigil", "--release"],
+            vec![
+                "build",
+                "-p",
+                "vigil",
+                "--release",
+                "--target",
+                "x86_64-unknown-linux-musl",
+            ],
+            vec![
+                "build",
+                "-p",
+                "vigil",
+                "--release",
+                "--target",
+                "aarch64-unknown-linux-musl",
+            ],
+        ] {
+            let Some(build) = command_output_in_dir(env!("CARGO"), args, &workspace_root()) else {
+                return DockerObservation {
+                    docker_available: true,
+                    command_succeeded: false,
+                    stdout: format!("{stdout}could not run cargo build before docker build\n"),
+                    healthcheck: String::new(),
+                };
+            };
+            let success = build.status.success();
+            stdout.push_str(&output_combined_text(build));
+            if !success {
+                return DockerObservation {
+                    docker_available: true,
+                    command_succeeded: false,
+                    stdout,
+                    healthcheck: String::new(),
+                };
+            }
+        }
+        let build = command_output_in_dir(
+            "docker",
+            ["build", "--pull=false", "-t", image, "."],
+            &workspace_root(),
+        );
+        if let Some(output) = build.as_ref() {
+            stdout.push_str(&output_combined_text_ref(output));
+        }
+        DockerObservation {
+            docker_available: true,
+            command_succeeded: build
+                .as_ref()
+                .map(|output| output.status.success())
+                .unwrap_or(false),
+            stdout,
+            healthcheck: String::new(),
+        }
+    }
+}
+
+fn verify_container_live_store_and_health(name: &str, volume: &Path, output: &mut String) -> bool {
+    let Some(pid_output) =
+        command_output("docker", ["inspect", "--format", "{{.State.Pid}}", name])
+    else {
+        output.push_str("container pid inspect failed\n");
+        return false;
+    };
+    let pid_text = output_combined_text_ref(&pid_output);
+    output.push_str(&pid_text);
+    if !pid_output.status.success() {
+        return false;
+    }
+    let Some(pid) = pid_text.trim().parse::<u32>().ok().filter(|pid| *pid != 0) else {
+        output.push_str("container pid was not a nonzero integer\n");
+        return false;
+    };
+    let store_path = volume.join("store.contextgraph");
+    let mut ok = true;
+    let live_lock = StoreProbe::new(&store_path).live_lock_held();
+    if !live_lock.locked {
+        output.push_str(&live_lock.detail);
+        output.push('\n');
+        ok = false;
+    }
+    let live_file = StoreProbe::new(&store_path).live_database_file_open(pid);
+    if !live_file.open {
+        output.push_str(&live_file.detail);
+        output.push('\n');
+        ok = false;
+    }
+    let contention = StoreProbe::new(&store_path).public_open_blocked_by_process(pid);
+    if !contention.blocked {
+        output.push_str(&contention.detail);
+        output.push('\n');
+        ok = false;
+    }
+    let health_owner = listener_owned_by_pid_in_namespace(pid, 8099);
+    if !health_owner.owned {
+        output.push_str(&health_owner.detail);
+        output.push('\n');
+        ok = false;
+    }
+    ok
+}
+
+pub(crate) struct DockerObservation {
+    pub(crate) docker_available: bool,
+    pub(crate) command_succeeded: bool,
+    pub(crate) stdout: String,
+    pub(crate) healthcheck: String,
+}
+
+impl DockerObservation {
+    pub(crate) fn healthcheck_targets_health_endpoint(&self) -> bool {
+        let metadata = self.healthcheck.to_ascii_lowercase();
+        let exec_curl = metadata.contains(r#""test":["cmd","curl""#);
+        let exec_wget = metadata.contains(r#""test":["cmd","wget""#);
+        let target = metadata.contains("/health")
+            && (metadata.contains("127.0.0.1") || metadata.contains("localhost"));
+        let shell_or_noop = metadata.contains("cmd-shell")
+            || metadata.contains("echo")
+            || metadata.contains(r#""true""#)
+            || metadata.contains("#");
+        target && (exec_curl || exec_wget) && !shell_or_noop
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            docker_available: false,
+            command_succeeded: false,
+            stdout: String::new(),
+            healthcheck: String::new(),
+        }
+    }
+}
+
+pub(crate) struct NetworkBlock;
+
+impl NetworkBlock {
+    pub(crate) fn outbound() -> Self {
+        Self
+    }
+}
+
+pub(crate) struct NetworkTrace {
+    pub(crate) tool_available: bool,
+    pub(crate) outbound_attempts: Vec<String>,
+    pub(crate) raw: String,
+}
+
+pub(crate) struct RssProbe {
+    pid: u32,
+}
+
+impl RssProbe {
+    pub(crate) fn new(pid: u32) -> Self {
+        Self { pid }
+    }
+
+    pub(crate) fn sample_kb(&self) -> Option<u64> {
+        let status = fs::read_to_string(format!("/proc/{}/status", self.pid)).ok()?;
+        status.lines().find_map(|line| {
+            line.strip_prefix("VmRSS:").and_then(|value| {
+                value
+                    .split_whitespace()
+                    .next()
+                    .and_then(|kb| kb.parse::<u64>().ok())
+            })
+        })
+    }
+}
+
+pub(crate) fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+pub(crate) fn temp_config(
+    data_dir: &Path,
+    store_path: &Path,
+    toml_health_port: u16,
+) -> std::io::Result<(TempDir, PathBuf)> {
+    let dir = tempfile::tempdir()?;
+    let config_path = dir.path().join("vigil.toml");
+    let config = format!(
+        "data_dir = \"{}\"\nstore_path = \"{}\"\nhealth_port = {}\n",
+        escape_toml_path(data_dir),
+        escape_toml_path(store_path),
+        toml_health_port
+    );
+    fs::write(&config_path, config)?;
+    Ok((dir, config_path))
+}
+
+pub(crate) fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .unwrap_or(8099)
+}
+
+pub(crate) fn output_text(output: &Output) -> (String, String) {
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+pub(crate) fn pid_of(process: &VigilProcess) -> u32 {
+    process.runtime_pid().unwrap_or_else(|| process.child.id())
+}
+
+fn capture_pipe<T>(pipe: Option<T>) -> Arc<Mutex<String>>
+where
+    T: Read + Send + 'static,
+{
+    let logs = Arc::new(Mutex::new(String::new()));
+    if let Some(mut pipe) = pipe {
+        let captured = Arc::clone(&logs);
+        thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => {
+                        if let Ok(mut logs) = captured.lock() {
+                            logs.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    logs
+}
+
+fn signal_child(pid: u32, signal: &str, signal_group: bool) {
+    let target = if signal_group {
+        format!("-{pid}")
+    } else {
+        pid.to_string()
+    };
+    let _ = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(target)
+        .status();
+}
+
+fn descendant_pids(root: u32) -> Vec<u32> {
+    let mut descendants = Vec::new();
+    let mut queue = vec![root];
+    while let Some(parent) = queue.pop() {
+        for child in child_pids(parent) {
+            descendants.push(child);
+            queue.push(child);
+        }
+    }
+    descendants
+}
+
+fn child_pids(parent: u32) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_string_lossy().parse::<u32>().ok()?;
+            let stat = fs::read_to_string(entry.path().join("stat")).ok()?;
+            let ppid = parse_stat_ppid(&stat)?;
+            (ppid == parent).then_some(pid)
+        })
+        .collect()
+}
+
+fn process_comm(pid: u32) -> Option<String> {
+    fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+fn parse_stat_ppid(stat: &str) -> Option<u32> {
+    let close = stat.rfind(") ")?;
+    stat[close + 2..].split_whitespace().nth(1)?.parse().ok()
+}
+
+fn ensure_vigil_binary() {
+    static BUILD_ONCE: OnceLock<()> = OnceLock::new();
+    BUILD_ONCE.get_or_init(|| {
+        let status = Command::new(env!("CARGO"))
+            .current_dir(workspace_root())
+            .args(["build", "-p", "vigil", "--bin", "vigil"])
+            .status()
+            .expect("cargo build -p vigil --bin vigil should run");
+        assert!(status.success(), "cargo build -p vigil --bin vigil failed");
+    });
+}
+
+fn command_status<I, S>(program: &str, args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(program)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn docker_available() -> bool {
+    command_status("docker", ["version", "--format", "{{.Server.Version}}"])
+}
+
+fn command_output<I, S>(program: &str, args: I) -> Option<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(program).args(args).output().ok()
+}
+
+fn command_output_in_dir<I, S>(program: &str, args: I, dir: &Path) -> Option<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(program)
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .ok()
+}
+
+fn output_combined_text(output: Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!("{stdout}{stderr}")
+}
+
+fn output_combined_text_ref(output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!("{stdout}{stderr}")
+}
+
+fn listening_socket_inodes(port: u16) -> Vec<String> {
+    let mut inodes = Vec::new();
+    collect_listening_socket_inodes(Path::new("/proc/net/tcp"), port, &mut inodes);
+    collect_listening_socket_inodes(Path::new("/proc/net/tcp6"), port, &mut inodes);
+    inodes.sort();
+    inodes.dedup();
+    inodes
+}
+
+fn listener_owned_by_pid_in_namespace(pid: u32, port: u16) -> HealthOwnerProbeResult {
+    let mut inodes = Vec::new();
+    collect_listening_socket_inodes(
+        Path::new(&format!("/proc/{pid}/net/tcp")),
+        port,
+        &mut inodes,
+    );
+    collect_listening_socket_inodes(
+        Path::new(&format!("/proc/{pid}/net/tcp6")),
+        port,
+        &mut inodes,
+    );
+    inodes.sort();
+    inodes.dedup();
+    if inodes.is_empty() {
+        return HealthOwnerProbeResult {
+            owned: false,
+            detail: format!("no listening socket inode found for container health port {port}"),
+        };
+    }
+    let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
+    let Ok(entries) = fs::read_dir(&fd_dir) else {
+        return HealthOwnerProbeResult {
+            owned: false,
+            detail: format!(
+                "could not inspect container process fd directory {}",
+                fd_dir.display()
+            ),
+        };
+    };
+    for entry in entries.flatten() {
+        if let Ok(target) = fs::read_link(entry.path()) {
+            let target = target.to_string_lossy();
+            if inodes
+                .iter()
+                .any(|inode| target.as_ref() == format!("socket:[{inode}]"))
+            {
+                return HealthOwnerProbeResult {
+                    owned: true,
+                    detail: format!("container health port {port} listener is owned by pid {pid}"),
+                };
+            }
+        }
+    }
+    HealthOwnerProbeResult {
+        owned: false,
+        detail: format!(
+            "container health port {port} listener socket inodes {inodes:?} were not owned by pid {pid}"
+        ),
+    }
+}
+
+fn collect_listening_socket_inodes(path: &Path, port: u16, inodes: &mut Vec<String>) {
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() <= 9 || fields[3] != "0A" {
+            continue;
+        }
+        let Some(local_port) = fields[1]
+            .rsplit_once(':')
+            .and_then(|(_, port)| u16::from_str_radix(port, 16).ok())
+        else {
+            continue;
+        };
+        if local_port == port {
+            inodes.push(fields[9].to_string());
+        }
+    }
+}
+
+fn inspect_clean_container_exit(name: &str, output: &mut String) -> bool {
+    let Some(inspect) = command_output(
+        "docker",
+        [
+            "inspect",
+            "--format",
+            "exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}}",
+            name,
+        ],
+    ) else {
+        output.push_str("container exit inspect failed\n");
+        return false;
+    };
+    let success = inspect.status.success();
+    let text = output_combined_text(inspect);
+    output.push_str(&text);
+    success && text.contains("exit_code=0") && text.contains("oom_killed=false")
+}
+
+fn network_line_is_outbound(line: &str) -> bool {
+    let traced_connect = line.contains("connect(") || line.contains("sendto(");
+    let internet_socket = line.contains("AF_INET") || line.contains("AF_INET6");
+    if !(traced_connect && internet_socket) {
+        return false;
+    }
+    !(line.contains("127.0.0.1")
+        || line.contains("127.0.1.1")
+        || line.contains("\"::1\"")
+        || line.contains("sin6_addr=inet_pton(AF_INET6, \"::1\")"))
+}
+
+fn wait_for_docker_health(name: &str, timeout: Duration, output: &mut String) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Some(inspect) = command_output(
+            "docker",
+            [
+                "inspect",
+                "--format",
+                "{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}",
+                name,
+            ],
+        ) {
+            let text = output_combined_text(inspect);
+            let status = text.trim();
+            if status == "healthy" {
+                output.push_str(&text);
+                return true;
+            }
+            if status == "unhealthy" || status == "missing" {
+                output.push_str(&text);
+            }
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    false
+}
+
+fn unique_container_name() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("vigil-acceptance-{}-{nanos}", std::process::id())
+}
+
+fn escape_toml_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
+
+fn binary_name(binary: &str) -> String {
+    if cfg!(windows) {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
+    }
+}

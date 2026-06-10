@@ -407,13 +407,10 @@ impl StoreProbe {
     }
 
     pub(crate) fn live_database_file_open(&self, pid: u32) -> StoreFileProbeResult {
-        let Ok(expected) = fs::canonicalize(&self.path) else {
+        let Ok(expected_metadata) = fs::metadata(&self.path) else {
             return StoreFileProbeResult {
                 open: false,
-                detail: format!(
-                    "store path was not canonicalizable: {}",
-                    self.path.display()
-                ),
+                detail: format!("store path was not statable: {}", self.path.display()),
             };
         };
         let fd_dir = PathBuf::from(format!("/proc/{pid}/fd"));
@@ -427,12 +424,23 @@ impl StoreProbe {
             };
         };
         for entry in entries.flatten() {
-            if let Ok(target) = fs::read_link(entry.path())
-                && target == expected
+            #[cfg(unix)]
+            if let Ok(metadata) = fs::metadata(entry.path())
+                && metadata.dev() == expected_metadata.dev()
+                && metadata.ino() == expected_metadata.ino()
             {
                 return StoreFileProbeResult {
                     open: true,
-                    detail: format!("store database file is open: {}", expected.display()),
+                    detail: format!("store database file is open: {}", self.path.display()),
+                };
+            }
+            #[cfg(not(unix))]
+            if let Ok(target) = fs::read_link(entry.path())
+                && target == self.path
+            {
+                return StoreFileProbeResult {
+                    open: true,
+                    detail: format!("store database file is open: {}", self.path.display()),
                 };
             }
         }
@@ -440,7 +448,7 @@ impl StoreProbe {
             open: false,
             detail: format!(
                 "process {pid} did not have the store database file open: {}",
-                expected.display()
+                self.path.display()
             ),
         }
     }

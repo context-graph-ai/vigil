@@ -7,13 +7,22 @@ repo_root="$(cd "$script_dir/../.." && pwd)"
 
 addon_dir="${VIGIL_ADDON_DIR:-$repo_root/addons/vigil}"
 addon_slug="${VIGIL_ADDON_SLUG:-local_vigil}"
-ha_cli="${HA_CLI:-ha}"
-health_url="${VIGIL_HEALTH_URL:-http://127.0.0.1:8099/health}"
-frigate_url="${FRIGATE_URL:-http://127.0.0.1:5000}"
-mqtt_host="${MQTT_HOST:-127.0.0.1}"
+haos_ssh_target="${HAOS_SSH_TARGET:-}"
+ha_cli="${HA_CLI:-}"
+docker_cli="${DOCKER_CLI:-}"
+curl_cli="${CURL_CLI:-}"
+health_url="${VIGIL_HEALTH_URL:-}"
+frigate_url="${FRIGATE_URL:-}"
+mqtt_host="${MQTT_HOST:-}"
 mqtt_port="${MQTT_PORT:-1883}"
+mqtt_username="${MQTT_USERNAME:-}"
+mqtt_password="${MQTT_PASSWORD:-}"
 update_addon_dir="${VIGIL_UPDATE_ADDON_DIR:-}"
 addon_data_dir="${VIGIL_ADDON_DATA_DIR:-/mnt/data/supervisor/addons/data/$addon_slug}"
+addon_store_access="${VIGIL_ADDON_STORE_ACCESS:-host}"
+store_probe_binary="${VIGIL_STORE_PROBE_BINARY:-}"
+remote_addon_dir="${VIGIL_REMOTE_ADDON_DIR:-/addons/vigil}"
+th_run_list="${TH_RUN_LIST:-}"
 
 bounded_int() {
   local value="$1"
@@ -29,7 +38,7 @@ bounded_int() {
 metric_tolerance_percent="$(bounded_int "${VIGIL_METRIC_TOLERANCE_PERCENT:-10}" 0 10 10)"
 host_reboot_cmd="${VIGIL_HOST_REBOOT_CMD:-}"
 host_wait_cmd="${VIGIL_HOST_WAIT_CMD:-}"
-store_probe="${VIGIL_STORE_PROBE:-cargo run --quiet --manifest-path $repo_root/Cargo.toml --bin vigil-store-probe --}"
+store_probe="${VIGIL_STORE_PROBE:-cargo run --quiet --manifest-path $repo_root/Cargo.toml -p vigil-acceptance --bin vigil-store-probe --}"
 expected_runtime_store_path="${VIGIL_EXPECTED_RUNTIME_STORE_PATH:-/data/store.contextgraph}"
 expected_addon_store_path="${VIGIL_EXPECTED_ADDON_STORE_PATH:-$addon_data_dir/store.contextgraph}"
 expected_health_port="${VIGIL_EXPECTED_HEALTH_PORT:-8099}"
@@ -40,8 +49,38 @@ th05_sample_seconds="$(bounded_int "${TH05_SAMPLE_SECONDS:-30}" 30 3600 30)"
 th06_sample_seconds="$(bounded_int "${TH06_SAMPLE_SECONDS:-30}" 30 3600 30)"
 th09_sample_seconds="$(bounded_int "${TH09_SAMPLE_SECONDS:-15}" 15 600 15)"
 
+config_fail() {
+  printf 'TH-CONFIG FAIL %s\n' "$1" >&2
+  exit 1
+}
+
+if [[ -n "$haos_ssh_target" ]]; then
+  ha_cli="ssh $haos_ssh_target sudo docker exec hassio_cli ha"
+  docker_cli="ssh $haos_ssh_target sudo docker"
+  [[ -n "$health_url" ]] || config_fail "VIGIL_HEALTH_URL is required when HAOS_SSH_TARGET is set"
+  [[ -n "$frigate_url" ]] || config_fail "FRIGATE_URL is required when HAOS_SSH_TARGET is set"
+  [[ -n "$mqtt_host" ]] || config_fail "MQTT_HOST is required when HAOS_SSH_TARGET is set"
+else
+  ha_cli="${ha_cli:-ha}"
+  docker_cli="${docker_cli:-docker}"
+  curl_cli="${curl_cli:-curl}"
+  health_url="${health_url:-http://127.0.0.1:8099/health}"
+  frigate_url="${frigate_url:-http://127.0.0.1:5000}"
+  mqtt_host="${mqtt_host:-127.0.0.1}"
+fi
+
 read -r -a ha_cmd <<< "$ha_cli"
+read -r -a docker_cmd <<< "$docker_cli"
+read -r -a curl_cmd <<< "$curl_cli"
 read -r -a store_probe_cmd <<< "$store_probe"
+
+mosquitto_auth_args=()
+if [[ -n "$mqtt_username" ]]; then
+  mosquitto_auth_args+=("-u" "$mqtt_username")
+fi
+if [[ -n "$mqtt_password" ]]; then
+  mosquitto_auth_args+=("-P" "$mqtt_password")
+fi
 
 pass() {
   printf '%s PASS %s\n' "$1" "$2"
@@ -64,8 +103,39 @@ ha_cli_run() {
   "${ha_cmd[@]}" "$@"
 }
 
+docker_cli_available() {
+  [[ -n "${docker_cmd[0]:-}" ]] && have_cmd "${docker_cmd[0]}"
+}
+
+docker_cli_run() {
+  "${docker_cmd[@]}" "$@"
+}
+
+curl_run() {
+  if [[ -n "$haos_ssh_target" ]]; then
+    local quoted
+    printf -v quoted '%q ' "$@"
+    ssh -n -o BatchMode=yes "$haos_ssh_target" "curl $quoted"
+  elif [[ -n "${curl_cmd[0]:-}" ]]; then
+    "${curl_cmd[@]}" "$@"
+  else
+    curl "$@"
+  fi
+}
+
 store_probe_run() {
   "${store_probe_cmd[@]}" "$@"
+}
+
+store_probe_binary_available() {
+  if [[ -z "$store_probe_binary" ]]; then
+    return 1
+  fi
+  if [[ -n "$haos_ssh_target" ]]; then
+    ssh -o BatchMode=yes "$haos_ssh_target" "test -x '$store_probe_binary'"
+  else
+    [[ -x "$store_probe_binary" ]]
+  fi
 }
 
 require_file() {
@@ -74,23 +144,41 @@ require_file() {
   [[ -f "$path" ]] || { fail "$id" "missing required file $path"; return 1; }
 }
 
+sync_addon_source() {
+  local id="$1"
+  local source_dir="$2"
+  require_file "$id" "$source_dir/config.yaml" || return 1
+  require_file "$id" "$source_dir/Dockerfile" || return 1
+  if [[ -n "$haos_ssh_target" ]]; then
+    ssh -o BatchMode=yes "$haos_ssh_target" "sudo rm -rf '$remote_addon_dir' && sudo mkdir -p '$remote_addon_dir'" &&
+      tar -C "$source_dir" -cf - . | ssh -o BatchMode=yes "$haos_ssh_target" "sudo tar -xf - -C '$remote_addon_dir'" || {
+        fail "$id" "could not stage add-on source from $source_dir to $haos_ssh_target:$remote_addon_dir"
+        return 1
+      }
+  elif [[ "$source_dir" != "$addon_dir" ]]; then
+    cp -R "$source_dir"/. "$addon_dir"/ || {
+      fail "$id" "could not copy add-on source from $source_dir to $addon_dir"
+      return 1
+    }
+  fi
+}
+
 ensure_addon_installed() {
   local id="$1"
   if ha_cli_run addons info "$addon_slug" >/dev/null 2>&1; then
     return 0
   fi
-  require_file "$id" "$addon_dir/config.yaml" || return 1
-  require_file "$id" "$addon_dir/Dockerfile" || return 1
+  sync_addon_source "$id" "$addon_dir" || return 1
   ha_cli_run addons reload >/dev/null || { fail "$id" "Supervisor add-on reload failed"; return 1; }
   ha_cli_run addons install "$addon_slug" >/dev/null || { fail "$id" "install failed for add-on slug $addon_slug"; return 1; }
 }
 
 health_200() {
-  curl -fsS --max-time 3 "$health_url" >/dev/null 2>&1
+  curl_run -fsS --max-time 3 "$health_url" >/dev/null 2>&1
 }
 
 health_refused() {
-  ! curl -fsS --max-time 3 "$health_url" >/dev/null 2>&1
+  ! curl_run -fsS --max-time 3 "$health_url" >/dev/null 2>&1
 }
 
 wait_for_health() {
@@ -116,7 +204,7 @@ dwell_supervisor_health() {
 }
 
 frigate_ok() {
-  curl -fsS --max-time 5 "$frigate_url/api/version" >/dev/null 2>&1
+  curl_run -fsS --max-time 5 "$frigate_url/api/version" >/dev/null 2>&1
 }
 
 mqtt_ok() {
@@ -235,7 +323,7 @@ mqtt_topic_count() {
   local seconds="$1"
   local capture
   capture="$(mktemp)"
-  timeout "$seconds" mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" -v -t 'frigate/#' > "$capture" 2>/dev/null || true
+  timeout "$seconds" mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" -v -t 'frigate/#' > "$capture" 2>/dev/null || true
   wc -l < "$capture"
   rm -f "$capture"
 }
@@ -245,10 +333,10 @@ mqtt_subscription_roundtrip() {
   local payload="audit-$RANDOM"
   local capture
   capture="$(mktemp)"
-  mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" -C 1 -W 5 -t "$topic" > "$capture" 2>/dev/null &
+  mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" -C 1 -W 5 -t "$topic" > "$capture" 2>/dev/null &
   local sub_pid=$!
   sleep 1
-  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" -t "$topic" -m "$payload" >/dev/null 2>&1 || {
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" -t "$topic" -m "$payload" >/dev/null 2>&1 || {
     kill "$sub_pid" >/dev/null 2>&1 || true
     wait "$sub_pid" >/dev/null 2>&1 || true
     rm -f "$capture"
@@ -262,7 +350,7 @@ mqtt_subscription_roundtrip() {
 }
 
 addon_container_id() {
-  docker ps -a --format '{{.ID}}\t{{.Names}}' | awk -v slug="$addon_slug" '
+  docker_cli_run ps -a --format '{{.ID}}\t{{.Names}}' | awk -v slug="$addon_slug" '
     {
       name=tolower($2);
       slug_l=tolower(slug);
@@ -277,24 +365,24 @@ addon_image_id() {
   local container_id
   container_id="$(addon_container_id)"
   [[ -n "$container_id" ]] || return 1
-  docker inspect --format '{{.Image}}' "$container_id"
+  docker_cli_run inspect --format '{{.Image}}' "$container_id"
 }
 
 addon_container_host_pid() {
   local container_id="$1"
-  docker inspect --format '{{.State.Pid}}' "$container_id"
+  docker_cli_run inspect --format '{{.State.Pid}}' "$container_id"
 }
 
 addon_container_runtime_pid() {
   local container_id="$1"
-  docker exec "$container_id" sh -c 'for pid in $(pidof vigil 2>/dev/null); do echo "$pid"; exit 0; done; pgrep -x vigil 2>/dev/null | head -n 1 || echo 1'
+  docker_cli_run exec "$container_id" sh -c 'for pid in $(pidof vigil 2>/dev/null); do echo "$pid"; exit 0; done; pgrep -x vigil 2>/dev/null | head -n 1 || echo 1'
 }
 
 container_pid_owns_listen_port() {
   local container_id="$1"
   local runtime_pid="$2"
   local port="$3"
-  docker exec "$container_id" sh -c '
+  docker_cli_run exec "$container_id" sh -c '
     pid="$1"
     port="$2"
     hex_port="$(printf "%04X" "$port")"
@@ -318,13 +406,19 @@ container_pid_owns_listen_port() {
 
 vigil_image_leftover() {
   local image_id="$1"
-  if [[ -n "$image_id" ]] && docker image inspect "$image_id" >/dev/null 2>&1; then
+  if [[ -n "$image_id" ]] && docker_cli_run image inspect "$image_id" >/dev/null 2>&1; then
     return 0
   fi
-  docker images --format '{{.Repository}}:{{.Tag}}' | grep -Eiq '(^|/)(vigil|local_vigil|addon.*vigil)(:|$)'
+  docker_cli_run images --format '{{.Repository}}:{{.Tag}}' | grep -Eiq '(^|/)(vigil|local_vigil|addon.*vigil)(:|$)'
 }
 
 addon_store_path() {
+  if [[ "$addon_store_access" == "container" ]]; then
+    local container_id
+    container_id="$(addon_container_id)" || return 1
+    docker_cli_run exec "$container_id" sh -c 'test -f "$1" && printf "%s\n" "$1"' sh "$expected_runtime_store_path"
+    return
+  fi
   [[ -d "$addon_data_dir" ]] || return 1
   find "$addon_data_dir" -type f \( -name '*.cdb' -o -name '*.contextgraph' \) | head -n 1
 }
@@ -332,6 +426,12 @@ addon_store_path() {
 addon_store_identity() {
   local store_path canonical inode
   store_path="$(addon_store_path)" || return 1
+  if [[ "$addon_store_access" == "container" ]]; then
+    local container_id
+    container_id="$(addon_container_id)" || return 1
+    docker_cli_run exec "$container_id" sh -c 'canonical="$(realpath "$1")" && inode="$(stat -c "%d:%i" "$1")" && printf "%s|%s\n" "$canonical" "$inode"' sh "$store_path"
+    return
+  fi
   canonical="$(realpath "$store_path")" || return 1
   inode="$(stat -c '%d:%i' "$store_path")" || return 1
   printf '%s|%s\n' "$canonical" "$inode"
@@ -381,33 +481,48 @@ addon_store_runtime_ready() {
     fail "$id" "Vigil add-on data does not contain a cg store under $addon_data_dir"
     return 1
   }
-  lock_path="$(store_lock_path "$store_path")"
-  [[ -f "$lock_path" ]] || {
-    fail "$id" "Vigil add-on store lock is missing at $lock_path"
-    return 1
-  }
-  have_cmd flock || { fail "$id" "flock is required for add-on store lock audit"; return 1; }
-  if flock -n "$lock_path" true; then
-    fail "$id" "Vigil add-on store lock was not held while healthy: $lock_path"
-    return 1
-  fi
-  have_cmd docker || { fail "$id" "docker is required for add-on store process audit"; return 1; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for add-on store process audit"; return 1; }
   container_id="$(addon_container_id)" || {
     fail "$id" "could not identify Vigil add-on container"
-    return 1
-  }
-  host_pid="$(addon_container_host_pid "$container_id")" || {
-    fail "$id" "could not identify Vigil add-on host pid"
     return 1
   }
   runtime_pid="$(addon_container_runtime_pid "$container_id")" || {
     fail "$id" "could not identify Vigil runtime pid inside add-on container"
     return 1
   }
-  probe_output="$(store_probe_run live "$store_path" "$host_pid" "$runtime_pid" 2>&1)" || {
-    fail "$id" "public cg store live probe failed: $probe_output"
-    return 1
-  }
+  if [[ "$addon_store_access" == "container" ]]; then
+    store_probe_binary_available || {
+      fail "$id" "VIGIL_STORE_PROBE_BINARY must point to an executable static probe for container store access"
+      return 1
+    }
+    probe_output="$(
+      docker_cli_run cp "$store_probe_binary" "$container_id:/tmp/vigil-store-probe" &&
+      docker_cli_run exec "$container_id" chmod 755 /tmp/vigil-store-probe &&
+      docker_cli_run exec "$container_id" /tmp/vigil-store-probe live "$store_path" "$runtime_pid" "$runtime_pid"
+    )" || {
+      fail "$id" "public cg store live probe failed inside add-on container: $probe_output"
+      return 1
+    }
+  else
+    lock_path="$(store_lock_path "$store_path")"
+    [[ -f "$lock_path" ]] || {
+      fail "$id" "Vigil add-on store lock is missing at $lock_path"
+      return 1
+    }
+    have_cmd flock || { fail "$id" "flock is required for add-on store lock audit"; return 1; }
+    if flock -n "$lock_path" true; then
+      fail "$id" "Vigil add-on store lock was not held while healthy: $lock_path"
+      return 1
+    fi
+    host_pid="$(addon_container_host_pid "$container_id")" || {
+      fail "$id" "could not identify Vigil add-on host pid"
+      return 1
+    }
+    probe_output="$(store_probe_run live "$store_path" "$host_pid" "$runtime_pid" 2>&1)" || {
+      fail "$id" "public cg store live probe failed: $probe_output"
+      return 1
+    }
+  fi
   container_pid_owns_listen_port "$container_id" "$runtime_pid" "$expected_health_port" || {
     fail "$id" "Vigil runtime pid $runtime_pid does not own health port $expected_health_port"
     return 1
@@ -427,7 +542,13 @@ capture_and_compare_frigate_after() {
 }
 
 addon_options_snapshot() {
-  ha_cli_run addons options "$addon_slug" 2>/dev/null | sed '/^[[:space:]]*$/d'
+  if [[ -n "$haos_ssh_target" ]]; then
+    ssh -o BatchMode=yes "$haos_ssh_target" \
+      "sudo docker exec hassio_cli sh -c 'curl -fsS -H \"Authorization: Bearer \\$SUPERVISOR_TOKEN\" http://supervisor/addons/$addon_slug/info | jq -c .data.options'" \
+      | sed '/^[[:space:]]*$/d'
+  else
+    ha_cli_run addons options "$addon_slug" 2>/dev/null | sed '/^[[:space:]]*$/d'
+  fi
 }
 
 host_reboot_and_wait() {
@@ -451,7 +572,7 @@ addon_runtime_ports_clean() {
   local container_id ports
   container_id="$(addon_container_id)"
   [[ -n "$container_id" ]] || return 1
-  docker exec "$container_id" ss -tlnp > "$script_dir/th10-ss.txt" 2>/dev/null || return 1
+  docker_cli_run exec "$container_id" ss -tlnp > "$script_dir/th10-ss.txt" 2>/dev/null || return 1
   ports="$(awk '
     /^LISTEN/ {
       address=$4;
@@ -494,12 +615,24 @@ supervisor_options_payload() {
 apply_supervisor_options() {
   local id="$1"
   have_cmd jq || { fail "$id" "jq is required to configure Supervisor options"; return 1; }
-  local payload
+  local payload wrapped
   payload="$(supervisor_options_payload)" || { fail "$id" "could not build Supervisor options payload"; return 1; }
-  ha_cli_run addons options "$addon_slug" --options "$payload" >/dev/null || {
-    fail "$id" "Supervisor options were not accepted for store_path/health_port"
-    return 1
-  }
+  if [[ -n "$haos_ssh_target" ]]; then
+    wrapped="$(jq -cn --argjson options "$payload" '{options: $options}')" || {
+      fail "$id" "could not wrap Supervisor options payload"
+      return 1
+    }
+    printf '%s' "$wrapped" | ssh -o BatchMode=yes "$haos_ssh_target" \
+      "sudo docker exec -i hassio_cli sh -c 'cat >/tmp/vigil-options.json && curl -fsS -X POST -H \"Authorization: Bearer \\$SUPERVISOR_TOKEN\" -H \"Content-Type: application/json\" --data @/tmp/vigil-options.json http://supervisor/addons/$addon_slug/options >/dev/null'" || {
+        fail "$id" "Supervisor API did not accept store_path/health_port options"
+        return 1
+      }
+  else
+    ha_cli_run addons options "$addon_slug" --options "$payload" >/dev/null || {
+      fail "$id" "Supervisor options were not accepted for store_path/health_port"
+      return 1
+    }
+  fi
 }
 
 assert_supervisor_options_applied() {
@@ -516,6 +649,13 @@ assert_supervisor_options_applied() {
     fail "$id" "Vigil add-on data does not contain the configured store"
     return 1
   }
+  if [[ "$addon_store_access" == "container" ]]; then
+    [[ "$store_path" == "$expected_runtime_store_path" ]] || {
+      fail "$id" "runtime store path did not match Supervisor option: actual=$store_path expected=$expected_runtime_store_path"
+      return 1
+    }
+    return 0
+  fi
   actual="$(realpath "$store_path")" || { fail "$id" "could not canonicalize runtime store path $store_path"; return 1; }
   expected="$(realpath "$expected_addon_store_path")" || {
     fail "$id" "configured store path was not created: $expected_addon_store_path"
@@ -536,6 +676,7 @@ th01() {
     return
   fi
   ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  sync_addon_source "$id" "$addon_dir" || return
   ha_cli_run addons reload >/dev/null || { fail "$id" "Supervisor add-on reload failed"; return; }
   ha_cli_run addons install "$addon_slug" >/dev/null || { fail "$id" "install failed for add-on slug $addon_slug"; return; }
   ha_cli_run addons info "$addon_slug" >/dev/null || { fail "$id" "installed add-on $addon_slug is not visible"; return; }
@@ -613,7 +754,7 @@ th06() {
   local id="TH-06"
   have_cmd jq || { fail "$id" "jq is required for Frigate metric comparison"; return; }
   ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
-  have_cmd docker || { fail "$id" "docker is required for image cleanup audit"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for image cleanup audit"; return; }
   frigate_ok || { fail "$id" "Frigate API was not reachable before Vigil uninstall"; return; }
   "$script_dir/capture-frigate-metrics.sh" "$script_dir/th06-before.txt" >/dev/null || { fail "$id" "pre-uninstall metric capture failed"; return; }
   local image_id
@@ -693,7 +834,7 @@ th09() {
   local capture sub_err sub_status
   capture="$(mktemp)"
   sub_err="$(mktemp)"
-  timeout "$th09_sample_seconds" mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" -v -t 'homeassistant/#' -t 'frigate/#' > "$capture" 2>"$sub_err" &
+  timeout "$th09_sample_seconds" mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" -v -t 'homeassistant/#' -t 'frigate/#' > "$capture" 2>"$sub_err" &
   local sub_pid=$!
   sleep 2
   ha_cli_run addons start "$addon_slug" >/dev/null || { fail "$id" "Supervisor did not start $addon_slug for MQTT audit"; rm -f "$capture" "$sub_err"; return; }
@@ -718,7 +859,7 @@ th09() {
 th10() {
   local id="TH-10"
   require_file "$id" "$addon_dir/config.yaml" || return
-  have_cmd docker || { fail "$id" "docker is required for runtime port audit"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for runtime port audit"; return; }
   ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
   ensure_addon_installed "$id" || return
   local ports
@@ -749,7 +890,7 @@ th11() {
   addon_store_runtime_ready "$id" || return
   identity_before="$(addon_store_identity)" || { fail "$id" "could not identify add-on store before update"; return; }
   options_before="$(addon_options_snapshot)" || { fail "$id" "could not snapshot Supervisor options before update"; return; }
-  cp -R "$update_addon_dir"/. "$addon_dir"/ || { fail "$id" "could not copy version-B add-on files"; return; }
+  sync_addon_source "$id" "$update_addon_dir" || return
   ha_cli_run addons rebuild "$addon_slug" >/dev/null || { fail "$id" "Supervisor rebuild failed for version B"; return; }
   ha_cli_run addons restart "$addon_slug" >/dev/null || { fail "$id" "Supervisor restart failed after update"; return; }
   wait_for_health || { fail "$id" "version-B did not reach health after update"; return; }
@@ -768,16 +909,41 @@ th11() {
   pass "$id" "update preserves state and options"
 }
 
-th01
-th02
-th03
-th04
-th05
-th06
-th07
-th08
-th09
-th10
-th11
+run_th() {
+  local name
+  name="$(tr '[:upper:]' '[:lower:]' <<< "$1")"
+  case "$name" in
+    1|01|th01|th-01) th01 ;;
+    2|02|th02|th-02) th02 ;;
+    3|03|th03|th-03) th03 ;;
+    4|04|th04|th-04) th04 ;;
+    5|05|th05|th-05) th05 ;;
+    6|06|th06|th-06) th06 ;;
+    7|07|th07|th-07) th07 ;;
+    8|08|th08|th-08) th08 ;;
+    9|09|th09|th-09) th09 ;;
+    10|th10|th-10) th10 ;;
+    11|th11|th-11) th11 ;;
+    *) fail "TH-RUN" "unknown TH_RUN_LIST entry: $1" ;;
+  esac
+}
+
+if [[ -n "$th_run_list" ]]; then
+  for th_name in $th_run_list; do
+    run_th "$th_name"
+  done
+else
+  th01
+  th02
+  th03
+  th04
+  th05
+  th06
+  th07
+  th08
+  th09
+  th10
+  th11
+fi
 
 exit "$status"

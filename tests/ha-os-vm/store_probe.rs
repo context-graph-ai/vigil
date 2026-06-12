@@ -1,8 +1,10 @@
 use std::env;
 use std::fs;
+use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 
 use context_graph::{EmbedderConfig, Store, StoreConfig};
 
@@ -119,13 +121,26 @@ fn lock_is_held(path: &Path) -> Result<bool, String> {
             lock_path.display()
         ));
     }
-    let output = Command::new("flock")
-        .arg("-n")
-        .arg(&lock_path)
-        .arg("true")
-        .output()
-        .map_err(|error| format!("could not run flock for {}: {error}", lock_path.display()))?;
-    Ok(!output.status.success())
+    let file = File::open(&lock_path)
+        .map_err(|error| format!("could not open lock {}: {error}", lock_path.display()))?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        Ok(false)
+    } else {
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(code) if code == libc::EWOULDBLOCK || code == libc::EAGAIN
+        ) {
+            Ok(true)
+        } else {
+            Err(format!(
+                "could not check lock {}: {error}",
+                lock_path.display()
+            ))
+        }
+    }
 }
 
 fn lock_path(path: &Path) -> PathBuf {

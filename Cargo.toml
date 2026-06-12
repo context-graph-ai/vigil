@@ -23,11 +23,13 @@ keywords = ["home-assistant", "camera", "nvr", "local-first"]
 categories = ["command-line-utilities"]
 
 [workspace.dependencies]
-context-graph = { path = "../context-graph/crates/context-graph" }
+context-graph = { path = "../context-graph/crates/context-graph", default-features = false }
+libc = "0.2"
 tempfile = "3"
 
 [dependencies]
 context-graph.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

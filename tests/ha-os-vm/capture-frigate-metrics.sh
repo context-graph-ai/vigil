@@ -56,7 +56,7 @@ else
 fi
 addon_status="unavailable"
 if [[ -n "${ha_cmd[0]:-}" ]] && type -P "${ha_cmd[0]}" >/dev/null 2>&1; then
-  addon_status="$("${ha_cmd[@]}" addons info "$addon_slug" 2>/dev/null | tr '\n' ' ' || true)"
+  addon_status="$("${ha_cmd[@]}" apps info "$addon_slug" 2>/dev/null | tr '\n' ' ' || true)"
   [[ -n "$addon_status" ]] || addon_status="unavailable"
 fi
 recording_metrics="$(

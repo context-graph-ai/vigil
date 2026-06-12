@@ -1,3 +1,10 @@
+mod config;
+mod health;
+mod privilege;
+mod runtime;
+mod shutdown;
+mod store;
+
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -7,20 +14,17 @@ where
 {
     let mut args = args.into_iter();
     let _program = args.next();
-    match args
-        .next()
-        .and_then(|arg| arg.into_string().ok())
-        .as_deref()
-    {
-        Some("--version") => {
-            println!("vigil");
+
+    match args.next().and_then(|arg| arg.into_string().ok()) {
+        Some(flag) if flag == "--version" => {
+            println!("vigil {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some("--help") | Some("-h") => {
+        Some(flag) if flag == "--help" || flag == "-h" => {
             print_help();
             ExitCode::SUCCESS
         }
-        Some("run") => run_unavailable(args.collect()),
+        Some(command) if command == "run" => runtime::run(args.collect()),
         _ => {
             print_help();
             ExitCode::from(2)
@@ -33,14 +37,8 @@ fn print_help() {
     println!();
     println!("Commands:");
     println!("  run");
-    println!("  diagnose");
     println!();
     println!("Options:");
     println!("  --help");
     println!("  --version");
-}
-
-fn run_unavailable(_args: Vec<OsString>) -> ExitCode {
-    eprintln!("vigil runtime is unavailable");
-    ExitCode::from(78)
 }

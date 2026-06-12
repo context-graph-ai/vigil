@@ -31,7 +31,12 @@ fn run() -> Result<(), String> {
             let lock_pid = args.next().and_then(|value| value.parse::<u32>().ok());
             live_store(&path, host_pid, lock_pid)
         }
-        _ => Err("usage: vigil-store-probe open-existing <store-path> | live <store-path> <host-pid> [lock-pid]".to_string()),
+        Some("locked") => {
+            let path = next_path(&mut args, "store path")?;
+            let lock_pid = args.next().and_then(|value| value.parse::<u32>().ok());
+            live_store_locked(&path, lock_pid)
+        }
+        _ => Err("usage: vigil-store-probe open-existing <store-path> | live <store-path> <host-pid> [lock-pid] | locked <store-path> [lock-pid]".to_string()),
     }
 }
 
@@ -54,6 +59,13 @@ fn live_store(path: &Path, host_pid: u32, lock_pid: Option<u32>) -> Result<(), S
             "process {host_pid} does not have store db file open: {}",
             path.display()
         ));
+    }
+    live_store_locked(path, lock_pid)
+}
+
+fn live_store_locked(path: &Path, lock_pid: Option<u32>) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("store path does not exist: {}", path.display()));
     }
     if !lock_is_held(path)? {
         return Err(format!(

@@ -754,7 +754,8 @@ impl DockerObservation {
     pub(crate) fn healthcheck_targets_health_endpoint(&self) -> bool {
         let metadata = self.healthcheck.to_ascii_lowercase();
         let exec_curl = metadata.contains(r#""test":["cmd","curl""#);
-        let exec_wget = metadata.contains(r#""test":["cmd","wget""#);
+        let exec_wget =
+            metadata.contains(r#""test":["cmd","wget""#) || metadata.contains(r#","wget","#);
         let target = metadata.contains("/health")
             && (metadata.contains("127.0.0.1") || metadata.contains("localhost"));
         let shell_or_noop = metadata.contains("cmd-shell")

@@ -1,0 +1,24 @@
+name: Vigil
+slug: vigil
+version: "0.1.0"
+description: Local Vigil substrate runtime
+startup: services
+boot: auto
+init: false
+watchdog: "http://[HOST]:[PORT:8099]/health"
+arch:
+  - amd64
+  - aarch64
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Health endpoint
+options:
+  store_path: /data/store.contextgraph
+  health_port: 8099
+schema:
+  store_path: str
+  health_port: int
+apparmor: true
+host_network: false
+host_pid: false

@@ -25,7 +25,11 @@ categories = ["command-line-utilities"]
 [workspace.dependencies]
 context-graph = { path = "../context-graph/crates/context-graph", default-features = false }
 libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
 tempfile = "3"
+toml = "0.9"
 
 [dependencies]
 context-graph.workspace = true
@@ -39,6 +43,9 @@ shared-version = true
 tag-name = "v{{version}}"
 tag-message = "v{{version}}"
 pre-release-commit-message = "release: v{{version}}"
+pre-release-replacements = [
+  { file = "addons/vigil/config.yaml", search = 'version: "[^"]+"', replace = 'version: "{{version}}"', min = 1 },
+]
 publish = false
 push = true
 

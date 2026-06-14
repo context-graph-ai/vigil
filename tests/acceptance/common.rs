@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
@@ -122,6 +123,15 @@ impl VigilProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        if child.id() <= 1 {
+            let invalid_pid = child.id();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("spawned process reported invalid child pid {invalid_pid}"),
+            ));
+        }
         let stdout = capture_pipe(child.stdout.take());
         let stderr = capture_pipe(child.stderr.take());
         Ok(Self {
@@ -168,10 +178,17 @@ impl VigilProcess {
     pub(crate) fn terminate(&mut self) -> Option<ExitStatus> {
         signal_child(self.child.id(), "TERM", self.signal_group);
         self.wait(Duration::from_secs(10))
+            .or_else(|| self.kill_child_directly())
     }
 
     pub(crate) fn kill9(&mut self) -> Option<ExitStatus> {
         signal_child(self.child.id(), "KILL", self.signal_group);
+        self.wait(Duration::from_secs(10))
+            .or_else(|| self.kill_child_directly())
+    }
+
+    fn kill_child_directly(&mut self) -> Option<ExitStatus> {
+        let _ = self.child.kill();
         self.wait(Duration::from_secs(10))
     }
 
@@ -833,10 +850,26 @@ pub(crate) fn temp_config(
 }
 
 pub(crate) fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|address| address.port())
-        .unwrap_or(8099)
+    static ALLOCATED_PORTS: OnceLock<Mutex<BTreeSet<u16>>> = OnceLock::new();
+
+    let allocated = ALLOCATED_PORTS.get_or_init(|| Mutex::new(BTreeSet::new()));
+    for _ in 0..128 {
+        let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
+            continue;
+        };
+        let Ok(address) = listener.local_addr() else {
+            continue;
+        };
+        let port = address.port();
+        if allocated
+            .lock()
+            .map(|mut ports| ports.insert(port))
+            .unwrap_or(false)
+        {
+            return port;
+        }
+    }
+    panic!("could not allocate a unique test health port")
 }
 
 pub(crate) fn output_text(output: &Output) -> (String, String) {
@@ -847,7 +880,12 @@ pub(crate) fn output_text(output: &Output) -> (String, String) {
 }
 
 pub(crate) fn pid_of(process: &VigilProcess) -> u32 {
-    process.runtime_pid().unwrap_or_else(|| process.child.id())
+    let pid = process.runtime_pid().unwrap_or_else(|| process.child.id());
+    assert!(
+        pid > 1,
+        "acceptance harness resolved invalid process pid {pid}"
+    );
+    pid
 }
 
 fn capture_pipe<T>(pipe: Option<T>) -> Arc<Mutex<String>>
@@ -876,15 +914,28 @@ where
 }
 
 fn signal_child(pid: u32, signal: &str, signal_group: bool) {
-    let target = if signal_group {
-        format!("-{pid}")
-    } else {
-        pid.to_string()
-    };
+    let target = signal_target(pid, signal_group).unwrap_or_else(|error| panic!("{error}"));
     let _ = Command::new("kill")
         .arg(format!("-{signal}"))
         .arg(target)
         .status();
+}
+
+fn signal_target(pid: u32, signal_group: bool) -> Result<String, String> {
+    if pid <= 1 {
+        return Err(format!(
+            "refusing to signal invalid child pid {pid}; acceptance harness would target the current process group or all user processes"
+        ));
+    }
+    // Negative kill targets are process groups. If pid ever degenerates to 0 or
+    // 1, that becomes kill(0) or kill(-1), which can terminate the developer's
+    // shell, tmux, and test runner. Keep every process-group signal behind this
+    // validator.
+    if signal_group {
+        Ok(format!("-{pid}"))
+    } else {
+        Ok(pid.to_string())
+    }
 }
 
 fn descendant_pids(root: u32) -> Vec<u32> {
@@ -1144,5 +1195,41 @@ fn binary_name(binary: &str) -> String {
         format!("{binary}.exe")
     } else {
         binary.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{free_port, signal_target};
+
+    #[test]
+    fn free_port_allocates_unique_ports_within_acceptance_process() {
+        let first = free_port();
+        let second = free_port();
+
+        assert_ne!(
+            first, second,
+            "acceptance harness must not hand the same health port to parallel child processes"
+        );
+    }
+
+    #[test]
+    fn signal_target_rejects_wildcard_process_targets() {
+        for pid in [0, 1] {
+            assert!(
+                signal_target(pid, false).is_err(),
+                "pid {pid} must not be signalled directly"
+            );
+            assert!(
+                signal_target(pid, true).is_err(),
+                "pid {pid} must not be negated into a process-group target"
+            );
+        }
+    }
+
+    #[test]
+    fn signal_target_formats_only_valid_child_or_group_targets() {
+        assert_eq!(signal_target(42, false).as_deref(), Ok("42"));
+        assert_eq!(signal_target(42, true).as_deref(), Ok("-42"));
     }
 }

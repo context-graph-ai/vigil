@@ -49,3 +49,22 @@ This checklist is completed on the real Home Assistant host by the operator. Att
 - Operator initials:
 - Timestamp:
 - Notes:
+
+## One-camera farm acceptance
+
+- Lower-gate RTSP URL configured directly in Vigil:
+- Hard far-gate night-IR event performed at operational distance:
+- Event id:
+- Durable clip path:
+- `vigil events` output attached or summarized:
+- `vigil why --latest` output attached or summarized:
+- Ambient quiet window duration, minimum 30 minutes:
+- Ambient false-positive count:
+- Stream fps from `vigil stats`:
+- Detector latency p50 from `vigil stats`:
+- Detector latency p95 from `vigil stats`:
+- Detector latency max from `vigil stats`:
+- Processing lag or backlog from `vigil stats`:
+- Dropped motion-positive frames from `vigil stats`:
+- Keep-pace result, based on bounded backlog and no systematic motion-positive drops:
+- Pass/fail notes:

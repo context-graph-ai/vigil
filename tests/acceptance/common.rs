@@ -53,7 +53,6 @@ pub(crate) struct VigilProcess {
     stderr: Arc<Mutex<String>>,
     port: u16,
     trace_prefix: Option<PathBuf>,
-    signal_group: bool,
     _trace_dir: Option<TempDir>,
     _isolation_dir: TempDir,
 }
@@ -125,8 +124,11 @@ impl VigilProcess {
             .spawn()?;
         if child.id() <= 1 {
             let invalid_pid = child.id();
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = kill_tracked_child_with_timeout(
+                &mut child,
+                "invalid spawned vigil child",
+                Duration::from_secs(1),
+            );
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("spawned process reported invalid child pid {invalid_pid}"),
@@ -140,7 +142,6 @@ impl VigilProcess {
             stderr,
             port: health_port,
             trace_prefix,
-            signal_group: trace_network,
             _trace_dir: trace_dir,
             _isolation_dir: isolation_dir,
         })
@@ -176,34 +177,19 @@ impl VigilProcess {
     }
 
     pub(crate) fn terminate(&mut self) -> Option<ExitStatus> {
-        signal_child(self.child.id(), "TERM", self.signal_group);
-        self.wait(Duration::from_secs(10))
-            .or_else(|| self.kill_child_directly())
+        terminate_tracked_child_with_timeout(
+            &mut self.child,
+            "vigil acceptance child",
+            Duration::from_secs(10),
+        )
     }
 
     pub(crate) fn kill9(&mut self) -> Option<ExitStatus> {
-        signal_child(self.child.id(), "KILL", self.signal_group);
-        self.wait(Duration::from_secs(10))
-            .or_else(|| self.kill_child_directly())
-    }
-
-    fn kill_child_directly(&mut self) -> Option<ExitStatus> {
-        let _ = self.child.kill();
-        self.wait(Duration::from_secs(10))
-    }
-
-    pub(crate) fn wait(&mut self, timeout: Duration) -> Option<ExitStatus> {
-        let start = Instant::now();
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => return Some(status),
-                Ok(None) if start.elapsed() < timeout => {
-                    thread::sleep(Duration::from_millis(25));
-                }
-                Ok(None) => return None,
-                Err(_) => return None,
-            }
-        }
+        kill_tracked_child_with_timeout(
+            &mut self.child,
+            "vigil acceptance child hard stop",
+            Duration::from_secs(10),
+        )
     }
 
     pub(crate) fn network_trace(&self) -> NetworkTrace {
@@ -247,7 +233,7 @@ impl VigilProcess {
     }
 
     pub(crate) fn runtime_pid(&self) -> Option<u32> {
-        if !self.signal_group {
+        if self.trace_prefix.is_none() {
             return Some(self.child.id());
         }
         descendant_pids(self.child.id())
@@ -258,10 +244,11 @@ impl VigilProcess {
 
 impl Drop for VigilProcess {
     fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        let _ = kill_tracked_child_with_timeout(
+            &mut self.child,
+            "vigil acceptance drop cleanup",
+            Duration::from_secs(10),
+        );
     }
 }
 
@@ -913,29 +900,113 @@ where
     logs
 }
 
-fn signal_child(pid: u32, signal: &str, signal_group: bool) {
-    let target = signal_target(pid, signal_group).unwrap_or_else(|error| panic!("{error}"));
-    let _ = Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(target)
-        .status();
+pub(crate) fn kill_tracked_child(child: &mut Child, label: &str) -> Option<ExitStatus> {
+    kill_tracked_child_with_timeout(child, label, Duration::from_secs(10))
 }
 
-fn signal_target(pid: u32, signal_group: bool) -> Result<String, String> {
+fn terminate_tracked_child_with_timeout(
+    child: &mut Child,
+    label: &str,
+    timeout: Duration,
+) -> Option<ExitStatus> {
+    let pid = child.id();
+    match child.try_wait() {
+        Ok(Some(status)) => return Some(status),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("acceptance harness could not read child status for {label}: {error}");
+            return None;
+        }
+    }
+
+    if signal_direct_child(pid, libc::SIGTERM, label) {
+        wait_for_child_exit(child, timeout)
+            .or_else(|| kill_tracked_child_with_timeout(child, label, timeout))
+    } else {
+        kill_tracked_child_with_timeout(child, label, timeout)
+    }
+}
+
+fn kill_tracked_child_with_timeout(
+    child: &mut Child,
+    label: &str,
+    timeout: Duration,
+) -> Option<ExitStatus> {
+    let pid = child.id();
+    match child.try_wait() {
+        Ok(Some(status)) => return Some(status),
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("acceptance harness could not read child status for {label}: {error}");
+            return None;
+        }
+    }
+
+    if !signal_direct_child(pid, libc::SIGKILL, label) {
+        return child.try_wait().ok().flatten();
+    }
+    wait_for_child_exit(child, timeout)
+}
+
+fn signal_direct_child(pid: u32, signal: libc::c_int, label: &str) -> bool {
+    if signal != libc::SIGTERM && signal != libc::SIGKILL {
+        eprintln!("acceptance harness refused unsupported cleanup signal {signal} for {label}");
+        return false;
+    }
+    if let Err(error) = direct_child_target_is_safe(pid) {
+        eprintln!("acceptance harness refused direct process cleanup target for {label}: {error}");
+        return false;
+    }
+
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if result == 0 {
+        return true;
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return true;
+    }
+    eprintln!(
+        "acceptance harness direct child signal {signal} failed for {label} pid {pid}: {error}"
+    );
+    false
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => return None,
+            Err(_) => return None,
+        }
+    }
+}
+
+fn direct_child_target_is_safe(pid: u32) -> Result<(), String> {
     if pid <= 1 {
         return Err(format!(
-            "refusing to signal invalid child pid {pid}; acceptance harness would target the current process group or all user processes"
+            "invalid child pid {pid}; direct kill would target the current process group or init"
         ));
     }
-    // Negative kill targets are process groups. If pid ever degenerates to 0 or
-    // 1, that becomes kill(0) or kill(-1), which can terminate the developer's
-    // shell, tmux, and test runner. Keep every process-group signal behind this
-    // validator.
-    if signal_group {
-        Ok(format!("-{pid}"))
-    } else {
-        Ok(pid.to_string())
+
+    let current_pid = std::process::id();
+    let ppid = process_parent_id(pid)
+        .ok_or_else(|| format!("child pid {pid} has no readable parent process in /proc"))?;
+    if ppid != current_pid {
+        return Err(format!(
+            "pid {pid} is not a tracked direct child of this acceptance process; parent pid is {ppid}, expected {current_pid}"
+        ));
     }
+
+    Ok(())
+}
+
+fn process_parent_id(pid: u32) -> Option<u32> {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_stat_ppid(&stat))
 }
 
 fn descendant_pids(root: u32) -> Vec<u32> {
@@ -1200,7 +1271,10 @@ fn binary_name(binary: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{free_port, signal_target};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use super::{direct_child_target_is_safe, free_port, workspace_root};
 
     #[test]
     fn free_port_allocates_unique_ports_within_acceptance_process() {
@@ -1217,19 +1291,83 @@ mod tests {
     fn signal_target_rejects_wildcard_process_targets() {
         for pid in [0, 1] {
             assert!(
-                signal_target(pid, false).is_err(),
-                "pid {pid} must not be signalled directly"
-            );
-            assert!(
-                signal_target(pid, true).is_err(),
-                "pid {pid} must not be negated into a process-group target"
+                direct_child_target_is_safe(pid).is_err(),
+                "pid {pid} must not reach direct child cleanup"
             );
         }
     }
 
     #[test]
-    fn signal_target_formats_only_valid_child_or_group_targets() {
-        assert_eq!(signal_target(42, false).as_deref(), Ok("42"));
-        assert_eq!(signal_target(42, true).as_deref(), Ok("-42"));
+    fn direct_child_cleanup_rejects_current_acceptance_process() {
+        assert!(
+            direct_child_target_is_safe(std::process::id()).is_err(),
+            "direct child cleanup must refuse the current acceptance process"
+        );
+    }
+
+    #[test]
+    fn process_cleanup_has_no_wildcard_or_shell_kill_paths() {
+        let root = workspace_root();
+        let mut rust_files = Vec::new();
+        collect_rust_files(&root.join("tests"), &mut rust_files);
+        collect_rust_files(&root.join("crates/vigil/tests"), &mut rust_files);
+
+        let banned = [
+            ("raw shell kill", ["Command::new(", "\"kill\""].concat()),
+            ("process-group kill", ["kill", "pg"].concat()),
+            ("process-group lookup", ["get", "pgid"].concat()),
+            ("nix signal kill", ["nix::sys::signal", "::kill"].concat()),
+            ("process-group target enum", ["Signal", "Target"].concat()),
+            (
+                "process-group target variant",
+                ["Process", "Group"].concat(),
+            ),
+            (
+                "negative kill argument formatting",
+                ["format!", "(\"-", "{"].concat(),
+            ),
+        ];
+        let allowed_libc_kill_path = root.join("tests/acceptance/common.rs");
+        let libc_kill = ["libc", "::", "kill", "("].concat();
+        let mut libc_kill_locations = Vec::new();
+        let mut violations = Vec::new();
+
+        for path in rust_files {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+            for (name, pattern) in &banned {
+                if source.contains(pattern) {
+                    violations.push(format!("{} contains {name}", path.display()));
+                }
+            }
+            if source.contains(&libc_kill) {
+                libc_kill_locations.push(path);
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "acceptance cleanup must not contain wildcard/process-group kill paths:\n{}",
+            violations.join("\n")
+        );
+        assert_eq!(
+            libc_kill_locations,
+            vec![allowed_libc_kill_path],
+            "raw signal syscalls must stay centralized in the positive direct-child cleanup helper"
+        );
+    }
+
+    fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rust_files(&path, files);
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                files.push(path);
+            }
+        }
     }
 }

@@ -9,6 +9,8 @@ pub(crate) struct RuntimeConfig {
     pub(crate) data_dir: PathBuf,
     pub(crate) store_path: PathBuf,
     pub(crate) health_port: u16,
+    pub(crate) rtsp_url: Option<String>,
+    pub(crate) detector_model_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -16,6 +18,8 @@ struct PartialConfig {
     data_dir: Option<PathBuf>,
     store_path: Option<PathBuf>,
     health_port: Option<u16>,
+    rtsp_url: Option<String>,
+    detector_model_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -24,6 +28,8 @@ struct CliOverrides {
     data_dir: Option<PathBuf>,
     store_path: Option<PathBuf>,
     health_port: Option<u16>,
+    rtsp_url: Option<String>,
+    detector_model_path: Option<PathBuf>,
 }
 
 pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
@@ -45,6 +51,8 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             data_dir: cli.data_dir,
             store_path: cli.store_path,
             health_port: cli.health_port,
+            rtsp_url: cli.rtsp_url,
+            detector_model_path: cli.detector_model_path,
         },
     );
     merge(&mut partial, env_overrides()?);
@@ -59,6 +67,8 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         data_dir,
         store_path,
         health_port,
+        rtsp_url: partial.rtsp_url,
+        detector_model_path: partial.detector_model_path,
     })
 }
 
@@ -74,11 +84,25 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
             "--data-dir" => cli.data_dir = Some(next_path(&mut iter, "--data-dir")?),
             "--store-path" => cli.store_path = Some(next_path(&mut iter, "--store-path")?),
             "--health-port" => cli.health_port = Some(next_port(&mut iter, "--health-port")?),
+            "--rtsp-url" => cli.rtsp_url = Some(next_string(&mut iter, "--rtsp-url")?),
+            "--detector-model-path" => {
+                cli.detector_model_path = Some(next_path(&mut iter, "--detector-model-path")?)
+            }
             "--help" | "-h" => return Err(run_usage()),
             other => return Err(format!("{other} is not a supported run option")),
         }
     }
     Ok(cli)
+}
+
+fn next_string(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<String, String> {
+    iter.next()
+        .ok_or_else(|| format!("{flag} requires a value"))
+        .and_then(|value| {
+            value
+                .into_string()
+                .map_err(|_| format!("{flag} value must be valid UTF-8"))
+        })
 }
 
 fn next_path(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<PathBuf, String> {
@@ -126,6 +150,8 @@ fn env_overrides() -> Result<PartialConfig, String> {
             ),
             Err(_) => None,
         },
+        rtsp_url: std::env::var("VIGIL_RTSP_URL").ok(),
+        detector_model_path: std::env::var_os("VIGIL_DETECTOR_MODEL_PATH").map(Into::into),
     })
 }
 
@@ -139,6 +165,12 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.health_port.is_some() {
         target.health_port = source.health_port;
     }
+    if source.rtsp_url.is_some() {
+        target.rtsp_url = source.rtsp_url;
+    }
+    if source.detector_model_path.is_some() {
+        target.detector_model_path = source.detector_model_path;
+    }
 }
 
 fn default_data_dir() -> PathBuf {
@@ -148,6 +180,6 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--rtsp-url URL] [--detector-model-path PATH]"
         .to_string()
 }

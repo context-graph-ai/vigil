@@ -1,13 +1,18 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Stdio};
+use std::process;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use burn::tensor::{Device, Tensor, TensorData, backend::Backend};
 use burn_flex::Flex;
+use burn_store::{ModuleSnapshot, PytorchStore};
 use sha2::{Digest, Sha256};
-use yolox_burn::model::{BoundingBox, boxes::nms, weights, yolox::Yolox};
+use yolox_burn::model::{BoundingBox, boxes::nms, yolox::Yolox};
+
+#[path = "../media_pipeline.rs"]
+mod media_pipeline;
 
 const HEIGHT: usize = 640;
 const WIDTH: usize = 640;
@@ -31,12 +36,12 @@ fn main() {
 }
 
 fn run_oracle(args: OracleArgs) -> Result<(), String> {
+    keep_shared_media_symbols_linked();
+
     let model_sha256 = load_record(&args.model)?;
-    seed_yolox_burn_cache(&args.model)?;
 
     let device = Default::default();
-    let model: Yolox<Flex> = Yolox::yolox_tiny_pretrained(weights::YoloxTiny::Coco, &device)
-        .map_err(|error| format!("load_record {}: {error}", args.model.display()))?;
+    let model = load_yolox_tiny_from_checkpoint(&args.model, &device)?;
     let tensor = decode_frames_to_tensor::<Flex>(&args.clip, args.sample_frames, &device)?;
 
     let model_output = model.forward(tensor);
@@ -59,6 +64,48 @@ fn run_oracle(args: OracleArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn keep_shared_media_symbols_linked() {
+    if env::var_os("VIGIL_ORACLE_EXERCISE_UNUSED_MEDIA_PATHS").is_none() {
+        return;
+    }
+
+    let segment = media_pipeline::DecodedVideoSegment {
+        codec: media_pipeline::VideoCodec::H264,
+        frames: vec![media_pipeline::DecodedRgbFrame {
+            index: 0,
+            width: 2,
+            height: 2,
+            rgb: vec![0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 255, 0],
+        }],
+        encoded_units: Vec::new(),
+        fps: 0.0,
+        observed_at: None,
+    };
+    let _ = segment.codec.extension();
+    let _ = segment.codec.mime_type();
+    let _ = segment.frame_count();
+    let _ = segment.fps;
+    let _ = &segment.observed_at;
+    let _ = media_pipeline::motion_gate(&segment).motion_positive_frames;
+    let _ = media_pipeline::write_encoded_clip(&segment, Path::new("/dev/null"));
+    let _ = media_pipeline::sha256_path(Path::new("/dev/null"));
+    let _ = media_pipeline::write_detector_evidence_png(
+        &segment,
+        0,
+        "0,0,1,1",
+        Path::new("/tmp/vigil-oracle-unused-detector.png"),
+        2,
+        2,
+    );
+    let shutdown = Arc::new(AtomicBool::new(true));
+    if let Ok(source) =
+        media_pipeline::prepare_rtsp_source("rtsp://127.0.0.1:8554/probe", None, None)
+    {
+        let _ = source.session_url();
+        let _ = media_pipeline::capture_rtsp_segments(&source, 1, shutdown, || Ok(()), |_| Ok(()));
+    }
 }
 
 fn parse_args() -> Result<OracleArgs, String> {
@@ -105,22 +152,29 @@ fn load_record(model: &Path) -> Result<String, String> {
     Ok(sha256_hex(&bytes))
 }
 
-fn seed_yolox_burn_cache(model: &Path) -> Result<(), String> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "HOME is required to seed the yolox-burn model cache".to_string())?;
-    let cache_dir = home.join(".cache").join("yolox-burn");
-    fs::create_dir_all(&cache_dir)
-        .map_err(|error| format!("create {}: {error}", cache_dir.display()))?;
-    let cache_model = cache_dir.join("yolox_tiny.pth");
-    fs::copy(model, &cache_model).map_err(|error| {
+fn load_yolox_tiny_from_checkpoint(
+    model_path: &Path,
+    device: &Device<Flex>,
+) -> Result<Yolox<Flex>, String> {
+    let mut model = Yolox::yolox_tiny(80, device);
+    let mut store = PytorchStore::from_file(model_path)
+        .with_top_level_key("model")
+        .with_key_remapping("backbone\\.C3_(.+)", "backbone.c3_$1")
+        .with_key_remapping("(backbone\\.backbone\\.dark[2-5])\\.0\\.(.+)", "$1.conv.$2")
+        .with_key_remapping("(backbone\\.backbone\\.dark[2-4])\\.1\\.(.+)", "$1.c3.$2")
+        .with_key_remapping("(backbone\\.backbone\\.dark5)\\.1\\.(.+)", "$1.spp.$2")
+        .with_key_remapping("(backbone\\.backbone\\.dark5)\\.2\\.(.+)", "$1.c3.$2")
+        .with_key_remapping(
+            "(head\\.(cls|reg)_convs\\.[0-9]+)\\.([0-9]+)\\.(.+)",
+            "$1.conv$3.$4",
+        );
+    model.load_from(&mut store).map_err(|error| {
         format!(
-            "seed yolox-burn cache {} from {}: {error}",
-            cache_model.display(),
-            model.display()
+            "load local YOLOX checkpoint {}: {error}",
+            model_path.display()
         )
     })?;
-    Ok(())
+    Ok(model)
 }
 
 fn decode_frames_to_tensor<B: Backend>(
@@ -141,97 +195,13 @@ fn decode_sampled_rgb_frames(
     clip: &Path,
     sample_frames: usize,
 ) -> Result<(Vec<u8>, usize), String> {
-    let indices = sampled_frame_indices(clip, sample_frames)?;
-    let select = indices
-        .iter()
-        .map(|index| format!("eq(n\\,{index})"))
-        .collect::<Vec<_>>()
-        .join("+");
-    let ffmpeg = env::var_os("VIGIL_FFMPEG_BIN").unwrap_or_else(|| "ffmpeg".into());
-    let output = Command::new(ffmpeg)
-        .arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-i")
-        .arg(clip)
-        .arg("-vf")
-        .arg(format!(
-            "select='{select}',scale={WIDTH}:{HEIGHT}:flags=bilinear"
-        ))
-        .arg("-vsync")
-        .arg("0")
-        .arg("-frames:v")
-        .arg(indices.len().to_string())
-        .arg("-f")
-        .arg("rawvideo")
-        .arg("-pix_fmt")
-        .arg("rgb24")
-        .arg("-")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("decode frame from {}: {error}", clip.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "decode frame from {} failed: {}",
-            clip.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let expected = indices.len() * WIDTH * HEIGHT * 3;
-    if output.stdout.len() != expected {
-        return Err(format!(
-            "decode frame from {} produced {} bytes, expected {expected}",
-            clip.display(),
-            output.stdout.len()
-        ));
-    }
-    Ok((output.stdout, indices.len()))
-}
-
-fn sampled_frame_indices(clip: &Path, sample_frames: usize) -> Result<Vec<usize>, String> {
-    let frame_count = video_frame_count(clip)?;
-    if frame_count == 0 {
-        return Err(format!("{} has no decodable frames", clip.display()));
-    }
-    let wanted = sample_frames.max(1).min(frame_count);
-    let mut indices = BTreeSet::new();
-    if wanted == 1 {
-        indices.insert(frame_count / 2);
-    } else {
-        for sample in 0..wanted {
-            indices.insert((frame_count - 1) * sample / (wanted - 1));
-        }
-    }
-    Ok(indices.into_iter().collect())
-}
-
-fn video_frame_count(clip: &Path) -> Result<usize, String> {
-    let ffprobe = env::var_os("VIGIL_FFPROBE_BIN").unwrap_or_else(|| "ffprobe".into());
-    let output = Command::new(ffprobe)
-        .arg("-v")
-        .arg("error")
-        .arg("-count_frames")
-        .arg("-select_streams")
-        .arg("v:0")
-        .arg("-show_entries")
-        .arg("stream=nb_read_frames")
-        .arg("-of")
-        .arg("default=noprint_wrappers=1:nokey=1")
-        .arg(clip)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| format!("count frames in {}: {error}", clip.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "count frames in {} failed: {}",
-            clip.display(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(|line| line.trim().parse::<usize>().ok())
-        .ok_or_else(|| format!("ffprobe returned no frame count for {}", clip.display()))
+    let segment = media_pipeline::decode_video_file(clip)?;
+    media_pipeline::sampled_detector_rgb(
+        &segment.frames,
+        sample_frames,
+        WIDTH as u32,
+        HEIGHT as u32,
+    )
 }
 
 struct Detection {

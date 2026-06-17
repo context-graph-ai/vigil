@@ -1,18 +1,20 @@
 mod config;
 mod health;
+mod live_read;
+mod media_pipeline;
+mod owner_socket;
 mod privilege;
 mod runtime;
+mod runtime_stats;
 mod shutdown;
 mod store;
+mod yolox_detector;
 
 use std::ffi::OsString;
-use std::io::{Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use context_graph::Store;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 
 pub fn run_cli<I>(args: I) -> ExitCode
 where
@@ -53,7 +55,6 @@ pub fn open_context_graph_store_with_text_embedder_disabled(path: &Path) -> Resu
 }
 
 fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
-    send_default_review_telemetry();
     match ask_runtime_owner(command, request) {
         Ok(response) => {
             print!("{response}");
@@ -65,7 +66,11 @@ fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("{error}; runtime owner unavailable: {socket_error}");
+                if error.to_ascii_lowercase().contains("not found") {
+                    eprintln!("{error}");
+                } else {
+                    eprintln!("{error}; runtime owner unavailable: {socket_error}");
+                }
                 ExitCode::from(2)
             }
         },
@@ -74,20 +79,7 @@ fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
 
 #[cfg(unix)]
 fn ask_runtime_owner(command: &str, request: &str) -> Result<String, String> {
-    let socket_path = control_socket_path();
-    let mut stream = UnixStream::connect(&socket_path)
-        .map_err(|error| format!("could not connect to {}: {error}", socket_path.display()))?;
-    stream
-        .write_all(format!("{command} {request}\n").as_bytes())
-        .map_err(|error| format!("could not send owner request: {error}"))?;
-    stream
-        .shutdown(std::net::Shutdown::Write)
-        .map_err(|error| format!("could not finish owner request: {error}"))?;
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| format!("could not read owner response: {error}"))?;
-    Ok(response)
+    owner_socket::request_live_owner(&data_dir_from_env(), &format!("{command} {request}\n"))
 }
 
 #[cfg(not(unix))]
@@ -96,37 +88,35 @@ fn ask_runtime_owner(_command: &str, _request: &str) -> Result<String, String> {
 }
 
 fn direct_read_local(command: &str, request: &str) -> Result<String, String> {
+    if command == "stats" {
+        let stats = runtime_stats::read_snapshot(&data_dir_from_env()).unwrap_or_default();
+        return Ok(runtime_stats::format_stats(&stats));
+    }
+
     let store_path = store_path_from_env();
-    let _store = store::open(&store_path).map_err(|error| {
+    let open = store::open(&store_path).map_err(|error| {
+        let error_kind = if is_database_locked_error(&error) {
+            "database_locked"
+        } else {
+            "store_open_failed"
+        };
         format!(
-            "runtime busy, retry through the running owner for {}: {error}",
+            "runtime busy error_kind={error_kind}, retry through the running owner for {}: {error}",
             store_path.display()
         )
     })?;
     match command {
-        "stats" => Ok(
-            "frames-received=0\nstream-fps=0\ndetector-latency-p50-ms=0\ntelemetry-sink=local\n"
-                .to_string(),
-        ),
-        "events" => Err("events review surface not implemented".to_string()),
-        "why" => Err(format!("event {request} not found")),
+        "events" => live_read::handle_events_read(&open.handle, 100)
+            .map(|response| live_read::format_events_cli(&response)),
+        "why" => live_read::handle_why_read(&open.handle, request)
+            .map(|response| live_read::format_why_cli(&response)),
         _ => Err(format!("unknown control command {command}")),
     }
 }
 
-fn send_default_review_telemetry() {
-    let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-        return;
-    };
-    let _ = socket.connect("203.0.113.1:4317");
-    let _ = socket.send(b"vigil-review-telemetry");
-}
-
-fn control_socket_path() -> std::path::PathBuf {
-    if let Some(path) = std::env::var_os("VIGIL_CONTROL_SOCKET") {
-        return path.into();
-    }
-    data_dir_from_env().join("control.sock")
+fn is_database_locked_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("database is locked") || (lower.contains("locked") && lower.contains("process"))
 }
 
 fn store_path_from_env() -> std::path::PathBuf {
@@ -154,7 +144,6 @@ fn print_help() {
     println!();
     println!("Commands:");
     println!("  run");
-    println!("  detector-probe");
     println!();
     println!("Options:");
     println!("  --help");

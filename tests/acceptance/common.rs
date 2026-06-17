@@ -919,7 +919,7 @@ fn terminate_tracked_child_with_timeout(
         }
     }
 
-    if signal_direct_child(pid, libc::SIGTERM, label) {
+    if signal_tracked_child_tree(pid, libc::SIGTERM, label) {
         wait_for_child_exit(child, timeout)
             .or_else(|| kill_tracked_child_with_timeout(child, label, timeout))
     } else {
@@ -942,10 +942,22 @@ fn kill_tracked_child_with_timeout(
         }
     }
 
-    if !signal_direct_child(pid, libc::SIGKILL, label) {
+    if !signal_tracked_child_tree(pid, libc::SIGKILL, label) {
         return child.try_wait().ok().flatten();
     }
     wait_for_child_exit(child, timeout)
+}
+
+fn signal_tracked_child_tree(root_pid: u32, signal: libc::c_int, label: &str) -> bool {
+    if let Err(error) = direct_child_target_is_safe(root_pid) {
+        eprintln!("acceptance harness refused tracked tree cleanup root for {label}: {error}");
+        return false;
+    }
+    let descendants = descendant_pids(root_pid);
+    for descendant in descendants.into_iter().rev() {
+        let _ = signal_descendant(root_pid, descendant, signal, label);
+    }
+    signal_direct_child(root_pid, signal, label)
 }
 
 fn signal_direct_child(pid: u32, signal: libc::c_int, label: &str) -> bool {
@@ -968,6 +980,30 @@ fn signal_direct_child(pid: u32, signal: libc::c_int, label: &str) -> bool {
     }
     eprintln!(
         "acceptance harness direct child signal {signal} failed for {label} pid {pid}: {error}"
+    );
+    false
+}
+
+fn signal_descendant(root_pid: u32, pid: u32, signal: libc::c_int, label: &str) -> bool {
+    if signal != libc::SIGTERM && signal != libc::SIGKILL {
+        eprintln!("acceptance harness refused unsupported cleanup signal {signal} for {label}");
+        return false;
+    }
+    if let Err(error) = descendant_target_is_safe(root_pid, pid) {
+        eprintln!("acceptance harness refused descendant cleanup target for {label}: {error}");
+        return false;
+    }
+
+    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
+    if result == 0 {
+        return true;
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return true;
+    }
+    eprintln!(
+        "acceptance harness descendant signal {signal} failed for {label} pid {pid}: {error}"
     );
     false
 }
@@ -1000,6 +1036,24 @@ fn direct_child_target_is_safe(pid: u32) -> Result<(), String> {
         ));
     }
 
+    Ok(())
+}
+
+fn descendant_target_is_safe(root_pid: u32, pid: u32) -> Result<(), String> {
+    if pid <= 1 {
+        return Err(format!(
+            "invalid descendant pid {pid}; direct kill would target the current process group or init"
+        ));
+    }
+    direct_child_target_is_safe(root_pid)?;
+    if !descendant_pids(root_pid)
+        .into_iter()
+        .any(|descendant| descendant == pid)
+    {
+        return Err(format!(
+            "pid {pid} is not a descendant of tracked child pid {root_pid}"
+        ));
+    }
     Ok(())
 }
 

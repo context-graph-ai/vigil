@@ -26,10 +26,16 @@ categories = ["command-line-utilities"]
 context-graph = { path = "../context-graph/crates/context-graph", default-features = false }
 burn = { version = "0.21.0", default-features = false }
 burn-flex = { version = "0.21.0" }
+burn-store = { version = "0.21.0", default-features = false, features = ["std", "pytorch"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures-util = "0.3"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+imageproc = { version = "0.27.0", default-features = false }
 libc = "0.2"
-retina = { version = "0.4.19", default-features = false }
+mp4 = "0.14.0"
+openh264 = { version = "0.9.3", default-features = false, features = ["source"] }
+retina = { version = "0.4.19", default-features = false, features = ["h265"] }
+rust_h265 = "0.1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -39,7 +45,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["net", "rt", "time"] }
 toml = "0.9"
 url = "2.5"
-yolox-burn = { git = "https://github.com/tracel-ai/models.git", rev = "ec1b9e42e6692ef2b95f85c4ba783e07cd3d19af", package = "yolox-burn", features = ["pretrained"] }
+yolox-burn = { git = "https://github.com/tracel-ai/models.git", rev = "ec1b9e42e6692ef2b95f85c4ba783e07cd3d19af", package = "yolox-burn" }
 
 [dependencies]
 context-graph.workspace = true

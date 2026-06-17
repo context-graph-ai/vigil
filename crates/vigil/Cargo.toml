@@ -24,11 +24,17 @@ path = "src/bin/yolox_burn_oracle.rs"
 [dependencies]
 burn.workspace = true
 burn-flex.workspace = true
+burn-store.workspace = true
 chrono.workspace = true
 context-graph.workspace = true
 futures-util.workspace = true
+image.workspace = true
+imageproc.workspace = true
 libc.workspace = true
+mp4.workspace = true
+openh264.workspace = true
 retina.workspace = true
+rust_h265.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -1,2 +1,15 @@
+[target.x86_64-unknown-linux-musl]
+linker = "target/vigil-test-tools/zig/rust-lld-x86_64-linux-musl"
+rustflags = ["-Clinker-flavor=ld.lld"]
+
 [target.aarch64-unknown-linux-musl]
-linker = "rust-lld"
+linker = "target/vigil-test-tools/zig/rust-lld-aarch64-linux-musl"
+rustflags = ["-Clinker-flavor=ld.lld"]
+
+[env]
+CC_x86_64_unknown_linux_musl = { value = "target/vigil-test-tools/zig/zig-cc-x86_64-linux-musl", relative = true }
+CXX_x86_64_unknown_linux_musl = { value = "target/vigil-test-tools/zig/zig-cxx-x86_64-linux-musl", relative = true }
+CXXSTDLIB_x86_64_unknown_linux_musl = "c++"
+CC_aarch64_unknown_linux_musl = { value = "target/vigil-test-tools/zig/zig-cc-aarch64-linux-musl", relative = true }
+CXX_aarch64_unknown_linux_musl = { value = "target/vigil-test-tools/zig/zig-cxx-aarch64-linux-musl", relative = true }
+CXXSTDLIB_aarch64_unknown_linux_musl = "c++"

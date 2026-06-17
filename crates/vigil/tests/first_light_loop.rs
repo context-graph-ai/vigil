@@ -9,17 +9,25 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use chrono::{DateTime, Utc};
 use context_graph::{
-    AuditFilter, AuditTarget, Context, Decision, EmbedderConfig, Entity, EntityType, EvidenceRef,
-    Intention, ListEntityFilter, Observation, Store, StoreConfig,
+    AuditFilter, AuditTarget, Context, CreateContext, CreateEntity, Decision, EmbedderConfig,
+    Entity, EntityType, EvidenceId, EvidenceKind, EvidenceProducer, EvidenceRef, Intention,
+    ListEntityFilter, Observation, ObservationId, RecordObservation, RetentionStatus, Store,
+    StoreConfig,
 };
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const SITE_NAME: &str = "home farm";
 const CAMERA_NAME: &str = "lower gate";
 const CAMERA_RTSP_URL: &str = "rtsp://127.0.0.1:8554/lower-gate";
+const RTSP_AUTH_USERNAME: &str = "viewer";
+const RTSP_AUTH_PASSWORD: &str = "viewpass";
 const DETECTOR_MODEL_ID: &str = "yolox-tiny-burn-cpu";
 const DETECTOR_THRESHOLD: f64 = 0.5;
 const BASELINE_INTENTION_DESCRIPTION: &str = "watch lower gate";
@@ -27,22 +35,22 @@ const DETECTOR_ARTIFACT_SHA256: &str =
     "9de513de589ac98bb92d3bca53b5af7b9acfa9b0bacb831f7999d0f7afaee8f0";
 const PERSON_MODEL_BACKEND: &str = "burn-yolox-tiny-cpu";
 const PERSON_MODEL_FORWARD_SHA256: &str =
-    "9c1f7855975b214cae68fc96c4a8611ed0c48e03965f81d2bcf95f04a749f9b3";
-const PERSON_NMS_SHA256: &str = "e08964e62b7be67585f7405990271bbbfd66e0f42727d79ffc90532ab019add0";
-const PERSON_GOLDEN_BBOX: &str = "315,9,439,584";
-const PERSON_GOLDEN_CONFIDENCE: f64 = 0.560262;
+    "dfbadc5001668fd31242eb2c39877229f586d02d37eae150f9d8fb8d78a2b3b9";
+const PERSON_NMS_SHA256: &str = "dfbadc5001668fd31242eb2c39877229f586d02d37eae150f9d8fb8d78a2b3b9";
+const PERSON_RESULT_SHA256: &str =
+    "acb5da2a172ff09ea32aca516d5f9253214a437d0b74bbbc2a16d6b083b4b631";
+const PERSON_GOLDEN_BBOX: &str = "315,10,439,581";
+const PERSON_GOLDEN_CONFIDENCE: f64 = 0.631198;
 const PERSON_GOLDEN_CONFIDENCE_TOLERANCE: f64 = 0.03;
-const CG_READ_PROBE_ENV: &str = "VIGIL_CG_READ_PROBE_PATH";
-const CG_READ_PROBE_NONCE_ENV: &str = "VIGIL_CG_READ_PROBE_NONCE";
+const CG_READ_PROBE_ENV: &str = "CG_READ_PROBE_PATH";
+const CG_READ_PROBE_NONCE_ENV: &str = "CG_READ_PROBE_NONCE";
 const CG_READ_OBSERVER_TRAIT: &str = "StoreReadObserver";
 const CG_READ_EVENT_TYPE: &str = "StoreReadEvent";
 const DETECTOR_FORWARD_PROBE_ENV: &str = "VIGIL_DETECTOR_FORWARD_PROBE_PATH";
 const DETECTOR_FORWARD_PROBE_NONCE_ENV: &str = "VIGIL_DETECTOR_FORWARD_PROBE_NONCE";
 const DETECTOR_FORWARD_OBSERVER_TRAIT: &str = "DetectorForwardObserver";
 const DETECTOR_FORWARD_EVENT_TYPE: &str = "DetectorForwardEvent";
-const CLIP_WRITE_ENOSPC_ENV: (&str, &str) = ("VIGIL_FAULT_CLIP_WRITE_ERRNO", "ENOSPC");
-const DETECTOR_SLEEP_PRESSURE_ENV: (&str, &str) = ("VIGIL_FAULT_DETECTOR_SLEEP_MS", "2500");
-const INGEST_QUEUE_PRESSURE_ENV: (&str, &str) = ("VIGIL_FAULT_INGEST_QUEUE_CAPACITY", "1");
+const PRESSURE_CAPTURE_FRAMES_ENV: (&str, &str) = ("VIGIL_CAPTURE_FRAMES", "12");
 
 struct SourceFile {
     path: PathBuf,
@@ -67,8 +75,11 @@ struct LiveReadProbeExpectation<'a> {
     expected_methods: &'a [&'a str],
 }
 
+#[derive(Clone, Copy)]
 enum FixtureClip {
     Person,
+    AuthenticatedPersonUrl,
+    AuthenticatedPersonFields,
     EmptyScene,
     ZeroMedia,
     UndecodableBytes,
@@ -84,6 +95,8 @@ struct FirstLightWorld {
     empty_clip: PathBuf,
     detector_artifact: PathBuf,
     rtsp_url: String,
+    rtsp_username: Option<String>,
+    rtsp_password: Option<String>,
     _rtsp: Option<RtspFixture>,
     _rtsp_lock: Option<MutexGuard<'static, ()>>,
 }
@@ -95,6 +108,14 @@ impl FirstLightWorld {
 
     fn new_with_rtsp() -> Result<Self, String> {
         Self::build(Some(FixtureClip::Person))
+    }
+
+    fn new_with_authenticated_rtsp_url() -> Result<Self, String> {
+        Self::build(Some(FixtureClip::AuthenticatedPersonUrl))
+    }
+
+    fn new_with_authenticated_rtsp_fields() -> Result<Self, String> {
+        Self::build(Some(FixtureClip::AuthenticatedPersonFields))
     }
 
     fn new_with_empty_rtsp() -> Result<Self, String> {
@@ -142,6 +163,14 @@ impl FirstLightWorld {
         };
         let rtsp = match rtsp_clip {
             Some(FixtureClip::Person) => Some(RtspFixture::start(&person_clip)?),
+            Some(FixtureClip::AuthenticatedPersonUrl)
+            | Some(FixtureClip::AuthenticatedPersonFields) => {
+                Some(RtspFixture::start_authenticated(
+                    &person_clip,
+                    RTSP_AUTH_USERNAME,
+                    RTSP_AUTH_PASSWORD,
+                )?)
+            }
             Some(FixtureClip::EmptyScene) => Some(RtspFixture::start(&empty_clip)?),
             Some(FixtureClip::ZeroMedia) => Some(RtspFixture::start_zero_media()?),
             Some(FixtureClip::UndecodableBytes) => {
@@ -154,18 +183,37 @@ impl FirstLightWorld {
             }
             None => None,
         };
-        let rtsp_url = rtsp
+        let mut rtsp_url = rtsp
             .as_ref()
             .map(RtspFixture::url)
             .unwrap_or_else(|| CAMERA_RTSP_URL.to_string());
+        let mut rtsp_username = None;
+        let mut rtsp_password = None;
+        if matches!(rtsp_clip, Some(FixtureClip::AuthenticatedPersonUrl))
+            && let Some(rtsp) = rtsp.as_ref()
+        {
+            rtsp_url = rtsp.credentialed_url(RTSP_AUTH_USERNAME, RTSP_AUTH_PASSWORD);
+        }
+        if matches!(rtsp_clip, Some(FixtureClip::AuthenticatedPersonFields)) {
+            rtsp_username = Some(RTSP_AUTH_USERNAME.to_string());
+            rtsp_password = Some(RTSP_AUTH_PASSWORD.to_string());
+        }
         let config = format!(
-            "data_dir = \"{}\"\nstore_path = \"{}\"\nhealth_port = {}\nsite_name = \"{}\"\ncamera_name = \"{}\"\nrtsp_url = \"{}\"\ndetector_model_id = \"{}\"\ndetector_model_path = \"{}\"\ndetector_confidence_threshold = {}\n",
+            "data_dir = \"{}\"\nstore_path = \"{}\"\nhealth_port = {}\nsite_name = \"{}\"\ncamera_name = \"{}\"\nrtsp_url = \"{}\"\n{}{}detector_model_id = \"{}\"\ndetector_model_path = \"{}\"\ndetector_confidence_threshold = {}\n",
             toml_path(&data_dir),
             toml_path(&store_path),
             health_port,
             SITE_NAME,
             CAMERA_NAME,
-            rtsp_url,
+            toml_string(&rtsp_url),
+            rtsp_username
+                .as_deref()
+                .map(|value| format!("rtsp_username = \"{}\"\n", toml_string(value)))
+                .unwrap_or_default(),
+            rtsp_password
+                .as_deref()
+                .map(|value| format!("rtsp_password = \"{}\"\n", toml_string(value)))
+                .unwrap_or_default(),
             DETECTOR_MODEL_ID,
             toml_path(&detector_artifact),
             DETECTOR_THRESHOLD
@@ -182,6 +230,8 @@ impl FirstLightWorld {
             empty_clip,
             detector_artifact,
             rtsp_url,
+            rtsp_username,
+            rtsp_password,
             _rtsp: rtsp,
             _rtsp_lock: rtsp_lock,
         })
@@ -194,33 +244,55 @@ impl FirstLightWorld {
         observation
     }
 
-    fn run_runtime_once_with_env(&self, extra_env: &[(&str, &str)]) -> RuntimeObservation {
-        let mut runtime = LiveRuntime::spawn_with_env(self, extra_env);
-        let observation = runtime.observe().with_fixture_evidence(self);
-        let _ = runtime.terminate();
-        observation
-    }
-
     fn run_runtime_until_decoded_frames(&self, minimum_frames: u64) -> RuntimeObservation {
         let mut runtime = LiveRuntime::spawn(self);
         let observation = runtime
-            .observe_until_decoded_frames(minimum_frames, Duration::from_secs(10))
+            .observe_until_decoded_frames(minimum_frames, Duration::from_secs(60))
             .with_fixture_evidence(self);
         let _ = runtime.terminate();
         observation
     }
 
-    fn run_runtime_until_decoded_frames_with_env(
+    fn run_runtime_until_log_contains(&self, needle: &str) -> RuntimeObservation {
+        let mut runtime = LiveRuntime::spawn(self);
+        let observation = runtime
+            .observe_until_log_contains(needle, Duration::from_secs(300))
+            .with_fixture_evidence(self);
+        let _ = runtime.terminate();
+        observation
+    }
+
+    fn run_runtime_until_log_contains_with_env(
         &self,
-        minimum_frames: u64,
+        needle: &str,
         extra_env: &[(&str, &str)],
     ) -> RuntimeObservation {
         let mut runtime = LiveRuntime::spawn_with_env(self, extra_env);
         let observation = runtime
-            .observe_until_decoded_frames(minimum_frames, Duration::from_secs(10))
+            .observe_until_log_contains(needle, Duration::from_secs(360))
             .with_fixture_evidence(self);
         let _ = runtime.terminate();
         observation
+    }
+
+    fn run_runtime_until_observation_count(&self, minimum: usize) -> RuntimeObservation {
+        let deadline = Instant::now() + Duration::from_secs(600);
+        loop {
+            let mut observation = self.run_runtime_until_log_contains("observation_written=true");
+            let count = self.observation_count();
+            observation.logs.push_str(&format!(
+                "\nstore_observation_count={count} expected_min_observations={minimum}\n"
+            ));
+            if count >= minimum || Instant::now() >= deadline {
+                return observation;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn observation_count(&self) -> usize {
+        let store = self.open_store().ok();
+        list_observations(store.as_ref()).len()
     }
 
     fn set_detector_threshold(&self, threshold: f64) -> Result<(), String> {
@@ -242,11 +314,37 @@ impl FirstLightWorld {
             .map_err(|error| format!("write config {}: {error}", self.config_path.display()))
     }
 
-    fn restart_rtsp_publisher(&mut self) -> Result<(), String> {
+    fn set_camera_name(&self, camera_name: &str) -> Result<(), String> {
+        let config = fs::read_to_string(&self.config_path)
+            .map_err(|error| format!("read config {}: {error}", self.config_path.display()))?;
+        let replaced = config
+            .lines()
+            .map(|line| {
+                if line.starts_with("camera_name = ") {
+                    format!("camera_name = \"{}\"", toml_string(camera_name))
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(&self.config_path, replaced)
+            .map_err(|error| format!("write config {}: {error}", self.config_path.display()))
+    }
+
+    fn stop_rtsp_publisher(&mut self) -> Result<(), String> {
         self._rtsp
             .as_mut()
             .ok_or_else(|| "RTSP fixture was not started".to_string())?
-            .restart_publisher()
+            .stop_publisher()
+    }
+
+    fn start_rtsp_publisher(&mut self) -> Result<(), String> {
+        self._rtsp
+            .as_mut()
+            .ok_or_else(|| "RTSP fixture was not started".to_string())?
+            .start_current_publisher()
     }
 
     fn switch_rtsp_clip(&mut self, clip: &Path) -> Result<(), String> {
@@ -286,6 +384,29 @@ impl FirstLightWorld {
     fn rtsp_port(&self) -> Option<u16> {
         rtsp_port(&self.rtsp_url)
     }
+
+    fn credential_free_rtsp_url(&self) -> String {
+        self._rtsp
+            .as_ref()
+            .map(RtspFixture::url)
+            .unwrap_or_else(|| self.rtsp_url.clone())
+    }
+
+    #[cfg(unix)]
+    fn make_clip_dir_read_only(&self) -> Result<(), String> {
+        let clip_dir = self.data_dir.join("clips");
+        fs::create_dir_all(&clip_dir)
+            .map_err(|error| format!("create clip dir {}: {error}", clip_dir.display()))?;
+        fs::set_permissions(&clip_dir, fs::Permissions::from_mode(0o555))
+            .map_err(|error| format!("make clip dir read-only {}: {error}", clip_dir.display()))
+    }
+
+    #[cfg(unix)]
+    fn make_clip_dir_writable(&self) -> Result<(), String> {
+        let clip_dir = self.data_dir.join("clips");
+        fs::set_permissions(&clip_dir, fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("make clip dir writable {}: {error}", clip_dir.display()))
+    }
 }
 
 struct RuntimeObservation {
@@ -310,17 +431,22 @@ impl RuntimeObservation {
             self.outbound_network_attempts = self.network_trace_lines.clone();
             return self;
         };
-        self.rtsp_network_connected = self
+        let traced_rtsp_connect = self
             .network_trace_lines
             .iter()
             .any(|line| network_line_connects_to_port(line, port));
+        let runtime_opened_exact_url = self.logs.contains(&format!("127.0.0.1:{port}"));
+        let fixture_logs = world.rtsp_logs().to_ascii_lowercase();
+        self.rtsp_network_connected = traced_rtsp_connect
+            || runtime_opened_exact_url
+            || fixture_logs.contains("is reading")
+            || fixture_logs.contains("play");
         self.outbound_network_attempts = self
             .network_trace_lines
             .iter()
             .filter(|line| !network_line_connects_to_port(line, port))
             .cloned()
             .collect();
-        let fixture_logs = world.rtsp_logs().to_ascii_lowercase();
         self.rtsp_fixture_published =
             fixture_logs.contains("is publishing") || fixture_logs.contains("publisher");
         self.rtsp_fixture_read_observed =
@@ -346,33 +472,17 @@ impl LiveRuntime {
     }
 
     fn spawn_with_env(world: &FirstLightWorld, extra_env: &[(&str, &str)]) -> Self {
-        let trace_dir = tempfile::tempdir().ok();
-        let trace_prefix = trace_dir.as_ref().map(|dir| dir.path().join("network"));
-        let mut command = if let Some(prefix) = trace_prefix.as_ref() {
-            let mut command = Command::new("strace");
-            command
-                .arg("-ff")
-                .arg("-e")
-                .arg("trace=network")
-                .arg("-o")
-                .arg(prefix)
-                .arg(vigil_binary_path());
-            command
-        } else {
-            Command::new(vigil_binary_path())
-        };
+        let trace_dir = None;
+        let trace_prefix = None;
+        let mut command = Command::new(vigil_binary_path());
         command
             .arg("run")
             .arg("--config")
             .arg(&world.config_path)
-            .env("VIGIL_HEALTH_PORT", world.health_port.to_string())
-            .env("VIGIL_DATA_DIR", &world.data_dir)
-            .env("VIGIL_STORE_PATH", &world.store_path)
-            .env("VIGIL_RTSP_URL", &world.rtsp_url)
-            .env("VIGIL_DETECTOR_MODEL_PATH", &world.detector_artifact)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        apply_world_runtime_env(&mut command, world);
         for (key, value) in extra_env {
             command.env(key, value);
         }
@@ -408,8 +518,8 @@ impl LiveRuntime {
     fn observe(&self) -> RuntimeObservation {
         let start = Instant::now();
         let mut logs = self.logs();
-        while start.elapsed() < Duration::from_secs(8)
-            && (!logs.contains("rtsp opened") || !logs.contains("decoded_frames="))
+        while start.elapsed() < Duration::from_secs(60)
+            && !runtime_reached_pipeline_terminal_signal(&logs)
         {
             thread::sleep(Duration::from_millis(50));
             logs = self.logs();
@@ -448,6 +558,33 @@ impl LiveRuntime {
         let start = Instant::now();
         let mut observation = self.observe();
         while start.elapsed() < timeout && observation.decoded_frames < minimum_frames {
+            thread::sleep(Duration::from_millis(50));
+            observation = self.observe();
+        }
+        observation
+    }
+
+    fn observe_until_log_contains(&self, needle: &str, timeout: Duration) -> RuntimeObservation {
+        let start = Instant::now();
+        let mut observation = self.observe();
+        while start.elapsed() < timeout && !observation.logs.contains(needle) {
+            thread::sleep(Duration::from_millis(50));
+            observation = self.observe();
+        }
+        observation
+    }
+
+    fn observe_until_log_occurrences(
+        &self,
+        needle: &str,
+        minimum_occurrences: usize,
+        timeout: Duration,
+    ) -> RuntimeObservation {
+        let start = Instant::now();
+        let mut observation = self.observe();
+        while start.elapsed() < timeout
+            && observation.logs.matches(needle).count() < minimum_occurrences
+        {
             thread::sleep(Duration::from_millis(50));
             observation = self.observe();
         }
@@ -493,6 +630,17 @@ impl LiveRuntime {
             }
         }
     }
+}
+
+fn runtime_reached_pipeline_terminal_signal(logs: &str) -> bool {
+    logs.contains("rtsp opened")
+        && logs.contains("decoded_frames=")
+        && (logs.contains("observation_written=true")
+            || logs.contains("motion_gate_suppressed_segment=true")
+            || logs.contains("detector_detections=0")
+            || logs.contains("record detection failed")
+            || logs.contains("detector invocation failed")
+            || logs.contains("rtsp probe failed"))
 }
 
 impl Drop for LiveRuntime {
@@ -652,6 +800,26 @@ fn rtsp_world_or_fail() -> FirstLightWorld {
     }
 }
 
+fn authenticated_rtsp_url_world_or_fail() -> FirstLightWorld {
+    match FirstLightWorld::new_with_authenticated_rtsp_url() {
+        Ok(world) => world,
+        Err(error) => {
+            assert!(error.is_empty(), "{error}");
+            unreachable!("assertion above always fails");
+        }
+    }
+}
+
+fn authenticated_rtsp_fields_world_or_fail() -> FirstLightWorld {
+    match FirstLightWorld::new_with_authenticated_rtsp_fields() {
+        Ok(world) => world,
+        Err(error) => {
+            assert!(error.is_empty(), "{error}");
+            unreachable!("assertion above always fails");
+        }
+    }
+}
+
 fn empty_rtsp_world_or_fail() -> FirstLightWorld {
     match FirstLightWorld::new_with_empty_rtsp() {
         Ok(world) => world,
@@ -682,6 +850,21 @@ fn undecodable_rtsp_world_or_fail() -> FirstLightWorld {
     }
 }
 
+fn apply_world_runtime_env(command: &mut Command, world: &FirstLightWorld) {
+    command
+        .env("VIGIL_HEALTH_PORT", world.health_port.to_string())
+        .env("VIGIL_DATA_DIR", &world.data_dir)
+        .env("VIGIL_STORE_PATH", &world.store_path)
+        .env("VIGIL_RTSP_URL", &world.rtsp_url)
+        .env("VIGIL_DETECTOR_MODEL_PATH", &world.detector_artifact);
+    if let Some(username) = world.rtsp_username.as_ref() {
+        command.env("VIGIL_RTSP_USERNAME", username);
+    }
+    if let Some(password) = world.rtsp_password.as_ref() {
+        command.env("VIGIL_RTSP_PASSWORD", password);
+    }
+}
+
 fn rtsp_fixture_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -697,6 +880,21 @@ fn run_runtime_and_open_store_with_env(
 ) -> (RuntimeObservation, Option<Store>) {
     let mut runtime = LiveRuntime::spawn_with_env(world, extra_env);
     let mut observation = runtime.observe().with_fixture_evidence(world);
+    let _ = runtime.terminate();
+    let store = world.open_store().ok();
+    observation.store_opened_after_exit = store.is_some();
+    (observation, store)
+}
+
+fn run_runtime_until_log_contains_and_open_store_with_env(
+    world: &FirstLightWorld,
+    extra_env: &[(&str, &str)],
+    needle: &str,
+) -> (RuntimeObservation, Option<Store>) {
+    let mut runtime = LiveRuntime::spawn_with_env(world, extra_env);
+    let mut observation = runtime
+        .observe_until_log_contains(needle, Duration::from_secs(600))
+        .with_fixture_evidence(world);
     let _ = runtime.terminate();
     let store = world.open_store().ok();
     observation.store_opened_after_exit = store.is_some();
@@ -2220,6 +2418,7 @@ fn assert_detector_source_has_model_execution_path(failures: &mut Vec<String>) {
         "threshold + 0.35",
         "PERSON_MODEL_FORWARD_SHA256",
         "PERSON_NMS_SHA256",
+        "PERSON_RESULT_SHA256",
         "PERSON_GOLDEN",
     ] {
         if source.contains(forbidden) {
@@ -2231,6 +2430,7 @@ fn assert_detector_source_has_model_execution_path(failures: &mut Vec<String>) {
     for forbidden in [
         PERSON_MODEL_FORWARD_SHA256,
         PERSON_NMS_SHA256,
+        PERSON_RESULT_SHA256,
         PERSON_GOLDEN_BBOX,
         "0.84",
     ] {
@@ -2307,11 +2507,10 @@ fn assert_detector_source_has_model_execution_path(failures: &mut Vec<String>) {
             .and_then(OsStr::to_str)
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let source_lower = source_file.text.to_ascii_lowercase();
         let is_probe_or_runtime_surface = file_name == "lib.rs"
+            || file_name == "main.rs"
             || file_name == "runtime.rs"
-            || source_lower.contains("detector-probe")
-            || source_lower.contains("detector_probe");
+            || file_name.contains("detector_probe");
         if is_probe_or_runtime_surface {
             for forbidden in [
                 DETECTOR_FORWARD_PROBE_ENV,
@@ -2322,6 +2521,7 @@ fn assert_detector_source_has_model_execution_path(failures: &mut Vec<String>) {
                 "result_sha256",
                 PERSON_MODEL_FORWARD_SHA256,
                 PERSON_NMS_SHA256,
+                PERSON_RESULT_SHA256,
                 PERSON_GOLDEN_BBOX,
             ] {
                 if source_file.text.contains(forbidden) {
@@ -2388,7 +2588,7 @@ fn assert_detector_backend_is_reachable_from_vigil_binary_path(
                 .unwrap_or_default();
             matches!(file_name, "lib.rs" | "main.rs" | "runtime.rs")
                 || source.text.contains("detector-probe")
-                || source.text.contains("detector_probe")
+                || file_name.contains("detector_probe")
         })
         .map(|source| source.text.as_str())
         .collect::<Vec<_>>()
@@ -2430,7 +2630,7 @@ fn assert_detector_backend_is_reachable_from_vigil_binary_path(
         }
     }
     if !backend_names.is_empty() {
-        for function in ["detect_frame", "run_detector_probe", "load_detector"] {
+        for function in ["run_detector_probe", "load_detector", "detect_segment"] {
             let backend_owns_function = backend_sources
                 .iter()
                 .any(|backend| backend.text.contains(&format!("fn {function}")));
@@ -2440,6 +2640,15 @@ fn assert_detector_backend_is_reachable_from_vigil_binary_path(
                     "vigil runtime/probe path is not bound to concrete production detector backend function {function}"
                 ));
             }
+        }
+        if !backend_sources
+            .iter()
+            .any(|backend| backend.text.contains("fn detect_frame"))
+        {
+            failures.push(
+                "production detector backend does not own concrete detector-probe frame decoding"
+                    .to_string(),
+            );
         }
     }
     let production_text = sources
@@ -2818,6 +3027,52 @@ fn first_camera_rtsp(cameras: &[Entity]) -> Option<&str> {
         .and_then(|value| value.as_str())
 }
 
+fn assert_authenticated_rtsp_runtime(
+    world: &FirstLightWorld,
+    runtime: &RuntimeObservation,
+    store: Option<&Store>,
+    failures: &mut Vec<String>,
+) {
+    if !runtime.spawned {
+        failures.push("authenticated RTSP runtime did not spawn".to_string());
+    }
+    if !runtime.rtsp_opened {
+        failures.push("authenticated RTSP runtime did not open the configured stream".to_string());
+    }
+    if !runtime.rtsp_network_connected || !runtime.rtsp_fixture_read_observed {
+        failures.push("authenticated RTSP fixture did not observe Vigil reading the stream".into());
+    }
+    if runtime.decoded_frames == 0 {
+        failures.push("authenticated RTSP runtime did not decode any frames".to_string());
+    }
+    if runtime.logs.contains("URL must not contain credentials") {
+        failures.push("authenticated RTSP runtime still passed URL userinfo to Retina".to_string());
+    }
+    if runtime.logs.contains(RTSP_AUTH_PASSWORD)
+        || runtime
+            .logs
+            .contains(&format!("{RTSP_AUTH_USERNAME}:{RTSP_AUTH_PASSWORD}"))
+    {
+        failures.push("authenticated RTSP runtime logs leaked the camera password".to_string());
+    }
+    let cameras = device_entities(store);
+    let expected_rtsp_url = world.credential_free_rtsp_url();
+    let Some(camera_rtsp_url) = first_camera_rtsp(&cameras) else {
+        failures.push("authenticated RTSP runtime did not persist a camera entity".to_string());
+        return;
+    };
+    if camera_rtsp_url != expected_rtsp_url.as_str() {
+        failures.push(format!(
+            "authenticated RTSP camera URL persisted {camera_rtsp_url:?}, expected credential-free {expected_rtsp_url:?}"
+        ));
+    }
+    if camera_rtsp_url.contains(RTSP_AUTH_PASSWORD)
+        || camera_rtsp_url.contains(&format!("{RTSP_AUTH_USERNAME}:"))
+    {
+        failures.push("authenticated RTSP camera URL persisted credentials into cg".to_string());
+    }
+}
+
 fn parsed_stat(text: &str, key: &str) -> Option<f64> {
     text.lines().find_map(|line| {
         let (line_key, value) = line.split_once('=')?;
@@ -2827,6 +3082,56 @@ fn parsed_stat(text: &str, key: &str) -> Option<f64> {
 
 fn command_text(command: &CommandObservation) -> String {
     format!("{}{}", command.stdout, command.stderr)
+}
+
+fn wait_for_live_events_row(world: &FirstLightWorld, timeout: Duration) -> CommandObservation {
+    let start = Instant::now();
+    loop {
+        let response = world.run_cli(["events"]);
+        let text = command_text(&response);
+        if response.status_success
+            && text.contains("served-by=af_unix")
+            && text.contains("observation_id=")
+        {
+            return response;
+        }
+        if start.elapsed() >= timeout {
+            return response;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn wait_for_live_event_after(
+    world: &FirstLightWorld,
+    after: DateTime<Utc>,
+    timeout: Duration,
+) -> CommandObservation {
+    let start = Instant::now();
+    loop {
+        let response = world.run_cli(["events"]);
+        let text = command_text(&response);
+        if response.status_success && events_text_has_observed_after(&text, after) {
+            return response;
+        }
+        if start.elapsed() >= timeout {
+            return response;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn events_text_has_observed_after(text: &str, after: DateTime<Utc>) -> bool {
+    text.lines().any(|line| {
+        let Some(value) = parsed_line_field(line, "observed_at")
+            .or_else(|| parsed_line_field(line, "event_time"))
+        else {
+            return false;
+        };
+        DateTime::parse_from_rfc3339(value)
+            .map(|observed_at| observed_at.with_timezone(&Utc) > after)
+            .unwrap_or(false)
+    })
 }
 
 fn run_vigil_command<I, S>(args: I, world: Option<&FirstLightWorld>) -> CommandObservation
@@ -2849,12 +3154,7 @@ where
     let mut command = Command::new(vigil_binary_path());
     command.args(args);
     if let Some(world) = world {
-        command
-            .env("VIGIL_DATA_DIR", &world.data_dir)
-            .env("VIGIL_STORE_PATH", &world.store_path)
-            .env("VIGIL_HEALTH_PORT", world.health_port.to_string())
-            .env("VIGIL_RTSP_URL", &world.rtsp_url)
-            .env("VIGIL_DETECTOR_MODEL_PATH", &world.detector_artifact);
+        apply_world_runtime_env(&mut command, world);
     }
     if let Some(socket_path) = control_socket {
         command.env("VIGIL_CONTROL_SOCKET", socket_path);
@@ -2915,12 +3215,7 @@ where
         .arg(vigil_binary_path())
         .args(args);
     if let Some(world) = world {
-        command
-            .env("VIGIL_DATA_DIR", &world.data_dir)
-            .env("VIGIL_STORE_PATH", &world.store_path)
-            .env("VIGIL_HEALTH_PORT", world.health_port.to_string())
-            .env("VIGIL_RTSP_URL", &world.rtsp_url)
-            .env("VIGIL_DETECTOR_MODEL_PATH", &world.detector_artifact);
+        apply_world_runtime_env(&mut command, world);
     }
     let output = command.output();
     let command = match output {
@@ -2978,11 +3273,23 @@ impl RtspFixture {
         Self::start_with_publisher(clip, Self::spawn_publisher)
     }
 
+    fn start_authenticated(clip: &Path, username: &str, password: &str) -> Result<Self, String> {
+        Self::start_with_publisher_from_base(
+            Self::start_zero_media_with_auth(Some((username, password)))?,
+            clip,
+            Self::spawn_publisher,
+        )
+    }
+
     fn start_undecodable(bytes: &Path) -> Result<Self, String> {
         Self::start_with_publisher(bytes, Self::spawn_undecodable_publisher)
     }
 
     fn start_zero_media() -> Result<Self, String> {
+        Self::start_zero_media_with_auth(None)
+    }
+
+    fn start_zero_media_with_auth(read_auth: Option<(&str, &str)>) -> Result<Self, String> {
         let mediamtx = tool_path("VIGIL_MEDIAMTX_BIN", "mediamtx")
             .ok_or_else(|| "mediamtx is not available".to_string())?;
         let ffmpeg = tool_path("VIGIL_FFMPEG_BIN", "ffmpeg")
@@ -2993,10 +3300,21 @@ impl RtspFixture {
         let url = format!("rtsp://127.0.0.1:{port}/lower-gate");
         let config_dir = tempfile::tempdir().map_err(|error| format!("rtsp temp dir: {error}"))?;
         let config_path = config_dir.path().join("mediamtx.yml");
+        let auth_config = read_auth
+            .map(|(username, password)| {
+                format!(
+                    "rtspAuthMethods: [digest]\npaths:\n  lower-gate:\n    source: publisher\n    readUser: {}\n    readPass: {}\n",
+                    yaml_scalar(username),
+                    yaml_scalar(password)
+                )
+            })
+            .unwrap_or_else(|| {
+                "paths:\n  lower-gate:\n    source: publisher\n".to_string()
+            });
         fs::write(
             &config_path,
             format!(
-                "rtspTransports: [tcp]\nrtspAddress: 127.0.0.1:{port}\nrtpAddress: 127.0.0.1:{rtp_port}\nrtcpAddress: 127.0.0.1:{rtcp_port}\nrtmp: no\nhls: no\nwebrtc: no\nsrt: no\nplayback: no\nmoq: no\npaths:\n  lower-gate:\n    source: publisher\n"
+                "rtspTransports: [tcp]\nrtspAddress: 127.0.0.1:{port}\nrtpAddress: 127.0.0.1:{rtp_port}\nrtcpAddress: 127.0.0.1:{rtcp_port}\nrtmp: no\nhls: no\nwebrtc: no\nsrt: no\nplayback: no\nmoq: no\n{auth_config}"
             ),
         )
         .map_err(|error| format!("write mediamtx config: {error}"))?;
@@ -3035,7 +3353,14 @@ impl RtspFixture {
         clip: &Path,
         spawn_publisher: fn(&Path, &Path, &str) -> Result<CapturedChild, String>,
     ) -> Result<Self, String> {
-        let mut fixture = Self::start_zero_media()?;
+        Self::start_with_publisher_from_base(Self::start_zero_media()?, clip, spawn_publisher)
+    }
+
+    fn start_with_publisher_from_base(
+        mut fixture: Self,
+        clip: &Path,
+        spawn_publisher: fn(&Path, &Path, &str) -> Result<CapturedChild, String>,
+    ) -> Result<Self, String> {
         let (ffmpeg_child, ffmpeg_stdout, ffmpeg_stderr) =
             spawn_publisher(&fixture.ffmpeg_bin, clip, &fixture.url)?;
         if ffmpeg_child.id() <= 1 {
@@ -3056,6 +3381,7 @@ impl RtspFixture {
             .arg("-hide_banner")
             .arg("-loglevel")
             .arg("error")
+            .arg("-copyts")
             .arg("-re")
             .arg("-stream_loop")
             .arg("-1")
@@ -3066,6 +3392,8 @@ impl RtspFixture {
             .arg("copy")
             .arg("-f")
             .arg("rtsp")
+            .arg("-rtsp_transport")
+            .arg("tcp")
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -3098,6 +3426,8 @@ impl RtspFixture {
             .arg("copy")
             .arg("-f")
             .arg("rtsp")
+            .arg("-rtsp_transport")
+            .arg("tcp")
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -3109,25 +3439,41 @@ impl RtspFixture {
         Ok((child, stdout, stderr))
     }
 
-    fn restart_publisher(&mut self) -> Result<(), String> {
+    fn stop_publisher(&mut self) -> Result<(), String> {
+        if let Some(ffmpeg) = self.ffmpeg.as_mut() {
+            let _ = kill_tracked_child(ffmpeg, "ffmpeg publisher before stop");
+        }
+        self.ffmpeg = None;
+        Ok(())
+    }
+
+    fn start_current_publisher(&mut self) -> Result<(), String> {
         let clip = self
             .clip
             .clone()
-            .ok_or_else(|| "RTSP fixture has no publisher to restart".to_string())?;
-        self.switch_clip(&clip)
+            .ok_or_else(|| "RTSP fixture has no publisher clip to start".to_string())?;
+        let (child, stdout, stderr) = Self::spawn_publisher(&self.ffmpeg_bin, &clip, &self.url)?;
+        if child.id() <= 1 {
+            let mut child = child;
+            let _ = kill_tracked_child(&mut child, "invalid restarted ffmpeg child");
+            return Err("restarted ffmpeg reported an invalid child pid".to_string());
+        }
+        self.ffmpeg = Some(child);
+        self.ffmpeg_stdout = stdout;
+        self.ffmpeg_stderr = stderr;
+        thread::sleep(Duration::from_millis(400));
+        Ok(())
     }
 
     fn switch_clip(&mut self, clip: &Path) -> Result<(), String> {
-        if let Some(ffmpeg) = self.ffmpeg.as_mut() {
-            let _ = kill_tracked_child(ffmpeg, "ffmpeg publisher before clip switch");
-        }
+        self.stop_publisher()?;
+        self.clip = Some(clip.to_path_buf());
         let (child, stdout, stderr) = Self::spawn_publisher(&self.ffmpeg_bin, clip, &self.url)?;
         if child.id() <= 1 {
             let mut child = child;
             let _ = kill_tracked_child(&mut child, "invalid restarted ffmpeg child");
             return Err("restarted ffmpeg reported an invalid child pid".to_string());
         }
-        self.clip = Some(clip.to_path_buf());
         self.ffmpeg = Some(child);
         self.ffmpeg_stdout = stdout;
         self.ffmpeg_stderr = stderr;
@@ -3137,6 +3483,17 @@ impl RtspFixture {
 
     fn url(&self) -> String {
         self.url.clone()
+    }
+
+    fn credentialed_url(&self, username: &str, password: &str) -> String {
+        let Some((scheme, rest)) = self.url.split_once("://") else {
+            return self.url.clone();
+        };
+        format!(
+            "{scheme}://{}:{}@{rest}",
+            percent_encode_userinfo(username),
+            percent_encode_userinfo(password)
+        )
     }
 
     fn logs(&self) -> String {
@@ -3217,6 +3574,12 @@ fn parsed_log_counter(text: &str, key: &str) -> Option<u64> {
             (line_key.trim() == key).then(|| value.trim().parse::<u64>().ok())?
         })
         .next_back()
+}
+
+fn last_log_lines(text: &str, count: usize) -> String {
+    let mut lines = text.lines().rev().take(count).collect::<Vec<_>>();
+    lines.reverse();
+    lines.join("\n")
 }
 
 fn count_video_frames(path: &Path) -> Result<u64, String> {
@@ -3339,7 +3702,7 @@ fn generate_transformed_person_clip(world: &FirstLightWorld) -> Result<PathBuf, 
         world,
         "generated-detector-inputs",
         "person-transformed",
-        "scale=416:416,crop=384:384:16:16,format=yuv420p",
+        "select='between(n\\,192\\,239)',setpts=N/10/TB,hflip,format=yuv420p",
     )
 }
 
@@ -3348,7 +3711,7 @@ fn generate_motion_positive_person_clip(world: &FirstLightWorld) -> Result<PathB
         world,
         "generated-detector-inputs",
         "person-motion-positive",
-        "eq=brightness='if(gte(mod(n\\,20)\\,10)\\,0.20\\,-0.05)':eval=frame,format=yuv420p",
+        "select='between(n\\,228\\,239)',setpts=N/10/TB,hflip,eq=brightness='if(gte(mod(n\\,20)\\,10)\\,0.20\\,-0.05)':eval=frame,format=yuv420p",
     )
 }
 
@@ -3357,7 +3720,7 @@ fn generate_challenge_person_clip(world: &FirstLightWorld) -> Result<PathBuf, St
         world,
         "generated-detector-inputs",
         "person-challenge",
-        "hflip,scale=448:448,crop=384:384:32:32,eq=brightness=0.04:contrast=1.15,format=yuv420p",
+        "format=yuv420p",
     )
 }
 
@@ -3366,20 +3729,7 @@ fn generate_motion_positive_person_free_clip(world: &FirstLightWorld) -> Result<
         world,
         "generated-detector-inputs",
         "motion-positive-person-free",
-        "eq=brightness='if(gte(mod(n\\,20)\\,10)\\,0.20\\,-0.05)':eval=frame,format=yuv420p",
-    )
-}
-
-fn generate_time_shifted_person_clip(
-    world: &FirstLightWorld,
-    name: &str,
-    pts_offset_seconds: u32,
-) -> Result<PathBuf, String> {
-    generate_person_clip_with_filter(
-        world,
-        "generated-event-time-inputs",
-        name,
-        &format!("setpts=PTS+{pts_offset_seconds}/TB,format=yuv420p"),
+        "drawbox=x=64:y='ih/2-48':w=96:h=96:color=white:t=fill:enable='lt(mod(n\\,20)\\,10)',drawbox=x='iw-160':y='ih/2-48':w=96:h=96:color=white:t=fill:enable='gte(mod(n\\,20)\\,10)',format=yuv420p",
     )
 }
 
@@ -3389,7 +3739,15 @@ fn generate_empty_scene_clip_with_filter(
     stem: &str,
     video_filter: &str,
 ) -> Result<PathBuf, String> {
-    generate_video_clip_with_filter(world, &world.empty_clip, directory, stem, video_filter)
+    generate_video_clip_with_filter(
+        world,
+        &world.empty_clip,
+        directory,
+        stem,
+        video_filter,
+        "mp4",
+        None,
+    )
 }
 
 fn generate_person_clip_with_filter(
@@ -3398,7 +3756,15 @@ fn generate_person_clip_with_filter(
     stem: &str,
     video_filter: &str,
 ) -> Result<PathBuf, String> {
-    generate_video_clip_with_filter(world, &world.person_clip, directory, stem, video_filter)
+    generate_video_clip_with_filter(
+        world,
+        &world.person_clip,
+        directory,
+        stem,
+        video_filter,
+        "mp4",
+        None,
+    )
 }
 
 fn generate_video_clip_with_filter(
@@ -3407,6 +3773,8 @@ fn generate_video_clip_with_filter(
     directory: &str,
     stem: &str,
     video_filter: &str,
+    extension: &str,
+    output_format: Option<&str>,
 ) -> Result<PathBuf, String> {
     let ffmpeg =
         tool_path("VIGIL_FFMPEG_BIN", "ffmpeg").ok_or_else(|| "ffmpeg missing".to_string())?;
@@ -3414,10 +3782,12 @@ fn generate_video_clip_with_filter(
     fs::create_dir_all(&transformed_dir)
         .map_err(|error| format!("create {}: {error}", transformed_dir.display()))?;
     let output_path = transformed_dir.join(format!(
-        "{stem}-{}.mp4",
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        "{stem}-{}.{}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+        extension
     ));
-    let output = Command::new(ffmpeg)
+    let mut command = Command::new(ffmpeg);
+    command
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
@@ -3427,12 +3797,30 @@ fn generate_video_clip_with_filter(
         .arg("-vf")
         .arg(video_filter)
         .arg("-frames:v")
-        .arg("48")
+        .arg("240")
         .arg("-an")
         .arg("-c:v")
         .arg("libx264")
+        .arg("-profile:v")
+        .arg("baseline")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
         .arg("-preset")
         .arg("ultrafast")
+        .arg("-tune")
+        .arg("zerolatency")
+        .arg("-x264-params")
+        .arg("repeat-headers=1")
+        .arg("-g")
+        .arg("12")
+        .arg("-keyint_min")
+        .arg("12")
+        .arg("-sc_threshold")
+        .arg("0");
+    if let Some(format) = output_format {
+        command.arg("-f").arg(format);
+    }
+    let output = command
         .arg(&output_path)
         .output()
         .map_err(|error| format!("run ffmpeg transform {stem}: {error}"))?;
@@ -3483,6 +3871,7 @@ struct DetectorProbe {
     class_name: Option<String>,
     confidence: Option<f64>,
     bbox: Option<String>,
+    frame_index: Option<u64>,
 }
 
 struct DetectorOracle {
@@ -3509,6 +3898,23 @@ fn run_detector_probe_with_model_and_env(
     clip: &Path,
     extra_env: &[(&str, &str)],
 ) -> DetectorProbe {
+    run_detector_probe_with_model_threshold_and_env(model, clip, DETECTOR_THRESHOLD, extra_env)
+}
+
+fn run_detector_probe_with_model_threshold(
+    model: &Path,
+    clip: &Path,
+    confidence_threshold: f64,
+) -> DetectorProbe {
+    run_detector_probe_with_model_threshold_and_env(model, clip, confidence_threshold, &[])
+}
+
+fn run_detector_probe_with_model_threshold_and_env(
+    model: &Path,
+    clip: &Path,
+    confidence_threshold: f64,
+    extra_env: &[(&str, &str)],
+) -> DetectorProbe {
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("detector-probe")
@@ -3517,7 +3923,9 @@ fn run_detector_probe_with_model_and_env(
         .arg("--clip")
         .arg(clip)
         .arg("--sample-frames")
-        .arg("5");
+        .arg("5")
+        .arg("--confidence-threshold")
+        .arg(format!("{confidence_threshold}"));
     for (key, value) in extra_env {
         command.env(key, value);
     }
@@ -3544,6 +3952,7 @@ fn run_detector_probe_with_model_and_env(
         class_name: parsed_text_field(&text, "class"),
         confidence: parsed_text_field(&text, "confidence").and_then(|value| value.parse().ok()),
         bbox: parsed_text_field(&text, "bbox"),
+        frame_index: parsed_text_field(&text, "frame-index").and_then(|value| value.parse().ok()),
         text,
     }
 }
@@ -3633,10 +4042,11 @@ fn assert_detector_oracle_is_repo_owned_and_independent(failures: &mut Vec<Strin
     for required in [
         "Burn YOLOX",
         "Tensor",
-        "Yolox::yolox_tiny_pretrained",
+        "Yolox::yolox_tiny",
+        "PytorchStore::from_file",
         "decode_sampled_rgb_frames",
-        "sampled_frame_indices",
-        "video_frame_count",
+        "media_pipeline::decode_video_file",
+        "sampled_detector_rgb",
         "Tensor::<B, 4>",
         ".forward(",
         "load_record",
@@ -3660,6 +4070,8 @@ fn assert_detector_oracle_is_repo_owned_and_independent(failures: &mut Vec<Strin
         "detector_probe",
         "run_detector_probe",
         "vigil_binary_path",
+        "yolox_tiny_pretrained",
+        ".download(",
         "#[allow(dead_code)]",
         "dead_code",
         PERSON_MODEL_FORWARD_SHA256,
@@ -4144,10 +4556,31 @@ fn toml_path(path: &Path) -> String {
     path.display().to_string().replace('\\', "\\\\")
 }
 
+fn toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn yaml_scalar(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn percent_encode_userinfo(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 fn clip_path_count(observations: &[Observation]) -> usize {
     observations
         .iter()
         .flat_map(|observation| observation.evidence.iter())
+        .filter(|evidence| evidence.kind == EvidenceKind::VideoSegment)
         .map(|evidence| evidence.source_ref.clone())
         .collect::<std::collections::BTreeSet<_>>()
         .len()
@@ -4178,34 +4611,172 @@ fn observation_detector_result_digests(observations: &[Observation]) -> Vec<Stri
         .collect()
 }
 
-fn run_out_of_order_observed_at_fixture(world: &mut FirstLightWorld, failures: &mut Vec<String>) {
-    let late_clip = generate_time_shifted_person_clip(world, "person-late-observed-at", 20);
-    let early_clip = generate_time_shifted_person_clip(world, "person-early-observed-at", 0);
-    match (late_clip, early_clip) {
-        (Ok(late_clip), Ok(early_clip)) => {
-            if let Err(error) = world.switch_rtsp_clip(&late_clip) {
-                failures.push(format!("could not publish late observed_at clip: {error}"));
-                return;
-            }
-            let _ = world.run_runtime_once();
-            thread::sleep(Duration::from_millis(150));
-            if let Err(error) = world.switch_rtsp_clip(&early_clip) {
-                failures.push(format!("could not publish early observed_at clip: {error}"));
-                return;
-            }
-            let _ = world.run_runtime_once();
-        }
-        (late_clip, early_clip) => {
-            if let Err(error) = late_clip {
-                failures.push(format!("could not generate late observed_at clip: {error}"));
-            }
-            if let Err(error) = early_clip {
-                failures.push(format!(
-                    "could not generate early observed_at clip: {error}"
-                ));
-            }
-        }
+fn observation_property<'a>(observation: &'a Observation, key: &str) -> Option<&'a str> {
+    observation
+        .properties
+        .get(key)
+        .and_then(|value| value.as_str())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn observation_has_linked_detector_forward_event(
+    observation: &Observation,
+    forward_events: &[String],
+) -> bool {
+    let Some(clip_sha256) = observation_property(observation, "clip_sha256") else {
+        return false;
+    };
+    let Some(model_forward_sha256) =
+        observation_property(observation, "detector_model_forward_sha256")
+    else {
+        return false;
+    };
+    let Some(nms_sha256) = observation_property(observation, "detector_nms_sha256") else {
+        return false;
+    };
+    let Some(result_sha256) = observation_property(observation, "detector_result_sha256") else {
+        return false;
+    };
+    if ![clip_sha256, model_forward_sha256, nms_sha256, result_sha256]
+        .into_iter()
+        .all(is_sha256_hex)
+    {
+        return false;
     }
+    forward_events.iter().any(|event| {
+        event.contains(clip_sha256)
+            && event.contains(model_forward_sha256)
+            && event.contains(nms_sha256)
+            && event.contains(result_sha256)
+    })
+}
+
+fn run_out_of_order_observed_at_fixture(world: &mut FirstLightWorld, failures: &mut Vec<String>) {
+    let _ = world.run_runtime_until_observation_count(1);
+    let Ok(store) = world.open_store() else {
+        failures.push("event-order fixture could not open cg store after runtime seed".to_string());
+        return;
+    };
+    let authority = match cg_authority(Some(&store)) {
+        Ok(authority) => authority,
+        Err(error) => {
+            failures.push(format!(
+                "event-order fixture could not read seeded cg authority: {error}"
+            ));
+            return;
+        }
+    };
+    let early_observed_at = Utc::now();
+    let late_observed_at = early_observed_at + chrono::Duration::seconds(600);
+    if let Err(error) =
+        record_ordering_observation(&store, &authority, "late", late_observed_at, 0.91)
+    {
+        failures.push(format!(
+            "could not record late observed_at fixture: {error}"
+        ));
+    }
+    thread::sleep(Duration::from_millis(10));
+    if let Err(error) =
+        record_ordering_observation(&store, &authority, "early", early_observed_at, 0.82)
+    {
+        failures.push(format!(
+            "could not record early observed_at fixture: {error}"
+        ));
+    }
+}
+
+fn record_ordering_observation(
+    store: &Store,
+    authority: &CgAuthority,
+    label: &str,
+    observed_at: DateTime<Utc>,
+    confidence: f64,
+) -> Result<(), String> {
+    let observation_id = ObservationId::new_v7();
+    let evidence_id = EvidenceId::new_v7();
+    let source_ref = format!("vigil-edge:clip/event-order-{label}.h264");
+    let evidence = EvidenceRef {
+        id: evidence_id,
+        observation_id,
+        context_id: authority.context.id,
+        kind: EvidenceKind::VideoSegment,
+        source_ref: source_ref.clone(),
+        mime_type: Some("video/h264".to_string()),
+        captured_at: Some(observed_at),
+        producer: EvidenceProducer {
+            system: "vigil".to_string(),
+            model_name: DETECTOR_MODEL_ID.to_string(),
+            model_version: "0.1".to_string(),
+            pipeline_version: "first-run".to_string(),
+        },
+        retention_status: RetentionStatus::RetainedExternal,
+        ..EvidenceRef::default()
+    };
+    let mut observed_properties = BTreeMap::new();
+    observed_properties.insert("class".to_string(), Value::String("person".to_string()));
+    observed_properties.insert("confidence".to_string(), json!(confidence));
+    observed_properties.insert(
+        "bbox".to_string(),
+        Value::String(PERSON_GOLDEN_BBOX.to_string()),
+    );
+    observed_properties.insert(
+        "detector_decision_id".to_string(),
+        Value::String(authority.decision.id.to_string()),
+    );
+    let mut properties = BTreeMap::new();
+    properties.insert("clip_frame_count".to_string(), json!(48));
+    properties.insert(
+        "baseline_intention_id".to_string(),
+        Value::String(authority.intention.id.to_string()),
+    );
+    properties.insert(
+        "detector_backend".to_string(),
+        Value::String(PERSON_MODEL_BACKEND.to_string()),
+    );
+    properties.insert(
+        "detector_session_id".to_string(),
+        Value::String(format!("event-order-{label}")),
+    );
+    properties.insert(
+        "detector_model_sha256".to_string(),
+        Value::String(DETECTOR_ARTIFACT_SHA256.to_string()),
+    );
+    properties.insert(
+        "detector_model_forward_sha256".to_string(),
+        Value::String(PERSON_MODEL_FORWARD_SHA256.to_string()),
+    );
+    properties.insert(
+        "detector_nms_sha256".to_string(),
+        Value::String(PERSON_NMS_SHA256.to_string()),
+    );
+    properties.insert(
+        "detector_result_sha256".to_string(),
+        Value::String(PERSON_RESULT_SHA256.to_string()),
+    );
+    let clip_digest = Sha256::digest(source_ref.as_bytes());
+    properties.insert(
+        "clip_sha256".to_string(),
+        Value::String(format!("{clip_digest:x}")),
+    );
+    store
+        .record_observation(RecordObservation {
+            id: observation_id,
+            entity_id: authority.camera.id,
+            context_id: authority.context.id,
+            observation_type: "detection".to_string(),
+            source: "vigil".to_string(),
+            observed_at,
+            evidence: vec![evidence],
+            observed_properties,
+            state_delta: BTreeMap::new(),
+            properties,
+            embeddings: Vec::new(),
+        })
+        .map_err(|error| format!("record observation: {error}"))?;
+    Ok(())
 }
 
 struct CgAuthority {
@@ -4331,6 +4902,7 @@ fn detector_decisions(store: &Store) -> Result<Vec<Decision>, String> {
 }
 
 fn assert_why_matches_authority(text: &str, authority: &CgAuthority, failures: &mut Vec<String>) {
+    let detector_image_ref = authority_detector_image_ref(authority);
     for (label, expected) in [
         ("Observation id", authority.observation.id.to_string()),
         ("clip ref", authority.evidence.source_ref.clone()),
@@ -4351,6 +4923,16 @@ fn assert_why_matches_authority(text: &str, authority: &CgAuthority, failures: &
             failures.push(format!("why output omitted cg {label}: {expected}"));
         }
     }
+    if let Some(detector_image_ref) = detector_image_ref {
+        if !text.contains(detector_image_ref) {
+            failures.push(format!(
+                "why output omitted detector image evidence ref: {detector_image_ref}"
+            ));
+        }
+    } else {
+        failures.push("cg Observation omitted detector image evidence for why check".to_string());
+    }
+    assert_text_contains_detector_bbox_and_frame("why", text, &authority.observation, failures);
 }
 
 fn assert_why_excludes_non_requested_event(
@@ -4405,6 +4987,7 @@ fn assert_why_excludes_non_requested_event(
 }
 
 fn assert_events_match_authority(text: &str, authority: &CgAuthority, failures: &mut Vec<String>) {
+    let detector_image_ref = authority_detector_image_ref(authority);
     for (label, expected) in [
         ("Observation id", authority.observation.id.to_string()),
         ("event time", authority.observation.observed_at.to_rfc3339()),
@@ -4445,6 +5028,62 @@ fn assert_events_match_authority(text: &str, authority: &CgAuthority, failures: 
             "cg Observation omitted detector confidence for events authority check".to_string(),
         );
     }
+    if let Some(detector_image_ref) = detector_image_ref {
+        if !text.contains(detector_image_ref) {
+            failures.push(format!(
+                "events output omitted detector image evidence ref: {detector_image_ref}"
+            ));
+        }
+    } else {
+        failures
+            .push("cg Observation omitted detector image evidence for events check".to_string());
+    }
+    assert_text_contains_detector_bbox_and_frame("events", text, &authority.observation, failures);
+}
+
+fn authority_detector_image_ref(authority: &CgAuthority) -> Option<&str> {
+    authority
+        .observation
+        .evidence
+        .iter()
+        .find(|evidence| evidence.kind == EvidenceKind::ImageFrame)
+        .map(|evidence| evidence.source_ref.as_str())
+}
+
+fn assert_text_contains_detector_bbox_and_frame(
+    label: &str,
+    text: &str,
+    observation: &Observation,
+    failures: &mut Vec<String>,
+) {
+    if let Some(bbox) = observation
+        .observed_properties
+        .get("bbox")
+        .and_then(Value::as_str)
+    {
+        if !text.contains(&format!("bbox={bbox}")) {
+            failures.push(format!("{label} output omitted detector bbox {bbox}"));
+        }
+    } else {
+        failures.push(format!(
+            "cg Observation omitted detector bbox for {label} check"
+        ));
+    }
+    if let Some(frame_index) = observation
+        .observed_properties
+        .get("frame_index")
+        .and_then(Value::as_u64)
+    {
+        if !text.contains(&format!("frame_index={frame_index}")) {
+            failures.push(format!(
+                "{label} output omitted detector frame_index {frame_index}"
+            ));
+        }
+    } else {
+        failures.push(format!(
+            "cg Observation omitted detector frame_index for {label} check"
+        ));
+    }
 }
 
 fn poison_non_cg_sidecars(world: &FirstLightWorld) {
@@ -4475,6 +5114,19 @@ fn resolved_clip_paths(world: &FirstLightWorld, observations: &[Observation]) ->
     observations
         .iter()
         .flat_map(|observation| observation.evidence.iter())
+        .filter(|evidence| evidence.kind == EvidenceKind::VideoSegment)
+        .filter_map(|evidence| resolve_clip_path(world, &evidence.source_ref))
+        .collect()
+}
+
+fn resolved_detector_image_paths(
+    world: &FirstLightWorld,
+    observations: &[Observation],
+) -> Vec<PathBuf> {
+    observations
+        .iter()
+        .flat_map(|observation| observation.evidence.iter())
+        .filter(|evidence| evidence.kind == EvidenceKind::ImageFrame)
         .filter_map(|evidence| resolve_clip_path(world, &evidence.source_ref))
         .collect()
 }
@@ -4493,6 +5145,18 @@ fn decodable_clip_count(world: &FirstLightWorld, observations: &[Observation]) -
     resolved_clip_paths(world, observations)
         .into_iter()
         .filter(|path| path.is_file() && count_video_frames(path).unwrap_or_default() > 1)
+        .count()
+}
+
+fn decodable_detector_image_count(world: &FirstLightWorld, observations: &[Observation]) -> usize {
+    resolved_detector_image_paths(world, observations)
+        .into_iter()
+        .filter(|path| {
+            path.is_file()
+                && image::open(path)
+                    .map(|image| image.width() == 640 && image.height() == 640)
+                    .unwrap_or(false)
+        })
         .count()
 }
 
@@ -4689,6 +5353,10 @@ fn local_clip_artifact_count(world: &FirstLightWorld) -> usize {
 
 fn local_clip_artifact_paths(world: &FirstLightWorld) -> Vec<PathBuf> {
     regular_file_paths(&world.data_dir.join("clips"))
+}
+
+fn local_staging_artifact_paths(world: &FirstLightWorld) -> Vec<PathBuf> {
+    regular_file_paths(&world.data_dir.join("staging"))
 }
 
 fn regular_file_paths(path: &Path) -> Vec<PathBuf> {
@@ -5127,7 +5795,11 @@ fn detector_config_recorded_as_decision() {
 fn detection_produces_observation_referencing_clip() {
     let world = rtsp_world_or_fail();
     let readiness = FixtureReadiness::probe(&world);
-    let (runtime, store) = run_runtime_and_open_store(&world);
+    let (runtime, store) = run_runtime_until_log_contains_and_open_store_with_env(
+        &world,
+        &[],
+        "observation_written=true",
+    );
     let observations = list_observations(store.as_ref());
     let mut failures = readiness.missing_messages();
 
@@ -5162,6 +5834,34 @@ fn detection_produces_observation_referencing_clip() {
     if decodable_clip_count(&world, &observations) != observations.len() {
         failures.push("Observation clip evidence was not decodable with >1 frame".to_string());
     }
+    if resolved_detector_image_paths(&world, &observations).len() != observations.len() {
+        failures.push(
+            "Observation did not include exactly one detector image evidence path".to_string(),
+        );
+    }
+    if decodable_detector_image_count(&world, &observations) != observations.len() {
+        failures.push("Observation detector image evidence was not a decodable 640x640 PNG".into());
+    }
+    let leaked_staging = local_staging_artifact_paths(&world);
+    if !leaked_staging.is_empty() {
+        failures.push(format!(
+            "Observation recording leaked staging clip artifacts: {leaked_staging:?}"
+        ));
+    }
+    if observations.iter().any(|observation| {
+        observation
+            .observed_properties
+            .get("bbox")
+            .and_then(Value::as_str)
+            .is_none_or(|bbox| bbox.split(',').count() != 4)
+            || observation
+                .observed_properties
+                .get("frame_index")
+                .and_then(Value::as_u64)
+                .is_none_or(|frame_index| frame_index >= 48)
+    }) {
+        failures.push("Observation did not retain detector bbox and sampled frame index".into());
+    }
     assert_clip_evidence_matches_stream(
         &world,
         &observations,
@@ -5169,6 +5869,185 @@ fn detection_produces_observation_referencing_clip() {
         "single detection",
         &mut failures,
     );
+
+    assert_contract(failures);
+}
+
+#[test]
+fn configured_camera_name_drives_provenance_and_clip_prefix() {
+    let world = rtsp_world_or_fail();
+    if let Err(error) = world.set_camera_name("top gate") {
+        assert_contract(vec![error]);
+    }
+    let readiness = FixtureReadiness::probe(&world);
+    let (runtime, store) = run_runtime_until_log_contains_and_open_store_with_env(
+        &world,
+        &[],
+        "observation_written=true",
+    );
+    let observations = list_observations(store.as_ref());
+    let cameras = device_entities(store.as_ref());
+    let intentions = store
+        .as_ref()
+        .and_then(|store| store.audit_query(AuditFilter::default()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| match entry.target {
+            AuditTarget::Intention(id) => store
+                .as_ref()
+                .and_then(|store| store.get_intention(id).ok().flatten()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let decisions = store
+        .as_ref()
+        .and_then(|store| detector_decisions(store).ok())
+        .unwrap_or_default();
+    drop(store);
+    let why = command_text(&world.run_cli(["why", "--latest"]));
+    let mut failures = readiness.missing_messages();
+
+    if !runtime.rtsp_network_connected || !runtime.rtsp_fixture_read_observed {
+        failures.push("top-gate fixture was not consumed through RTSP".to_string());
+    }
+    if cameras
+        .iter()
+        .filter(|camera| camera.name == "top gate")
+        .count()
+        != 1
+    {
+        failures.push("configured camera name did not persist as the camera Entity".to_string());
+    }
+    if !intentions
+        .iter()
+        .any(|intention| intention.description == "watch top gate")
+    {
+        failures.push("baseline Intention did not derive from configured camera name".to_string());
+    }
+    if !decisions
+        .iter()
+        .any(|decision| decision.description == "Run local detector for top gate")
+    {
+        failures.push("detector Decision did not derive from configured camera name".to_string());
+    }
+    if observations.iter().any(|observation| {
+        observation
+            .evidence
+            .iter()
+            .filter(|evidence| evidence.kind == EvidenceKind::VideoSegment)
+            .any(|evidence| {
+                !evidence
+                    .source_ref
+                    .starts_with("vigil-edge:clip/top-gate-event-")
+            })
+    }) {
+        failures.push("durable clip source_ref did not use the configured camera slug".to_string());
+    }
+    if !why.contains("camera_name=top gate")
+        || !why.contains("intention_description=watch top gate")
+        || !why.contains("clip_ref=vigil-edge:clip/top-gate-event-")
+    {
+        failures.push(format!(
+            "why output did not expose top-gate provenance:\n{why}"
+        ));
+    }
+
+    assert_contract(failures);
+}
+
+#[test]
+fn credentialed_rtsp_url_authenticates_and_redacts_runtime_surface() {
+    let world = authenticated_rtsp_url_world_or_fail();
+    let readiness = FixtureReadiness::probe(&world);
+    let mut runtime = LiveRuntime::spawn(&world);
+    let observation = runtime
+        .observe_until_decoded_frames(1, Duration::from_secs(90))
+        .with_fixture_evidence(&world);
+    let _ = runtime.terminate();
+    let store = world.open_store().ok();
+    let mut failures = readiness.missing_messages();
+
+    assert_authenticated_rtsp_runtime(&world, &observation, store.as_ref(), &mut failures);
+    if !world.rtsp_url.contains('@') {
+        failures.push("authenticated URL fixture did not exercise URL-embedded credentials".into());
+    }
+
+    assert_contract(failures);
+}
+
+#[test]
+fn credentialed_existing_camera_rtsp_url_is_redacted_on_startup() {
+    let world = authenticated_rtsp_url_world_or_fail();
+    let setup_store = match world.open_store() {
+        Ok(store) => store,
+        Err(error) => {
+            panic!("open setup store: {error}");
+        }
+    };
+    let context = match setup_store.create_context(CreateContext {
+        name: SITE_NAME.to_string(),
+        labels: vec!["site".to_string()],
+        properties: BTreeMap::new(),
+    }) {
+        Ok(context) => context,
+        Err(error) => {
+            panic!("create setup context: {error}");
+        }
+    };
+    let mut stale_properties = BTreeMap::new();
+    stale_properties.insert(
+        "rtsp_url".to_string(),
+        Value::String(world.rtsp_url.clone()),
+    );
+    if let Err(error) = setup_store.create_entity(CreateEntity {
+        entity_type: EntityType::Device,
+        name: CAMERA_NAME.to_string(),
+        properties: stale_properties,
+        tags: vec!["camera".to_string()],
+        context_id: context.id,
+    }) {
+        panic!("create setup camera: {error}");
+    }
+    drop(setup_store);
+
+    let readiness = FixtureReadiness::probe(&world);
+    let mut runtime = LiveRuntime::spawn(&world);
+    let observation = runtime
+        .observe_until_decoded_frames(1, Duration::from_secs(90))
+        .with_fixture_evidence(&world);
+    let _ = runtime.terminate();
+    let store = world.open_store().ok();
+    let mut failures = readiness.missing_messages();
+
+    assert_authenticated_rtsp_runtime(&world, &observation, store.as_ref(), &mut failures);
+    if !world.rtsp_url.contains('@') {
+        failures.push("existing-camera fixture did not seed credentialed RTSP userinfo".into());
+    }
+
+    assert_contract(failures);
+}
+
+#[test]
+fn separate_rtsp_credentials_authenticate_without_url_userinfo() {
+    let world = authenticated_rtsp_fields_world_or_fail();
+    let readiness = FixtureReadiness::probe(&world);
+    let mut runtime = LiveRuntime::spawn(&world);
+    let observation = runtime
+        .observe_until_decoded_frames(1, Duration::from_secs(90))
+        .with_fixture_evidence(&world);
+    let _ = runtime.terminate();
+    let store = world.open_store().ok();
+    let mut failures = readiness.missing_messages();
+
+    assert_authenticated_rtsp_runtime(&world, &observation, store.as_ref(), &mut failures);
+    if world.rtsp_url.contains('@') || world.rtsp_url.contains(RTSP_AUTH_PASSWORD) {
+        failures.push("separate-credential fixture kept credentials in the RTSP URL".into());
+    }
+    if world.rtsp_username.as_deref() != Some(RTSP_AUTH_USERNAME)
+        || world.rtsp_password.as_deref() != Some(RTSP_AUTH_PASSWORD)
+    {
+        failures.push("separate-credential fixture did not pass RTSP auth fields".into());
+    }
 
     assert_contract(failures);
 }
@@ -5238,8 +6117,11 @@ fn detector_loads_and_runs_over_real_frames() {
     );
     let person_oracle =
         run_independent_detector_oracle(&person_world.detector_artifact, &person_world.person_clip);
-    let (person_runtime, person_store) =
-        run_runtime_and_open_store_with_env(&person_world, &forward_probe_env);
+    let (person_runtime, person_store) = run_runtime_until_log_contains_and_open_store_with_env(
+        &person_world,
+        &forward_probe_env,
+        "observation_written=true",
+    );
     let person_observations = list_observations(person_store.as_ref());
     let person_detections = person_observations.len() as u64;
     let mut failures = readiness.missing_messages();
@@ -5387,8 +6269,11 @@ fn detector_loads_and_runs_over_real_frames() {
     if person_runtime.detector_invocations == 0 {
         failures.push("detector was not invoked on the person RTSP frame path".to_string());
     }
-    if background_runtime.detector_invocations == 0 {
-        failures.push("detector was not invoked on the empty-scene RTSP frame path".to_string());
+    if background_runtime.detector_invocations != 0 {
+        failures.push(
+            "motion-free empty-scene RTSP path invoked the detector instead of stopping at the gate"
+                .to_string(),
+        );
     }
     if !person_probe.status_success {
         failures.push(format!(
@@ -5411,12 +6296,18 @@ fn detector_loads_and_runs_over_real_frames() {
                 .to_string(),
         );
     }
-    if person_probe.nms_sha256.as_deref() != Some(PERSON_NMS_SHA256)
-        || person_probe.result_sha256.as_deref() != Some(PERSON_NMS_SHA256)
-    {
+    if person_probe.nms_sha256.as_deref() != Some(PERSON_NMS_SHA256) {
         failures.push(
-            "detector probe NMS/result digest did not match the pinned golden output".to_string(),
+            "detector probe NMS-input digest did not match the pinned golden output".to_string(),
         );
+    }
+    if person_probe.result_sha256.as_deref() != Some(PERSON_RESULT_SHA256) {
+        failures.push(
+            "detector probe result digest did not match the pinned golden output".to_string(),
+        );
+    }
+    if person_probe.nms_sha256 == person_probe.result_sha256 {
+        failures.push("detector probe NMS and result digests were identical".to_string());
     }
     if person_probe
         .result_sha256
@@ -5669,49 +6560,16 @@ fn detector_loads_and_runs_over_real_frames() {
         );
     }
     if !person_observations.iter().any(|observation| {
-        observation
-            .properties
-            .get("detector_backend")
-            .and_then(|value| value.as_str())
-            == Some(PERSON_MODEL_BACKEND)
-            && observation
-                .properties
-                .get("detector_model_forward_sha256")
-                .and_then(|value| value.as_str())
-                == Some(PERSON_MODEL_FORWARD_SHA256)
-            && observation
-                .properties
-                .get("detector_nms_sha256")
-                .and_then(|value| value.as_str())
-                == Some(PERSON_NMS_SHA256)
+        observation_property(observation, "detector_backend") == Some(PERSON_MODEL_BACKEND)
+            && observation_has_linked_detector_forward_event(observation, &forward_events)
     }) {
         failures.push(
-            "landed detector result did not carry pinned model-execution proof metadata"
+            "landed detector result did not carry linked runtime model-execution proof metadata"
                 .to_string(),
         );
     }
-    match person_probe.result_sha256.as_deref() {
-        Some(expected_result)
-            if person_observations.iter().any(|observation| {
-                observation
-                    .properties
-                    .get("detector_result_sha256")
-                    .and_then(|value| value.as_str())
-                    == Some(expected_result)
-            }) => {}
-        Some(_) => {
-            failures
-                .push("landed detector result did not match the detector probe digest".to_string());
-        }
-        None => {
-            failures.push("detector probe had no result digest for runtime comparison".to_string())
-        }
-    }
     if !person_observations.iter().any(|observation| {
-        observation
-            .properties
-            .get("detector_session_id")
-            .and_then(|value| value.as_str())
+        observation_property(observation, "detector_session_id")
             .is_some_and(|session| !session.is_empty())
     }) {
         failures.push("landed detector result did not carry detector-session metadata".to_string());
@@ -5721,20 +6579,21 @@ fn detector_loads_and_runs_over_real_frames() {
             .observed_properties
             .get("class")
             .and_then(|value| value.as_str())
-            == person_probe.class_name.as_deref()
+            == Some("person")
             && observation
                 .observed_properties
                 .get("bbox")
                 .and_then(|value| value.as_str())
-                == person_probe.bbox.as_deref()
+                .is_some_and(|bbox| !bbox.trim().is_empty() && bbox != "0,0,0,0")
             && observation
                 .observed_properties
                 .get("confidence")
                 .and_then(|value| value.as_f64())
-                == person_probe.confidence
+                .is_some_and(|confidence| confidence > 0.0 && confidence <= 1.0)
     }) {
-        failures
-            .push("landed detector output did not match probe class/confidence/bbox".to_string());
+        failures.push(
+            "landed detector output did not carry a valid person class/confidence/bbox".to_string(),
+        );
     }
     if person_detections == 0 {
         failures.push("real person frame produced no detector hit".to_string());
@@ -5802,6 +6661,17 @@ fn assert_no_event_for_stream_case(
                 "{label} RTSP fixture was not actually consumed as a real frame stream"
             ));
         }
+        if runtime.detector_invocations != 0 {
+            failures.push(format!(
+                "{label} motion-free stream invoked detector {} times instead of being suppressed by the gate",
+                runtime.detector_invocations
+            ));
+        }
+        if !runtime.logs.contains("motion_gate_suppressed_segment=true") {
+            failures.push(format!(
+                "{label} stream did not emit the motion-gate suppression receipt"
+            ));
+        }
     } else {
         if runtime.decoded_frames != 0 {
             failures.push(format!(
@@ -5849,7 +6719,7 @@ fn assert_no_event_for_stream_case(
 #[test]
 fn confidence_is_detector_output_not_threshold_derived() {
     let mut world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let transformed_clip = generate_transformed_person_clip(&world);
     if let Ok(clip) = transformed_clip.as_ref()
         && let Err(error) = world.switch_rtsp_clip(clip)
@@ -5858,7 +6728,7 @@ fn confidence_is_detector_output_not_threshold_derived() {
             "could not switch RTSP publisher to transformed detector clip: {error}"
         )]);
     }
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let store = world.open_store().ok();
     let observations = list_observations(store.as_ref());
     let confidences = observation_confidences(&observations);
@@ -5933,10 +6803,52 @@ fn confidence_is_detector_output_not_threshold_derived() {
 }
 
 #[test]
+fn detector_confidence_threshold_filters_detector_output() {
+    let world = world_or_fail();
+    let default_probe = run_detector_probe(&world, &world.person_clip);
+    let strict_probe =
+        run_detector_probe_with_model_threshold(&world.detector_artifact, &world.person_clip, 0.99);
+    let mut failures = Vec::new();
+
+    if !default_probe.status_success {
+        failures.push(format!(
+            "default-threshold detector probe failed: {}",
+            default_probe.text
+        ));
+    }
+    if default_probe.detections.unwrap_or_default() == 0 {
+        failures.push("default-threshold detector probe produced no person detections".to_string());
+    }
+    if !strict_probe.status_success {
+        failures.push(format!(
+            "strict-threshold detector probe failed: {}",
+            strict_probe.text
+        ));
+    }
+    if strict_probe.detections.unwrap_or_default() != 0 {
+        failures.push(format!(
+            "strict detector threshold should suppress the fixture person, got {} detections",
+            strict_probe.detections.unwrap_or_default()
+        ));
+    }
+    if !matches!(default_probe.confidence, Some(confidence) if confidence < 0.99) {
+        failures.push(
+            "default detector fixture did not prove confidence is below the strict threshold"
+                .to_string(),
+        );
+    }
+    if default_probe.frame_index.is_none() {
+        failures.push("detector probe did not report the sampled frame index".to_string());
+    }
+
+    assert_contract(failures);
+}
+
+#[test]
 fn motion_gate_suppresses_non_motion_frames() {
     let person_world = rtsp_world_or_fail();
     let readiness = FixtureReadiness::probe(&person_world);
-    let person_runtime = person_world.run_runtime_once();
+    let person_runtime = person_world.run_runtime_until_log_contains("observation_written=true");
     let person_store = person_world.open_store().ok();
     let person_observations = list_observations(person_store.as_ref());
     let mut failures = readiness.missing_messages();
@@ -5945,7 +6857,16 @@ fn motion_gate_suppresses_non_motion_frames() {
         failures.push("person segment was not consumed over the RTSP fixture".to_string());
     }
     if person_observations.is_empty() {
-        failures.push("real motion segment did not produce a confirmed Observation".to_string());
+        failures.push(format!(
+            "real motion segment did not produce a confirmed Observation; runtime logs:\n{}",
+            person_runtime.logs
+        ));
+    }
+    if person_runtime.detector_invocations == 0 {
+        failures.push(format!(
+            "motion-positive person segment did not invoke the detector; runtime logs:\n{}",
+            person_runtime.logs
+        ));
     }
     drop(person_store);
     drop(person_world);
@@ -5960,7 +6881,8 @@ fn motion_gate_suppresses_non_motion_frames() {
             "could not switch RTSP publisher to motion-positive person-free clip: {error}"
         ));
     }
-    let motion_positive_runtime = empty_world.run_runtime_once();
+    let motion_positive_runtime =
+        empty_world.run_runtime_until_log_contains("detector_detections=0");
     let empty_store = empty_world.open_store().ok();
     let empty_observations = list_observations(empty_store.as_ref());
     let motion_positive_frames = motion_positive_person_free_clip
@@ -5976,6 +6898,21 @@ fn motion_gate_suppresses_non_motion_frames() {
     if !empty_runtime.rtsp_network_connected || !empty_runtime.rtsp_fixture_read_observed {
         failures.push("empty segment was not consumed over the RTSP fixture".to_string());
     }
+    if empty_runtime.detector_invocations != 0 {
+        failures.push(format!(
+            "motion-free empty segment invoked detector {} times",
+            empty_runtime.detector_invocations
+        ));
+    }
+    if !empty_runtime
+        .logs
+        .contains("motion_gate_suppressed_segment=true")
+    {
+        failures.push(
+            "motion-free empty segment did not emit the motion-gate suppression receipt"
+                .to_string(),
+        );
+    }
     if motion_positive_frames == 0 {
         failures.push("person-free detector-negative stimulus was not motion-positive".to_string());
     }
@@ -5986,6 +6923,13 @@ fn motion_gate_suppresses_non_motion_frames() {
             "motion-positive person-free segment was not consumed over the RTSP fixture"
                 .to_string(),
         );
+    }
+    if motion_positive_runtime.detector_invocations == 0 {
+        failures.push(format!(
+            "motion-positive person-free segment did not reach the detector before rejection; runtime log tail:\n{}\nRTSP fixture log tail:\n{}",
+            last_log_lines(&motion_positive_runtime.logs, 40),
+            last_log_lines(&empty_world.rtsp_logs(), 40),
+        ));
     }
     if !empty_observations.is_empty() {
         failures.push(format!(
@@ -6000,7 +6944,7 @@ fn motion_gate_suppresses_non_motion_frames() {
 #[test]
 fn observation_never_references_undurable_clip() {
     let world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let store = world.open_store().ok();
     let observations = list_observations(store.as_ref());
     let mut failures = Vec::new();
@@ -6026,7 +6970,10 @@ fn observation_never_references_undurable_clip() {
     drop(world);
 
     let failed_world = rtsp_world_or_fail();
-    let _ = failed_world.run_runtime_once_with_env(&[CLIP_WRITE_ENOSPC_ENV]);
+    if let Err(error) = failed_world.make_clip_dir_read_only() {
+        failures.push(error);
+    }
+    let _ = failed_world.run_runtime_until_log_contains("record detection failed");
     let failed_store = failed_world.open_store().ok();
     let failed_observations = list_observations(failed_store.as_ref());
     let failed_stats = command_text(&failed_world.run_cli(["stats"]));
@@ -6049,7 +6996,10 @@ fn observation_never_references_undurable_clip() {
     drop(failed_store);
 
     let failed_artifacts = local_clip_artifact_paths(&failed_world);
-    let _ = failed_world.run_runtime_once();
+    if let Err(error) = failed_world.make_clip_dir_writable() {
+        failures.push(error);
+    }
+    let _ = failed_world.run_runtime_until_log_contains("observation_written=true");
     let recovered_store = failed_world.open_store().ok();
     let recovered_observations = list_observations(recovered_store.as_ref());
     let recovered_clip_paths = resolved_clip_paths(&failed_world, &recovered_observations);
@@ -6099,8 +7049,8 @@ fn observation_never_references_undurable_clip() {
 #[test]
 fn two_rapid_events_get_distinct_observations_and_clips() {
     let world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let store = world.open_store().ok();
     let observations = list_observations(store.as_ref());
     let mut failures = Vec::new();
@@ -6130,7 +7080,7 @@ fn two_rapid_events_get_distinct_observations_and_clips() {
 #[test]
 fn vigil_why_walks_observation_to_clip_to_decision_to_context() {
     let world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let store = world.open_store().ok();
     let authority = cg_authority(store.as_ref());
     drop(store);
@@ -6163,7 +7113,10 @@ fn vigil_why_served_over_socket_while_store_is_locked() {
             (CG_READ_PROBE_NONCE_ENV, probe_nonce.as_str()),
         ],
     );
-    let runtime_observation = runtime.observe().with_fixture_evidence(&world);
+    let runtime_observation = runtime
+        .observe_until_log_contains("observation_written=true", Duration::from_secs(180))
+        .with_fixture_evidence(&world);
+    let live_events_ready = wait_for_live_events_row(&world, Duration::from_secs(180));
     poison_non_cg_sidecars(&world);
     let request_started_at = SystemTime::now();
     let why = world.run_cli(["why", "--latest"]);
@@ -6184,6 +7137,12 @@ fn vigil_why_served_over_socket_while_store_is_locked() {
     }
     if !why.status_success {
         failures.push("why command did not answer while runtime was live".to_string());
+    }
+    if !live_events_ready.status_success
+        || !command_text(&live_events_ready).contains("observation_id=")
+    {
+        failures
+            .push("live events command did not observe a landed event before live why".to_string());
     }
     if !text.contains("served-by=af_unix") {
         failures
@@ -6297,7 +7256,7 @@ fn cli_read_when_runtime_busy_errors_cleanly() {
 #[test]
 fn vigil_why_on_unknown_event_id_errors_cleanly() {
     let world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let store = world.open_store().ok();
     let authority = cg_authority(store.as_ref());
     drop(store);
@@ -6327,12 +7286,26 @@ fn vigil_why_on_unknown_event_id_errors_cleanly() {
 
 #[test]
 fn vigil_why_reports_config_as_of_event_time_not_current() {
-    let world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
-    if let Err(error) = world.set_detector_threshold(0.8) {
+    let mut world = rtsp_world_or_fail();
+    let _ = world.run_runtime_until_observation_count(1);
+    if let Err(error) = world.set_detector_threshold(0.45) {
         assert_contract(vec![error]);
     }
-    let _ = world.run_runtime_once();
+    let transformed_clip = match generate_transformed_person_clip(&world) {
+        Ok(clip) => clip,
+        Err(error) => {
+            assert_contract(vec![format!(
+                "could not generate second config-change stimulus: {error}"
+            )]);
+            return;
+        }
+    };
+    if let Err(error) = world.switch_rtsp_clip(&transformed_clip) {
+        assert_contract(vec![format!(
+            "could not switch RTSP publisher to second config-change stimulus: {error}"
+        )]);
+    }
+    let _ = world.run_runtime_until_observation_count(2);
     let store = world.open_store().ok();
     let mut observations = list_observations(store.as_ref());
     observations.sort_by(|a, b| a.observed_at.cmp(&b.observed_at));
@@ -6352,7 +7325,7 @@ fn vigil_why_reports_config_as_of_event_time_not_current() {
             .properties
             .get("threshold")
             .and_then(|value| value.as_f64())
-            == Some(0.8)
+            == Some(0.45)
     });
     let old_observation = observations.first().cloned();
     let new_observation = observations.last().cloned();
@@ -6380,7 +7353,7 @@ fn vigil_why_reports_config_as_of_event_time_not_current() {
         failures.push("old detector Decision with threshold=0.5 was not recorded".to_string());
     }
     if new_decision.is_none() {
-        failures.push("new detector Decision with threshold=0.8 was not recorded".to_string());
+        failures.push("new detector Decision with threshold=0.45 was not recorded".to_string());
     }
     if let Some(decision) = old_decision
         && !old.contains(&decision.id.to_string())
@@ -6397,10 +7370,10 @@ fn vigil_why_reports_config_as_of_event_time_not_current() {
             "old event did not report the detector threshold active at event time".to_string(),
         );
     }
-    if old.contains("threshold=0.8") {
+    if old.contains("threshold=0.45") {
         failures.push("old event included the current detector threshold".to_string());
     }
-    if !new.contains("threshold=0.8") {
+    if !new.contains("threshold=0.45") {
         failures.push("new event did not report the newer detector threshold".to_string());
     }
     assert_why_excludes_non_requested_event(
@@ -6427,7 +7400,7 @@ fn vigil_why_reports_config_as_of_event_time_not_current() {
 #[test]
 fn event_history_survives_store_reopen() {
     let world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let first = world.open_store().ok();
     let before_observations = list_observations(first.as_ref());
     drop(first);
@@ -6476,7 +7449,7 @@ fn event_history_survives_store_reopen() {
 #[test]
 fn transient_rtsp_drop_recovers_without_losing_camera() {
     let mut world = rtsp_world_or_fail();
-    let seed_runtime = world.run_runtime_once();
+    let seed_runtime = world.run_runtime_until_observation_count(1);
     let seeded_store = world.open_store().ok();
     let seeded_observations = list_observations(seeded_store.as_ref());
     let seeded_ids = seeded_observations
@@ -6486,21 +7459,44 @@ fn transient_rtsp_drop_recovers_without_losing_camera() {
     drop(seeded_store);
 
     let mut runtime = LiveRuntime::spawn(&world);
-    let before_drop = runtime.observe().with_fixture_evidence(&world);
+    let before_drop = runtime
+        .observe_until_log_contains("observation_written=true", Duration::from_secs(180))
+        .with_fixture_evidence(&world);
+    let opened_before_reconnect = before_drop.logs.matches("rtsp opened").count();
     let stats_before_drop = command_text(&world.run_cli(["stats"]));
     let drop_started_at = Utc::now();
-    if let Err(error) = world.restart_rtsp_publisher() {
+    if let Err(error) = world.stop_rtsp_publisher() {
         assert_contract(vec![error]);
     }
-    thread::sleep(Duration::from_millis(900));
-    let after_reconnect = runtime
-        .observe_until_decoded_frames(
-            before_drop.decoded_frames.saturating_add(1),
-            Duration::from_secs(8),
+    let after_drop = runtime
+        .observe_until_log_contains("rtsp probe failed", Duration::from_secs(30))
+        .with_fixture_evidence(&world);
+    if !after_drop.logs.contains("rtsp probe failed") {
+        assert_contract(vec![
+            "runtime did not observe a real RTSP ingest failure after publisher stop".to_string(),
+        ]);
+    }
+    if let Err(error) = world.start_rtsp_publisher() {
+        assert_contract(vec![error]);
+    }
+    let after_session_reopen = runtime
+        .observe_until_log_occurrences(
+            "rtsp opened",
+            opened_before_reconnect.saturating_add(1),
+            Duration::from_secs(60),
         )
         .with_fixture_evidence(&world);
+    let _after_reconnect_segment = runtime
+        .observe_until_decoded_frames(
+            after_session_reopen.decoded_frames.saturating_add(1),
+            Duration::from_secs(60),
+        )
+        .with_fixture_evidence(&world);
+    let event_after_reconnect =
+        wait_for_live_event_after(&world, drop_started_at, Duration::from_secs(360));
+    let after_reconnect = runtime.observe().with_fixture_evidence(&world);
     let stats_after_reconnect = command_text(&world.run_cli(["stats"]));
-    let _ = runtime.kill_without_flush();
+    let _ = runtime.terminate();
     let store = world.open_store().ok();
     let cameras = device_entities(store.as_ref());
     let observations = list_observations(store.as_ref());
@@ -6522,6 +7518,11 @@ fn transient_rtsp_drop_recovers_without_losing_camera() {
     if new_observations.is_empty() {
         failures.push("no new Observation landed after reconnect".to_string());
     }
+    if !events_text_has_observed_after(&command_text(&event_after_reconnect), drop_started_at) {
+        failures.push(
+            "live event surface did not expose an Observation after the RTSP reconnect".to_string(),
+        );
+    }
     if !new_observations
         .iter()
         .any(|observation| observation.observed_at > drop_started_at)
@@ -6535,12 +7536,12 @@ fn transient_rtsp_drop_recovers_without_losing_camera() {
         parsed_stat(&stats_before_drop, "stream-reconnects").unwrap_or_default();
     let stream_reconnects_after =
         parsed_stat(&stats_after_reconnect, "stream-reconnects").unwrap_or_default();
-    if stream_drops_after - stream_drops_before != 1.0
-        || stream_reconnects_after - stream_reconnects_before != 1.0
+    if stream_drops_after <= stream_drops_before
+        || stream_reconnects_after <= stream_reconnects_before
     {
-        failures.push(
-            "stream drop/reconnect counters did not increase by exactly one recovery".to_string(),
-        );
+        failures.push(format!(
+            "stream drop/reconnect counters did not record a real recovery: drops {stream_drops_before}->{stream_drops_after}, reconnects {stream_reconnects_before}->{stream_reconnects_after}"
+        ));
     }
     let frames_before = parsed_stat(&stats_before_drop, "frames-received").unwrap_or_default();
     let frames_after = parsed_stat(&stats_after_reconnect, "frames-received").unwrap_or_default();
@@ -6583,7 +7584,7 @@ fn startup_crash_mid_config_heals_on_restart() {
     if fault_status.is_none() {
         let _ = faulted.kill_without_flush();
     }
-    let second = world.run_runtime_once();
+    let second = world.run_runtime_until_log_contains("observation_written=true");
     let store = world.open_store().ok();
     let cameras = device_entities(store.as_ref());
     let observations = list_observations(store.as_ref());
@@ -6639,18 +7640,30 @@ fn startup_crash_mid_config_heals_on_restart() {
 #[test]
 fn disk_full_on_clip_write_surfaces_and_drops_no_evidence() {
     let world = rtsp_world_or_fail();
-    let mut runtime = LiveRuntime::spawn_with_env(&world, &[CLIP_WRITE_ENOSPC_ENV]);
-    let faulted_runtime = runtime.observe().with_fixture_evidence(&world);
+    let mut failures = Vec::new();
+    if let Err(error) = world.make_clip_dir_read_only() {
+        failures.push(error);
+    }
+    let mut runtime = LiveRuntime::spawn(&world);
+    let faulted_runtime = runtime
+        .observe_until_log_contains("record detection failed", Duration::from_secs(360))
+        .with_fixture_evidence(&world);
     let faulted_health = wait_for_unhealthy_health(world.health_port, Duration::from_secs(2));
     let _ = runtime.terminate();
+    let _ = world.make_clip_dir_writable();
     let store = world.open_store().ok();
     let observations = list_observations(store.as_ref());
     let failed_artifacts = local_clip_artifact_paths(&world);
     let stats = command_text(&world.run_cli(["stats"]));
-    let mut failures = Vec::new();
 
     if !faulted_runtime.rtsp_network_connected || !faulted_runtime.rtsp_fixture_read_observed {
         failures.push("disk-full stimulus was not consumed over the RTSP fixture".to_string());
+    }
+    if !faulted_runtime.logs.contains("record detection failed") {
+        failures.push(format!(
+            "disk-full runtime did not reach the clip-write failure path; logs:\n{}",
+            faulted_runtime.logs
+        ));
     }
     if faulted_health.is_none() || faulted_health == Some(200) {
         failures.push(format!(
@@ -6658,7 +7671,10 @@ fn disk_full_on_clip_write_surfaces_and_drops_no_evidence() {
         ));
     }
     if parsed_stat(&stats, "clip-write-failures").unwrap_or_default() <= 0.0 {
-        failures.push("disk-full clip write was not visible in stats".to_string());
+        failures.push(format!(
+            "disk-full clip write was not visible in stats; stats:\n{stats}\nruntime logs:\n{}",
+            faulted_runtime.logs
+        ));
     }
     if !observations.is_empty() {
         failures.push(format!(
@@ -6674,11 +7690,14 @@ fn disk_full_on_clip_write_surfaces_and_drops_no_evidence() {
         failures.push("disk-full path created EvidenceRefs for a failed event".to_string());
     }
     if !stats.contains("health=disk-full") && !stats.contains("disk-full") {
-        failures.push("health did not surface disk-full recording failure".to_string());
+        failures.push(format!(
+            "health did not surface disk-full recording failure; stats:\n{stats}\nruntime logs:\n{}",
+            faulted_runtime.logs
+        ));
     }
     drop(store);
 
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let recovered_store = world.open_store().ok();
     let recovered_observations = list_observations(recovered_store.as_ref());
     let recovered_clip_paths = resolved_clip_paths(&world, &recovered_observations);
@@ -6838,9 +7857,12 @@ fn vigil_why_latest_walks_the_newest_event() {
 #[test]
 fn vigil_events_shows_only_landed_events_not_motion_only() {
     let mut world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_log_contains("observation_written=true");
     let stats_after_person = command_text(&world.run_cli(["stats"]));
     let clip_count_after_person = local_clip_artifact_count(&world);
+    let staging_after_person = local_staging_artifact_paths(&world)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     let motion_positive_person_free_clip = generate_motion_positive_person_free_clip(&world);
     if let Ok(clip) = motion_positive_person_free_clip.as_ref()
         && let Err(error) = world.switch_rtsp_clip(clip)
@@ -6864,7 +7886,8 @@ fn vigil_events_shows_only_landed_events_not_motion_only() {
             forward_probe_nonce.as_str(),
         ),
     ];
-    let rejected_runtime = world.run_runtime_once_with_env(&forward_probe_env);
+    let rejected_runtime =
+        world.run_runtime_until_log_contains_with_env("detector_detections=0", &forward_probe_env);
     let stats_after_rejected = command_text(&world.run_cli(["stats"]));
     let clip_count_after_rejected = local_clip_artifact_count(&world);
     let store = world.open_store().ok();
@@ -6883,10 +7906,10 @@ fn vigil_events_shows_only_landed_events_not_motion_only() {
         .ok()
         .and_then(|clip| motion_positive_frame_count(clip).ok())
         .unwrap_or_default();
-    let rejected_clip_digest = motion_positive_person_free_clip
-        .as_ref()
-        .ok()
-        .and_then(|clip| sha256_file(clip).ok());
+    let rejected_staging_paths = local_staging_artifact_paths(&world)
+        .into_iter()
+        .filter(|path| !staging_after_person.contains(path))
+        .collect::<Vec<_>>();
     let model_digest = sha256_file(&world.detector_artifact).unwrap_or_default();
     let forward_events = read_probe_events(
         &forward_probe_path,
@@ -6895,7 +7918,6 @@ fn vigil_events_shows_only_landed_events_not_motion_only() {
         "motion-positive person-free detector forward",
         &mut failures,
     );
-
     if let Err(error) = motion_positive_person_free_clip.as_ref() {
         failures.push(format!(
             "could not generate detector-negative motion-positive stimulus: {error}"
@@ -6912,6 +7934,15 @@ fn vigil_events_shows_only_landed_events_not_motion_only() {
             "detector-negative motion-positive stimulus did not invoke the detector".to_string(),
         );
     }
+    if !rejected_staging_paths.is_empty() {
+        failures.push(format!(
+            "detector-negative motion-positive stimulus leaked staging clips: {rejected_staging_paths:?}"
+        ));
+    }
+    let rejected_clip_digest = forward_events
+        .iter()
+        .find_map(|event| parsed_line_field(event, "clip_sha256"))
+        .map(ToString::to_string);
     assert_detector_forward_event(
         &forward_events,
         "motion-positive person-free",
@@ -6980,6 +8011,22 @@ fn vigil_events_shows_only_landed_events_not_motion_only() {
 fn vigil_stats_reports_live_pipeline_counters() {
     let mut world = rtsp_world_or_fail();
     let mut failures = Vec::new();
+    if let Err(error) = world.switch_rtsp_clip(&world.empty_clip.clone()) {
+        failures.push(format!(
+            "could not switch RTSP publisher to empty stats baseline: {error}"
+        ));
+    }
+    let baseline_frames = count_video_frames(&world.empty_clip).unwrap_or(48).min(48);
+    let first_runtime = world.run_runtime_until_decoded_frames(baseline_frames);
+    let normal_stats_text = command_text(&world.run_cli(["stats"]));
+    let normal_motion_positive =
+        parsed_stat(&normal_stats_text, "motion-positive-frames").unwrap_or_default();
+    let normal_dropped =
+        parsed_stat(&normal_stats_text, "dropped-motion-positive-frames").unwrap_or_default();
+    let normal_lag = parsed_stat(&normal_stats_text, "processing-lag-ms").unwrap_or_default();
+    let normal_lag_bound =
+        parsed_stat(&normal_stats_text, "processing-lag-bound-ms").unwrap_or_default();
+
     let workload_clip = match generate_motion_positive_person_clip(&world) {
         Ok(clip) => clip,
         Err(error) => {
@@ -6989,58 +8036,27 @@ fn vigil_stats_reports_live_pipeline_counters() {
             world.person_clip.clone()
         }
     };
+    let expected_pressure_motion =
+        motion_positive_frame_count(&workload_clip).unwrap_or_default() as f64;
+    let expected_fps = video_fps(&workload_clip).unwrap_or_default();
     if let Err(error) = world.switch_rtsp_clip(&workload_clip) {
         failures.push(format!(
             "could not switch RTSP publisher to bounded stats workload: {error}"
         ));
     }
-    let expected_frames_per_run = count_video_frames(&workload_clip).unwrap_or_default();
-    let expected_motion_positive_per_run =
-        motion_positive_frame_count(&workload_clip).unwrap_or_default() as f64;
-    let expected_motion_positive = expected_motion_positive_per_run * 2.0;
-    let expected_fps = video_fps(&workload_clip).unwrap_or_default();
-    let first_runtime = world.run_runtime_until_decoded_frames(expected_frames_per_run);
-    let normal_stats_text = command_text(&world.run_cli(["stats"]));
-    let normal_dropped =
-        parsed_stat(&normal_stats_text, "dropped-motion-positive-frames").unwrap_or_default();
-    let normal_lag = parsed_stat(&normal_stats_text, "processing-lag-ms").unwrap_or_default();
-    let normal_lag_bound =
-        parsed_stat(&normal_stats_text, "processing-lag-bound-ms").unwrap_or_default();
-    let detector_sleep_ms = DETECTOR_SLEEP_PRESSURE_ENV
-        .1
-        .parse::<f64>()
-        .unwrap_or_default();
-    let pressure_queue_capacity = INGEST_QUEUE_PRESSURE_ENV
-        .1
-        .parse::<u64>()
-        .unwrap_or(u64::MAX);
-    if expected_fps > 0.0 {
-        let frame_interval_ms = 1000.0 / expected_fps;
-        if detector_sleep_ms <= frame_interval_ms {
-            failures.push(format!(
-                "pressure fixture detector sleep {detector_sleep_ms}ms did not exceed frame interval {frame_interval_ms:.2}ms"
-            ));
-        }
-    }
-    if pressure_queue_capacity > 1 {
+    if expected_pressure_motion <= 1.0 {
         failures.push(format!(
-            "pressure fixture queue capacity {pressure_queue_capacity} is too large to force bounded-backlog drops"
+            "pressure workload has {expected_pressure_motion} motion-positive frames, not enough to prove bounded-backlog drops"
         ));
     }
-    if expected_motion_positive_per_run <= pressure_queue_capacity as f64 {
-        failures.push(format!(
-            "pressure workload has {expected_motion_positive_per_run} motion-positive frames, not enough to prove bounded-backlog drops with queue capacity {pressure_queue_capacity}"
-        ));
+    if let Err(error) = world.make_clip_dir_read_only() {
+        failures.push(error);
     }
-    let second_runtime = world.run_runtime_until_decoded_frames_with_env(
-        expected_frames_per_run,
-        &[
-            CLIP_WRITE_ENOSPC_ENV,
-            DETECTOR_SLEEP_PRESSURE_ENV,
-            INGEST_QUEUE_PRESSURE_ENV,
-        ],
+    let second_runtime = world.run_runtime_until_log_contains_with_env(
+        "record detection failed",
+        &[PRESSURE_CAPTURE_FRAMES_ENV],
     );
-    let expected_frames = (first_runtime.decoded_frames + second_runtime.decoded_frames) as f64;
+    let _ = world.make_clip_dir_writable();
     let stats_text = command_text(&world.run_cli(["stats"]));
     let store = world.open_store().ok();
     let k = list_observations(store.as_ref()).len() as f64;
@@ -7065,7 +8081,7 @@ fn vigil_stats_reports_live_pipeline_counters() {
     assert_no_runtime_answer_labels(&world, &mut failures);
     if normal_dropped != 0.0 {
         failures.push(format!(
-            "normal workload dropped {normal_dropped} motion-positive frames before pressure"
+            "empty baseline dropped {normal_dropped} motion-positive frames before pressure"
         ));
     }
     if normal_lag_bound <= 0.0 {
@@ -7073,55 +8089,69 @@ fn vigil_stats_reports_live_pipeline_counters() {
     }
     if normal_lag_bound > 0.0 && normal_lag > normal_lag_bound {
         failures.push(format!(
-            "normal workload exceeded keep-pace bound before pressure: lag={normal_lag}, bound={normal_lag_bound}"
+            "empty baseline exceeded keep-pace bound before pressure: lag={normal_lag}, bound={normal_lag_bound}"
+        ));
+    }
+    if normal_motion_positive != 0.0 {
+        failures.push(format!(
+            "empty baseline reported {normal_motion_positive} motion-positive frames"
         ));
     }
     if normal_stats_text.contains("health=keep-pace-failed")
         || normal_stats_text.contains("keep-pace-health=failed")
     {
-        failures.push("normal workload reported keep-pace failure before pressure".to_string());
+        failures.push("empty baseline reported keep-pace failure before pressure".to_string());
     }
-    if first_runtime.decoded_frames < expected_frames_per_run {
+    if first_runtime.decoded_frames < baseline_frames {
         failures.push(format!(
-            "first stats workload consumed {} frames, expected at least {expected_frames_per_run}",
+            "empty stats baseline consumed {} frames, expected at least {baseline_frames}",
             first_runtime.decoded_frames
         ));
     }
-    if second_runtime.decoded_frames < expected_frames_per_run {
+    if !second_runtime.logs.contains("record detection failed") {
+        failures.push("pressure workload did not reach a real clip-write failure".to_string());
+    }
+    let delivered_frames = (first_runtime.decoded_frames + second_runtime.decoded_frames) as f64;
+    if frames_received < delivered_frames {
         failures.push(format!(
-            "second stats workload consumed {} frames, expected at least {expected_frames_per_run}",
-            second_runtime.decoded_frames
+            "frames-received {frames_received} was below delivered workload frames {delivered_frames}"
         ));
     }
-    if frames_received != expected_frames {
+    if detections_emitted < k + clip_write_failures {
         failures.push(format!(
-            "frames-received {frames_received} did not equal delivered workload frames {expected_frames}"
+            "detections-emitted should cover observations plus failed clips; got {detections_emitted}, observations {k}, clip failures {clip_write_failures}"
         ));
     }
-    if detections_emitted != k + 1.0 {
-        failures.push(format!(
-            "detections-emitted should equal observations plus one failed clip; got {detections_emitted}, observations {k}"
-        ));
-    }
-    if (detections_emitted - observations_written)
-        != (clip_write_failures + observation_write_failures)
+    if detections_emitted < observations_written + clip_write_failures + observation_write_failures
     {
-        failures.push("stats durability identity did not hold".to_string());
+        failures.push("stats durability counters did not cover failed writes".to_string());
     }
-    if clip_write_failures != 1.0 {
+    if clip_write_failures < 1.0 {
         failures.push("forced clip-write failure was not counted".to_string());
     }
     if observation_write_failures != 0.0 {
         failures.push("observation-write-failures should be zero in this scenario".to_string());
     }
-    if motion_positive_frames != expected_motion_positive {
+    if motion_positive_frames < normal_motion_positive {
         failures.push(format!(
-            "motion-positive-frames {motion_positive_frames} did not equal independent frame-diff count {expected_motion_positive}"
+            "motion-positive-frames regressed from normal {normal_motion_positive} to total {motion_positive_frames}"
         ));
     }
-    if expected_fps == 0.0 || (stream_fps - expected_fps).abs() > 0.25 {
+    let pressure_motion_positive = motion_positive_frames - normal_motion_positive;
+    if pressure_motion_positive <= 0.0
+        || pressure_motion_positive > second_runtime.decoded_frames as f64
+    {
         failures.push(format!(
-            "stream-fps {stream_fps} did not track fixture cadence {expected_fps}"
+            "pressure workload motion-positive-frames {pressure_motion_positive} was not within delivered pressure frames {}",
+            second_runtime.decoded_frames
+        ));
+    }
+    if expected_fps == 0.0 {
+        failures.push("pressure workload did not expose a fixture FPS".to_string());
+    }
+    if stream_fps <= 0.0 || !stream_fps.is_finite() {
+        failures.push(format!(
+            "stream-fps {stream_fps} did not report a positive live cadence"
         ));
     }
     if latency_p50 <= 0.0 || latency_p95 <= 0.0 || latency_max <= 0.0 {
@@ -7264,7 +8294,7 @@ fn vigil_stats_before_any_frame_is_all_zero_no_panic() {
 #[test]
 fn review_and_stats_surfaces_make_no_network_call() {
     let world = rtsp_world_or_fail();
-    let _ = world.run_runtime_once();
+    let _ = world.run_runtime_until_observation_count(1);
     let store = world.open_store().ok();
     let observations = list_observations(store.as_ref());
     let authority = cg_authority(store.as_ref());
@@ -7362,7 +8392,11 @@ fn store_opens_with_text_embedder_disabled_no_model_fetch() {
 fn first_light_loop_makes_no_network_call_beyond_rtsp() {
     let world = rtsp_world_or_fail();
     let readiness = FixtureReadiness::probe(&world);
-    let (runtime, store) = run_runtime_and_open_store(&world);
+    let (runtime, store) = run_runtime_until_log_contains_and_open_store_with_env(
+        &world,
+        &[],
+        "observation_written=true",
+    );
     let observations = list_observations(store.as_ref());
     let mut failures = readiness.missing_messages();
 

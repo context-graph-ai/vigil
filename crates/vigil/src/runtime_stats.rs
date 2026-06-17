@@ -1,0 +1,147 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone)]
+pub(crate) struct RuntimeStatsState {
+    inner: Arc<Mutex<RuntimeStats>>,
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RuntimeStats {
+    pub(crate) frames_received: u64,
+    pub(crate) detector_invocations: u64,
+    pub(crate) detections_emitted: u64,
+    pub(crate) observations_written: u64,
+    pub(crate) clip_write_failures: u64,
+    pub(crate) observation_write_failures: u64,
+    pub(crate) motion_positive_frames: u64,
+    pub(crate) stream_drops: u64,
+    pub(crate) stream_reconnects: u64,
+    pub(crate) stream_fps: f64,
+    pub(crate) detector_latency_p50_ms: f64,
+    pub(crate) detector_latency_p95_ms: f64,
+    pub(crate) detector_latency_max_ms: f64,
+    pub(crate) dropped_motion_positive_frames: u64,
+    pub(crate) processing_lag_ms: f64,
+    pub(crate) processing_lag_bound_ms: f64,
+    pub(crate) false_positive_count: u64,
+    pub(crate) health: String,
+    pub(crate) ingest_signal: String,
+}
+
+impl Default for RuntimeStats {
+    fn default() -> Self {
+        Self {
+            frames_received: 0,
+            detector_invocations: 0,
+            detections_emitted: 0,
+            observations_written: 0,
+            clip_write_failures: 0,
+            observation_write_failures: 0,
+            motion_positive_frames: 0,
+            stream_drops: 0,
+            stream_reconnects: 0,
+            stream_fps: 0.0,
+            detector_latency_p50_ms: 0.0,
+            detector_latency_p95_ms: 0.0,
+            detector_latency_max_ms: 0.0,
+            dropped_motion_positive_frames: 0,
+            processing_lag_ms: 0.0,
+            processing_lag_bound_ms: 1.0,
+            false_positive_count: 0,
+            health: "ready".to_string(),
+            ingest_signal: "ok".to_string(),
+        }
+    }
+}
+
+impl RuntimeStatsState {
+    pub(crate) fn new(data_dir: &Path) -> Self {
+        let path = snapshot_path(data_dir);
+        let stats = read_snapshot(data_dir).unwrap_or_default();
+        Self {
+            inner: Arc::new(Mutex::new(stats)),
+            path,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> RuntimeStats {
+        self.inner
+            .lock()
+            .map(|stats| stats.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn update(&self, update: impl FnOnce(&mut RuntimeStats)) {
+        if let Ok(mut stats) = self.inner.lock() {
+            update(&mut stats);
+            let _ = write_snapshot_path(&self.path, &stats);
+        }
+    }
+}
+
+pub(crate) fn read_snapshot(data_dir: &Path) -> Option<RuntimeStats> {
+    let text = fs::read_to_string(snapshot_path(data_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_snapshot_path(path: &Path, stats: &RuntimeStats) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create stats directory {}: {error}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(stats).map_err(|error| error.to_string())?;
+    fs::write(path, text).map_err(|error| format!("write stats {}: {error}", path.display()))
+}
+
+fn snapshot_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("runtime-stats.json")
+}
+
+pub(crate) fn format_stats(stats: &RuntimeStats) -> String {
+    format!(
+        "frames-received={}\n\
+detector-invocations={}\n\
+detections-emitted={}\n\
+observations-written={}\n\
+clip-write-failures={}\n\
+observation-write-failures={}\n\
+motion-positive-frames={}\n\
+stream-drops={}\n\
+stream-reconnects={}\n\
+stream-fps={:.6}\n\
+detector-latency-p50-ms={:.6}\n\
+detector-latency-p95-ms={:.6}\n\
+detector-latency-max-ms={:.6}\n\
+dropped-motion-positive-frames={}\n\
+processing-lag-ms={:.6}\n\
+processing-lag-bound-ms={:.6}\n\
+false-positive-count={}\n\
+health={}\n\
+ingest={}\n\
+telemetry-sink=local\n",
+        stats.frames_received,
+        stats.detector_invocations,
+        stats.detections_emitted,
+        stats.observations_written,
+        stats.clip_write_failures,
+        stats.observation_write_failures,
+        stats.motion_positive_frames,
+        stats.stream_drops,
+        stats.stream_reconnects,
+        stats.stream_fps,
+        stats.detector_latency_p50_ms,
+        stats.detector_latency_p95_ms,
+        stats.detector_latency_max_ms,
+        stats.dropped_motion_positive_frames,
+        stats.processing_lag_ms,
+        stats.processing_lag_bound_ms,
+        stats.false_positive_count,
+        stats.health,
+        stats.ingest_signal
+    )
+}

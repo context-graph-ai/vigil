@@ -10,6 +10,9 @@ pub(crate) enum HealthStatus {
     Starting,
     Ready,
     StoreOpenFailed,
+    IngestFailed,
+    DiskFull,
+    KeepPaceFailed,
 }
 
 impl HealthStatus {
@@ -18,6 +21,9 @@ impl HealthStatus {
             Self::Starting => 0,
             Self::Ready => 1,
             Self::StoreOpenFailed => 2,
+            Self::IngestFailed => 3,
+            Self::DiskFull => 4,
+            Self::KeepPaceFailed => 5,
         }
     }
 
@@ -25,6 +31,9 @@ impl HealthStatus {
         match value {
             1 => Self::Ready,
             2 => Self::StoreOpenFailed,
+            3 => Self::IngestFailed,
+            4 => Self::DiskFull,
+            5 => Self::KeepPaceFailed,
             _ => Self::Starting,
         }
     }
@@ -32,7 +41,11 @@ impl HealthStatus {
     fn http_code(self) -> u16 {
         match self {
             Self::Ready => 200,
-            Self::Starting | Self::StoreOpenFailed => 503,
+            Self::Starting
+            | Self::StoreOpenFailed
+            | Self::IngestFailed
+            | Self::DiskFull
+            | Self::KeepPaceFailed => 503,
         }
     }
 
@@ -41,6 +54,9 @@ impl HealthStatus {
             Self::Starting => "starting",
             Self::Ready => "ready",
             Self::StoreOpenFailed => "store_open_failed",
+            Self::IngestFailed => "ingest_failed",
+            Self::DiskFull => "disk-full",
+            Self::KeepPaceFailed => "keep-pace-failed",
         }
     }
 }
@@ -82,6 +98,14 @@ pub(crate) struct HealthServer {
 }
 
 impl HealthServer {
+    pub(crate) fn listen(
+        port: u16,
+        state: HealthState,
+        shutdown: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        Self::bind(port, state, shutdown)
+    }
+
     pub(crate) fn bind(
         port: u16,
         state: HealthState,

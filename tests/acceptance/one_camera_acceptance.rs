@@ -121,7 +121,7 @@ fn frigate_replacement_loop_runs_over_direct_rtsp_synthetic() {
             let _ = process
                 .health()
                 .wait_for_status(200, Duration::from_secs(2));
-            let _ = process.wait_for_log("decoded_frames=", Duration::from_secs(5));
+            let _ = process.wait_for_log("observation_written=true", Duration::from_secs(300));
             runtime_logs = process.logs();
             trace_raw = process.network_trace().raw;
             forbidden_connections = disallowed_network_lines(&trace_raw, Some(&rtsp_url));
@@ -218,6 +218,12 @@ fn frigate_replacement_loop_runs_over_direct_rtsp_synthetic() {
     if !forbidden_connections.is_empty() {
         failures.push(format!(
             "binary opened non-RTSP network sockets: {forbidden_connections:?}"
+        ));
+    }
+    if !failures.is_empty() {
+        failures.push(format!(
+            "runtime log tail: {}",
+            last_log_lines(&runtime_logs, 80)
         ));
     }
 
@@ -1176,4 +1182,10 @@ fn tool_path(env_key: &str, binary: &str) -> Option<PathBuf> {
 
 fn escape_toml_path(path: &Path) -> String {
     path.display().to_string().replace('\\', "\\\\")
+}
+
+fn last_log_lines(logs: &str, count: usize) -> String {
+    let lines = logs.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(count);
+    lines[start..].join(" | ")
 }

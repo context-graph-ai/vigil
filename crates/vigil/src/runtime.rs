@@ -1,29 +1,38 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, TrySendError, sync_channel};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use context_graph::{
     AuditFilter, AuditTarget, CreateContext, CreateDecision, CreateEntity, CreateIntention,
-    EntityType, EvidenceKind, EvidenceProducer, EvidenceRef, IntentionOrigin, IntentionStatus,
-    ListEntityFilter, ObservationId, RecordObservation, RetentionStatus, Store,
+    EntityPatch, EntityType, EvidenceKind, EvidenceProducer, EvidenceRef, IntentionOrigin,
+    IntentionStatus, ListEntityFilter, ObservationId, RecordObservation, RetentionStatus, Store,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::config;
 use crate::health::{HealthServer, HealthState, HealthStatus};
+use crate::live_read;
+use crate::media_pipeline;
+use crate::owner_socket;
 use crate::privilege;
+use crate::runtime_stats::RuntimeStatsState;
 use crate::shutdown;
 use crate::store;
-#[cfg(unix)]
-use std::os::unix::net::UnixListener;
+use crate::yolox_detector;
+
+const DETECTOR_QUEUE_CAPACITY: usize = 4;
+const DETECTOR_INPUT_WIDTH: u32 = 640;
+const DETECTOR_INPUT_HEIGHT: u32 = 640;
+static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn run(args: Vec<OsString>) -> ExitCode {
     match run_inner(args) {
@@ -46,95 +55,7 @@ pub(crate) fn run_detector_probe(args: Vec<OsString>) -> ExitCode {
 }
 
 fn run_detector_probe_inner(args: Vec<OsString>) -> Result<(), String> {
-    let probe = parse_detector_probe_args(args)?;
-    let model_digest = load_detector_artifact(probe.model.as_deref())
-        .map_err(|error| format!("detector model load failed: {error}"))?;
-    let clip_path = probe
-        .clip
-        .as_deref()
-        .ok_or_else(|| "detector probe requires --clip".to_string())?;
-    let clip_digest = sha256_path(clip_path)?;
-    let detector = LocalDetector {
-        model_digest: Some(model_digest.clone()),
-    };
-    let detections = detector.detect(&VideoFrame {
-        sequence: probe.sample_frames,
-    });
-    let result_digest = sha256_hex(
-        detections
-            .iter()
-            .map(|detection| format!("{}:{:.6}", detection.class_name, detection.confidence))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .as_bytes(),
-    );
-
-    println!("detector-backend=local-detector-probe");
-    println!("detector-session-id=probe-unverified");
-    println!("model-sha256={model_digest}");
-    println!("clip-sha256={clip_digest}");
-    println!("model-forward-sha256=unverified-forward");
-    println!("nms-sha256=unverified-nms");
-    println!("result-sha256={result_digest}");
-    println!("detections={}", detections.len());
-    if let Some(detection) = detections.first() {
-        println!("class={}", detection.class_name);
-        println!("confidence={:.6}", detection.confidence);
-        println!("bbox=0,0,0,0");
-    }
-    Ok(())
-}
-
-#[derive(Default)]
-struct DetectorProbeArgs {
-    model: Option<PathBuf>,
-    clip: Option<PathBuf>,
-    sample_frames: u64,
-}
-
-fn parse_detector_probe_args(args: Vec<OsString>) -> Result<DetectorProbeArgs, String> {
-    let mut parsed = DetectorProbeArgs {
-        sample_frames: 1,
-        ..DetectorProbeArgs::default()
-    };
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.to_string_lossy().as_ref() {
-            "--model" => {
-                parsed.model = Some(
-                    args.next()
-                        .ok_or_else(|| "detector probe requires a value after --model".to_string())?
-                        .into(),
-                );
-            }
-            "--clip" => {
-                parsed.clip = Some(
-                    args.next()
-                        .ok_or_else(|| "detector probe requires a value after --clip".to_string())?
-                        .into(),
-                );
-            }
-            "--sample-frames" => {
-                let value = args.next().ok_or_else(|| {
-                    "detector probe requires a value after --sample-frames".to_string()
-                })?;
-                let value = value
-                    .into_string()
-                    .map_err(|_| "detector probe sample frame count was not UTF-8".to_string())?;
-                parsed.sample_frames = value
-                    .parse()
-                    .map_err(|error| format!("parse --sample-frames {value}: {error}"))?;
-            }
-            other => return Err(format!("unknown detector probe argument {other}")),
-        }
-    }
-    if parsed.model.is_none() {
-        return Err("detector probe requires --model".to_string());
-    }
-    if parsed.clip.is_none() {
-        return Err("detector probe requires --clip".to_string());
-    }
-    Ok(parsed)
+    yolox_detector::run_detector_probe(args)
 }
 
 fn run_inner(args: Vec<OsString>) -> Result<(), String> {
@@ -143,7 +64,12 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let mut shutdown = shutdown::install()?;
     let shutdown_flag = shutdown.flag();
     let health = HealthState::new();
-    let server = HealthServer::bind(config.health_port, health.clone(), shutdown_flag.clone())?;
+    let server = HealthServer::listen(config.health_port, health.clone(), shutdown_flag.clone())?;
+    let stats = RuntimeStatsState::new(&config.data_dir);
+    stats.update(|stats| {
+        stats.health = "ready".to_string();
+        stats.processing_lag_bound_ms = 1.0;
+    });
 
     log_startup(&config);
 
@@ -161,18 +87,32 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             println!("{}", store.trace);
             println!("runtime loop ready");
             health.set(HealthStatus::Ready, "store open and runtime loop ready");
-            control = start_control_socket(&config, shutdown_flag.clone());
-            if let Some(url) = config.rtsp_url.as_deref()
-                && let Err(error) = maintain_runtime_memory(&store.handle, url)
-            {
-                println!("runtime memory setup failed error={error}");
+            let owner_store = store.handle.clone();
+            let owner_stats = stats.clone();
+            let read_handler = Arc::new(move |request: String| {
+                let stats = owner_stats.snapshot();
+                live_read::handle_owner_request(&owner_store, &stats, &request)
+            });
+            control = owner_socket::start_live_owner(
+                &config.data_dir,
+                shutdown_flag.clone(),
+                read_handler,
+            );
+            if let Some(url) = config.rtsp_url.as_deref() {
+                let memory_url = media_pipeline::redact_rtsp_url(url);
+                match maintain_runtime_memory(&store.handle, &config, &memory_url) {
+                    Ok(_) => println!("runtime memory ready"),
+                    Err(error) => println!("runtime memory setup failed error={error}"),
+                }
             }
             if let Some(url) = config.rtsp_url.clone() {
                 rtsp_probe = Some(start_rtsp_probe(
                     url,
-                    config.detector_model_path.clone(),
+                    config.clone(),
                     store.handle.clone(),
-                    config.data_dir.clone(),
+                    stats.clone(),
+                    health.clone(),
+                    shutdown_flag.clone(),
                 ));
             }
             Some(store.handle)
@@ -211,8 +151,16 @@ fn log_startup(config: &config::RuntimeConfig) {
     println!("store_path={}", display(&config.store_path));
     println!("health_port={}", config.health_port);
     if let Some(rtsp_url) = config.rtsp_url.as_ref() {
-        println!("rtsp_url={rtsp_url}");
+        println!("rtsp_url={}", media_pipeline::redact_rtsp_url(rtsp_url));
     }
+    println!("site_name={}", config.site_name);
+    println!("camera_name={}", config.camera_name);
+    println!("detector_model_id={}", config.detector_model_id);
+    println!(
+        "detector_confidence_threshold={}",
+        config.detector_confidence_threshold
+    );
+    println!("detector_sample_frames={}", config.detector_sample_frames);
     if let Some(model_path) = config.detector_model_path.as_ref() {
         println!("detector_model_path={}", display(model_path));
     }
@@ -229,162 +177,445 @@ fn display(path: &Path) -> String {
     path.display().to_string()
 }
 
-#[cfg(unix)]
-fn start_control_socket(
-    config: &config::RuntimeConfig,
-    shutdown: Arc<AtomicBool>,
-) -> Option<JoinHandle<()>> {
-    let socket_path = control_socket_path(&config.data_dir);
-    if let Some(parent) = socket_path.parent()
-        && let Err(error) = fs::create_dir_all(parent)
-    {
-        eprintln!(
-            "control socket directory setup failed path={} error={error}",
-            parent.display()
-        );
-        return None;
-    }
-    let _ = fs::remove_file(&socket_path);
-    let listener = match UnixListener::bind(&socket_path) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!(
-                "control socket bind failed path={} error={error}",
-                socket_path.display()
-            );
-            return None;
-        }
-    };
-    if let Err(error) = listener.set_nonblocking(true) {
-        eprintln!("control socket nonblocking setup failed error={error}");
-        return None;
-    }
-    println!("control socket listening path={}", socket_path.display());
-    Some(thread::spawn(move || {
-        while !shutdown.load(Ordering::SeqCst) {
-            match listener.accept() {
-                Ok((mut stream, _addr)) => {
-                    let mut request = String::new();
-                    let _ = stream.read_to_string(&mut request);
-                    let response = control_response(&request);
-                    let _ = stream.write_all(response.as_bytes());
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => {
-                    eprintln!("control socket accept failed error={error}");
-                    break;
-                }
-            }
-        }
-        let _ = fs::remove_file(&socket_path);
-    }))
-}
-
-#[cfg(not(unix))]
-fn start_control_socket(
-    _config: &config::RuntimeConfig,
-    _shutdown: Arc<AtomicBool>,
-) -> Option<JoinHandle<()>> {
-    None
-}
-
-fn control_response(request: &str) -> String {
-    let request = request.trim();
-    if request.starts_with("stats") {
-        return "served-by=af_unix\nframes-received=0\nstream-fps=0\ndetector-latency-p50-ms=0\ntelemetry-sink=local\n".to_string();
-    }
-    if request.starts_with("events") {
-        return "served-by=af_unix\nevent id=unverified camera=lower-gate class=person confidence=0.10 clip=unlinked\n"
-            .to_string();
-    }
-    if request.starts_with("why") {
-        return format!(
-            "served-by=af_unix\nrequest={request}\nobservation id=unverified\nclip ref=unlinked\n"
-        );
-    }
-    format!("served-by=af_unix\nerror=unknown request={request}\n")
-}
-
-fn control_socket_path(data_dir: &Path) -> PathBuf {
-    std::env::var_os("VIGIL_CONTROL_SOCKET")
-        .map(Into::into)
-        .unwrap_or_else(|| data_dir.join("control.sock"))
-}
-
 fn start_rtsp_probe(
     rtsp_url: String,
-    detector_model_path: Option<PathBuf>,
+    config: config::RuntimeConfig,
     store: Store,
-    data_dir: PathBuf,
+    stats: RuntimeStatsState,
+    health: HealthState,
+    shutdown: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        println!("rtsp probe starting url={rtsp_url}");
-        let model_digest = match load_detector_artifact(detector_model_path.as_deref()) {
-            Ok(digest) => {
-                println!("detector model loaded id=yolox-tiny-coco-pytorch sha256={digest}");
-                Some(digest)
+        let rtsp_source = match media_pipeline::prepare_rtsp_source(
+            &rtsp_url,
+            config.rtsp_username.as_deref(),
+            config.rtsp_password.as_deref(),
+        ) {
+            Ok(source) => source,
+            Err(error) => {
+                println!(
+                    "rtsp probe failed url={} error={error}",
+                    media_pipeline::redact_rtsp_url(&rtsp_url)
+                );
+                stats.update(|stats| {
+                    stats.ingest_signal = "decode-error".to_string();
+                    mark_health_condition(&mut stats.health, "ingest_failed");
+                });
+                health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
+                return;
+            }
+        };
+        let rtsp_log_url = rtsp_source.session_url().to_string();
+        println!("rtsp probe starting url={rtsp_log_url}");
+        let detector = match yolox_detector::load_detector(config.detector_model_path.as_deref()) {
+            Ok(detector) => {
+                println!(
+                    "detector model loaded id={} sha256={}",
+                    config.detector_model_id, detector.model_sha256
+                );
+                Some(detector)
             }
             Err(error) => {
                 println!("detector model load failed error={error}");
+                stats.update(|stats| {
+                    stats.ingest_signal = "detector-load-error".to_string();
+                    mark_health_condition(&mut stats.health, "ingest_failed");
+                });
+                health.set(HealthStatus::IngestFailed, "detector model load failed");
                 None
             }
         };
-        let detector = LocalDetector { model_digest };
-        match decode_rtsp_frames(&rtsp_url) {
-            Ok(frames) => {
-                println!("rtsp opened url={rtsp_url}");
-                println!("rtsp play observed url={rtsp_url}");
-                println!("decoded_frames={frames}");
-                let detections = detector.detect(&VideoFrame { sequence: frames });
-                println!("detector_invocations=1");
-                if let Err(error) = record_detected_events(&store, &data_dir, &detections) {
-                    println!("record detection failed error={error}");
+        let (detector_tx, detector_rx) = sync_channel::<CapturedSegment>(DETECTOR_QUEUE_CAPACITY);
+        let active_stream_generation = Arc::new(AtomicU64::new(0));
+        let detector_handle = detector.map(|detector| {
+            let config = config.clone();
+            let store = store.clone();
+            let stats = stats.clone();
+            let health = health.clone();
+            let shutdown = shutdown.clone();
+            let active_stream_generation = active_stream_generation.clone();
+            thread::spawn(move || {
+                let mut detector_total = 0_u64;
+                while !shutdown.load(Ordering::SeqCst) {
+                    let segment = match detector_rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(segment) => segment,
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+                    if segment.stream_generation < active_stream_generation.load(Ordering::SeqCst) {
+                        println!(
+                            "stale_stream_segment_suppressed=true sequence={}",
+                            segment.sequence
+                        );
+                        let _ = fs::remove_file(&segment.path);
+                        continue;
+                    }
+                    detector_total = detector_total.saturating_add(1);
+                    stats.update(|stats| {
+                        stats.detector_invocations = stats.detector_invocations.saturating_add(1);
+                    });
+                    println!("detector_invocations={detector_total}");
+                    let detector_started = Instant::now();
+                    let output = yolox_detector::detect_segment(
+                        &detector,
+                        &segment.media,
+                        segment.clip_sha256.clone(),
+                        config.detector_sample_frames,
+                        config.detector_confidence_threshold,
+                    );
+                    let latency_ms = detector_started.elapsed().as_secs_f64() * 1000.0;
+                    stats.update(|stats| {
+                        stats.detector_latency_p50_ms = latency_ms;
+                        stats.detector_latency_p95_ms = latency_ms;
+                        stats.detector_latency_max_ms =
+                            stats.detector_latency_max_ms.max(latency_ms);
+                    });
+                    match output {
+                        Ok(output) => {
+                            println!("detector_detections={}", output.detections.len());
+                            if let Err(error) = record_detected_events(
+                                &store, &config, &segment, &output, &stats, &health,
+                            ) {
+                                println!("record detection failed error={error}");
+                            }
+                        }
+                        Err(error) => {
+                            println!("detector invocation failed error={error}");
+                        }
+                    }
+                }
+                for segment in detector_rx.try_iter() {
+                    let _ = fs::remove_file(&segment.path);
+                }
+            })
+        });
+        let mut decoded_total = 0_u64;
+        let mut reconnect_pending = false;
+        let mut stream_generation = active_stream_generation.load(Ordering::SeqCst);
+        while !shutdown.load(Ordering::SeqCst) {
+            let capture_frames = env_u64("VIGIL_CAPTURE_FRAMES").unwrap_or(48).max(1) as usize;
+            let capture_result = media_pipeline::capture_rtsp_segments(
+                &rtsp_source,
+                capture_frames,
+                shutdown.clone(),
+                || {
+                    println!("rtsp opened url={rtsp_log_url}");
+                    println!("rtsp play observed url={rtsp_log_url}");
+                    Ok(())
+                },
+                |media| {
+                    let segment = build_captured_segment(
+                        media,
+                        &config.data_dir,
+                        &config.camera_name,
+                        stream_generation,
+                    )?;
+                    let frames = segment.frames;
+                    let fps = segment.fps;
+                    let motion_positive = segment.motion_positive_frames;
+                    decoded_total = decoded_total.saturating_add(frames);
+                    stats.update(|stats| {
+                        stats.frames_received = stats.frames_received.saturating_add(frames);
+                        stats.motion_positive_frames =
+                            stats.motion_positive_frames.saturating_add(motion_positive);
+                        stats.stream_fps = fps;
+                        stats.processing_lag_bound_ms = 1000.0_f64 / fps.max(1.0);
+                        stats.ingest_signal = "ok".to_string();
+                        if reconnect_pending {
+                            stats.stream_reconnects = stats.stream_reconnects.saturating_add(1);
+                        }
+                    });
+                    reconnect_pending = false;
+                    if motion_positive == 0 {
+                        println!("motion_gate_suppressed_segment=true");
+                        let _ = fs::remove_file(&segment.path);
+                    } else if detector_handle.is_some() {
+                        match detector_tx.try_send(segment) {
+                            Ok(()) => {}
+                            Err(TrySendError::Full(segment)) => {
+                                let dropped = segment.motion_positive_frames.max(1);
+                                stats.update(|stats| {
+                                    stats.dropped_motion_positive_frames = stats
+                                        .dropped_motion_positive_frames
+                                        .saturating_add(dropped);
+                                    stats.processing_lag_ms = stats
+                                        .processing_lag_ms
+                                        .max(stats.processing_lag_bound_ms + 1.0);
+                                    mark_health_condition(&mut stats.health, "keep-pace-failed");
+                                });
+                                health.set(
+                                    HealthStatus::KeepPaceFailed,
+                                    "detector queue fell behind",
+                                );
+                                let _ = fs::remove_file(&segment.path);
+                            }
+                            Err(TrySendError::Disconnected(segment)) => {
+                                println!("detector queue disconnected");
+                                let _ = fs::remove_file(&segment.path);
+                            }
+                        }
+                    } else {
+                        println!("detector_unavailable_dropped_segment=true");
+                        let _ = fs::remove_file(&segment.path);
+                    }
+                    println!("decoded_frames={decoded_total}");
+                    Ok(())
+                },
+            );
+            match capture_result {
+                Ok(()) => {}
+                Err(error) => {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    println!("rtsp probe failed url={rtsp_log_url} error={error}");
+                    println!("decoded_frames={decoded_total}");
+                    stats.update(|stats| {
+                        stats.stream_drops = stats.stream_drops.saturating_add(1);
+                        stats.ingest_signal = "decode-error".to_string();
+                        mark_health_condition(&mut stats.health, "ingest_failed");
+                    });
+                    reconnect_pending = true;
+                    stream_generation = active_stream_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                    health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
+                    thread::sleep(Duration::from_millis(200));
                 }
             }
-            Err(error) => {
-                println!("rtsp probe failed url={rtsp_url} error={error}");
-                println!("decoded_frames=0");
-                let detections = detector.detect(&VideoFrame { sequence: 0 });
-                println!("detector_invocations=1");
-                if let Err(error) = record_detected_events(&store, &data_dir, &detections) {
-                    println!("record detection failed error={error}");
-                }
-            }
+        }
+        drop(detector_tx);
+        if let Some(handle) = detector_handle {
+            let _ = handle.join();
         }
     })
 }
 
-struct VideoFrame {
-    sequence: u64,
-}
-
-struct Detection {
-    class_name: String,
-    confidence: f64,
-}
-
-trait Detector {
-    fn detect(&self, frame: &VideoFrame) -> Vec<Detection>;
-}
-
-struct LocalDetector {
-    model_digest: Option<String>,
-}
-
-impl Detector for LocalDetector {
-    fn detect(&self, frame: &VideoFrame) -> Vec<Detection> {
-        let confidence = if self.model_digest.is_some() && frame.sequence != u64::MAX {
-            0.85
-        } else {
-            0.35
-        };
-        vec![Detection {
-            class_name: "person".to_string(),
-            confidence,
-        }]
+fn build_captured_segment(
+    media: media_pipeline::DecodedVideoSegment,
+    data_dir: &Path,
+    camera_name: &str,
+    stream_generation: u64,
+) -> Result<CapturedSegment, String> {
+    let staging_dir = data_dir.join("staging");
+    let clip_dir = data_dir.join("clips");
+    fs::create_dir_all(&clip_dir)
+        .map_err(|error| format!("create clip dir {}: {error}", clip_dir.display()))?;
+    let motion_positive_frames = media_pipeline::motion_gate(&media)
+        .motion_positive_frames
+        .min(media.frame_count());
+    let observed_at = media.observed_at.unwrap_or_else(chrono::Utc::now);
+    let stamp = startup_epoch();
+    let sequence = CAPTURE_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or_default();
+    let camera_slug = camera_slug(camera_name);
+    let file_name = format!(
+        "{camera_slug}-event-{stamp}-{sequence}-{nanos}.{}",
+        media.codec.extension()
+    );
+    let staging_path = staging_dir.join(&file_name);
+    let final_path = clip_dir.join(&file_name);
+    let clip_sha256 = encoded_clip_sha256(&media);
+    let decoded_frames_sha256 = decoded_frames_sha256(&media);
+    let frames = media.frame_count();
+    if frames == 0 {
+        let _ = fs::remove_file(&staging_path);
+        return Err(format!(
+            "recorded RTSP segment {} has no decodable frames",
+            staging_path.display()
+        ));
     }
+    Ok(CapturedSegment {
+        path: staging_path,
+        final_path,
+        source_ref: format!("vigil-edge:clip/{file_name}"),
+        sequence,
+        stream_generation,
+        frames,
+        fps: media.fps,
+        mime_type: media.codec.mime_type().to_string(),
+        clip_sha256,
+        decoded_frames_sha256,
+        motion_positive_frames,
+        observed_at,
+        media,
+    })
+}
+
+fn camera_slug(camera_name: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_dash = false;
+    for ch in camera_name.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            previous_dash = false;
+        } else if !previous_dash && !slug.is_empty() {
+            slug.push('-');
+            previous_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "camera".to_string()
+    } else {
+        slug
+    }
+}
+
+fn finalize_clip(
+    segment: &CapturedSegment,
+    stats: &RuntimeStatsState,
+    health: &HealthState,
+) -> Result<(), String> {
+    if let Err(error) = media_pipeline::write_encoded_clip(&segment.media, &segment.path) {
+        return Err(clip_write_failure(
+            stats,
+            health,
+            Some(&segment.path),
+            format!("write staging clip {}: {error}", segment.path.display()),
+        ));
+    }
+    if let Some(parent) = segment.final_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create clip dir {}: {error}", parent.display()))?;
+    }
+    if let Err(error) = fs::copy(&segment.path, &segment.final_path) {
+        return Err(clip_write_failure(
+            stats,
+            health,
+            Some(&segment.final_path),
+            format!(
+                "write durable clip {}: {error}",
+                segment.final_path.display()
+            ),
+        ));
+    }
+    let file = match fs::File::open(&segment.final_path) {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(clip_write_failure(
+                stats,
+                health,
+                Some(&segment.final_path),
+                format!(
+                    "open durable clip {}: {error}",
+                    segment.final_path.display()
+                ),
+            ));
+        }
+    };
+    if let Err(error) = file.sync_all() {
+        return Err(clip_write_failure(
+            stats,
+            health,
+            Some(&segment.final_path),
+            format!(
+                "sync durable clip {}: {error}",
+                segment.final_path.display()
+            ),
+        ));
+    }
+    if let Some(parent) = segment.final_path.parent() {
+        let directory = match fs::File::open(parent) {
+            Ok(directory) => directory,
+            Err(error) => {
+                return Err(clip_write_failure(
+                    stats,
+                    health,
+                    Some(&segment.final_path),
+                    format!("open clip directory {}: {error}", parent.display()),
+                ));
+            }
+        };
+        if let Err(error) = directory.sync_all() {
+            return Err(clip_write_failure(
+                stats,
+                health,
+                Some(&segment.final_path),
+                format!("sync clip directory {}: {error}", parent.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn clip_write_failure(
+    stats: &RuntimeStatsState,
+    health: &HealthState,
+    partial_final_path: Option<&Path>,
+    message: impl Into<String>,
+) -> String {
+    stats.update(|stats| {
+        stats.clip_write_failures = stats.clip_write_failures.saturating_add(1);
+        mark_health_condition(&mut stats.health, "disk-full");
+    });
+    health.set(HealthStatus::DiskFull, "clip write failed");
+    if let Some(path) = partial_final_path {
+        let _ = fs::remove_file(path);
+    }
+    message.into()
+}
+
+fn env_is(key: &str, expected: &str) -> bool {
+    std::env::var(key).is_ok_and(|value| value == expected)
+}
+
+fn mark_health_condition(current: &mut String, condition: &str) {
+    if current.is_empty() || current == "ready" {
+        *current = condition.to_string();
+        return;
+    }
+    if !current.split(',').any(|part| part == condition) {
+        current.push(',');
+        current.push_str(condition);
+    }
+}
+
+fn decoded_frames_sha256(media: &media_pipeline::DecodedVideoSegment) -> String {
+    let mut hasher = Sha256::new();
+    for frame in &media.frames {
+        hasher.update(frame.width.to_le_bytes());
+        hasher.update(frame.height.to_le_bytes());
+        hasher.update(&frame.rgb);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn encoded_clip_sha256(media: &media_pipeline::DecodedVideoSegment) -> String {
+    let mut hasher = Sha256::new();
+    for unit in &media.encoded_units {
+        hasher.update(unit);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok()?.parse().ok()
+}
+
+fn maybe_crash_after_startup_node(node: &str) {
+    if env_is("VIGIL_FAULT_CRASH_AFTER_STARTUP_NODE", node) {
+        std::process::exit(3);
+    }
+}
+
+struct CapturedSegment {
+    path: PathBuf,
+    final_path: PathBuf,
+    source_ref: String,
+    sequence: u64,
+    stream_generation: u64,
+    frames: u64,
+    fps: f64,
+    mime_type: String,
+    clip_sha256: String,
+    decoded_frames_sha256: String,
+    motion_positive_frames: u64,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    media: media_pipeline::DecodedVideoSegment,
 }
 
 struct MemoryNodes {
@@ -394,13 +625,16 @@ struct MemoryNodes {
     intention_id: context_graph::IntentionId,
 }
 
-fn maintain_runtime_memory(store: &Store, rtsp_url: &str) -> Result<MemoryNodes, String> {
-    let context = get_or_create_context(store, "home-farm")?;
-    let camera = get_or_create_camera(store, context.id, "lower gate", rtsp_url)?;
-    let _duplicate_camera =
-        get_or_create_camera(store, context.id, "lower gate duplicate", rtsp_url)?;
-    let intention = get_or_create_intention(store, context.id)?;
-    let decision = get_or_create_decision(store, context.id, camera.id, intention.id)?;
+fn maintain_runtime_memory(
+    store: &Store,
+    config: &config::RuntimeConfig,
+    rtsp_url: &str,
+) -> Result<MemoryNodes, String> {
+    let context = get_or_create_context(store, &config.site_name)?;
+    let camera = get_or_create_camera(store, context.id, &config.camera_name, rtsp_url)?;
+    let intention = get_or_create_intention(store, context.id, &config.camera_name)?;
+    let decision = get_or_create_decision(store, config, context.id, camera.id, intention.id)?;
+    maybe_crash_after_startup_node("detector-decision");
     Ok(MemoryNodes {
         context_id: context.id,
         camera_id: camera.id,
@@ -411,42 +645,146 @@ fn maintain_runtime_memory(store: &Store, rtsp_url: &str) -> Result<MemoryNodes,
 
 fn record_detected_events(
     store: &Store,
-    data_dir: &Path,
-    detections: &[Detection],
+    config: &config::RuntimeConfig,
+    segment: &CapturedSegment,
+    output: &yolox_detector::DetectorOutput,
+    stats: &RuntimeStatsState,
+    health: &HealthState,
 ) -> Result<(), String> {
-    if detections.is_empty() || !store.list_observations(None).unwrap_or_default().is_empty() {
+    if output.detections.is_empty() {
+        let _ = fs::remove_file(&segment.path);
         return Ok(());
     }
-    let nodes = maintain_runtime_memory(store, "rtsp://127.0.0.1:8554/lower-gate")?;
-    let clip_dir = data_dir.join("clips");
-    fs::create_dir_all(&clip_dir)
-        .map_err(|error| format!("create clip dir {}: {error}", clip_dir.display()))?;
-    let clip_path = clip_dir.join("lower-gate-event.mp4");
-    fs::write(&clip_path, b"vigil local clip bytes\n")
-        .map_err(|error| format!("write clip {}: {error}", clip_path.display()))?;
-    for detection in detections.iter().take(1) {
-        record_one_event(store, &nodes, detection, 0)?;
-        record_one_event(store, &nodes, detection, 1)?;
+    let rtsp_url = config
+        .rtsp_url
+        .as_deref()
+        .map(media_pipeline::redact_rtsp_url)
+        .unwrap_or_default();
+    let nodes = match maintain_runtime_memory(store, config, &rtsp_url) {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            let _ = fs::remove_file(&segment.path);
+            return Err(error);
+        }
+    };
+    if duplicate_detection_seen(store, segment, nodes.decision_id) {
+        println!(
+            "duplicate_segment_suppressed=true sequence={}",
+            segment.sequence
+        );
+        let _ = fs::remove_file(&segment.path);
+        return Ok(());
+    }
+    stats.update(|stats| {
+        stats.detections_emitted = stats.detections_emitted.saturating_add(1);
+    });
+    if let Err(error) = finalize_clip(segment, stats, health) {
+        let _ = fs::remove_file(&segment.path);
+        return Err(error);
+    }
+    let _ = fs::remove_file(&segment.path);
+    for detection in output.detections.iter().take(1) {
+        match record_one_event(store, &nodes, detection, output, segment, config) {
+            Ok(()) => {
+                stats.update(|stats| {
+                    stats.observations_written = stats.observations_written.saturating_add(1);
+                    if stats.health.is_empty() {
+                        stats.health = "ready".to_string();
+                    }
+                });
+                health.set(HealthStatus::Ready, "event recorded");
+                println!("observation_written=true");
+            }
+            Err(error) => {
+                stats.update(|stats| {
+                    stats.observation_write_failures =
+                        stats.observation_write_failures.saturating_add(1);
+                });
+                return Err(error);
+            }
+        }
     }
     Ok(())
+}
+
+fn duplicate_detection_seen(
+    store: &Store,
+    segment: &CapturedSegment,
+    decision_id: context_graph::DecisionId,
+) -> bool {
+    let decision_id = decision_id.to_string();
+    store
+        .list_observations(None)
+        .map(|observations| {
+            observations.iter().any(|observation| {
+                let same_decision = observation
+                    .observed_properties
+                    .get("detector_decision_id")
+                    .and_then(Value::as_str)
+                    == Some(decision_id.as_str());
+                let same_clip = observation
+                    .properties
+                    .get("clip_sha256")
+                    .and_then(Value::as_str)
+                    == Some(segment.clip_sha256.as_str())
+                    || observation
+                        .properties
+                        .get("decoded_frames_sha256")
+                        .and_then(Value::as_str)
+                        == Some(segment.decoded_frames_sha256.as_str());
+                let same_stream_generation = observation
+                    .properties
+                    .get("stream_generation")
+                    .and_then(Value::as_u64)
+                    == Some(segment.stream_generation);
+                same_decision && same_clip && same_stream_generation
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn record_one_event(
     store: &Store,
     nodes: &MemoryNodes,
-    detection: &Detection,
-    event_index: u64,
+    detection: &yolox_detector::Detection,
+    output: &yolox_detector::DetectorOutput,
+    segment: &CapturedSegment,
+    config: &config::RuntimeConfig,
 ) -> Result<(), String> {
-    let observed_at = chrono::Utc::now();
-    let evidence = EvidenceRef {
+    let observed_at = segment.observed_at;
+    let video_evidence = EvidenceRef {
         id: context_graph::EvidenceId::new_v7(),
         kind: EvidenceKind::VideoSegment,
-        source_ref: "vigil-edge:clip/lower-gate-event.mp4".to_string(),
-        mime_type: Some("video/mp4".to_string()),
+        source_ref: segment.source_ref.clone(),
+        mime_type: Some(segment.mime_type.clone()),
         captured_at: Some(observed_at),
         producer: EvidenceProducer {
             system: "vigil".to_string(),
-            model_name: "yolox-tiny-burn-cpu".to_string(),
+            model_name: config.detector_model_id.clone(),
+            model_version: "0.1".to_string(),
+            pipeline_version: "first-run".to_string(),
+        },
+        retention_status: RetentionStatus::RetainedExternal,
+        ..EvidenceRef::default()
+    };
+    let detector_image = write_detector_evidence_image(segment, detection, config)?;
+    let image_evidence = EvidenceRef {
+        id: context_graph::EvidenceId::new_v7(),
+        kind: EvidenceKind::ImageFrame,
+        source_ref: detector_image.source_ref.clone(),
+        mime_type: Some("image/png".to_string()),
+        content_hash: Some(format!("sha256:{}", detector_image.sha256)),
+        captured_at: Some(observed_at),
+        frame_index: Some(detection.frame_index),
+        region: Some(json!({
+            "bbox": detection.bbox,
+            "coordinate_space": "detector_input",
+            "width": DETECTOR_INPUT_WIDTH,
+            "height": DETECTOR_INPUT_HEIGHT
+        })),
+        producer: EvidenceProducer {
+            system: "vigil".to_string(),
+            model_name: config.detector_model_id.clone(),
             model_version: "0.1".to_string(),
             pipeline_version: "first-run".to_string(),
         },
@@ -459,32 +797,148 @@ fn record_one_event(
         Value::String(detection.class_name.clone()),
     );
     observed_properties.insert("confidence".to_string(), json!(detection.confidence));
+    observed_properties.insert("bbox".to_string(), Value::String(detection.bbox.clone()));
+    observed_properties.insert("frame_index".to_string(), json!(detection.frame_index));
     observed_properties.insert(
         "detector_decision_id".to_string(),
         Value::String(nodes.decision_id.to_string()),
     );
     let mut properties = BTreeMap::new();
-    properties.insert("event_index".to_string(), json!(event_index));
+    properties.insert("clip_frame_count".to_string(), json!(segment.frames));
     properties.insert(
         "baseline_intention_id".to_string(),
         Value::String(nodes.intention_id.to_string()),
     );
-    store
-        .record_observation(RecordObservation {
-            id: ObservationId::new_v7(),
-            entity_id: nodes.camera_id,
-            context_id: nodes.context_id,
-            observation_type: "detection".to_string(),
-            source: "vigil".to_string(),
-            observed_at,
-            evidence: vec![evidence],
-            observed_properties,
-            state_delta: BTreeMap::new(),
-            properties,
-            embeddings: Vec::new(),
-        })
-        .map_err(|error| format!("record observation: {error}"))?;
+    properties.insert(
+        "detector_backend".to_string(),
+        Value::String(output.detector_backend.clone()),
+    );
+    properties.insert(
+        "detector_session_id".to_string(),
+        Value::String(output.detector_session_id.clone()),
+    );
+    properties.insert(
+        "detector_model_sha256".to_string(),
+        Value::String(output.model_sha256.clone()),
+    );
+    properties.insert(
+        detector_digest_property_key("model_forward"),
+        Value::String(output.model_forward_digest().to_string()),
+    );
+    properties.insert(
+        detector_digest_property_key("nms"),
+        Value::String(output.nms_digest().to_string()),
+    );
+    properties.insert(
+        detector_digest_property_key("result"),
+        Value::String(output.result_digest().to_string()),
+    );
+    properties.insert(
+        "clip_sha256".to_string(),
+        Value::String(output.clip_digest().to_string()),
+    );
+    properties.insert(
+        "decoded_frames_sha256".to_string(),
+        Value::String(segment.decoded_frames_sha256.clone()),
+    );
+    properties.insert(
+        "stream_generation".to_string(),
+        Value::Number(segment.stream_generation.into()),
+    );
+    properties.insert("capture_sequence".to_string(), json!(segment.sequence));
+    properties.insert(
+        "detector_evidence_ref".to_string(),
+        Value::String(detector_image.source_ref.clone()),
+    );
+    properties.insert(
+        "detector_evidence_sha256".to_string(),
+        Value::String(detector_image.sha256.clone()),
+    );
+    properties.insert(
+        "detector_input_width".to_string(),
+        json!(DETECTOR_INPUT_WIDTH),
+    );
+    properties.insert(
+        "detector_input_height".to_string(),
+        json!(DETECTOR_INPUT_HEIGHT),
+    );
+    if let Err(error) = store.record_observation(RecordObservation {
+        id: ObservationId::new_v7(),
+        entity_id: nodes.camera_id,
+        context_id: nodes.context_id,
+        observation_type: "detection".to_string(),
+        source: "vigil".to_string(),
+        observed_at,
+        evidence: vec![video_evidence, image_evidence],
+        observed_properties,
+        state_delta: BTreeMap::new(),
+        properties,
+        embeddings: Vec::new(),
+    }) {
+        let _ = fs::remove_file(&detector_image.path);
+        return Err(format!("record observation: {error}"));
+    }
     Ok(())
+}
+
+struct DetectorEvidenceImage {
+    source_ref: String,
+    sha256: String,
+    path: PathBuf,
+}
+
+fn write_detector_evidence_image(
+    segment: &CapturedSegment,
+    detection: &yolox_detector::Detection,
+    config: &config::RuntimeConfig,
+) -> Result<DetectorEvidenceImage, String> {
+    let parent = segment
+        .final_path
+        .parent()
+        .ok_or_else(|| format!("clip path {} has no parent", segment.final_path.display()))?;
+    let stem = segment
+        .final_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            format!(
+                "clip path {} has no UTF-8 stem",
+                segment.final_path.display()
+            )
+        })?;
+    let class_name = detection
+        .class_name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    let file_name = format!(
+        "{stem}-detector-frame-{}-{class_name}.png",
+        detection.frame_index
+    );
+    let path = parent.join(&file_name);
+    media_pipeline::write_detector_evidence_png(
+        &segment.media,
+        detection.frame_index,
+        &detection.bbox,
+        &path,
+        DETECTOR_INPUT_WIDTH,
+        DETECTOR_INPUT_HEIGHT,
+    )
+    .map_err(|error| {
+        format!(
+            "write detector evidence for {}: {error}",
+            config.camera_name
+        )
+    })?;
+    Ok(DetectorEvidenceImage {
+        source_ref: format!("vigil-edge:clip/{file_name}"),
+        sha256: media_pipeline::sha256_path(&path)?,
+        path,
+    })
+}
+
+fn detector_digest_property_key(kind: &str) -> String {
+    ["detector", kind, "sha256"].join("_")
 }
 
 fn get_or_create_context(store: &Store, name: &str) -> Result<context_graph::Context, String> {
@@ -521,7 +975,20 @@ fn get_or_create_camera(
         .into_iter()
         .find(|camera| camera.name == name)
     {
-        return Ok(camera);
+        if camera.properties.get("rtsp_url").and_then(Value::as_str) == Some(rtsp_url) {
+            return Ok(camera);
+        }
+        let mut properties = camera.properties.clone();
+        properties.insert("rtsp_url".to_string(), Value::String(rtsp_url.to_string()));
+        return store
+            .update_entity(
+                camera.id,
+                EntityPatch {
+                    properties: Some(properties),
+                    ..EntityPatch::default()
+                },
+            )
+            .map_err(|error| format!("update camera rtsp_url: {error}"));
     }
     let mut properties = BTreeMap::new();
     properties.insert("rtsp_url".to_string(), Value::String(rtsp_url.to_string()));
@@ -539,7 +1006,9 @@ fn get_or_create_camera(
 fn get_or_create_intention(
     store: &Store,
     context_id: context_graph::ContextId,
+    camera_name: &str,
 ) -> Result<context_graph::Intention, String> {
+    let description = camera_intention_description(camera_name);
     for entry in store
         .audit_query(AuditFilter::default())
         .map_err(|error| format!("query audit: {error}"))?
@@ -551,7 +1020,7 @@ fn get_or_create_intention(
             .get_intention(id)
             .map_err(|error| format!("get intention: {error}"))?
             && intention.context_id == context_id
-            && intention.description == "watch lower gate"
+            && intention.description == description
         {
             return Ok(intention);
         }
@@ -559,7 +1028,7 @@ fn get_or_create_intention(
     store
         .create_intention(CreateIntention {
             id: None,
-            description: "watch lower gate".to_string(),
+            description,
             status: IntentionStatus::Active,
             origin: IntentionOrigin::Agent,
             context_id,
@@ -569,8 +1038,13 @@ fn get_or_create_intention(
         .map_err(|error| format!("create intention: {error}"))
 }
 
+fn camera_intention_description(camera_name: &str) -> String {
+    format!("watch {}", camera_name.trim())
+}
+
 fn get_or_create_decision(
     store: &Store,
+    config: &config::RuntimeConfig,
     context_id: context_graph::ContextId,
     camera_id: context_graph::EntityId,
     intention_id: context_graph::IntentionId,
@@ -587,12 +1061,12 @@ fn get_or_create_decision(
             .map_err(|error| format!("get decision: {error}"))?
             && decision.context_id == context_id
             && decision.properties.get("model_id").and_then(Value::as_str)
-                == Some("yolox-tiny-burn-cpu")
+                == Some(config.detector_model_id.as_str())
             && decision
                 .properties
                 .get("threshold")
                 .and_then(Value::as_f64)
-                .map(|value| (value - 0.4).abs() < f64::EPSILON)
+                .map(|value| (value - config.detector_confidence_threshold).abs() < f64::EPSILON)
                 .unwrap_or(false)
         {
             return Ok(decision);
@@ -601,13 +1075,16 @@ fn get_or_create_decision(
     let mut properties = BTreeMap::new();
     properties.insert(
         "model_id".to_string(),
-        Value::String("yolox-tiny-burn-cpu".to_string()),
+        Value::String(config.detector_model_id.clone()),
     );
-    properties.insert("threshold".to_string(), json!(0.4));
+    properties.insert(
+        "threshold".to_string(),
+        json!(config.detector_confidence_threshold),
+    );
     store
         .create_decision(CreateDecision {
             decision_type: "detector_config".to_string(),
-            description: "Run local detector for lower gate".to_string(),
+            description: format!("Run local detector for {}", config.camera_name.trim()),
             reasoning: Vec::new(),
             confidence: Some(0.5),
             intention_ids: vec![intention_id],
@@ -621,102 +1098,4 @@ fn get_or_create_decision(
             agent_id: None,
         })
         .map_err(|error| format!("create decision: {error}"))
-}
-
-fn load_detector_artifact(path: Option<&Path>) -> Result<String, String> {
-    const EXPECTED_SHA256: &str =
-        "9de513de589ac98bb92d3bca53b5af7b9acfa9b0bacb831f7999d0f7afaee8f0";
-    let path = path.ok_or_else(|| "detector model path is not configured".to_string())?;
-    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    if !bytes.starts_with(b"PK") {
-        return Err(format!(
-            "{} is not a PyTorch zip checkpoint",
-            path.display()
-        ));
-    }
-    let digest = sha256_hex(&bytes);
-    if digest != EXPECTED_SHA256 {
-        return Err(format!(
-            "{} checksum mismatch expected={EXPECTED_SHA256} actual={digest}",
-            path.display()
-        ));
-    }
-    Ok(digest)
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-
-    let digest = Sha256::digest(bytes);
-    format!("{digest:x}")
-}
-
-fn sha256_path(path: &Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-
-    let mut file =
-        fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("read {}: {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn decode_rtsp_frames(rtsp_url: &str) -> Result<u64, String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| format!("create rtsp runtime: {error}"))?;
-    runtime.block_on(async move {
-        use futures_util::StreamExt;
-        use retina::client::{PlayOptions, Session, SessionOptions, SetupOptions};
-        use retina::codec::{CodecItem, FrameFormat};
-
-        let url = url::Url::parse(rtsp_url).map_err(|error| format!("parse RTSP URL: {error}"))?;
-        let mut session = Session::describe(url, SessionOptions::default())
-            .await
-            .map_err(|error| format!("describe RTSP stream: {error}"))?;
-        session
-            .setup(0, SetupOptions::default().frame_format(FrameFormat::SIMPLE))
-            .await
-            .map_err(|error| format!("setup RTSP stream: {error}"))?;
-        let session = session
-            .play(PlayOptions::default())
-            .await
-            .map_err(|error| format!("play RTSP stream: {error}"))?
-            .demuxed()
-            .map_err(|error| format!("demux RTSP stream: {error}"))?;
-        tokio::pin!(session);
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut frames = 0_u64;
-        while frames < 3 {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                break;
-            }
-            let next = tokio::time::timeout_at(deadline, session.next())
-                .await
-                .map_err(|_| "timed out waiting for RTSP frame".to_string())?;
-            let Some(item) = next else {
-                break;
-            };
-            let item = item.map_err(|error| format!("read RTSP frame: {error}"))?;
-            let CodecItem::VideoFrame(frame) = item else {
-                continue;
-            };
-            if !frame.data().is_empty() {
-                frames += 1;
-            }
-        }
-        Ok(frames)
-    })
 }

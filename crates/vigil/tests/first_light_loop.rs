@@ -2884,8 +2884,8 @@ fn assert_live_read_source_has_no_provenance_mirror(failures: &mut Vec<String>) 
     let source = vigil_source_text();
     let cg_source = context_graph_source_text();
     for expected in [
-        format!("pub trait {CG_READ_OBSERVER_TRAIT}"),
-        format!("pub struct {CG_READ_EVENT_TYPE}"),
+        format!("trait {CG_READ_OBSERVER_TRAIT}"),
+        format!("struct {CG_READ_EVENT_TYPE}"),
         "StoreConfig".to_string(),
         "read_observer".to_string(),
         "observe_read".to_string(),

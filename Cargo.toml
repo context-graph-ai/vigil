@@ -51,6 +51,12 @@ yolox-burn = { git = "https://github.com/tracel-ai/models.git", rev = "ec1b9e42e
 context-graph.workspace = true
 libc.workspace = true
 
+[features]
+default = []
+# Slow installable/container/camera acceptance. Keep this out of the default
+# workspace gate; run with `cargo test-acceptance`.
+acceptance = []
+
 [dev-dependencies]
 tempfile.workspace = true
 
@@ -68,6 +74,7 @@ push = true
 [[test]]
 name = "acceptance"
 path = "tests/acceptance.rs"
+required-features = ["acceptance"]
 
 [[bin]]
 name = "vigil-store-probe"

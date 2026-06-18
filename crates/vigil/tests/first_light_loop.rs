@@ -524,6 +524,10 @@ impl LiveRuntime {
             thread::sleep(Duration::from_millis(50));
             logs = self.logs();
         }
+        self.observation_from_logs(logs)
+    }
+
+    fn observation_from_logs(&self, logs: String) -> RuntimeObservation {
         RuntimeObservation {
             spawned: self.spawn_error.is_none(),
             health_ready: self.health_ready,
@@ -566,12 +570,12 @@ impl LiveRuntime {
 
     fn observe_until_log_contains(&self, needle: &str, timeout: Duration) -> RuntimeObservation {
         let start = Instant::now();
-        let mut observation = self.observe();
-        while start.elapsed() < timeout && !observation.logs.contains(needle) {
+        let mut logs = self.logs();
+        while start.elapsed() < timeout && !logs.contains(needle) {
             thread::sleep(Duration::from_millis(50));
-            observation = self.observe();
+            logs = self.logs();
         }
-        observation
+        self.observation_from_logs(logs)
     }
 
     fn observe_until_log_occurrences(
@@ -581,14 +585,12 @@ impl LiveRuntime {
         timeout: Duration,
     ) -> RuntimeObservation {
         let start = Instant::now();
-        let mut observation = self.observe();
-        while start.elapsed() < timeout
-            && observation.logs.matches(needle).count() < minimum_occurrences
-        {
+        let mut logs = self.logs();
+        while start.elapsed() < timeout && logs.matches(needle).count() < minimum_occurrences {
             thread::sleep(Duration::from_millis(50));
-            observation = self.observe();
+            logs = self.logs();
         }
-        observation
+        self.observation_from_logs(logs)
     }
 
     fn logs(&self) -> String {
@@ -856,7 +858,9 @@ fn apply_world_runtime_env(command: &mut Command, world: &FirstLightWorld) {
         .env("VIGIL_DATA_DIR", &world.data_dir)
         .env("VIGIL_STORE_PATH", &world.store_path)
         .env("VIGIL_RTSP_URL", &world.rtsp_url)
-        .env("VIGIL_DETECTOR_MODEL_PATH", &world.detector_artifact);
+        .env("VIGIL_DETECTOR_MODEL_PATH", &world.detector_artifact)
+        .env("VIGIL_RTSP_RETRY_INITIAL_MS", "200")
+        .env("VIGIL_RTSP_RETRY_MAX_MS", "1000");
     if let Some(username) = world.rtsp_username.as_ref() {
         command.env("VIGIL_RTSP_USERNAME", username);
     }
@@ -4669,10 +4673,18 @@ fn run_out_of_order_observed_at_fixture(world: &mut FirstLightWorld, failures: &
             return;
         }
     };
+    let baseline = CgBaseline::from(&authority);
+    record_out_of_order_observed_at_fixture(&store, &baseline, failures);
+}
+
+fn record_out_of_order_observed_at_fixture(
+    store: &Store,
+    baseline: &CgBaseline,
+    failures: &mut Vec<String>,
+) {
     let early_observed_at = Utc::now();
     let late_observed_at = early_observed_at + chrono::Duration::seconds(600);
-    if let Err(error) =
-        record_ordering_observation(&store, &authority, "late", late_observed_at, 0.91)
+    if let Err(error) = record_ordering_observation(store, baseline, "late", late_observed_at, 0.91)
     {
         failures.push(format!(
             "could not record late observed_at fixture: {error}"
@@ -4680,7 +4692,7 @@ fn run_out_of_order_observed_at_fixture(world: &mut FirstLightWorld, failures: &
     }
     thread::sleep(Duration::from_millis(10));
     if let Err(error) =
-        record_ordering_observation(&store, &authority, "early", early_observed_at, 0.82)
+        record_ordering_observation(store, baseline, "early", early_observed_at, 0.82)
     {
         failures.push(format!(
             "could not record early observed_at fixture: {error}"
@@ -4690,7 +4702,7 @@ fn run_out_of_order_observed_at_fixture(world: &mut FirstLightWorld, failures: &
 
 fn record_ordering_observation(
     store: &Store,
-    authority: &CgAuthority,
+    baseline: &CgBaseline,
     label: &str,
     observed_at: DateTime<Utc>,
     confidence: f64,
@@ -4698,14 +4710,43 @@ fn record_ordering_observation(
     let observation_id = ObservationId::new_v7();
     let evidence_id = EvidenceId::new_v7();
     let source_ref = format!("vigil-edge:clip/event-order-{label}.h264");
-    let evidence = EvidenceRef {
+    let detector_image_ref = format!("vigil-edge:clip/event-order-{label}-detector-frame-24.png");
+    let video_evidence = EvidenceRef {
         id: evidence_id,
         observation_id,
-        context_id: authority.context.id,
+        context_id: baseline.context.id,
         kind: EvidenceKind::VideoSegment,
         source_ref: source_ref.clone(),
         mime_type: Some("video/h264".to_string()),
         captured_at: Some(observed_at),
+        producer: EvidenceProducer {
+            system: "vigil".to_string(),
+            model_name: DETECTOR_MODEL_ID.to_string(),
+            model_version: "0.1".to_string(),
+            pipeline_version: "first-run".to_string(),
+        },
+        retention_status: RetentionStatus::RetainedExternal,
+        ..EvidenceRef::default()
+    };
+    let image_evidence = EvidenceRef {
+        id: EvidenceId::new_v7(),
+        observation_id,
+        context_id: baseline.context.id,
+        kind: EvidenceKind::ImageFrame,
+        source_ref: detector_image_ref.clone(),
+        mime_type: Some("image/png".to_string()),
+        content_hash: Some(format!(
+            "sha256:{:x}",
+            Sha256::digest(detector_image_ref.as_bytes())
+        )),
+        captured_at: Some(observed_at),
+        frame_index: Some(24),
+        region: Some(json!({
+            "bbox": PERSON_GOLDEN_BBOX,
+            "coordinate_space": "detector_input",
+            "width": 640,
+            "height": 640
+        })),
         producer: EvidenceProducer {
             system: "vigil".to_string(),
             model_name: DETECTOR_MODEL_ID.to_string(),
@@ -4722,15 +4763,16 @@ fn record_ordering_observation(
         "bbox".to_string(),
         Value::String(PERSON_GOLDEN_BBOX.to_string()),
     );
+    observed_properties.insert("frame_index".to_string(), json!(24));
     observed_properties.insert(
         "detector_decision_id".to_string(),
-        Value::String(authority.decision.id.to_string()),
+        Value::String(baseline.decision.id.to_string()),
     );
     let mut properties = BTreeMap::new();
     properties.insert("clip_frame_count".to_string(), json!(48));
     properties.insert(
         "baseline_intention_id".to_string(),
-        Value::String(authority.intention.id.to_string()),
+        Value::String(baseline.intention.id.to_string()),
     );
     properties.insert(
         "detector_backend".to_string(),
@@ -4761,15 +4803,28 @@ fn record_ordering_observation(
         "clip_sha256".to_string(),
         Value::String(format!("{clip_digest:x}")),
     );
+    properties.insert(
+        "detector_evidence_ref".to_string(),
+        Value::String(detector_image_ref.clone()),
+    );
+    properties.insert(
+        "detector_evidence_sha256".to_string(),
+        Value::String(format!(
+            "{:x}",
+            Sha256::digest(detector_image_ref.as_bytes())
+        )),
+    );
+    properties.insert("detector_input_width".to_string(), json!(640));
+    properties.insert("detector_input_height".to_string(), json!(640));
     store
         .record_observation(RecordObservation {
             id: observation_id,
-            entity_id: authority.camera.id,
-            context_id: authority.context.id,
+            entity_id: baseline.camera.id,
+            context_id: baseline.context.id,
             observation_type: "detection".to_string(),
             source: "vigil".to_string(),
             observed_at,
-            evidence: vec![evidence],
+            evidence: vec![video_evidence, image_evidence],
             observed_properties,
             state_delta: BTreeMap::new(),
             properties,
@@ -4777,6 +4832,25 @@ fn record_ordering_observation(
         })
         .map_err(|error| format!("record observation: {error}"))?;
     Ok(())
+}
+
+#[derive(Clone)]
+struct CgBaseline {
+    context: Context,
+    camera: Entity,
+    decision: Decision,
+    intention: Intention,
+}
+
+impl From<&CgAuthority> for CgBaseline {
+    fn from(authority: &CgAuthority) -> Self {
+        Self {
+            context: authority.context.clone(),
+            camera: authority.camera.clone(),
+            decision: authority.decision.clone(),
+            intention: authority.intention.clone(),
+        }
+    }
 }
 
 struct CgAuthority {
@@ -6054,9 +6128,9 @@ fn separate_rtsp_credentials_authenticate_without_url_userinfo() {
 
 #[test]
 fn detector_loads_and_runs_over_real_frames() {
-    let person_world = rtsp_world_or_fail();
-    let readiness = FixtureReadiness::probe(&person_world);
-    let forward_probe_path = person_world.data_dir.join("detector-forward-probe.log");
+    let probe_world = world_or_fail();
+    let readiness = FixtureReadiness::probe(&probe_world);
+    let forward_probe_path = probe_world.data_dir.join("detector-forward-probe.log");
     let forward_probe_path_string = forward_probe_path.display().to_string();
     let forward_probe_nonce = unique_probe_nonce("detector-forward");
     let forward_probe_env = [
@@ -6069,12 +6143,12 @@ fn detector_loads_and_runs_over_real_frames() {
             forward_probe_nonce.as_str(),
         ),
     ];
-    let model_digest = sha256_file(&person_world.detector_artifact).unwrap_or_default();
+    let model_digest = sha256_file(&probe_world.detector_artifact).unwrap_or_default();
     let model_loaded = model_digest == DETECTOR_ARTIFACT_SHA256;
-    let person_clip_digest = sha256_file(&person_world.person_clip).ok();
-    let person_frames = count_video_frames(&person_world.person_clip).unwrap_or_default();
-    let background_frames = count_video_frames(&person_world.empty_clip).unwrap_or_default();
-    let transformed_clip = generate_transformed_person_clip(&person_world);
+    let person_clip_digest = sha256_file(&probe_world.person_clip).ok();
+    let person_frames = count_video_frames(&probe_world.person_clip).unwrap_or_default();
+    let background_frames = count_video_frames(&probe_world.empty_clip).unwrap_or_default();
+    let transformed_clip = generate_transformed_person_clip(&probe_world);
     let transformed_clip_digest = transformed_clip
         .as_ref()
         .ok()
@@ -6082,15 +6156,15 @@ fn detector_loads_and_runs_over_real_frames() {
     let transformed_oracle = transformed_clip
         .as_ref()
         .ok()
-        .map(|clip| run_independent_detector_oracle(&person_world.detector_artifact, clip));
+        .map(|clip| run_independent_detector_oracle(&probe_world.detector_artifact, clip));
     let transformed_probe = transformed_clip.as_ref().ok().map(|clip| {
         run_detector_probe_with_model_and_env(
-            &person_world.detector_artifact,
+            &probe_world.detector_artifact,
             clip,
             &forward_probe_env,
         )
     });
-    let challenge_clip = generate_challenge_person_clip(&person_world);
+    let challenge_clip = generate_challenge_person_clip(&probe_world);
     let challenge_clip_digest = challenge_clip
         .as_ref()
         .ok()
@@ -6098,25 +6172,30 @@ fn detector_loads_and_runs_over_real_frames() {
     let challenge_oracle = challenge_clip
         .as_ref()
         .ok()
-        .map(|clip| run_independent_detector_oracle(&person_world.detector_artifact, clip));
+        .map(|clip| run_independent_detector_oracle(&probe_world.detector_artifact, clip));
     let challenge_probe = challenge_clip.as_ref().ok().map(|clip| {
         run_detector_probe_with_model_and_env(
-            &person_world.detector_artifact,
+            &probe_world.detector_artifact,
             clip,
             &forward_probe_env,
         )
     });
-    let corrupt_model = corrupt_detector_artifact(&person_world);
+    let corrupt_model = corrupt_detector_artifact(&probe_world);
     let corrupt_probe = corrupt_model.as_ref().ok().map(|model| {
-        run_detector_probe_with_model_and_env(model, &person_world.person_clip, &forward_probe_env)
+        run_detector_probe_with_model_and_env(model, &probe_world.person_clip, &forward_probe_env)
     });
     let person_probe = run_detector_probe_with_model_and_env(
-        &person_world.detector_artifact,
-        &person_world.person_clip,
+        &probe_world.detector_artifact,
+        &probe_world.person_clip,
         &forward_probe_env,
     );
     let person_oracle =
-        run_independent_detector_oracle(&person_world.detector_artifact, &person_world.person_clip);
+        run_independent_detector_oracle(&probe_world.detector_artifact, &probe_world.person_clip);
+    let background_oracle =
+        run_independent_detector_oracle(&probe_world.detector_artifact, &probe_world.empty_clip);
+    let background_probe = run_detector_probe(&probe_world, &probe_world.empty_clip);
+
+    let person_world = rtsp_world_or_fail();
     let (person_runtime, person_store) = run_runtime_until_log_contains_and_open_store_with_env(
         &person_world,
         &forward_probe_env,
@@ -6213,11 +6292,6 @@ fn detector_loads_and_runs_over_real_frames() {
     drop(person_world);
 
     let background_world = empty_rtsp_world_or_fail();
-    let background_oracle = run_independent_detector_oracle(
-        &background_world.detector_artifact,
-        &background_world.empty_clip,
-    );
-    let background_probe = run_detector_probe(&background_world, &background_world.empty_clip);
     let (background_runtime, background_store) = run_runtime_and_open_store(&background_world);
     let background_detections = list_observations(background_store.as_ref()).len() as u64;
 
@@ -7602,6 +7676,9 @@ fn startup_crash_mid_config_heals_on_restart() {
     }
     if !second.spawned {
         failures.push("startup/restart sequence did not run through the binary".to_string());
+    }
+    if !second.logs.contains("runtime memory ready") {
+        failures.push("restart did not rebuild the runtime memory graph".to_string());
     }
     if list_context_count(store.as_ref()) != 1 {
         failures.push("restart did not heal to exactly one site Context".to_string());

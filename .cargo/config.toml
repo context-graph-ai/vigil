@@ -1,3 +1,7 @@
+[alias]
+test-first-light = "test -p vigil --features first-light-acceptance --test first_light_loop -- --test-threads=1"
+test-acceptance = "test -p vigil-acceptance --features acceptance --test acceptance -- --test-threads=1"
+
 [target.x86_64-unknown-linux-musl]
 linker = "target/vigil-test-tools/zig/rust-lld-x86_64-linux-musl"
 rustflags = ["-Clinker-flavor=ld.lld"]

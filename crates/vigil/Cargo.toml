@@ -46,7 +46,15 @@ yolox-burn.workspace = true
 
 [features]
 default = []
+# Slow deterministic camera/detector first-light acceptance. Keep this out of
+# the default workspace gate; run with `cargo test-first-light`.
+first-light-acceptance = []
 
 [dev-dependencies]
 syn.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "first_light_loop"
+path = "tests/first_light_loop.rs"
+required-features = ["first-light-acceptance"]

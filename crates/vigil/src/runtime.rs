@@ -292,6 +292,11 @@ fn start_rtsp_probe(
         let mut decoded_total = 0_u64;
         let mut reconnect_pending = false;
         let mut stream_generation = active_stream_generation.load(Ordering::SeqCst);
+        let retry_initial_ms = env_u64("VIGIL_RTSP_RETRY_INITIAL_MS").unwrap_or(2_000);
+        let retry_max_ms = env_u64("VIGIL_RTSP_RETRY_MAX_MS")
+            .unwrap_or(30_000)
+            .max(retry_initial_ms);
+        let mut retry_delay_ms = retry_initial_ms;
         while !shutdown.load(Ordering::SeqCst) {
             let capture_frames = env_u64("VIGIL_CAPTURE_FRAMES").unwrap_or(48).max(1) as usize;
             let capture_result = media_pipeline::capture_rtsp_segments(
@@ -326,6 +331,7 @@ fn start_rtsp_probe(
                         }
                     });
                     reconnect_pending = false;
+                    retry_delay_ms = retry_initial_ms;
                     if motion_positive == 0 {
                         println!("motion_gate_suppressed_segment=true");
                         let _ = fs::remove_file(&segment.path);
@@ -378,7 +384,9 @@ fn start_rtsp_probe(
                     reconnect_pending = true;
                     stream_generation = active_stream_generation.fetch_add(1, Ordering::SeqCst) + 1;
                     health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
-                    thread::sleep(Duration::from_millis(200));
+                    println!("rtsp_retry_after_ms={retry_delay_ms}");
+                    sleep_shutdown_aware(&shutdown, Duration::from_millis(retry_delay_ms));
+                    retry_delay_ms = retry_delay_ms.saturating_mul(2).min(retry_max_ms);
                 }
             }
         }
@@ -387,6 +395,14 @@ fn start_rtsp_probe(
             let _ = handle.join();
         }
     })
+}
+
+fn sleep_shutdown_aware(shutdown: &AtomicBool, duration: Duration) {
+    let started = Instant::now();
+    while !shutdown.load(Ordering::SeqCst) && started.elapsed() < duration {
+        let remaining = duration.saturating_sub(started.elapsed());
+        thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
 }
 
 fn build_captured_segment(
@@ -479,8 +495,14 @@ fn finalize_clip(
         ));
     }
     if let Some(parent) = segment.final_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create clip dir {}: {error}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            clip_write_failure(
+                stats,
+                health,
+                None,
+                format!("create clip dir {}: {error}", parent.display()),
+            )
+        })?;
     }
     if let Err(error) = fs::copy(&segment.path, &segment.final_path) {
         return Err(clip_write_failure(

@@ -14,6 +14,7 @@ use context_graph::{
     AuditFilter, AuditTarget, CreateContext, CreateDecision, CreateEntity, CreateIntention,
     EntityPatch, EntityType, EvidenceKind, EvidenceProducer, EvidenceRef, IntentionOrigin,
     IntentionStatus, ListEntityFilter, ObservationId, RecordObservation, RetentionStatus, Store,
+    start_control_listener,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,6 @@ use crate::config;
 use crate::health::{HealthServer, HealthState, HealthStatus};
 use crate::live_read;
 use crate::media_pipeline;
-use crate::owner_socket;
 use crate::privilege;
 use crate::runtime_stats::RuntimeStatsState;
 use crate::shutdown;
@@ -89,15 +89,13 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             health.set(HealthStatus::Ready, "store open and runtime loop ready");
             let owner_store = store.handle.clone();
             let owner_stats = stats.clone();
-            let read_handler = Arc::new(move |request: String| {
+            let read_handler: context_graph::ControlHandler = Arc::new(move |request: String| {
                 let stats = owner_stats.snapshot();
                 live_read::handle_owner_request(&owner_store, &stats, &request)
             });
-            control = owner_socket::start_live_owner(
-                &config.data_dir,
-                shutdown_flag.clone(),
-                read_handler,
-            );
+            let control_socket_path = crate::control_socket::control_socket_path(&config.data_dir);
+            control =
+                start_control_listener(&control_socket_path, shutdown_flag.clone(), read_handler);
             if let Some(url) = config.rtsp_url.as_deref() {
                 let memory_url = media_pipeline::redact_rtsp_url(url);
                 match maintain_runtime_memory(&store.handle, &config, &memory_url) {
@@ -225,7 +223,12 @@ fn start_rtsp_probe(
                 None
             }
         };
-        let (detector_tx, detector_rx) = sync_channel::<CapturedSegment>(DETECTOR_QUEUE_CAPACITY);
+        let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
+            .map(|capacity| capacity.max(1) as usize)
+            .unwrap_or(DETECTOR_QUEUE_CAPACITY);
+        let detector_work_delay =
+            Duration::from_millis(env_u64("VIGIL_DETECTOR_WORK_DELAY_MS").unwrap_or_default());
+        let (detector_tx, detector_rx) = sync_channel::<CapturedSegment>(detector_queue_capacity);
         let active_stream_generation = Arc::new(AtomicU64::new(0));
         let detector_handle = detector.map(|detector| {
             let config = config.clone();
@@ -255,6 +258,7 @@ fn start_rtsp_probe(
                         stats.detector_invocations = stats.detector_invocations.saturating_add(1);
                     });
                     println!("detector_invocations={detector_total}");
+                    sleep_shutdown_aware(&shutdown, detector_work_delay);
                     let detector_started = Instant::now();
                     let output = yolox_detector::detect_segment(
                         &detector,

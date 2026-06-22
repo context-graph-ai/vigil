@@ -40,7 +40,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 signal-hook = "0.3"
-syn = { version = "2", features = ["full"] }
 tempfile = "3"
 tokio = { version = "1", features = ["net", "rt", "time"] }
 toml = "0.9"

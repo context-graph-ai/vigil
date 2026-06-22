@@ -1,8 +1,8 @@
 mod config;
+mod control_socket;
 mod health;
 mod live_read;
 mod media_pipeline;
-mod owner_socket;
 mod privilege;
 mod runtime;
 mod runtime_stats;
@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 
-use context_graph::Store;
+use context_graph::{Store, request_control};
 
 pub fn run_cli<I>(args: I) -> ExitCode
 where
@@ -79,7 +79,8 @@ fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
 
 #[cfg(unix)]
 fn ask_runtime_owner(command: &str, request: &str) -> Result<String, String> {
-    owner_socket::request_live_owner(&data_dir_from_env(), &format!("{command} {request}\n"))
+    let socket_path = control_socket::control_socket_path(&data_dir_from_env());
+    request_control(&socket_path, &format!("{command} {request}\n"))
 }
 
 #[cfg(not(unix))]

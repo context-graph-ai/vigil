@@ -8,7 +8,7 @@
 - Upstream SHA-256: `a5964aa259099a482a8b360ffc2c57b5a30f84d5919236a4dad01f8e929ac07c`
 - Local normalized SHA-256: `a65415f0da868f59014777ace1b702f6d7c6274c18e5af3e344cf710c37526ea`
 - License: Creative Commons Attribution 4.0 International.
-- Generation command: `setup-video-fixtures.sh` normalizes the source through `ffmpeg` to H.264
+- Generation command: `cargo xtask setup-harness` verifies the source through `ffmpeg` as H.264
   Baseline L3.0.
 
 This fixture is real recorded video used by the RTSP harness tests. It is not a generated pixel
@@ -16,15 +16,15 @@ fixture, frame manifest, or detector-answer source.
 
 ## Empty-Scene Derivative
 
-The companion empty-scene segment is derived from the same upstream clip and license by
-`setup-video-fixtures.sh`. It must be a carved segment from the upstream recording, not a generated
+The companion empty-scene segment is derived from the same upstream clip and license and verified by
+`cargo xtask setup-harness`. It must be a carved segment from the upstream recording, not a generated
 frame sequence or detector-answer fixture.
 
 - `empty-scene-from-one-by-one-person-detection.mp4`
 - Source: same Intel IoT DevKit upstream file and commit listed above.
 - Local SHA-256: `2d4c35233e497d1c81d2a08187e856b5aba84acaf4f10cb47ccd33b9b5edee63`
 - License: Creative Commons Attribution 4.0 International.
-- Generation command: `setup-video-fixtures.sh` normalizes the source through `ffmpeg` to H.264
+- Generation command: `cargo xtask setup-harness` verifies the source through `ffmpeg` as H.264
   Baseline L3.0 and writes the derivative from the quiet lead-in segment.
 
 ## YOLOX-Tiny COCO Checkpoint

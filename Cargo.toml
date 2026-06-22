@@ -9,7 +9,7 @@ publish = false
 
 [workspace]
 resolver = "2"
-members = ["crates/vigil"]
+members = ["crates/vigil", "xtask"]
 default-members = ["crates/vigil"]
 
 [workspace.package]

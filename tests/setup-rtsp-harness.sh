@@ -2,4 +2,5 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec "${repo_root}/tests/fixtures/video/setup-video-fixtures.sh"
+cd "${repo_root}"
+exec cargo xtask setup-harness

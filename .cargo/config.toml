@@ -1,6 +1,8 @@
 [alias]
-test-first-light = "test -p vigil --features first-light-acceptance --test first_light_loop -- --test-threads=1"
-test-acceptance = "test -p vigil-acceptance --features acceptance --test acceptance -- --test-threads=1"
+xtask = "run -p xtask --"
+test-first-light = "nextest run --release --profile ci-full --workspace --features first-light-acceptance,acceptance -E=binary(first_light_loop)"
+test-acceptance = "nextest run --release --profile ci-full --workspace --features first-light-acceptance,acceptance -E=binary(acceptance)"
+test-ci-full = "nextest run --release --profile ci-full --workspace --features first-light-acceptance,acceptance"
 
 [target.x86_64-unknown-linux-musl]
 linker = "target/vigil-test-tools/zig/rust-lld-x86_64-linux-musl"

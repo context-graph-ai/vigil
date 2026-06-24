@@ -13,12 +13,36 @@ ports:
   8099/tcp: 8099
 ports_description:
   8099/tcp: Health endpoint
+# Declare the HA Mosquitto broker as an optional service dependency.
+# When the Mosquitto add-on is installed and running, Vigil discovers the broker
+# credentials at startup by calling the Supervisor services API
+# (GET http://supervisor/services/mqtt via SUPERVISOR_TOKEN).
+# Explicit env vars MQTT_HOST / MQTT_PORT / MQTT_USER / MQTT_PASSWORD are
+# accepted as a fallback for non-Supervisor deployments.
+services:
+  - mqtt:want
+# Mount the HA config directory read-write so Vigil can install its Lovelace
+# card into /homeassistant/www/ (served by HA as /local/).
+# The current Supervisor schema mounts `homeassistant_config:rw` at
+# /homeassistant — NOT the legacy `config:rw` path /config.
+map:
+  - homeassistant_config:rw
 options:
   store_path: /data/store.contextgraph
   health_port: 8099
+  cameras: []
 schema:
   store_path: str
   health_port: int
+  detector_model_path: str?
+  cameras:
+    - name: str
+      rtsp_url: str?
+      username: str?
+      password: str?
 apparmor: true
 host_network: false
 host_pid: false
+# Required for Supervisor REST API access (go2rtc stream registration,
+# Lovelace resource registration) and for SUPERVISOR_TOKEN injection.
+homeassistant_api: true

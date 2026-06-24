@@ -576,3 +576,77 @@ fn false_alarm_and_wrong_class_corrections_record_and_read_back() {
          wrong stub drops the label"
     );
 }
+
+/// RED — wrong stub sets correction_recorded=true for ALL correction types, including
+/// Identity.  Identity is a POSITIVE signal ("confirmed") and must NOT set
+/// correction_recorded; it must set confirmed=true instead.
+///
+/// FalseAlarm is a negative signal: correction_recorded=true, confirmed=false.
+/// Identity ("confirmed"): correction_recorded=false, confirmed=true.
+#[test]
+fn confirmed_correction_does_not_set_correction_recorded() {
+    let (_tmp, store_path) = ha_test_support::fresh_store_copy(2)
+        .expect("seeded store for confirmed_correction_does_not_set_correction_recorded");
+    let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+    let mut observations = list_all_observations(&store);
+    assert!(
+        observations.len() >= 2,
+        "at least two detections must be in the store for this test; got {}",
+        observations.len()
+    );
+    observations.sort_by_key(|o| o.id.to_string());
+    let id_a = observations[0].id.to_string();
+    let id_b = observations[1].id.to_string();
+
+    // Identity ("confirmed") on detection A.
+    let req_a = CorrectionRequest {
+        detection_id: id_a.clone(),
+        label: Some("confirmed correct".to_string()),
+        correction_type: CorrectionType::Identity,
+    };
+    record_correction(&store, req_a).expect("Identity correction must not error");
+
+    // FalseAlarm on detection B.
+    let req_b = CorrectionRequest {
+        detection_id: id_b.clone(),
+        label: None,
+        correction_type: CorrectionType::FalseAlarm,
+    };
+    record_correction(&store, req_b).expect("FalseAlarm correction must not error");
+
+    let events = review_events(&store, 100).expect("review_events must not error");
+
+    let row_a = events
+        .rows
+        .iter()
+        .find(|r| r.observation_id == id_a)
+        .expect("review_events must include a row for detection A");
+
+    // Identity is a positive signal: confirmed=true, correction_recorded=false.
+    assert!(
+        !row_a.correction_recorded,
+        "Identity ('confirmed') correction on detection A must NOT set correction_recorded; \
+         wrong stub sets correction_recorded for ALL correction types — got correction_recorded=true"
+    );
+    assert!(
+        row_a.confirmed,
+        "Identity ('confirmed') correction on detection A must set confirmed=true; \
+         wrong stub hardcodes confirmed=false — got false"
+    );
+
+    let row_b = events
+        .rows
+        .iter()
+        .find(|r| r.observation_id == id_b)
+        .expect("review_events must include a row for detection B");
+
+    // FalseAlarm is a negative signal: correction_recorded=true, confirmed=false.
+    assert!(
+        row_b.correction_recorded,
+        "FalseAlarm correction on detection B must set correction_recorded=true; got false"
+    );
+    assert!(
+        !row_b.confirmed,
+        "FalseAlarm correction on detection B must NOT set confirmed=true; got confirmed=true"
+    );
+}

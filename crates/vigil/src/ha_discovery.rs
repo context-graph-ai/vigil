@@ -40,8 +40,11 @@ pub struct DetectionInput {
     pub zone: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EventPayload {
+    /// Must be "vigil_detection" — required by the HA MQTT event entity so
+    /// Home Assistant can match published messages to the declared event_types.
+    pub event_type: String,
     pub detection_id: String,
     pub camera: String,
     pub object_class: String,
@@ -72,114 +75,289 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-// ── Wrong stubs ────────────────────────────────────────────────────────────
+// ── Slug helper ────────────────────────────────────────────────────────────
 
-/// WRONG STUB: generates a flat discovery tree with per-call random UUIDs as
-/// entity ids, emits `object_id` instead of `default_entity_id`, and includes
-/// a per-camera health entity, causing:
-///   - discovery_registers_device_and_per_camera_subdevice   → flat tree → FAIL
-///   - discovery_payload_uses_default_entity_id_not_object_id → object_id present → FAIL
-///   - entity_ids_and_topics_stable_across_regeneration       → UUIDs differ per call → FAIL
-///   - discovery_has_no_per_camera_health_entity              → health entity present → FAIL
+/// Convert an arbitrary string into a stable lowercase slug using underscores
+/// as separators.  Derived from `service_id` or `camera_id` so HA entity IDs
+/// are stable across regeneration from the same config.
+/// Exposed pub(crate) so ha_mqtt_tasks can derive image-topic keys.
+pub(crate) fn slug(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+// ── Discovery payload generation ───────────────────────────────────────────
+
+/// Generate HA MQTT discovery payloads for a Vigil service and its cameras.
+///
+/// Structure:
+/// - One service-hub payload (sensor "running condition") with no
+///   `via_device` — registered under the service device.
+/// - Per-camera: six entity payloads (event, image, binary_sensor,
+///   button×3 [enable/disable/snapshot]), each carrying
+///   `device.via_device` pointing to the service hub.
+///   The live-view camera is registered as an HA Generic Camera config entry
+///   via the config-flow API (POST /core/api/config/config_entries/flow,
+///   stream_source = rtsp://127.0.0.1:8554/<slug> — resolved by HA Core, which
+///   is host-networked with go2rtc on loopback) and is NOT part of MQTT discovery.
+///   The MQTT camera platform is image-only and cannot serve live streams.
+///
+/// All IDs and topics derive deterministically from `service_id` and
+/// `camera_id` so successive calls with identical configs produce identical
+/// payloads.  No `object_id` is emitted (removed in HA 2026.4).
+///
+/// Topic conventions
+/// -----------------
+/// MQTT topics use raw `service_id` / `camera_id` values to match what
+/// `runtime.rs` publishes (no additional slug transform on the topic path).
+/// HA entity IDs (unique_id, default_entity_id) use the `slug()` transform
+/// (underscores) which is the HA naming convention.
 pub fn generate_discovery_payloads(config: &ServiceConfig) -> Vec<DiscoveryPayload> {
     let mut payloads = Vec::new();
 
-    // wrong stub: use uuid-v4 per call — different on each generation, breaking stability
-    let device_id = uuid::Uuid::new_v4().to_string();
+    let service_slug = slug(&config.service_id);
+    let service_identifier = format!("vigil_{service_slug}");
 
-    // wrong stub: flat device entry (no sub-devices, no via_device linkage)
-    let device_payload = json!({
-        "device": {
-            "identifiers": [device_id.clone()],
-            "name": config.service_name.clone(),
-        },
-        // wrong stub: emits object_id (removed in HA 2026.4) instead of default_entity_id
-        "object_id": format!("vigil_{}_running", device_id),
-        "name": "Running Condition",
-        "component": "sensor",
+    // Availability topic — raw service_id (no slug) to match runtime.rs.
+    // Published as "online" on startup, "offline" via last-will on disconnect.
+    // Every entity carries this so HA marks all Vigil entities unavailable when
+    // the add-on goes away.
+    let availability_topic = service_availability_topic(&config.service_id);
+
+    // ── Service hub device ─────────────────────────────────────────────────
+    // One sensor entity for the running-condition string at the service level.
+    // No `via_device` — this is the parent device.
+    let hub_device = json!({
+        "identifiers": [service_identifier.clone()],
+        "name": config.service_name,
+        "manufacturer": "Vigil",
+        "model": "Vigil NVR",
     });
+    let hub_entity_slug = format!("vigil_{service_slug}_running");
+    // slug(service_id) matches running_condition_topic(service_id) used by runtime.
+    let hub_state_topic = format!("vigil/{service_slug}/running-condition");
     payloads.push(DiscoveryPayload {
-        topic: format!("homeassistant/sensor/{device_id}/running_condition/config"),
-        payload: device_payload,
+        topic: format!("homeassistant/sensor/{service_identifier}/running/config"),
+        payload: json!({
+            "component": "sensor",
+            "device": hub_device,
+            "name": "Running Condition",
+            "default_entity_id": format!("sensor.{hub_entity_slug}"),
+            "unique_id": format!("{service_identifier}_running"),
+            "state_topic": hub_state_topic,
+            "availability_topic": availability_topic,
+            "payload_available": "online",
+            "payload_not_available": "offline",
+        }),
     });
 
+    // ── Per-camera sub-device entities ─────────────────────────────────────
     for camera in &config.cameras {
-        let cam_id = uuid::Uuid::new_v4().to_string(); // wrong stub: per-call random
+        let cam_slug = slug(&camera.camera_id);
+        let cam_identifier = format!("vigil_{cam_slug}");
 
-        // wrong stub: per-camera health entity — this is the forbidden entity the test rejects
-        let health_payload = json!({
-            "device": {
-                "identifiers": [cam_id.clone()],
-                "name": camera.camera_label.clone(),
-                // wrong stub: no via_device linkage to parent
-            },
-            "object_id": format!("cam_{cam_id}_health"),
-            "name": "Camera Health",
-            "component": "sensor",
-            "entity_role": "camera_health", // the role the test discriminates on
-        });
-        payloads.push(DiscoveryPayload {
-            topic: format!("homeassistant/sensor/{cam_id}/camera_health/config"),
-            payload: health_payload,
+        let cam_device = json!({
+            "identifiers": [cam_identifier.clone()],
+            "name": camera.camera_label,
+            "manufacturer": "Vigil",
+            "model": "Vigil Camera",
+            "via_device": service_identifier,
         });
 
-        // wrong stub: event entity without sub-device linkage to parent device
-        let event_payload = json!({
-            "device": {
-                "identifiers": [cam_id.clone()],
-                "name": camera.camera_label.clone(),
-            },
-            "object_id": format!("cam_{cam_id}_detection"),
-            "name": "Detection Event",
-            "component": "event",
-        });
+        // MQTT topic paths — raw camera_id (not slugged) matches runtime publishing.
+        let detection_topic = format!("vigil/{}/{}/detection", config.service_id, camera.camera_id);
+        let active_topic = format!("vigil/{}/{}/active", config.service_id, camera.camera_id);
+        // Snapshot topic has no service_id prefix so the snapshot handler can derive
+        // it from cmd.camera_id alone without needing service context.
+        let snapshot_topic = format!("vigil/{}/snapshot", camera.camera_id);
+
+        // event — detection events.
+        // HA event entity requires state_topic and the published JSON must include
+        // event_type matching one of the declared event_types.
         payloads.push(DiscoveryPayload {
-            topic: format!("homeassistant/event/{cam_id}/detection/config"),
-            payload: event_payload,
+            topic: format!("homeassistant/event/{cam_identifier}/detection/config"),
+            payload: json!({
+                "component": "event",
+                "device": cam_device.clone(),
+                "name": format!("{} Detection", camera.camera_label),
+                "default_entity_id": format!("event.{cam_identifier}_detection"),
+                "unique_id": format!("{cam_identifier}_detection"),
+                "state_topic": detection_topic,
+                "event_types": ["vigil_detection"],
+                "availability_topic": availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }),
+        });
+
+        // image — latest detection snapshot (JPEG bytes published on snapshot_topic).
+        // HA image entity requires image_topic where raw bytes are published.
+        payloads.push(DiscoveryPayload {
+            topic: format!("homeassistant/image/{cam_identifier}/snapshot/config"),
+            payload: json!({
+                "component": "image",
+                "device": cam_device.clone(),
+                "name": format!("{} Snapshot", camera.camera_label),
+                "default_entity_id": format!("image.{cam_identifier}_snapshot"),
+                "unique_id": format!("{cam_identifier}_snapshot"),
+                "image_topic": snapshot_topic,
+                "availability_topic": availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }),
+        });
+
+        // binary_sensor — active/motion flag.
+        // HA binary_sensor requires state_topic, payload_on, payload_off.
+        payloads.push(DiscoveryPayload {
+            topic: format!("homeassistant/binary_sensor/{cam_identifier}/active/config"),
+            payload: json!({
+                "component": "binary_sensor",
+                "device": cam_device.clone(),
+                "name": format!("{} Active", camera.camera_label),
+                "default_entity_id": format!("binary_sensor.{cam_identifier}_active"),
+                "unique_id": format!("{cam_identifier}_active"),
+                "device_class": "motion",
+                "state_topic": active_topic,
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "availability_topic": availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }),
+        });
+
+        // NOTE: no MQTT camera entity here.  The HA MQTT camera platform is
+        // image-only (no stream_source key), so it cannot serve live video.
+        // Live view is provided by a Generic Camera config entry created at
+        // runtime via the HA config-flow API (`register_generic_camera` in
+        // runtime.rs), with stream_source=rtsp://127.0.0.1:8554/<cam_slug>
+        // (resolved by HA Core, which is host-networked with go2rtc).
+
+        // button — enable camera
+        payloads.push(DiscoveryPayload {
+            topic: format!("homeassistant/button/{cam_identifier}/enable/config"),
+            payload: json!({
+                "component": "button",
+                "device": cam_device.clone(),
+                "name": format!("{} Enable", camera.camera_label),
+                "default_entity_id": format!("button.{cam_identifier}_enable"),
+                "unique_id": format!("{cam_identifier}_enable"),
+                "command_topic": "vigil/commands/control",
+                "payload_press": format!(r#"{{"camera_id":"{}","action":"enable"}}"#, camera.camera_id),
+                "availability_topic": availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }),
+        });
+
+        // button — disable camera
+        payloads.push(DiscoveryPayload {
+            topic: format!("homeassistant/button/{cam_identifier}/disable/config"),
+            payload: json!({
+                "component": "button",
+                "device": cam_device.clone(),
+                "name": format!("{} Disable", camera.camera_label),
+                "default_entity_id": format!("button.{cam_identifier}_disable"),
+                "unique_id": format!("{cam_identifier}_disable"),
+                "command_topic": "vigil/commands/control",
+                "payload_press": format!(r#"{{"camera_id":"{}","action":"disable"}}"#, camera.camera_id),
+                "availability_topic": availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }),
+        });
+
+        // button — snapshot trigger (publishes latest detector evidence PNG to image_topic)
+        payloads.push(DiscoveryPayload {
+            topic: format!("homeassistant/button/{cam_identifier}/snapshot/config"),
+            payload: json!({
+                "component": "button",
+                "device": cam_device.clone(),
+                "name": format!("{} Snapshot", camera.camera_label),
+                "default_entity_id": format!("button.{cam_identifier}_snapshot_trigger"),
+                "unique_id": format!("{cam_identifier}_snapshot_trigger"),
+                "command_topic": "vigil/commands/control",
+                "payload_press": format!(r#"{{"camera_id":"{}","action":"snapshot"}}"#, camera.camera_id),
+                "availability_topic": availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+            }),
         });
     }
 
     payloads
 }
 
-/// WRONG STUB: hardcodes object_class = "person" regardless of input, drops
-/// detection_id, drops evidence_ref, and omits snapshot_ref.
+/// Return the MQTT topic on which the running-condition string is published.
+/// Stable across restarts; derived from the service_id.
+pub fn running_condition_topic(service_id: &str) -> String {
+    format!("vigil/{}/running-condition", slug(service_id))
+}
+
+/// Return the MQTT availability topic for the Vigil service.
 ///
-/// Fails on `detection_event_payload_carries_contract_with_person_empty_zone`:
-/// the non-"person" class value-equality assertion when input is "vehicle".
+/// All Vigil HA entities carry this as their `availability_topic`.  The
+/// runtime publishes `"online"` here on startup and the MQTT last-will
+/// publishes `"offline"` here on unclean disconnect, making every Vigil
+/// entity in HA show "unavailable" when the service goes away.
+///
+/// Uses the raw service_id (not slug-transformed) so it matches the
+/// `avail_topic` that `runtime.rs` constructs inline.
+pub fn service_availability_topic(service_id: &str) -> String {
+    format!("vigil/{}/availability", service_id)
+}
+
+/// Map a detection observation to an event payload for publication to the broker.
 pub fn map_detection_to_event_payload(detection: &DetectionInput) -> EventPayload {
     EventPayload {
-        detection_id: String::new(), // wrong stub: dropped
+        event_type: "vigil_detection".to_string(),
+        detection_id: detection.observation_id.clone(),
         camera: detection.camera_name.clone(),
-        object_class: "person".to_string(), // wrong stub: hardcoded, ignores detection.object_class
+        object_class: detection.object_class.clone(),
         confidence: detection.confidence,
         timestamp_ms: detection.timestamp_ms,
-        evidence_ref: String::new(), // wrong stub: dropped
-        snapshot_ref: String::new(), // wrong stub: dropped
+        evidence_ref: detection.evidence_ref.clone(),
+        snapshot_ref: detection.snapshot_ref.clone(),
         zone: detection.zone.clone(),
     }
 }
 
-/// WRONG STUB: always returns "running" regardless of HealthStatus, causing:
-///   - running_condition_maps_each_named_fault → faults all map to "running" → FAIL
-// Called only from the unit-test module below; suppress the dead-code lint
-// for the non-test lib build (the correct implementation will call this from
-// publish_discovery_to_broker / publish_availability_online).
-#[cfg_attr(not(test), allow(dead_code))]
+/// Map a health status to the running-condition string published on the broker.
 pub(crate) fn map_health_to_running_condition(health: HealthStatus) -> &'static str {
-    let _ = health; // wrong stub: ignores input
-    "running"
+    match health {
+        HealthStatus::Starting => "running",
+        HealthStatus::Ready => "running",
+        HealthStatus::StoreOpenFailed => "store-open-failed",
+        HealthStatus::IngestFailed => "ingest-failed",
+        HealthStatus::DiskFull => "disk-full",
+        HealthStatus::KeepPaceFailed => "keep-pace-failed",
+    }
 }
 
-/// WRONG STUB: maps correction_type string into detection_id and leaves label
-/// empty, causing:
-///   - command_topic_parses_to_channel_agnostic_request → detection_id wrong value → FAIL
+/// Parse a command-topic message into a channel-agnostic CorrectionRequest.
 pub fn parse_command_topic(msg: &CommandTopicMessage) -> Result<CorrectionRequest, ParseError> {
-    // wrong stub: puts correction_type into detection_id and discards label
+    let correction_type = match msg.correction_type.as_str() {
+        "identity" | "Identity" => CorrectionType::Identity,
+        "wrong_class" | "WrongClass" => CorrectionType::WrongClass,
+        "false_alarm" | "FalseAlarm" => CorrectionType::FalseAlarm,
+        other => {
+            return Err(ParseError(format!(
+                "unknown correction_type '{other}'; expected identity|wrong_class|false_alarm"
+            )));
+        }
+    };
     Ok(CorrectionRequest {
-        detection_id: msg.correction_type.clone(), // wrong: should be msg.detection_id
-        label: None,                               // wrong: should be msg.label
-        correction_type: CorrectionType::FalseAlarm, // wrong: should parse msg.correction_type
+        detection_id: msg.detection_id.clone(),
+        label: msg.label.clone(),
+        correction_type,
     })
 }
 
@@ -235,13 +413,25 @@ mod tests {
             })
             .collect();
 
-        // Assert exactly one sub-device linked to parent for one-camera config
+        // Each camera contributes several entity payloads that all share ONE sub-device
+        // identity, so assert exactly one DISTINCT sub-device (by device identifiers) for a
+        // one-camera config — counting payloads would always exceed one.
+        let distinct_sub_devices: std::collections::BTreeSet<&str> = sub_devices
+            .iter()
+            .filter_map(|p| {
+                p.payload
+                    .get("device")
+                    .and_then(|d| d.get("identifiers"))
+                    .and_then(|i| i.get(0))
+                    .and_then(|v| v.as_str())
+            })
+            .collect();
         assert_eq!(
-            sub_devices.len(),
+            distinct_sub_devices.len(),
             1,
-            "expected exactly one per-camera sub-device linked to parent via via_device; \
-             got {}: wrong stub emits flat structure",
-            sub_devices.len()
+            "expected exactly one distinct per-camera sub-device; got {}: wrong stub emits a \
+             flat structure or duplicate sub-device identities",
+            distinct_sub_devices.len()
         );
 
         // Assert sub-device name equals configured camera label, not a generic string
@@ -268,22 +458,41 @@ mod tests {
             })
             .filter_map(|p| p.payload.get("component").and_then(|c| c.as_str()))
             .collect();
+        // Per-camera MQTT entities: event (detection), image (snapshot display),
+        // binary_sensor (active/motion), and button×3 (enable/disable/snapshot).
+        // BTreeSet deduplicates the three "button" payloads into one "button" key.
+        // The live-view camera is a Generic Camera config entry (not MQTT) — see
+        // `register_generic_camera` in runtime.rs.
         let expected_components: std::collections::BTreeSet<&str> =
-            ["event", "image", "binary_sensor", "camera", "button"]
+            ["event", "image", "binary_sensor", "button"]
                 .iter()
                 .copied()
                 .collect();
         assert_eq!(
             via_device_components, expected_components,
-            "per-camera sub-device must carry exactly the closed component set \
-             {{event, image, binary_sensor, camera, button}} and no extras; \
+            "per-camera sub-device must carry exactly the closed MQTT component set \
+             {{event, image, binary_sensor, button}} — no camera component (live view is a \
+             Generic Camera config entry, not MQTT); \
              wrong stub emits flat structure with no via_device → empty component set"
+        );
+
+        // Exact count: 6 per-camera MQTT payloads.
+        // event(1) + image(1) + binary_sensor(1) + button×3(3) = 6.
+        // The camera/live-view is a Generic Camera config entry, NOT an MQTT entity.
+        // Goes RED if an MQTT camera entity is re-added (would be 7).
+        assert_eq!(
+            sub_devices.len(),
+            6,
+            "per-camera MQTT discovery must register exactly 6 entities \
+             {{event, image, binary_sensor, button×3}} — the live-view camera is a \
+             Generic Camera config entry; got {}",
+            sub_devices.len()
         );
 
         // Two-camera config → two sub-devices
         let config_two = two_camera_config();
         let payloads_two = generate_discovery_payloads(&config_two);
-        let sub_devices_two: Vec<&DiscoveryPayload> = payloads_two
+        let distinct_sub_devices_two: std::collections::BTreeSet<&str> = payloads_two
             .iter()
             .filter(|p| {
                 p.payload
@@ -291,12 +500,19 @@ mod tests {
                     .and_then(|d| d.get("via_device"))
                     .is_some()
             })
+            .filter_map(|p| {
+                p.payload
+                    .get("device")
+                    .and_then(|d| d.get("identifiers"))
+                    .and_then(|i| i.get(0))
+                    .and_then(|v| v.as_str())
+            })
             .collect();
         assert_eq!(
-            sub_devices_two.len(),
+            distinct_sub_devices_two.len(),
             2,
-            "expected two per-camera sub-devices for two-camera config; got {}",
-            sub_devices_two.len()
+            "expected two distinct per-camera sub-devices for two-camera config; got {}",
+            distinct_sub_devices_two.len()
         );
     }
 
@@ -403,6 +619,15 @@ mod tests {
             payload.detection_id, detection.observation_id,
             "event payload detection_id must equal the observation id; \
              wrong stub drops it (got empty string)"
+        );
+
+        // event_type must be "vigil_detection" — required by the HA MQTT event entity.
+        // The published JSON must carry this field matching the event_types declaration
+        // in the discovery config or Home Assistant will reject the event.
+        assert_eq!(
+            payload.event_type, "vigil_detection",
+            "event payload event_type must be 'vigil_detection' (HA MQTT event entity \
+             requirement); missing or wrong value breaks HA event recognition"
         );
 
         // object_class must READ from input, not hardcode "person"
@@ -535,6 +760,137 @@ mod tests {
                 .map(|p| p.topic.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    /// RED — wrong stub emits discovery payloads missing required HA MQTT fields.
+    ///
+    /// Each component type has fields that HA requires to function correctly:
+    /// - event: state_topic + event_types
+    /// - image: image_topic
+    /// - binary_sensor: state_topic + payload_on + payload_off
+    /// - All per-camera entities: availability_topic + payload_available + payload_not_available
+    ///
+    /// Note: there is no MQTT camera entity — live view is a Generic Camera config
+    /// entry created via the config-flow API (see `register_generic_camera` in runtime.rs).
+    ///
+    /// Fails on any missing required field.
+    #[test]
+    fn discovery_entities_carry_required_ha_fields() {
+        let config = one_camera_config();
+        let payloads = generate_discovery_payloads(&config);
+
+        for p in &payloads {
+            let component = p
+                .payload
+                .get("component")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            let is_per_camera = p
+                .payload
+                .get("device")
+                .and_then(|d| d.get("via_device"))
+                .is_some();
+            let topic = &p.topic;
+
+            // All per-camera entities must carry availability metadata so HA can
+            // mark Vigil entities unavailable when the add-on disconnects.
+            if is_per_camera {
+                let avail = p
+                    .payload
+                    .get("availability_topic")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                assert!(
+                    !avail.is_empty(),
+                    "entity on topic '{topic}' (component={component}) is missing \
+                     availability_topic; all per-camera entities must carry it"
+                );
+                let avail_payload = p
+                    .payload
+                    .get("payload_available")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                assert_eq!(
+                    avail_payload, "online",
+                    "entity on topic '{topic}' must have payload_available='online'; got '{avail_payload}'"
+                );
+                let unavail_payload = p
+                    .payload
+                    .get("payload_not_available")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                assert_eq!(
+                    unavail_payload, "offline",
+                    "entity on topic '{topic}' must have payload_not_available='offline'; got '{unavail_payload}'"
+                );
+            }
+
+            match component {
+                "event" => {
+                    // HA MQTT event entity requires state_topic and event_types.
+                    let state_topic = p
+                        .payload
+                        .get("state_topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert!(
+                        !state_topic.is_empty(),
+                        "event entity on topic '{topic}' is missing state_topic (required by HA MQTT event)"
+                    );
+                    let event_types = p.payload.get("event_types").and_then(|v| v.as_array());
+                    assert!(
+                        event_types.is_some() && !event_types.unwrap().is_empty(),
+                        "event entity on topic '{topic}' is missing event_types (required by HA MQTT event)"
+                    );
+                }
+                "image" => {
+                    // HA MQTT image entity requires image_topic.
+                    let image_topic = p
+                        .payload
+                        .get("image_topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert!(
+                        !image_topic.is_empty(),
+                        "image entity on topic '{topic}' is missing image_topic (required by HA MQTT image)"
+                    );
+                }
+                "binary_sensor" => {
+                    // HA MQTT binary_sensor requires state_topic, payload_on, payload_off.
+                    let state_topic = p
+                        .payload
+                        .get("state_topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert!(
+                        !state_topic.is_empty(),
+                        "binary_sensor on topic '{topic}' is missing state_topic (required by HA MQTT binary_sensor)"
+                    );
+                    let payload_on = p
+                        .payload
+                        .get("payload_on")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert_eq!(
+                        payload_on, "ON",
+                        "binary_sensor on topic '{topic}' must have payload_on='ON'; got '{payload_on}'"
+                    );
+                    let payload_off = p
+                        .payload
+                        .get("payload_off")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert_eq!(
+                        payload_off, "OFF",
+                        "binary_sensor on topic '{topic}' must have payload_off='OFF'; got '{payload_off}'"
+                    );
+                }
+                _ => {
+                    // No MQTT camera entity — live view is a Generic Camera config
+                    // entry, not an MQTT discovery payload.
+                }
+            }
+        }
     }
 
     /// RED — wrong stub maps correction_type into detection_id, drops label.

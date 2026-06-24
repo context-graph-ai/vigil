@@ -6,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HealthStatus {
+pub enum HealthStatus {
     Starting,
     Ready,
     StoreOpenFailed,
@@ -16,7 +16,7 @@ pub(crate) enum HealthStatus {
 }
 
 impl HealthStatus {
-    fn as_u16(self) -> u16 {
+    pub(crate) fn as_u16(self) -> u16 {
         match self {
             Self::Starting => 0,
             Self::Ready => 1,
@@ -62,27 +62,33 @@ impl HealthStatus {
 }
 
 #[derive(Clone)]
-pub(crate) struct HealthState {
+pub struct HealthState {
     status: Arc<AtomicU16>,
     detail: Arc<Mutex<String>>,
 }
 
+impl Default for HealthState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthState {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             status: Arc::new(AtomicU16::new(HealthStatus::Starting.as_u16())),
             detail: Arc::new(Mutex::new(String::new())),
         }
     }
 
-    pub(crate) fn set(&self, status: HealthStatus, detail: impl Into<String>) {
+    pub fn set(&self, status: HealthStatus, detail: impl Into<String>) {
         if let Ok(mut guard) = self.detail.lock() {
             *guard = detail.into();
         }
         self.status.store(status.as_u16(), Ordering::SeqCst);
     }
 
-    fn snapshot(&self) -> (HealthStatus, String) {
+    pub fn snapshot(&self) -> (HealthStatus, String) {
         let status = HealthStatus::from_u16(self.status.load(Ordering::SeqCst));
         let detail = self
             .detail

@@ -23,16 +23,15 @@ use std::time::{Duration, Instant};
 use context_graph::{EmbedderConfig, Store, StoreConfig};
 use tempfile::TempDir;
 use vigil::{
-    CameraConfig, CorrectionRequest, CorrectionType, MqttConfig, ServiceConfig,
-    generate_discovery_payloads, mqtt_connect_intent, publish_discovery_to_broker,
-    record_correction, spawn_correction_subscriber,
+    CameraConfig, CorrectionRequest, CorrectionType, HealthState, HealthStatus, MqttConfig,
+    ServiceConfig, WiredSubscriberConfig, generate_discovery_payloads, mqtt_connect_intent,
+    publish_discovery_to_broker, record_correction, spawn_detection_publisher,
+    spawn_production_subscriber,
 };
 
 // ── Acceptance-only imports ────────────────────────────────────────────────
 #[cfg(feature = "first-light-acceptance")]
-use vigil::{
-    CorrectionError, publish_detection_event, review_why, spawn_wired_correction_subscriber,
-};
+use vigil::{CorrectionError, publish_detection_event, review_events, review_why};
 
 // ── Acceptance test support (OnceLock-seeded template store) ──────────────
 
@@ -109,6 +108,19 @@ fn open_store_at(path: &Path) -> Result<Store, String> {
         ..StoreConfig::default()
     })
     .map_err(|e| format!("open store {}: {e}", path.display()))
+}
+
+/// Build a minimal `WiredSubscriberConfig` for tests.
+/// Availability and condition topics are test-only placeholders.
+fn test_subscriber_cfg(mqtt: MqttConfig) -> WiredSubscriberConfig {
+    WiredSubscriberConfig {
+        mqtt,
+        client_id: "vigil-test-sub".to_string(),
+        availability_topic: "vigil/test/availability".to_string(),
+        condition_topic: "vigil/test/condition".to_string(),
+        discovery_payloads: vec![],
+        health: HealthState::new(),
+    }
 }
 
 fn free_port() -> Result<u16, String> {
@@ -373,10 +385,21 @@ fn correction_command_channel_overflow_is_loud() {
     };
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
-    // Bounded channel with capacity 1; a correct subscriber fills it and increments overflow.
+    // Bounded channel with capacity 1; the subscriber fills it and increments overflow.
+    // The _rx is held but never drained so the channel stays full after the first message.
     let (tx, _rx) = mpsc::sync_channel::<CorrectionRequest>(1);
 
-    let handle = spawn_correction_subscriber(broker.mqtt_config(), tx, Arc::clone(&overflow_count));
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("data").join("store.contextgraph");
+    let store = Arc::new(open_store_at(&store_path).expect("store"));
+
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
+        store,
+        std::collections::BTreeMap::new(),
+        tx,
+        Arc::clone(&overflow_count),
+    );
 
     // Let the subscriber connect (correct implementation would; wrong stub does not).
     thread::sleep(Duration::from_millis(300));
@@ -406,9 +429,8 @@ fn correction_command_channel_overflow_is_loud() {
 #[cfg(feature = "first-light-acceptance")]
 #[test]
 fn correction_and_event_under_disk_full_fail_loudly() {
-    let (tmp, store_path) = ha_test_support::fresh_store_copy(1)
+    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
         .expect("seeded store for correction_and_event_under_disk_full_fail_loudly");
-    let data_dir = tmp.path().join("data");
 
     let detection_id = {
         let s =
@@ -421,15 +443,18 @@ fn correction_and_event_under_disk_full_fail_loudly() {
         obs[0].id.to_string()
     };
 
-    // Open the store, then restrict the directory to read-only (simulates disk-full).
+    // Open the store and cap the database at its current size so the next INSERT fails.
+    // contextdb's DiskBudgetExceeded error propagates up through record_observation →
+    // record_correction as WriteFailed — this is the real cg write path, not a probe.
     let store =
         ha_test_support::open_store_at(&store_path).expect("open store for disk-constrained write");
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o444));
-    }
+    let db = store.sync_database();
+    let current_size = db
+        .disk_file_size()
+        .expect("store must be file-backed for disk-limit test");
+    db.set_disk_limit(Some(current_size))
+        .expect("set disk limit to current file size");
 
     let req = CorrectionRequest {
         detection_id: detection_id.clone(),
@@ -438,19 +463,12 @@ fn correction_and_event_under_disk_full_fail_loudly() {
     };
     let result = record_correction(&store, req);
 
-    // Restore permissions before tmp drop (so TempDir cleanup succeeds).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o755));
-    }
-
     // Must return Err(WriteFailed) specifically — a real id exists so NoAnchor is wrong.
     // Wrong stub always returns Ok(receipt) → assertion FAILS.
     assert!(
         matches!(result, Err(CorrectionError::WriteFailed(_))),
         "record_correction must return Err(WriteFailed) when the cg write fails against \
-         a constrained store with a real detection id; wrong stub always returns Ok — \
+         a disk-limit-capped store with a real detection id; wrong stub always returns Ok — \
          got: {result:?}"
     );
 }
@@ -595,7 +613,7 @@ fn detection_publishes_event_to_real_broker() {
     );
 }
 
-/// RED — wrong stub `spawn_wired_correction_subscriber` never connects to the broker;
+/// RED — wrong stub the wired subscriber never connects to the broker;
 /// the correction command is published but never internally delivered to `record_correction`,
 /// so nothing lands in cg.
 #[cfg(feature = "first-light-acceptance")]
@@ -611,11 +629,22 @@ fn correction_command_on_broker_lands_in_cg() {
     let detection_id = obs[0].id.to_string();
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
-    // Production path: subscriber wires broker → record_correction internally.
-    // The test observes via cg/review, not by draining a command channel directly.
-    let handle = spawn_wired_correction_subscriber(
-        broker.mqtt_config(),
+    let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
+    // Worker drains the correction channel and writes to cg so review_why can verify.
+    {
+        let store_w = Arc::clone(&store);
+        thread::spawn(move || {
+            while let Ok(req) = cmd_rx.recv() {
+                let _ = record_correction(&store_w, req);
+            }
+        });
+    }
+    // Production subscriber forwards correct commands to the channel.
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
         Arc::clone(&store),
+        std::collections::BTreeMap::new(),
+        cmd_tx,
         Arc::clone(&overflow_count),
     );
 
@@ -653,7 +682,7 @@ fn correction_command_on_broker_lands_in_cg() {
     );
 }
 
-/// RED — wrong stub `spawn_wired_correction_subscriber` never connects; redelivered
+/// RED — wrong stub the wired subscriber never connects; redelivered
 /// commands can't be idempotent if nothing arrives, so nothing lands in cg.
 #[cfg(feature = "first-light-acceptance")]
 #[test]
@@ -668,10 +697,20 @@ fn redelivered_correction_command_is_idempotent() {
     let detection_id = obs[0].id.to_string();
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
-    // Production path: subscriber calls record_correction internally — no cmd_rx drain here.
-    let handle = spawn_wired_correction_subscriber(
-        broker.mqtt_config(),
+    let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
+    {
+        let store_w = Arc::clone(&store);
+        thread::spawn(move || {
+            while let Ok(req) = cmd_rx.recv() {
+                let _ = record_correction(&store_w, req);
+            }
+        });
+    }
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
         Arc::clone(&store),
+        std::collections::BTreeMap::new(),
+        cmd_tx,
         Arc::clone(&overflow_count),
     );
 
@@ -693,7 +732,7 @@ fn redelivered_correction_command_is_idempotent() {
     );
 }
 
-/// RED — wrong stub `spawn_wired_correction_subscriber` never connects; two distinct
+/// RED — wrong stub the wired subscriber never connects; two distinct
 /// corrections on the same detection both require delivery and recording in cg.
 #[cfg(feature = "first-light-acceptance")]
 #[test]
@@ -708,10 +747,20 @@ fn two_distinct_corrections_on_same_detection_both_land() {
     let detection_id = obs[0].id.to_string();
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
-    // Production path: subscriber calls record_correction for each command internally.
-    let handle = spawn_wired_correction_subscriber(
-        broker.mqtt_config(),
+    let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
+    {
+        let store_w = Arc::clone(&store);
+        thread::spawn(move || {
+            while let Ok(req) = cmd_rx.recv() {
+                let _ = record_correction(&store_w, req);
+            }
+        });
+    }
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
         Arc::clone(&store),
+        std::collections::BTreeMap::new(),
+        cmd_tx,
         Arc::clone(&overflow_count),
     );
 
@@ -766,9 +815,20 @@ fn malformed_correction_command_is_rejected_and_subscriber_survives() {
     let broker = MosquittoFixture::start().expect("mosquitto");
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
+    // Capacity large enough so no overflow occurs; test only checks subscriber survival.
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(100);
-    let handle =
-        spawn_correction_subscriber(broker.mqtt_config(), cmd_tx, Arc::clone(&overflow_count));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("data").join("store.contextgraph");
+    let store = Arc::new(open_store_at(&store_path).expect("store"));
+
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
+        store,
+        std::collections::BTreeMap::new(),
+        cmd_tx,
+        Arc::clone(&overflow_count),
+    );
 
     thread::sleep(Duration::from_millis(300));
 
@@ -850,17 +910,17 @@ fn broker_drop_does_not_affect_durable_cg_record() {
     );
 }
 
-/// RED — three sub-checks for operator actions delivered through the production
-/// wired subscriber. All three fail via wrong stub (never connects → nothing routed).
+/// RED — three sub-checks for operator actions delivered through the production subscriber.
+/// All three fail via wrong stub (never connects → nothing routed).
 ///
-/// (a) disable-camera: the wired subscriber receives the command and writes a disable
-///     marker at {data_dir}/camera-disabled/{camera_id}; wrong stub → never connects →
-///     no marker written → assert FAILS.
-/// (b) snapshot: the wired subscriber receives the command and writes a snapshot file
-///     under {data_dir}/snapshots/{camera_id}/; wrong stub → never connects → no file
+/// (a) disable-camera: the subscriber receives the command and writes a disable marker at
+///     {data_dir}/camera-disabled/{camera_id}; wrong stub → never connects → no marker
 ///     written → assert FAILS.
-/// (c) ack (Identity correction) via subscriber → cg; wrong stub → nothing in cg →
+/// (b) ack (Identity correction) via subscriber → cg; wrong stub → nothing in cg →
 ///     review_why shows no corrections → assert_eq FAILS.
+/// (c) snapshot: the subscriber publishes the latest detector evidence PNG to
+///     vigil/{camera_id}/snapshot; wrong stub → never connects → no bytes published →
+///     assert FAILS (non-empty bytes on snapshot topic required).
 #[cfg(feature = "first-light-acceptance")]
 #[test]
 fn operator_action_command_effects_action() {
@@ -874,17 +934,34 @@ fn operator_action_command_effects_action() {
     let detection_id = obs[0].id.to_string();
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
-    // Production path: all operator commands go through the wired subscriber.
-    // No cmd_rx in test body.
-    let handle = spawn_wired_correction_subscriber(
-        broker.mqtt_config(),
+    let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
+    {
+        let store_w = Arc::clone(&store_arc);
+        thread::spawn(move || {
+            while let Ok(req) = cmd_rx.recv() {
+                let _ = record_correction(&store_w, req);
+            }
+        });
+    }
+    // Two live per-camera enabled flags. The production control handler flips
+    // these on disable/enable; disabling A must flip ONLY A's flag — the
+    // differential "camera A stops while B keeps detecting" contract.
+    let flag_a = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag_b = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut camera_flags = std::collections::BTreeMap::new();
+    camera_flags.insert("lower-gate".to_string(), Arc::clone(&flag_a));
+    camera_flags.insert("driveway".to_string(), Arc::clone(&flag_b));
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
         Arc::clone(&store_arc),
+        camera_flags,
+        cmd_tx,
         Arc::clone(&overflow_count),
     );
     thread::sleep(Duration::from_millis(300));
 
     // ── Sub-check (a): disable-camera routes to the named camera ─────────────
-    // The correct wired subscriber connects to the control topic and routes the disable
+    // The correct subscriber connects to the control topic and routes the disable
     // command to camera 'lower-gate', writing a disable marker file at
     // {data_dir}/camera-disabled/lower-gate.  Wrong stub: never connects → no marker
     // written → assert FAILS.
@@ -908,41 +985,78 @@ fn operator_action_command_effects_action() {
          {}; wrong stub never connects to the broker so no marker was written",
         disable_marker.display()
     );
-
-    // ── Sub-check (b): snapshot command produces a file for the named camera ──
-    // The correct wired subscriber receives the snapshot command for 'lower-gate' and
-    // writes a snapshot file under {data_dir}/snapshots/lower-gate/.  Wrong stub: never
-    // connects → no file written → assert FAILS.
-    let snap_dir = data_dir.join("snapshots").join("lower-gate");
-    mosquitto_pub_n(
-        broker.port,
-        "vigil/commands/control",
-        r#"{"camera_id":"lower-gate","action":"snapshot"}"#,
-        1,
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let has_file =
-            snap_dir.is_dir() && fs::read_dir(&snap_dir).map_or(false, |mut d| d.next().is_some());
-        if has_file || Instant::now() >= deadline {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    // The load-bearing differential effect: the production handler flipped ONLY
+    // camera A's live enabled flag. A regression that writes the marker but skips
+    // the flag flip (camera A would keep detecting) fails here.
     assert!(
-        snap_dir.is_dir() && fs::read_dir(&snap_dir).map_or(false, |mut d| d.next().is_some()),
-        "snapshot command must produce a file under {}/; \
-         wrong stub never connects to the broker so no snapshot file was written",
-        snap_dir.display()
+        !flag_a.load(std::sync::atomic::Ordering::SeqCst),
+        "disabling 'lower-gate' must flip its live enabled flag to false (camera A stops detecting)"
+    );
+    assert!(
+        flag_b.load(std::sync::atomic::Ordering::SeqCst),
+        "disabling 'lower-gate' must NOT touch 'driveway' (camera B keeps detecting)"
     );
 
-    // ── Sub-check (c): ack (Identity) via subscriber → cg ─────────────────────
+    // ── Sub-check (b): ack (Identity) via subscriber → cg ─────────────────────
     // Wrong stub: subscriber never calls record_correction → corrections empty → FAILS.
     let ack_payload = format!(
         r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"confirmed: Roshan"}}"#
     );
     mosquitto_pub_n(broker.port, "vigil/commands/correct", &ack_payload, 1);
     thread::sleep(Duration::from_secs(2));
+
+    // ── Sub-check (c): snapshot → real detector evidence PNG published to image topic ──
+    // The subscriber must read the latest detector evidence PNG from disk and publish it
+    // to "vigil/{camera_id}/snapshot" so the HA image entity shows the detection frame.
+    // camera_id for "lower-gate" matches the seeded store's camera slug.
+    // Wrong stub: subscriber never connects → nothing published → assert FAILS.
+    //
+    // An in-process rumqttc subscriber is used (not mosquitto_sub) to avoid the
+    // stdout full-buffering issue: mosquitto_sub buffers output when piped, and
+    // SIGKILL drops the unflushed buffer before capture_pipe can read it.
+    // The in-process subscriber receives the Publish packet directly, no buffering.
+    let broker_port_snap = broker.port;
+    let snap_thread = thread::spawn(move || -> bool {
+        use rumqttc::v5::mqttbytes::QoS;
+        use rumqttc::v5::mqttbytes::v5::Packet;
+        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
+        let mut opts = MqttOptions::new("vigil-test-snap-sub", "127.0.0.1", broker_port_snap);
+        opts.set_keep_alive(Duration::from_secs(5));
+        // Match the production subscriber's packet-size ceiling so the PNG Publish
+        // from the broker (up to 5 MB) is accepted rather than dropped.
+        // In MQTT v5, set_max_packet_size takes a single Option<u32> (incoming size only).
+        opts.set_max_packet_size(Some(5 * 1024 * 1024u32));
+        let (client, mut connection) = Client::new(opts, 10);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut subscribed = false;
+        while Instant::now() < deadline {
+            match connection.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
+                    let _ = client.subscribe("vigil/lower-gate/snapshot", QoS::AtMostOnce);
+                    subscribed = true;
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
+                    // Any non-empty payload is the PNG bytes published by the real impl.
+                    // A wrong stub never connects → this branch is never reached → returns false.
+                    return !p.payload.is_empty();
+                }
+                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        false
+    });
+
+    // Give the in-process subscriber 200 ms to connect and subscribe before sending.
+    thread::sleep(Duration::from_millis(200));
+    mosquitto_pub_n(
+        broker.port,
+        "vigil/commands/control",
+        r#"{"camera_id":"lower-gate","action":"snapshot"}"#,
+        1,
+    );
+    let snap_received = snap_thread.join().unwrap_or(false);
+
     handle.shutdown_and_join();
 
     let why = review_why(&store_arc, &detection_id).expect("review_why");
@@ -953,91 +1067,614 @@ fn operator_action_command_effects_action() {
          wrong stub never connects (corrections = {})",
         why.corrections.len()
     );
+
+    assert!(
+        snap_received,
+        "snapshot command must publish real detector evidence PNG bytes to \
+         vigil/lower-gate/snapshot; wrong stub never connects so nothing was received"
+    );
 }
 
-/// RED — wrong stub `spawn_wired_correction_subscriber` never calls record_correction;
-/// the ack must survive two successive store reopens (two daemon restarts).
+/// RED — `review_events` must return only detection observations; corrections and
+/// other cg-internal observation types must not surface.  `review_why("--latest")`
+/// must pick the newest detection even when a more-recent correction exists.
 ///
-/// Drive ack via the production wired subscriber (no direct record_correction call
-/// in test body). Drop ALL in-process state after delivery attempt. Reopen ONLY the cg
-/// Store (fresh handle each time). Assert via list_observations (no review_why) so there
-/// is no in-process mirror that could answer for a shadowed write.
+/// Wrong stub: no filter applied → corrections appear in `review_events` rows; and
+/// `--latest` might pick the correction instead of the detection.
 #[cfg(feature = "first-light-acceptance")]
 #[test]
-fn acknowledge_survives_reopen_and_restart_via_cg_authority() {
+fn detection_only_events_excludes_corrections() {
     let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
-        .expect("seeded store for acknowledge_survives_reopen_and_restart_via_cg_authority");
-    let broker = MosquittoFixture::start().expect("mosquitto must start");
+        .expect("seeded store for detection_only_events_excludes_corrections");
+    let store = ha_test_support::open_store_at(&store_path).expect("open store");
 
-    let detection_id = {
-        let store = ha_test_support::open_store_at(&store_path).expect("open store");
-        let obs = store.list_observations(None).expect("list");
-        assert!(!obs.is_empty(), "need at least one detection");
-        obs[0].id.to_string()
+    // The seeded template may have more than one detection (OnceLock seeds with minimum=3).
+    // Use the NEWEST detection as the anchor so we can verify that after writing a correction
+    // (which gets an even newer id), `--latest` still picks the newest DETECTION, not the correction.
+    let obs = store.list_observations(None).expect("list_observations");
+    let detection = obs
+        .iter()
+        .filter(|o| o.observation_type == "detection")
+        .max_by_key(|o| o.observed_at)
+        .expect("at least one detection required in seeded store");
+    let detection_id = detection.id.to_string();
+
+    // Write a correction — its v7 UUID timestamp is newer than any existing detection.
+    // It must NOT appear in review_events or be selected by --latest.
+    let req = CorrectionRequest {
+        detection_id: detection_id.clone(),
+        label: Some("acknowledged".to_string()),
+        correction_type: CorrectionType::Identity,
+    };
+    record_correction(&store, req).expect("record_correction must not error");
+
+    // review_events must return ONLY detection rows — the correction must be absent.
+    let events = review_events(&store, 100).expect("review_events must not error");
+    for row in &events.rows {
+        // Find the raw observation to verify its type.
+        let raw = store
+            .list_observations(None)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|o| o.id.to_string() == row.observation_id);
+        if let Some(raw_obs) = raw {
+            assert_eq!(
+                raw_obs.observation_type, "detection",
+                "review_events returned a row for observation {} which has type '{}', not 'detection'; \
+                 only detection observations must surface on the events display path",
+                row.observation_id, raw_obs.observation_type
+            );
+        }
+    }
+
+    // Verify the detection IS present (sanity: filter must not over-strip).
+    let detection_present = events.rows.iter().any(|r| r.observation_id == detection_id);
+    assert!(
+        detection_present,
+        "review_events must include the detection row for {detection_id}; \
+         over-filtering dropped it"
+    );
+
+    // `vigil why --latest` (handle_why_read with "--latest") must select the detection,
+    // not the newer correction.  Wrong stub: no filter → picks the newer correction →
+    // provenance walk fails (no decision/intention).
+    let why = review_why(&store, "--latest")
+        .expect("review_why('--latest') must resolve to the detection, not the newer correction");
+    assert_eq!(
+        why.observation_id, detection_id,
+        "review_why('--latest') must select the newest DETECTION ({}), not the newer \
+         correction; wrong stub picks the correction and the provenance walk fails",
+        detection_id
+    );
+}
+
+/// RED — `record_correction` must return `Err(NoAnchor)` when the anchor observation
+/// exists in cg but has `observation_type != "detection"`.  Zero new observations must
+/// be written (the type guard fires before any write).
+///
+/// Wrong stub: no type check → returns Ok even for a non-detection anchor → assertions FAIL.
+#[cfg(feature = "first-light-acceptance")]
+#[test]
+fn correction_rejected_for_non_detection_anchor() {
+    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
+        .expect("seeded store for correction_rejected_for_non_detection_anchor");
+    let store = ha_test_support::open_store_at(&store_path).expect("open store");
+
+    // Obtain the detection id and then write a correction anchored to it.
+    let obs = store.list_observations(None).expect("list_observations");
+    let detection = obs
+        .iter()
+        .find(|o| o.observation_type == "detection")
+        .expect("at least one detection required");
+    let detection_id = detection.id.to_string();
+
+    let first_correction_req = CorrectionRequest {
+        detection_id: detection_id.clone(),
+        label: None,
+        correction_type: CorrectionType::FalseAlarm,
+    };
+    let receipt = record_correction(&store, first_correction_req)
+        .expect("initial correction on detection must succeed");
+
+    // The correction observation now exists in cg with observation_type = "correction".
+    // Attempt to anchor a second correction to the CORRECTION observation (not the detection).
+    let obs_after = store
+        .list_observations(None)
+        .expect("list after first correction");
+    let count_before_second = obs_after.len();
+
+    let bad_req = CorrectionRequest {
+        detection_id: receipt.correction_id.clone(), // ← anchoring to the correction, not the detection
+        label: Some("bad anchor".to_string()),
+        correction_type: CorrectionType::Identity,
+    };
+    let result = record_correction(&store, bad_req);
+
+    // Must return Err(NoAnchor) — the anchor is valid (exists, well-formed UUID) but
+    // has the wrong type.  Wrong stub: no type check → Ok(receipt) → FAILS.
+    assert!(
+        matches!(result, Err(CorrectionError::NoAnchor(_))),
+        "record_correction anchored to a correction observation (type='correction') must \
+         return Err(NoAnchor); wrong stub has no type check and returns Ok — got: {result:?}"
+    );
+
+    // Zero new observations must have been written (the guard fires before the write).
+    let obs_final = store
+        .list_observations(None)
+        .expect("list after rejected correction");
+    assert_eq!(
+        obs_final.len(),
+        count_before_second,
+        "rejected non-detection anchor must write zero new observations; \
+         wrong stub writes a spurious correction before checking the type (count delta = {})",
+        obs_final.len() as i64 - count_before_second as i64
+    );
+}
+
+// ── Fix B: live running-condition tracks health ────────────────────────────
+
+/// RED — wrong stub publishes hardcoded "running" regardless of health;
+/// subscriber must publish the mapped condition when health changes.
+#[test]
+fn running_condition_tracks_live_health_retained() {
+    let broker = match MosquittoFixture::start() {
+        Ok(b) => b,
+        Err(e) => {
+            if e.contains("not found") {
+                return;
+            }
+            panic!("mosquitto failed: {e}");
+        }
     };
 
-    // Drive ack via the production wired subscriber — no record_correction in test body.
-    {
-        let store =
-            Arc::new(ha_test_support::open_store_at(&store_path).expect("open store for ack"));
-        let overflow_count = Arc::new(AtomicUsize::new(0));
-        let handle = spawn_wired_correction_subscriber(
-            broker.mqtt_config(),
-            Arc::clone(&store),
-            Arc::clone(&overflow_count),
+    thread::sleep(Duration::from_millis(150));
+
+    let health = HealthState::new();
+    health.set(HealthStatus::Ready, "test start");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("data").join("store.contextgraph");
+    let store = Arc::new(open_store_at(&store_path).expect("store"));
+
+    let overflow = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (cmd_tx, _cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
+    let condition_topic = "vigil/test-health-svc/running-condition".to_string();
+
+    // Subscribe to the condition topic using an in-process rumqttc subscriber
+    // before spawning the production subscriber.
+    let broker_port = broker.port;
+    let topic_clone = condition_topic.clone();
+    let sub_buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sub_buf_clone = Arc::clone(&sub_buf);
+    let sub_thread = thread::spawn(move || {
+        use rumqttc::v5::mqttbytes::QoS;
+        use rumqttc::v5::mqttbytes::v5::Packet;
+        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
+        let mut opts = MqttOptions::new("vigil-test-condition-sub", "127.0.0.1", broker_port);
+        opts.set_keep_alive(Duration::from_secs(5));
+        let (client, mut connection) = Client::new(opts, 10);
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut subscribed = false;
+        let mut payloads: Vec<String> = Vec::new();
+        while Instant::now() < deadline {
+            match connection.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
+                    let _ = client.subscribe(&topic_clone, QoS::AtMostOnce);
+                    subscribed = true;
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
+                    if let Ok(s) = std::str::from_utf8(&p.payload) {
+                        payloads.push(s.to_string());
+                    }
+                }
+                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if let Ok(mut g) = sub_buf_clone.lock() {
+            *g = payloads;
+        }
+    });
+
+    // Give the subscriber 300ms to connect and subscribe.
+    thread::sleep(Duration::from_millis(300));
+
+    let cfg = WiredSubscriberConfig {
+        mqtt: broker.mqtt_config(),
+        client_id: "vigil-test-health-sub".to_string(),
+        availability_topic: "vigil/test-health-svc/availability".to_string(),
+        condition_topic,
+        discovery_payloads: vec![],
+        health: health.clone(),
+    };
+    let handle = spawn_production_subscriber(
+        cfg,
+        store,
+        std::collections::BTreeMap::new(),
+        cmd_tx,
+        overflow,
+    );
+
+    // Let the subscriber connect and re-announce (publishes current condition).
+    thread::sleep(Duration::from_millis(500));
+
+    // Flip health to DiskFull — subscriber must detect the change and publish "disk-full".
+    health.set(HealthStatus::DiskFull, "disk full test");
+
+    thread::sleep(Duration::from_millis(600));
+    handle.shutdown_and_join();
+
+    sub_thread.join().ok();
+    let payloads = sub_buf.lock().map(|g| g.clone()).unwrap_or_default();
+
+    // Must have received "disk-full" at some point.
+    assert!(
+        payloads.iter().any(|p| p == "disk-full"),
+        "running-condition must reflect DiskFull health as 'disk-full'; \
+         wrong impl publishes hardcoded 'running' regardless of health — got: {payloads:?}"
+    );
+}
+
+// ── Fix C: long-lived detection publisher + bounded channel + loud overflow ─
+
+/// RED — wrong impl uses a per-detection connection; overflow is never counted
+/// because the channel blocks on connack rather than using try_send.
+#[test]
+fn outbound_detection_publish_channel_overflow_is_loud() {
+    // Use a non-reachable address so the publisher thread never connects —
+    // this means the channel fills immediately (nothing is drained).
+    let config = MqttConfig {
+        broker_host: "127.0.0.1".to_string(),
+        broker_port: 19999, // nothing listening here
+        username: None,
+        password: None,
+    };
+    let health = HealthState::new();
+    health.set(HealthStatus::Ready, "test");
+
+    let (publisher, handle) = spawn_detection_publisher(&config, health.clone());
+
+    // Fill the channel beyond capacity — all sends after the 32nd must overflow.
+    for i in 0..50 {
+        publisher.try_publish(
+            format!("vigil/test/{i}/detection"),
+            r#"{"test":true}"#.to_string(),
         );
-        thread::sleep(Duration::from_millis(300));
-        let ack_payload = format!(
-            r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"acknowledged"}}"#
-        );
-        mosquitto_pub_n(broker.port, "vigil/commands/correct", &ack_payload, 1);
-        thread::sleep(Duration::from_secs(2));
-        handle.shutdown_and_join();
-        // Arc<Store> dropped here — all in-process state released.
     }
 
-    // First reopen — simulates daemon restart.
-    // Read via list_observations ONLY (no review_why).
-    {
-        let store_r1 =
-            ha_test_support::open_store_at(&store_path).expect("open store after first reopen");
-        let all_obs = store_r1
-            .list_observations(None)
-            .expect("list after first reopen");
-        let correction_in_cg = all_obs.iter().any(|o| {
-            o.observed_properties
-                .get("anchored_detection_id")
-                .or_else(|| o.properties.get("anchored_detection_id"))
-                .and_then(|v| v.as_str())
-                == Some(detection_id.as_str())
-        });
-        assert!(
-            correction_in_cg,
-            "acknowledged correction must persist in cg after first store reopen; \
-             wrong stub subscriber never calls record_correction → nothing written \
-             → anchored_detection_id '{detection_id}' absent from list_observations"
-        );
-    }
+    thread::sleep(Duration::from_millis(200));
+    handle.shutdown_and_join();
 
-    // Second reopen — simulates a second restart (e.g. add-on update).
-    {
-        let store_r2 =
-            ha_test_support::open_store_at(&store_path).expect("open store after second reopen");
-        let all_obs_2 = store_r2
-            .list_observations(None)
-            .expect("list after second reopen");
-        let still_in_cg = all_obs_2.iter().any(|o| {
-            o.observed_properties
-                .get("anchored_detection_id")
-                .or_else(|| o.properties.get("anchored_detection_id"))
-                .and_then(|v| v.as_str())
-                == Some(detection_id.as_str())
-        });
-        assert!(
-            still_in_cg,
-            "acknowledged correction must survive a second store reopen; \
-             wrong stub never wrote to cg so both reopens show no correction \
-             (detection_id = {detection_id})"
+    let overflow = publisher.overflow_count.load(Ordering::SeqCst);
+    assert!(
+        overflow > 0,
+        "try_publish must increment overflow_count when the channel is full; \
+         wrong impl silently drops without incrementing — got overflow={overflow}"
+    );
+
+    // Health must have been flipped to KeepPaceFailed on overflow.
+    let (status, _) = health.snapshot();
+    assert_eq!(
+        status,
+        HealthStatus::KeepPaceFailed,
+        "overflow must flip health to KeepPaceFailed; \
+         wrong impl leaves health unchanged — got status={status:?}"
+    );
+}
+
+/// RED — wrong impl opens a fresh connection per publish (blocks up to 10s on connack).
+/// try_publish must return without waiting for the broker.
+#[test]
+fn detection_publish_does_not_block_when_broker_unreachable() {
+    let config = MqttConfig {
+        broker_host: "127.0.0.1".to_string(),
+        broker_port: 19998, // nothing listening
+        username: None,
+        password: None,
+    };
+    let health = HealthState::new();
+    let (publisher, handle) = spawn_detection_publisher(&config, health);
+
+    let start = Instant::now();
+    // 10 publishes — must ALL return well under 100ms total (no connection attempt per send).
+    for i in 0..10 {
+        publisher.try_publish(
+            format!("vigil/test/{i}/detection"),
+            r#"{"detection_id":"test"}"#.to_string(),
         );
     }
+    let elapsed = start.elapsed();
+
+    handle.shutdown_and_join();
+
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "10 try_publish calls must complete in <100ms even when the broker is unreachable; \
+         wrong impl opens a connection per publish (waits up to 10s connack) — took {elapsed:?}"
+    );
+}
+
+// ── GAP 3: motion binary_sensor active feed ───────────────────────────────
+
+/// RED — wrong stub: notify_active is a no-op (missing channel write) so nothing
+/// arrives on the active topic.  The production path: detection fires →
+/// notify_active → publisher publishes "ON" retained to the camera's active topic.
+#[test]
+fn detection_fires_active_sensor_on() {
+    let broker = match MosquittoFixture::start() {
+        Ok(b) => b,
+        Err(e) => {
+            if e.contains("not found") {
+                return;
+            }
+            panic!("mosquitto failed: {e}");
+        }
+    };
+    thread::sleep(Duration::from_millis(150));
+
+    let active_topic = "vigil/home-farm/lower-gate/active";
+
+    // Subscribe to the active topic before spawning the publisher.
+    let broker_port = broker.port;
+    let topic_owned = active_topic.to_string();
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_clone = Arc::clone(&received);
+    let sub_thread = thread::spawn(move || {
+        use rumqttc::v5::mqttbytes::QoS;
+        use rumqttc::v5::mqttbytes::v5::Packet;
+        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
+        let mut opts = MqttOptions::new("vigil-test-active-sub", "127.0.0.1", broker_port);
+        opts.set_keep_alive(Duration::from_secs(5));
+        let (client, mut connection) = Client::new(opts, 10);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut subscribed = false;
+        let mut payloads: Vec<String> = Vec::new();
+        while Instant::now() < deadline {
+            match connection.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
+                    let _ = client.subscribe(&topic_owned, QoS::AtMostOnce);
+                    subscribed = true;
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
+                    if let Ok(s) = std::str::from_utf8(&p.payload) {
+                        payloads.push(s.to_string());
+                    }
+                }
+                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            if !payloads.is_empty() {
+                break;
+            }
+        }
+        if let Ok(mut g) = received_clone.lock() {
+            *g = payloads;
+        }
+    });
+
+    // Give the subscriber 300ms to connect and subscribe.
+    thread::sleep(Duration::from_millis(300));
+
+    let health = HealthState::new();
+    health.set(HealthStatus::Ready, "test");
+    let (publisher, handle) = spawn_detection_publisher(&broker.mqtt_config(), health);
+
+    // Give the publisher thread time to connect (initial reconnect delay 500ms).
+    thread::sleep(Duration::from_millis(700));
+
+    publisher.notify_active(active_topic.to_string());
+
+    // Wait for the retained ON to propagate broker → subscriber.
+    thread::sleep(Duration::from_millis(800));
+    handle.shutdown_and_join();
+    sub_thread.join().ok();
+
+    let msgs = received.lock().map(|g| g.clone()).unwrap_or_default();
+    assert!(
+        msgs.iter().any(|m| m == "ON"),
+        "notify_active must publish 'ON' retained to the camera's active topic; \
+         wrong stub never sends to channel → subscriber sees nothing — received: {msgs:?}"
+    );
+}
+
+// ── Item 6: long-lived publisher happy path + typed E2E correction ─────────
+
+/// RED — the overflow and non-block tests only cover failure paths; the PRODUCTION
+/// path (spawn_detection_publisher → try_publish → broker receipt) was exercised by
+/// the old per-connection publish_detection_event, not by the new publisher.
+/// Wrong stub: try_publish puts the message on the channel but the background thread
+/// never calls client.publish (broken publish loop) → subscriber sees nothing.
+#[cfg(feature = "first-light-acceptance")]
+#[test]
+fn detection_publisher_delivers_to_broker() {
+    let broker = match MosquittoFixture::start() {
+        Ok(b) => b,
+        Err(e) => {
+            if e.contains("not found") {
+                return;
+            }
+            panic!("mosquitto failed: {e}");
+        }
+    };
+    thread::sleep(Duration::from_millis(150));
+
+    let topic = "vigil/test/camera-1/detection";
+    let payload = r#"{"class_name":"person","confidence":0.95}"#;
+
+    // Subscribe to the topic in-process before spawning the publisher.
+    let broker_port = broker.port;
+    let topic_owned = topic.to_string();
+    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let received_clone = Arc::clone(&received);
+    let sub_thread = thread::spawn(move || {
+        use rumqttc::v5::mqttbytes::QoS;
+        use rumqttc::v5::mqttbytes::v5::Packet;
+        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
+        let mut opts = MqttOptions::new("vigil-test-det-sub", "127.0.0.1", broker_port);
+        opts.set_keep_alive(Duration::from_secs(5));
+        let (client, mut connection) = Client::new(opts, 10);
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut subscribed = false;
+        let mut payloads: Vec<String> = Vec::new();
+        while Instant::now() < deadline {
+            match connection.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
+                    let _ = client.subscribe(&topic_owned, QoS::AtMostOnce);
+                    subscribed = true;
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
+                    if let Ok(s) = std::str::from_utf8(&p.payload) {
+                        payloads.push(s.to_string());
+                    }
+                }
+                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            if !payloads.is_empty() {
+                break;
+            }
+        }
+        if let Ok(mut g) = received_clone.lock() {
+            *g = payloads;
+        }
+    });
+
+    // Give the subscriber 300ms to connect and subscribe.
+    thread::sleep(Duration::from_millis(300));
+
+    let health = HealthState::new();
+    health.set(HealthStatus::Ready, "test");
+    let (publisher, handle) = spawn_detection_publisher(&broker.mqtt_config(), health);
+
+    // Give the publisher thread time to connect (default reconnect delay is 500ms).
+    thread::sleep(Duration::from_millis(700));
+
+    publisher.try_publish(topic.to_string(), payload.to_string());
+
+    // Wait for the message to propagate broker → subscriber.
+    thread::sleep(Duration::from_millis(1000));
+    handle.shutdown_and_join();
+    sub_thread.join().ok();
+
+    let msgs = received.lock().map(|g| g.clone()).unwrap_or_default();
+    assert!(
+        msgs.iter().any(|m| m == payload),
+        "spawn_detection_publisher → try_publish must deliver the payload to the broker; \
+         wrong stub's publish loop never calls client.publish — received: {msgs:?}"
+    );
+}
+
+/// RED — wrong stub: parse_command_topic returns None for correction payloads
+/// so record_correction is never called and nothing lands in cg.
+/// Drive the production path end-to-end: MQTT correct command →
+/// parse_command_topic → record_correction → cg read-back.
+/// Covers both false_alarm (no label) and wrong_class + label="cat".
+#[cfg(feature = "first-light-acceptance")]
+#[test]
+fn typed_correction_via_mqtt_lands_in_cg() {
+    let (_tmp, store_path) = ha_test_support::fresh_store_copy(2)
+        .expect("seeded store for typed_correction_via_mqtt_lands_in_cg");
+    let store = Arc::new(ha_test_support::open_store_at(&store_path).expect("open store"));
+
+    let obs = store.list_observations(None).expect("list observations");
+    let mut detections: Vec<_> = obs
+        .iter()
+        .filter(|o| o.observation_type == "detection")
+        .collect();
+    assert!(
+        detections.len() >= 2,
+        "need at least 2 detections in the seeded store; got {}",
+        detections.len()
+    );
+    detections.sort_by_key(|o| o.id.to_string());
+    let detection_a = detections[0].id.to_string();
+    let detection_b = detections[1].id.to_string();
+
+    let broker = match MosquittoFixture::start() {
+        Ok(b) => b,
+        Err(e) => {
+            if e.contains("not found") {
+                return;
+            }
+            panic!("mosquitto failed: {e}");
+        }
+    };
+    thread::sleep(Duration::from_millis(150));
+
+    let overflow = Arc::new(AtomicUsize::new(0));
+    let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
+    {
+        let store_w = Arc::clone(&store);
+        thread::spawn(move || {
+            while let Ok(req) = cmd_rx.recv() {
+                let _ = record_correction(&store_w, req);
+            }
+        });
+    }
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
+        Arc::clone(&store),
+        std::collections::BTreeMap::new(),
+        cmd_tx,
+        Arc::clone(&overflow),
+    );
+
+    // Give the subscriber time to connect and subscribe.
+    thread::sleep(Duration::from_millis(400));
+
+    // false_alarm on detection A (no label).
+    let fa_payload =
+        format!(r#"{{"detection_id":"{detection_a}","correction_type":"false_alarm"}}"#);
+    mosquitto_pub_n(broker.port, "vigil/commands/correct", &fa_payload, 1);
+
+    // wrong_class + label="cat" on detection B.
+    let wc_payload = format!(
+        r#"{{"detection_id":"{detection_b}","correction_type":"wrong_class","label":"cat"}}"#
+    );
+    mosquitto_pub_n(broker.port, "vigil/commands/correct", &wc_payload, 1);
+
+    // Wait for both corrections to be processed into cg.
+    thread::sleep(Duration::from_secs(2));
+    handle.shutdown_and_join();
+    // Brief drain for the correction worker thread.
+    thread::sleep(Duration::from_millis(200));
+
+    // Read back FalseAlarm on A via review_why.
+    let why_a = review_why(&*store, &detection_a)
+        .expect("review_why(A) must not error after false_alarm correction");
+    assert_eq!(
+        why_a.corrections.len(),
+        1,
+        "false_alarm MQTT command must record a FalseAlarm correction in cg; \
+         wrong stub parse_command_topic returns None → record_correction never called → 0 corrections"
+    );
+    assert_eq!(
+        why_a.corrections[0].correction_type,
+        CorrectionType::FalseAlarm,
+        "correction type must be FalseAlarm; got {:?}",
+        why_a.corrections[0].correction_type
+    );
+
+    // Read back WrongClass + label="cat" on B via review_why.
+    let why_b = review_why(&*store, &detection_b)
+        .expect("review_why(B) must not error after wrong_class correction");
+    assert_eq!(
+        why_b.corrections.len(),
+        1,
+        "wrong_class MQTT command must record a WrongClass correction in cg; \
+         wrong stub returns None → 0 corrections"
+    );
+    assert_eq!(
+        why_b.corrections[0].correction_type,
+        CorrectionType::WrongClass,
+        "correction type must be WrongClass; got {:?}",
+        why_b.corrections[0].correction_type
+    );
+    assert_eq!(
+        why_b.corrections[0].label.as_deref(),
+        Some("cat"),
+        "wrong_class correction label must read back as 'cat'; \
+         wrong stub drops the label — got {:?}",
+        why_b.corrections[0].label
+    );
 }

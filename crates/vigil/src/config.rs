@@ -4,13 +4,27 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::ha_mqtt_tasks::MqttConfig;
+
+/// One camera entry in the multi-camera list.
+#[derive(Debug, Clone)]
+pub(crate) struct CameraEntry {
+    pub(crate) name: String,
+    pub(crate) rtsp_url: Option<String>,
+    pub(crate) username: Option<String>,
+    pub(crate) password: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeConfig {
     pub(crate) data_dir: PathBuf,
     pub(crate) store_path: PathBuf,
     pub(crate) health_port: u16,
     pub(crate) site_name: String,
+    /// First camera's name — retained for backward-compat with log_startup and
+    /// single-camera deployments.
     pub(crate) camera_name: String,
+    /// First camera's RTSP URL — retained for backward compat.
     pub(crate) rtsp_url: Option<String>,
     pub(crate) rtsp_username: Option<String>,
     pub(crate) rtsp_password: Option<String>,
@@ -18,6 +32,24 @@ pub(crate) struct RuntimeConfig {
     pub(crate) detector_model_path: Option<PathBuf>,
     pub(crate) detector_confidence_threshold: f64,
     pub(crate) detector_sample_frames: usize,
+    /// Canonical multi-camera list.  Always contains at least one entry (the
+    /// single camera_name/rtsp_url for backward compat).
+    pub(crate) cameras: Vec<CameraEntry>,
+    /// MQTT broker connection, present when a broker is configured (e.g. via
+    /// HA Supervisor MQTT service or env vars MQTT_HOST / MQTT_PORT).
+    pub(crate) mqtt: Option<MqttConfig>,
+    /// Stable service identifier derived from site_name or explicitly configured
+    /// via VIGIL_SERVICE_ID.  Used as the MQTT topic namespace and HA device id.
+    pub(crate) service_id: String,
+}
+
+/// Per-camera entry as it appears in TOML/JSON config files.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CameraEntryPartial {
+    name: String,
+    rtsp_url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -34,6 +66,14 @@ struct PartialConfig {
     detector_model_path: Option<PathBuf>,
     detector_confidence_threshold: Option<f64>,
     detector_sample_frames: Option<usize>,
+    /// Multi-camera list.  When present, supersedes camera_name/rtsp_url.
+    cameras: Option<Vec<CameraEntryPartial>>,
+    // MQTT broker — provided by HA Supervisor or env vars when broker is configured.
+    mqtt_host: Option<String>,
+    mqtt_port: Option<u16>,
+    mqtt_username: Option<String>,
+    mqtt_password: Option<String>,
+    service_id: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -81,9 +121,35 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             detector_model_path: cli.detector_model_path,
             detector_confidence_threshold: cli.detector_confidence_threshold,
             detector_sample_frames: cli.detector_sample_frames,
+            // Multi-camera list not exposed as CLI flags; comes from config file or options.json.
+            cameras: None,
+            // MQTT fields are not exposed as CLI flags; they come from env vars or options.json.
+            mqtt_host: None,
+            mqtt_port: None,
+            mqtt_username: None,
+            mqtt_password: None,
+            service_id: None,
         },
     );
     merge(&mut partial, env_overrides()?);
+
+    // If MQTT_HOST was not supplied via options.json or env, attempt Supervisor services API.
+    // Only called when SUPERVISOR_TOKEN is present (i.e. running as an HA add-on).
+    if partial.mqtt_host.is_none()
+        && let Some(cfg) = crate::supervisor::fetch_supervisor_mqtt()
+    {
+        partial.mqtt_host = Some(cfg.broker_host);
+        // Only override port/creds if the env didn't provide them explicitly.
+        if partial.mqtt_port.is_none() {
+            partial.mqtt_port = Some(cfg.broker_port);
+        }
+        if partial.mqtt_username.is_none() {
+            partial.mqtt_username = cfg.username;
+        }
+        if partial.mqtt_password.is_none() {
+            partial.mqtt_password = cfg.password;
+        }
+    }
 
     let data_dir = partial.data_dir.unwrap_or_else(default_data_dir);
     let store_path = partial
@@ -104,6 +170,42 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         "detector_sample_frames",
     )?;
 
+    // MQTT broker: present when a host is configured.
+    let mqtt = partial.mqtt_host.map(|host| MqttConfig {
+        broker_host: host,
+        broker_port: partial.mqtt_port.unwrap_or(1883),
+        username: partial.mqtt_username,
+        password: partial.mqtt_password,
+    });
+
+    // Stable service identifier — explicit override or derived from site_name.
+    let service_id = partial
+        .service_id
+        .unwrap_or_else(|| config_slug(&site_name));
+
+    // Build the canonical multi-camera list.
+    // If a `cameras` list is provided in config/JSON it supersedes the single
+    // camera_name / rtsp_url fields.  Otherwise synthesize a one-element list
+    // from the single-camera fields (backward compat).
+    let cameras: Vec<CameraEntry> = if let Some(cam_list) = partial.cameras {
+        cam_list
+            .into_iter()
+            .map(|c| CameraEntry {
+                name: c.name,
+                rtsp_url: c.rtsp_url,
+                username: c.username,
+                password: c.password,
+            })
+            .collect()
+    } else {
+        vec![CameraEntry {
+            name: camera_name.clone(),
+            rtsp_url: partial.rtsp_url.clone(),
+            username: partial.rtsp_username.clone(),
+            password: partial.rtsp_password.clone(),
+        }]
+    };
+
     Ok(RuntimeConfig {
         data_dir,
         store_path,
@@ -117,6 +219,9 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         detector_model_path: partial.detector_model_path,
         detector_confidence_threshold,
         detector_sample_frames,
+        cameras,
+        mqtt,
+        service_id,
     })
 }
 
@@ -261,6 +366,24 @@ fn env_overrides() -> Result<PartialConfig, String> {
             )?),
             Err(_) => None,
         },
+        // MQTT credentials — HA Supervisor injects these via env when `services: [mqtt:want]`
+        // is declared in the add-on config.yaml.
+        mqtt_host: std::env::var("MQTT_HOST").ok(),
+        mqtt_port: match std::env::var("MQTT_PORT") {
+            Ok(value) => Some(
+                value
+                    .parse::<u16>()
+                    .map_err(|error| format!("MQTT_PORT must be a TCP port: {error}"))?,
+            ),
+            Err(_) => None,
+        },
+        mqtt_username: std::env::var("MQTT_USER")
+            .ok()
+            .or_else(|| std::env::var("MQTT_USERNAME").ok()),
+        mqtt_password: std::env::var("MQTT_PASSWORD").ok(),
+        service_id: std::env::var("VIGIL_SERVICE_ID").ok(),
+        // Multi-camera list is not configurable via env vars; comes from config file only.
+        cameras: None,
     })
 }
 
@@ -301,6 +424,38 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.detector_sample_frames.is_some() {
         target.detector_sample_frames = source.detector_sample_frames;
     }
+    if source.mqtt_host.is_some() {
+        target.mqtt_host = source.mqtt_host;
+    }
+    if source.mqtt_port.is_some() {
+        target.mqtt_port = source.mqtt_port;
+    }
+    if source.mqtt_username.is_some() {
+        target.mqtt_username = source.mqtt_username;
+    }
+    if source.mqtt_password.is_some() {
+        target.mqtt_password = source.mqtt_password;
+    }
+    if source.cameras.is_some() {
+        target.cameras = source.cameras;
+    }
+    if source.service_id.is_some() {
+        target.service_id = source.service_id;
+    }
+}
+
+/// Derive a stable lowercase slug from a human-readable string.
+/// Used to turn site_name into a service_id when no explicit id is configured.
+fn config_slug(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn default_data_dir() -> PathBuf {

@@ -6,6 +6,9 @@ LABEL io.hass.arch="${BUILD_ARCH}" \
       io.hass.type="app" \
       io.hass.version="${BUILD_VERSION}"
 COPY vigil /usr/local/bin/vigil
+# Bundle the Lovelace gallery card so startup can copy it to /config/www/
+# and register it as a frontend resource without requiring manual steps.
+COPY www/ /www/
 ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000

@@ -839,8 +839,19 @@ declares_privileged_resources() {
 }
 
 supervisor_options_payload() {
-  jq -cn --arg store_path "$expected_runtime_store_path" --argjson health_port "$expected_health_port" \
-    '{store_path: $store_path, health_port: $health_port}'
+  # store_path + health_port are always set. A camera is added only when
+  # VIGIL_TEST_CAMERA_RTSP is exported — the detection/entity/correction/live-view
+  # checks (TH-12..16) need Vigil pointed at a moving RTSP source; the first-light
+  # lifecycle checks (TH-01..11) run cameraless (empty list). The add-on reads this
+  # `cameras` list from /data/options.json (config.rs read_options_json).
+  local cams='[]'
+  if [[ -n "${VIGIL_TEST_CAMERA_RTSP:-}" ]]; then
+    cams="$(jq -cn --arg url "$VIGIL_TEST_CAMERA_RTSP" --arg name "${VIGIL_TEST_CAMERA_NAME:-test-cam}" \
+      '[{name: $name, rtsp_url: $url}]')"
+  fi
+  jq -cn --arg store_path "$expected_runtime_store_path" \
+    --argjson health_port "$expected_health_port" --argjson cameras "$cams" \
+    '{store_path: $store_path, health_port: $health_port, cameras: $cameras}'
 }
 
 apply_supervisor_options() {
@@ -1220,6 +1231,21 @@ ha_rest_api_run() {
   fi
 }
 
+ha_camera_proxy_sha256() {
+  # Fetch a camera entity's current JPEG frame via the Core camera_proxy and
+  # return its sha256.  The hash is computed where the bytes are (inside the VM
+  # for the ssh path) so raw JPEG never crosses ssh as a shell variable.
+  local entity="$1"
+  if [[ -n "$haos_ssh_target" ]]; then
+    ssh -n -o BatchMode=yes "$haos_ssh_target" \
+      "sudo docker exec hassio_cli sh -c 'curl -fsS --max-time 5 -H \"Authorization: Bearer \$SUPERVISOR_TOKEN\" \"http://supervisor/ha/api/camera_proxy/${entity}\" | sha256sum | cut -d\" \" -f1'" \
+      2>/dev/null || true
+  else
+    curl_run -fsS --max-time 5 -H "Authorization: Bearer ${ha_api_token}" \
+      "${ha_api_base}/api/camera_proxy/${entity}" 2>/dev/null | sha256sum | cut -d' ' -f1 || true
+  fi
+}
+
 vigil_exec_cmd() {
   # Execute a command inside the running Vigil add-on container.
   local container_id
@@ -1478,7 +1504,48 @@ no video codec; the live-view stream must deliver decodable video through the HA
 wrong stub wires go2rtc at a host-only address that is unreachable from inside the HA network namespace"
     return
   fi
-  pass "$id" "live view RTSP stream delivers video codec '${video_codec}' as probed via ffprobe from inside the HA network namespace"
+  # ── Live-view ENTITY + MOVING-VIDEO assertion (the real owner-facing gate) ──
+  # The codec probe above proves the go2rtc stream side. This proves the entity
+  # the OWNER opens exists as a streaming camera AND renders MOVING video: a
+  # black/frozen tile (wrong stream_source host, or an image-only entity) yields
+  # identical frames across time. Discovery is by scanning camera.* (robust to
+  # the Generic Camera's default entity_id naming). In the haos-test VM the only
+  # cameras are Vigil's, so "some camera.* streams moving video" == Vigil's works.
+  # NOTE: this assertion is validated/tuned during HA-OS VM bring-up alongside the
+  # config-flow registration (register_generic_camera) — it must NOT be removed to
+  # make the suite green; identical-frames is a real black-tile failure.
+  local states_json camera_list cam moving_cam=""
+  states_json="$(ha_rest_api_run /api/states 2>/dev/null || true)"
+  camera_list="$(jq -er '.[] | select(.entity_id | startswith("camera.")) | .entity_id' <<< "$states_json" 2>/dev/null || true)"
+  if [[ -z "$camera_list" ]]; then
+    fail "$id" "no camera.* entity in HA states; the live-view Generic Camera config entry must be created \
+via the config-flow API (register_generic_camera) — wrong stub registers the go2rtc stream but never the entity"
+    return
+  fi
+  while IFS= read -r cam; do
+    [[ -n "$cam" ]] || continue
+    local stream_type h1 h2
+    # frontend_stream_type present == HA treats it as a streaming camera (web_rtc on 2024.11+, else hls)
+    stream_type="$(jq -er --arg e "$cam" \
+      '.[] | select(.entity_id == $e) | .attributes.frontend_stream_type // empty' \
+      <<< "$states_json" 2>/dev/null || true)"
+    [[ -n "$stream_type" ]] || continue
+    h1="$(ha_camera_proxy_sha256 "$cam")"
+    sleep 1
+    h2="$(ha_camera_proxy_sha256 "$cam")"
+    if [[ -n "$h1" && -n "$h2" && "$h1" != "$h2" ]]; then
+      moving_cam="${cam} (frontend_stream_type=${stream_type})"
+      break
+    fi
+  done <<< "$camera_list"
+  if [[ -z "$moving_cam" ]]; then
+    fail "$id" "no streaming camera entity delivered MOVING video: every camera.* with a frontend_stream_type \
+returned identical JPEG frames across 1s — a black/frozen tile means a wrong stream_source host (must be the \
+HA-Core-loopback rtsp://127.0.0.1:8554/<slug>) or an image-only entity. The looping fixture must yield differing frames"
+    return
+  fi
+  pass "$id" "live view: go2rtc stream codec '${video_codec}' (probed inside HA net), and camera entity \
+${moving_cam} renders MOVING video (frame-difference across 1s)"
 }
 
 th16() {

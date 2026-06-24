@@ -1,6 +1,10 @@
-use std::net::TcpStream;
+use std::collections::{BTreeMap, HashSet};
 
-use context_graph::Store;
+use context_graph::{
+    ContextId, EvidenceId, EvidenceKind, EvidenceProducer, EvidenceRef, ObservationId,
+    RecordObservation, RetentionStatus, Store,
+};
+use serde_json::Value;
 
 use crate::live_read::{handle_events_read, handle_why_read};
 
@@ -85,7 +89,13 @@ pub struct EventRow {
     pub frame_index: u64,
     pub clip_ref: String,
     pub detector_image_ref: String,
+    /// True when a WrongClass or FalseAlarm correction has been recorded against this
+    /// detection.  An Identity ("confirmed") correction does NOT set this flag — it is
+    /// a positive signal surfaced separately via `confirmed`.
     pub correction_recorded: bool,
+    /// True when an Identity correction ("confirmed") has been recorded against this
+    /// detection.  Distinct from `correction_recorded` which is for WrongClass / FalseAlarm.
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -110,37 +120,205 @@ impl std::fmt::Display for ReviewError {
 
 impl std::error::Error for ReviewError {}
 
-// ── Wrong stubs ────────────────────────────────────────────────────────────
+// ── Correction type serialization helpers ──────────────────────────────────
 
-/// WRONG STUB: writes nothing to cg (correction held in neither cg nor any
-/// durable store); always returns Ok carrying a fixed fake receipt id regardless
-/// of whether the detection_id resolves, causing:
-///   - correction_writes_durably_through_cg_record_path  → no correction in cg → FAIL
-///   - correction_held_outside_cg_fails_readback         → no correction in cg → FAIL
-///   - correction_survives_daemon_restart                → no correction after reopen → FAIL
-///   - record_correction_with_unknown_detection_id_returns_typed_error → Ok not Err → FAIL
-///   - correction_and_event_under_disk_full_fail_loudly  → Ok not WriteFailed → FAIL
+fn correction_type_to_str(ct: &CorrectionType) -> &'static str {
+    match ct {
+        CorrectionType::Identity => "Identity",
+        CorrectionType::WrongClass => "WrongClass",
+        CorrectionType::FalseAlarm => "FalseAlarm",
+    }
+}
+
+fn correction_type_from_str(s: &str) -> Option<CorrectionType> {
+    match s {
+        "Identity" => Some(CorrectionType::Identity),
+        "WrongClass" => Some(CorrectionType::WrongClass),
+        "FalseAlarm" => Some(CorrectionType::FalseAlarm),
+        _ => None,
+    }
+}
+
+// ── Correction implementation ──────────────────────────────────────────────
+
+/// Write a human correction anchored to the named detection into cg authority.
 ///
-/// Also opens an outbound socket for correction_path_makes_no_outbound_network_beyond_broker.
+/// The correction is stored as a cg Observation whose `observed_properties` carry:
+///   - `anchored_detection_id`: the detection ObservationId string (the link)
+///   - `correction_type`: "Identity" | "WrongClass" | "FalseAlarm"
+///   - `label`: the label string, if provided
+///
+/// Idempotent: if an identical correction (same detection_id + correction_type
+/// + label) already exists, returns the existing receipt without a second write.
+///
+/// Returns `NoAnchor` when the detection_id is malformed or unknown.
+/// Returns `WriteFailed` when the cg write fails (e.g. read-only data dir).
 pub fn record_correction(
-    _store: &Store,
-    _request: CorrectionRequest,
+    store: &Store,
+    request: CorrectionRequest,
 ) -> Result<CorrectionReceipt, CorrectionError> {
-    // wrong stub: open an outbound socket — caught by the no-egress monitor test
-    let _ = TcpStream::connect("127.0.0.1:19876");
-    // wrong stub: return fake receipt without writing anything to cg
+    // Parse detection_id → ObservationId.
+    let uuid = uuid::Uuid::parse_str(&request.detection_id)
+        .map_err(|e| CorrectionError::NoAnchor(format!("invalid detection id: {e}")))?;
+    let detection_obs_id = ObservationId::from(uuid);
+
+    // Verify the detection exists in cg.
+    let detection_obs = store
+        .get_observation(detection_obs_id)
+        .map_err(|e| CorrectionError::NoAnchor(format!("detection not found: {e}")))?;
+
+    // Reject non-detection anchors — a correction must be anchored to a detection, not to
+    // another correction or any other cg-internal observation type.  Anchoring a correction
+    // to itself or to a prior correction would break the provenance model.
+    if detection_obs.observation_type != "detection" {
+        return Err(CorrectionError::NoAnchor(format!(
+            "anchor {} has type '{}', expected 'detection'",
+            request.detection_id, detection_obs.observation_type
+        )));
+    }
+
+    let correction_type_str = correction_type_to_str(&request.correction_type);
+
+    // Dedup: return existing receipt if an identical correction is already in cg.
+    // Scope to the detection's context so the scan stays bounded — never the whole store.
+    let all_obs = store
+        .list_observations(Some(detection_obs.context_id))
+        .map_err(|e| CorrectionError::WriteFailed(format!("list_observations failed: {e}")))?;
+
+    for obs in &all_obs {
+        let anchored = obs
+            .observed_properties
+            .get("anchored_detection_id")
+            .or_else(|| obs.properties.get("anchored_detection_id"))
+            .and_then(|v| v.as_str());
+        let ct = obs
+            .observed_properties
+            .get("correction_type")
+            .or_else(|| obs.properties.get("correction_type"))
+            .and_then(|v| v.as_str());
+        let lbl = obs
+            .observed_properties
+            .get("label")
+            .or_else(|| obs.properties.get("label"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if anchored == Some(request.detection_id.as_str())
+            && ct == Some(correction_type_str)
+            && lbl == request.label
+        {
+            return Ok(CorrectionReceipt {
+                correction_id: obs.id.to_string(),
+            });
+        }
+    }
+
+    // Build the correction observation.
+    let correction_id = ObservationId::new_v7();
+    let observed_at = chrono::Utc::now();
+
+    let mut observed_properties: BTreeMap<String, Value> = BTreeMap::new();
+    observed_properties.insert(
+        "anchored_detection_id".to_string(),
+        Value::String(request.detection_id.clone()),
+    );
+    observed_properties.insert(
+        "correction_type".to_string(),
+        Value::String(correction_type_str.to_string()),
+    );
+    if let Some(label) = &request.label {
+        observed_properties.insert("label".to_string(), Value::String(label.clone()));
+    }
+
+    // cg requires at least one evidence ref.  A human correction is its own
+    // provenance: a StructuredSignal evidence anchoring this correction act.
+    let evidence_id = EvidenceId::new_v7();
+    let evidence = vec![EvidenceRef {
+        id: evidence_id,
+        observation_id: correction_id,
+        context_id: detection_obs.context_id,
+        kind: EvidenceKind::StructuredSignal,
+        source_ref: format!(
+            "vigil-edge://correction/{correction_type_str}/{}",
+            request.detection_id
+        ),
+        captured_at: Some(observed_at),
+        producer: EvidenceProducer {
+            system: "vigil".to_string(),
+            pipeline_version: "correction-v1".to_string(),
+            ..Default::default()
+        },
+        retention_status: RetentionStatus::NotStored,
+        ..Default::default()
+    }];
+
+    store
+        .record_observation(RecordObservation {
+            id: correction_id,
+            entity_id: detection_obs.entity_id,
+            context_id: detection_obs.context_id,
+            observation_type: "correction".to_string(),
+            source: "vigil".to_string(),
+            observed_at,
+            evidence,
+            observed_properties,
+            state_delta: BTreeMap::new(),
+            properties: BTreeMap::new(),
+            embeddings: vec![],
+        })
+        .map_err(|e| CorrectionError::WriteFailed(format!("cg record_observation failed: {e}")))?;
+
     Ok(CorrectionReceipt {
-        correction_id: "00000000-0000-0000-0000-000000000042".to_string(),
+        correction_id: correction_id.to_string(),
     })
 }
 
-/// WRONG STUB: returns the real provenance walk (keeping vigil_why regression
-/// guard passing) but always returns an empty corrections list, causing:
-///   - correction_reads_back_via_review_why → corrections empty → FAIL
-///   - correction_anchored_to_named_detection_only → corrections empty under B → FAIL
-///   - false_alarm_and_wrong_class_corrections_record_and_read_back → empty → FAIL
+/// Return the provenance walk for a detection plus all corrections anchored to it.
 pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewError> {
     let resp = handle_why_read(store, detection_id).map_err(ReviewError::StoreError)?;
+
+    // Find all corrections anchored to this detection.
+    // Scope to the detection's context so the scan stays bounded (vigil uses one
+    // context per site; all corrections land in the same context as their detection).
+    let context_id = uuid::Uuid::parse_str(&resp.context_id)
+        .map(ContextId::from)
+        .map_err(|e| ReviewError::StoreError(format!("parse detection context_id: {e}")))?;
+    let all_obs = store
+        .list_observations(Some(context_id))
+        .map_err(|e| ReviewError::StoreError(e.to_string()))?;
+
+    let corrections: Vec<RecordedCorrection> = all_obs
+        .iter()
+        .filter_map(|obs| {
+            let anchored = obs
+                .observed_properties
+                .get("anchored_detection_id")
+                .or_else(|| obs.properties.get("anchored_detection_id"))
+                .and_then(|v| v.as_str())?;
+            if anchored != detection_id {
+                return None;
+            }
+            let ct_str = obs
+                .observed_properties
+                .get("correction_type")
+                .or_else(|| obs.properties.get("correction_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let correction_type = correction_type_from_str(ct_str)?;
+            let label = obs
+                .observed_properties
+                .get("label")
+                .or_else(|| obs.properties.get("label"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Some(RecordedCorrection {
+                label,
+                correction_type,
+                anchored_detection_id: anchored.to_string(),
+            })
+        })
+        .collect();
+
     Ok(WhyView {
         observation_id: resp.observation_id,
         observed_at: resp.observed_at,
@@ -160,15 +338,64 @@ pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewEr
         bbox: resp.bbox,
         frame_index: resp.frame_index,
         detector_image_ref: resp.detector_image_ref,
-        corrections: Vec::new(), // wrong stub: always empty, never joined from cg
+        corrections,
     })
 }
 
-/// WRONG STUB: returns the real event rows (keeping vigil_events regression guard
-/// passing) but hardcodes correction_recorded = false for every row, causing:
-///   - review_events_row_flags_corrected_events → corrected row still false → FAIL
+/// List recent detection events, each flagged whether a correction has been recorded.
 pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewError> {
     let resp = handle_events_read(store, limit).map_err(ReviewError::StoreError)?;
+
+    // Build per-type sets of detection IDs that have corrections in cg.
+    // Scope to the detection's context (vigil uses one context per site; all
+    // corrections live in the same context as their detection).
+    // If there are no event rows, no corrections are possible — skip the scan.
+    //
+    // Identity ("confirmed") is a POSITIVE signal: it must NOT set `correction_recorded`.
+    // Only WrongClass and FalseAlarm corrections set `correction_recorded = true`.
+    let (corrected_ids, confirmed_ids): (HashSet<String>, HashSet<String>) =
+        if let Some(first_row) = resp.rows.first() {
+            let context_id_opt = uuid::Uuid::parse_str(&first_row.observation_id)
+                .ok()
+                .map(ObservationId::from)
+                .and_then(|obs_id| store.get_observation(obs_id).ok())
+                .map(|obs| obs.context_id);
+            if let Some(ctx_id) = context_id_opt {
+                let mut corrected = HashSet::new();
+                let mut confirmed = HashSet::new();
+                for obs in store.list_observations(Some(ctx_id)).unwrap_or_default() {
+                    let anchored = obs
+                        .observed_properties
+                        .get("anchored_detection_id")
+                        .or_else(|| obs.properties.get("anchored_detection_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let ct = obs
+                        .observed_properties
+                        .get("correction_type")
+                        .or_else(|| obs.properties.get("correction_type"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if let Some(id) = anchored {
+                        match ct {
+                            "Identity" => {
+                                confirmed.insert(id);
+                            }
+                            "WrongClass" | "FalseAlarm" => {
+                                corrected.insert(id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                (corrected, confirmed)
+            } else {
+                (HashSet::new(), HashSet::new())
+            }
+        } else {
+            (HashSet::new(), HashSet::new())
+        };
+
     let rows = resp
         .rows
         .iter()
@@ -182,8 +409,93 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
             frame_index: row.frame_index,
             clip_ref: row.clip_ref.clone(),
             detector_image_ref: row.detector_image_ref.clone(),
-            correction_recorded: false, // wrong stub: always false, never reads from cg
+            correction_recorded: corrected_ids.contains(&row.observation_id),
+            confirmed: confirmed_ids.contains(&row.observation_id),
         })
         .collect();
+
     Ok(EventsView { rows })
+}
+
+/// Read the PNG bytes for the most-recent detector evidence frame for the named camera.
+///
+/// Used by the snapshot MQTT control action to publish a real frame to the HA image entity.
+/// The PNG was written by `write_detector_evidence_image` in runtime.rs and referenced as
+/// `"vigil-edge:clip/{filename}"` in the detection observation's `properties["detector_evidence_ref"]`.
+///
+/// Returns `None` when no detection, no evidence ref, or the file has been cleaned up.
+/// Callers tolerate None gracefully (log + skip the publish).
+pub(crate) fn read_latest_detection_image(
+    store: &Store,
+    camera_id_slug: &str,
+    data_dir: &std::path::Path,
+) -> Option<Vec<u8>> {
+    use context_graph::{EntityType, EvidenceKind, ListEntityFilter};
+
+    let entities = store
+        .list_entities(ListEntityFilter {
+            entity_type: Some(EntityType::Device),
+            ..Default::default()
+        })
+        .ok()?;
+
+    let cam = entities
+        .iter()
+        .find(|e| camera_name_to_slug(&e.name) == camera_id_slug)?;
+
+    // Scope the scan to the site context (vigil is one-context-per-site).
+    // list_contexts() is cheaper than probing observations — typically returns one entry.
+    let site_ctx = store
+        .list_contexts()
+        .ok()
+        .and_then(|ctxs| ctxs.into_iter().next().map(|c| c.id));
+    let all_obs = store.list_observations(site_ctx).ok()?;
+
+    let detection = all_obs
+        .iter()
+        .filter(|o| o.observation_type == "detection" && o.entity_id == cam.id)
+        .max_by_key(|o| o.observed_at)?;
+
+    // The detector evidence PNG path is stored as either:
+    // 1. An EvidenceRef with kind == ImageFrame whose source_ref = "vigil-edge:clip/{filename}"
+    // 2. properties["detector_evidence_ref"] = "vigil-edge:clip/{filename}" (legacy fallback)
+    // Try the evidence list first to match the live_read.rs / why-view read path.
+    let evidence_ref_str = detection
+        .evidence
+        .iter()
+        .find(|ev| ev.kind == EvidenceKind::ImageFrame)
+        .map(|ev| ev.source_ref.as_str())
+        .or_else(|| {
+            detection
+                .properties
+                .get("detector_evidence_ref")
+                .and_then(|v| v.as_str())
+        })?;
+
+    let file_name = evidence_ref_str.strip_prefix("vigil-edge:clip/")?;
+    std::fs::read(data_dir.join("clips").join(file_name)).ok()
+}
+
+/// Convert a camera display name to the dash-slug used as `camera_id` in MQTT
+/// control commands.  Mirrors the `camera_slug` function in `runtime.rs`.
+fn camera_name_to_slug(name: &str) -> String {
+    let mut result = String::new();
+    let mut prev_dash = false;
+    for ch in name.chars().flat_map(|c| c.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            result.push(ch);
+            prev_dash = false;
+        } else if !prev_dash && !result.is_empty() {
+            result.push('-');
+            prev_dash = true;
+        }
+    }
+    while result.ends_with('-') {
+        result.pop();
+    }
+    if result.is_empty() {
+        "camera".to_string()
+    } else {
+        result
+    }
 }

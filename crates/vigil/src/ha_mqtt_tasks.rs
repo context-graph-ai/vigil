@@ -1,15 +1,20 @@
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     mpsc,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use rumqttc::v5::mqttbytes::QoS;
+use rumqttc::v5::mqttbytes::v5::{LastWill, Packet};
+use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
 
 use context_graph::Store;
 
-use crate::correction::CorrectionRequest;
-use crate::ha_discovery::DiscoveryPayload;
+use crate::correction::{CorrectionRequest, read_latest_detection_image};
+use crate::ha_discovery::{CommandTopicMessage, DiscoveryPayload, parse_command_topic};
 
 // ── Public MQTT config ─────────────────────────────────────────────────────
 
@@ -21,149 +26,683 @@ pub struct MqttConfig {
     pub password: Option<String>,
 }
 
-// ── Subscriber handle exposed to callers (and tests) ──────────────────────
+// ── Subscriber handle ──────────────────────────────────────────────────────
 
 pub struct SubscriberHandle {
-    /// Counts correction commands dropped due to channel overflow (wrong stub: always 0).
+    /// Counts correction commands dropped due to channel overflow.
     pub overflow_count: Arc<AtomicUsize>,
-    shutdown: Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<thread::JoinHandle<()>>,
+    shutdown: Arc<AtomicBool>,
+    threads: Vec<thread::JoinHandle<()>>,
 }
 
 impl SubscriberHandle {
     pub fn shutdown_and_join(mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.thread.take() {
+        for handle in self.threads.drain(..) {
             let _ = handle.join();
         }
     }
 }
 
+// ── Internal helpers ───────────────────────────────────────────────────────
+
+/// Generate a unique MQTT client ID for this connection.
+fn next_client_id(prefix: &str) -> String {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{seq}")
+}
+
+fn make_mqtt_options(config: &MqttConfig, id_prefix: &str) -> MqttOptions {
+    let mut opts = MqttOptions::new(
+        next_client_id(id_prefix),
+        &config.broker_host,
+        config.broker_port,
+    );
+    opts.set_keep_alive(Duration::from_secs(30));
+    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+        opts.set_credentials(user, pass);
+    }
+    opts
+}
+
+/// Drive the connection event loop until ConnAck or timeout.
+/// Returns Ok(()) when connected, Err when connection fails or times out.
+fn wait_for_connack(
+    connection: &mut rumqttc::v5::Connection,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match connection.recv_timeout(Duration::from_millis(200)) {
+            Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => return Ok(()),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(format!("MQTT connection error: {e}")),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("broker disconnected before ConnAck".to_string());
+            }
+        }
+    }
+    Err("timed out waiting for broker ConnAck".to_string())
+}
+
 // ── Connect-intent predicate ───────────────────────────────────────────────
 
-/// WRONG STUB: always returns true regardless of whether a broker is configured.
-///
-/// Correct behaviour: returns true only when `config.is_some()`.
-///   - mqtt_gated_off_when_no_broker_configured → connect-intent is true when it must be false → FAIL
+/// Returns true when a broker is configured; false otherwise.
+/// Used as a gate before any MQTT I/O — avoids opening connections when
+/// no broker is set (e.g. a local-only vigil deployment).
 pub fn mqtt_connect_intent(config: Option<&MqttConfig>) -> bool {
-    let _ = config; // wrong stub: ignores the config
-    true
+    config.is_some()
 }
 
 // ── Discovery publisher ────────────────────────────────────────────────────
 
-/// WRONG STUB: returns Ok without connecting or publishing anything.
+/// Publish all HA MQTT discovery payloads to the broker as retained messages.
 ///
-///   - discovery_published_to_real_broker_on_start → bounded receive returns None → FAIL
+/// Blocks until the payloads have been handed to the MQTT library.  Returns
+/// after a brief drain to let QoS-0 sends flush.  Does NOT wait for broker
+/// ACKs — the caller should not assume delivery is confirmed when this returns.
 pub fn publish_discovery_to_broker(
-    _config: &MqttConfig,
-    _payloads: &[DiscoveryPayload],
+    config: &MqttConfig,
+    payloads: &[DiscoveryPayload],
 ) -> Result<(), String> {
-    // wrong stub: no-op — does not connect, does not publish
+    if payloads.is_empty() {
+        return Ok(());
+    }
+
+    let opts = make_mqtt_options(config, "vd");
+    let (client, mut connection) = Client::new(opts, 256);
+
+    wait_for_connack(&mut connection, Duration::from_secs(10))?;
+
+    for payload in payloads {
+        let json = serde_json::to_string(&payload.payload)
+            .map_err(|e| format!("serialize discovery payload: {e}"))?;
+        client
+            .publish(&payload.topic, QoS::AtMostOnce, true, json.into_bytes())
+            .map_err(|e| format!("publish discovery: {e}"))?;
+    }
+
+    // Drain briefly so the event loop flushes the outbound queue before we disconnect.
+    let flush_deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < flush_deadline {
+        match connection.recv_timeout(Duration::from_millis(50)) {
+            Ok(Ok(_)) => {}
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(Err(_)) => break,
+        }
+    }
+
+    let _ = client.disconnect();
     Ok(())
 }
 
-// ── Correction command subscriber ─────────────────────────────────────────
+// ── Production subscriber configuration ───────────────────────────────────
 
-/// WRONG STUB: spawns a thread that should listen to the broker command topic and
-/// forward parsed CorrectionRequests to `command_tx`, but:
-///   1. Never actually connects to the broker.
-///   2. Never sends on `command_tx`, so overflow_count is never incremented.
+/// Full configuration for the long-lived production subscriber.
+pub struct WiredSubscriberConfig {
+    pub mqtt: MqttConfig,
+    /// Stable MQTT client id derived from the service_id (does not reset on
+    /// restart so the broker can correlate last-will with prior sessions).
+    pub client_id: String,
+    /// Retained availability topic — last-will publishes "offline" here on
+    /// unclean disconnect so HA shows "unavailable" for all Vigil entities.
+    pub availability_topic: String,
+    /// Running-condition topic — republished as the live health-mapped string
+    /// after broker restart and whenever health changes.
+    pub condition_topic: String,
+    /// Retained discovery payloads — republished after broker restart or HA
+    /// restart so HA re-registers all Vigil entities without manual reload.
+    pub discovery_payloads: Vec<crate::ha_discovery::DiscoveryPayload>,
+    /// Live health state — polled each loop iteration to publish condition
+    /// updates as retained messages when health changes.
+    pub health: crate::health::HealthState,
+}
+
+fn make_production_subscriber_options(
+    config: &MqttConfig,
+    client_id: &str,
+    availability_topic: &str,
+) -> MqttOptions {
+    let mut opts = MqttOptions::new(client_id, &config.broker_host, config.broker_port);
+    opts.set_keep_alive(Duration::from_secs(30));
+    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+        opts.set_credentials(user, pass);
+    }
+    // Last-will: broker publishes "offline" to the availability topic when
+    // the TCP connection drops without a clean DISCONNECT packet.
+    // In MQTT 5, LastWill::new takes an extra properties argument (None = no user properties).
+    opts.set_last_will(LastWill::new(
+        availability_topic,
+        b"offline" as &[u8],
+        QoS::AtMostOnce,
+        true,
+        None,
+    ));
+    opts
+}
+
+/// Re-publish all discovery payloads + availability + running-condition into
+/// the broker using the already-connected client.  Called on every ConnAck
+/// (covers broker restart) and on `homeassistant/status = "online"` (covers
+/// HA restart).
 ///
-/// The caller is responsible for calling `record_correction` for each command it
-/// receives on the receiver end of `command_tx`.
+/// `current_condition` is the live health-mapped string (e.g. "running",
+/// "disk-full") — published as a retained message so HA always sees the
+/// current state even after a broker restart.
+fn re_announce_to_broker(
+    client: &Client,
+    payloads: &[crate::ha_discovery::DiscoveryPayload],
+    availability_topic: &str,
+    condition_topic: &str,
+    current_condition: &str,
+) {
+    for payload in payloads {
+        if let Ok(json) = serde_json::to_string(&payload.payload) {
+            let _ = client.publish(&payload.topic, QoS::AtMostOnce, true, json.into_bytes());
+        }
+    }
+    let _ = client.publish(
+        availability_topic,
+        QoS::AtMostOnce,
+        true,
+        b"online" as &[u8],
+    );
+    // Condition is retained (true) — it's a state, not an event.
+    let _ = client.publish(
+        condition_topic,
+        QoS::AtMostOnce,
+        true,
+        current_condition.as_bytes().to_vec(),
+    );
+}
+
+fn handle_production_control(
+    payload: &[u8],
+    data_dir: Option<&std::path::Path>,
+    camera_flags: &BTreeMap<String, Arc<AtomicBool>>,
+    store: &Store,
+    client: &Client,
+) {
+    #[derive(serde::Deserialize)]
+    struct ControlCmd {
+        camera_id: String,
+        action: String,
+    }
+
+    let Ok(cmd) = serde_json::from_slice::<ControlCmd>(payload) else {
+        return;
+    };
+
+    match cmd.action.as_str() {
+        "disable" => {
+            let Some(dir) = data_dir else { return };
+            let disabled_dir = dir.join("camera-disabled");
+            let _ = std::fs::create_dir_all(&disabled_dir);
+            let _ = std::fs::write(disabled_dir.join(&cmd.camera_id), b"");
+            if let Some(flag) = camera_flags.get(&cmd.camera_id) {
+                flag.store(false, Ordering::SeqCst);
+            }
+        }
+        "enable" => {
+            let Some(dir) = data_dir else { return };
+            let marker = dir.join("camera-disabled").join(&cmd.camera_id);
+            let _ = std::fs::remove_file(marker);
+            if let Some(flag) = camera_flags.get(&cmd.camera_id) {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        "snapshot" => {
+            // Publish the most-recent detector evidence PNG to the HA image topic so
+            // the HA image entity shows the latest detection frame.
+            // Topic matches the image entity's image_topic: "vigil/{camera_id}/snapshot".
+            let Some(dir) = data_dir else { return };
+            let image_topic = format!("vigil/{}/snapshot", cmd.camera_id);
+            if let Some(bytes) = read_latest_detection_image(store, &cmd.camera_id, dir) {
+                let _ = client.publish(&image_topic, QoS::AtMostOnce, false, bytes);
+            } else {
+                println!("snapshot_no_frame camera={}", cmd.camera_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Spawn the long-lived production MQTT subscriber.
 ///
-///   - correction_command_channel_overflow_is_loud → overflow_count stays 0 → FAIL
-///   - correction_command_on_broker_lands_in_cg → tx never receives → correction not in cg → FAIL
-///   - redelivered_correction_command_is_idempotent → tx never receives → nothing in cg → FAIL
-///   - two_distinct_corrections_on_same_detection_both_land → tx never receives → nothing → FAIL
-///   - malformed_correction_command_is_rejected_and_subscriber_survives → tx never receives → FAIL
-pub fn spawn_correction_subscriber(
-    config: MqttConfig,
+/// Handles BOTH the correction topic (`vigil/commands/correct`) and the control
+/// topic (`vigil/commands/control`).  Correction commands are forwarded via
+/// `command_tx` — if the channel is full, the command is dropped, `overflow_count`
+/// is incremented, and a log line is emitted.  Control commands
+/// (disable/enable/acknowledge) are handled inline.
+///
+/// The caller owns the receive end of `command_tx`'s channel and is responsible
+/// for draining it (e.g. a worker thread calling `record_correction`).  Holding
+/// the receive end without draining demonstrates overflow behaviour.
+///
+/// Features:
+///   - Stable `client_id` so the broker can correlate the last-will across
+///     reconnects.
+///   - Last-will: broker publishes "offline" to `availability_topic` on
+///     unclean TCP drop.
+///   - On every ConnAck (broker restart): re-subscribes all command topics
+///     and re-publishes all discovery + availability + running-condition
+///     payloads so HA entities survive a Mosquitto restart without a reboot.
+///   - Subscribes `homeassistant/status`; on "online" (HA restart): same
+///     re-announce so HA sees all Vigil entities immediately.
+///   - Routes `vigil/commands/control` to named per-camera `AtomicBool`
+///     flags in addition to writing/removing disk markers.
+///   - Polls `cfg.health` each loop iteration and publishes a retained
+///     condition update when health changes.
+///   - Brief exponential backoff on connection errors before rumqttc retries.
+pub fn spawn_production_subscriber(
+    cfg: WiredSubscriberConfig,
+    store: Arc<Store>,
+    camera_flags: BTreeMap<String, Arc<AtomicBool>>,
     command_tx: mpsc::SyncSender<CorrectionRequest>,
     overflow_count: Arc<AtomicUsize>,
 ) -> SubscriberHandle {
-    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let shutdown_clone = Arc::clone(&shutdown);
-
-    let _config_clone = config.clone();
-    let thread = thread::spawn(move || {
-        // wrong stub: never connects to the broker; the command_tx is never used
-        // so the caller's receiver never gets a message and overflow_count stays 0
-        let _ = command_tx; // dropped immediately — wrong stub ignores it
-        loop {
-            if shutdown_clone.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    });
-
-    SubscriberHandle {
-        overflow_count,
-        shutdown,
-        thread: Some(thread),
-    }
-}
-
-/// WRONG STUB: accepts a Store reference but never connects to the broker and
-/// never calls `record_correction`.  A correct implementation connects to the
-/// broker, receives correction commands from the command topic, and calls
-/// `record_correction(store, cmd)` for each, writing the correction durably
-/// to cg authority.
-///
-///   - correction_command_on_broker_lands_in_cg  → nothing in cg → FAIL
-///   - redelivered_correction_command_is_idempotent → nothing in cg → FAIL
-///   - two_distinct_corrections_on_same_detection_both_land → nothing in cg → FAIL
-///   - operator_action_command_effects_action → ack not in cg → FAIL
-///   - acknowledge_survives_reopen_and_restart_via_cg_authority → not in cg → FAIL
-pub fn spawn_wired_correction_subscriber(
-    config: MqttConfig,
-    store: Arc<Store>,
-    overflow_count: Arc<AtomicUsize>,
-) -> SubscriberHandle {
-    let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
     let overflow_clone = Arc::clone(&overflow_count);
+
     let thread = thread::spawn(move || {
-        // wrong stub: never connects to the broker; store and overflow_count are unused
-        let _ = config;
-        let _ = store;
-        let _ = overflow_clone;
+        let data_dir = store.db_path().parent().map(|p| p.to_path_buf());
+        let opts =
+            make_production_subscriber_options(&cfg.mqtt, &cfg.client_id, &cfg.availability_topic);
+        let (client, mut connection) = Client::new(opts, 100);
+        let mut reconnect_delay_ms: u64 = 500;
+
+        // Track the last-published health code so we only publish on changes.
+        // u16::MAX is a sentinel meaning "not yet published".
+        let mut last_health_code: u16 = u16::MAX;
+
         loop {
             if shutdown_clone.load(Ordering::SeqCst) {
                 break;
             }
-            thread::sleep(Duration::from_millis(50));
+
+            let event = match connection.recv_timeout(Duration::from_millis(100)) {
+                Ok(result) => result,
+                Err(RecvTimeoutError::Timeout) => {
+                    // Even on timeout, poll health and push an update if it changed.
+                    let (cur_health, _) = cfg.health.snapshot();
+                    let cur_code = cur_health.as_u16();
+                    if cur_code != last_health_code {
+                        last_health_code = cur_code;
+                        let condition =
+                            crate::ha_discovery::map_health_to_running_condition(cur_health);
+                        let _ = client.publish(
+                            &cfg.condition_topic,
+                            QoS::AtMostOnce,
+                            true,
+                            condition.as_bytes().to_vec(),
+                        );
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            };
+
+            // Poll health on every event too.
+            let (cur_health, _) = cfg.health.snapshot();
+            let cur_code = cur_health.as_u16();
+            if cur_code != last_health_code {
+                last_health_code = cur_code;
+                let condition = crate::ha_discovery::map_health_to_running_condition(cur_health);
+                let _ = client.publish(
+                    &cfg.condition_topic,
+                    QoS::AtMostOnce,
+                    true,
+                    condition.as_bytes().to_vec(),
+                );
+            }
+
+            match event {
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    reconnect_delay_ms = 500; // reset backoff on successful connect
+                    // Re-subscribe every command topic on every (re)connect so
+                    // subscriptions survive a broker restart.
+                    let _ = client.subscribe("vigil/commands/correct", QoS::AtLeastOnce);
+                    let _ = client.subscribe("vigil/commands/control", QoS::AtLeastOnce);
+                    let _ = client.subscribe("homeassistant/status", QoS::AtMostOnce);
+                    // Re-publish retained discovery and availability so HA entities
+                    // reappear after a broker restart without requiring a Vigil restart.
+                    // Use the current live health for the condition.
+                    let (conn_health, _) = cfg.health.snapshot();
+                    let conn_condition =
+                        crate::ha_discovery::map_health_to_running_condition(conn_health);
+                    re_announce_to_broker(
+                        &client,
+                        &cfg.discovery_payloads,
+                        &cfg.availability_topic,
+                        &cfg.condition_topic,
+                        conn_condition,
+                    );
+                }
+                Ok(Event::Incoming(Packet::Publish(p))) => {
+                    // In MQTT 5, Publish.topic is Bytes, not String.
+                    let topic = std::str::from_utf8(&p.topic).unwrap_or("");
+                    match topic {
+                        "homeassistant/status" => {
+                            // HA restarted — re-publish discovery so HA re-registers all
+                            // Vigil entities immediately without waiting for the next retain flush.
+                            if p.payload.as_ref() == b"online" {
+                                let (ha_health, _) = cfg.health.snapshot();
+                                let ha_condition =
+                                    crate::ha_discovery::map_health_to_running_condition(ha_health);
+                                re_announce_to_broker(
+                                    &client,
+                                    &cfg.discovery_payloads,
+                                    &cfg.availability_topic,
+                                    &cfg.condition_topic,
+                                    ha_condition,
+                                );
+                            }
+                        }
+                        "vigil/commands/correct" => {
+                            if let Ok(msg) =
+                                serde_json::from_slice::<CommandTopicMessage>(&p.payload)
+                                && let Ok(req) = parse_command_topic(&msg)
+                            {
+                                match command_tx.try_send(req) {
+                                    Ok(()) => {}
+                                    Err(mpsc::TrySendError::Full(_)) => {
+                                        let n = overflow_clone.fetch_add(1, Ordering::SeqCst) + 1;
+                                        println!("mqtt_correction_command_overflow=true total={n}");
+                                    }
+                                    Err(mpsc::TrySendError::Disconnected(_)) => break,
+                                }
+                            }
+                        }
+                        "vigil/commands/control" => {
+                            handle_production_control(
+                                &p.payload,
+                                data_dir.as_deref(),
+                                &camera_flags,
+                                store.as_ref(),
+                                &client,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    // Connection error — brief backoff before rumqttc retries.
+                    thread::sleep(Duration::from_millis(reconnect_delay_ms));
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(30_000);
+                }
+            }
         }
     });
+
     SubscriberHandle {
         overflow_count,
         shutdown,
-        thread: Some(thread),
+        threads: vec![thread],
     }
 }
 
-/// WRONG STUB: publishes an outbound socket attempt in the detection-event publish path.
-/// This is caught by correction_path_makes_no_outbound_network_beyond_broker.
+// ── Detection event publisher ──────────────────────────────────────────────
+
+/// Publish a detection event JSON payload to the given broker topic.
 ///
-///   - detection_publishes_event_to_real_broker → bounded receive returns None → FAIL
-///   - correction_path_makes_no_outbound_network_beyond_broker → extra socket detected → FAIL
+/// Connects, publishes exactly one message at QoS 0, then disconnects.
+/// Returns when the message has been handed to the MQTT library.
 pub fn publish_detection_event(
-    _config: &MqttConfig,
-    _event_json: &str,
-    _topic: &str,
+    config: &MqttConfig,
+    event_json: &str,
+    topic: &str,
 ) -> Result<(), String> {
-    // wrong stub: no-op — does not publish detection events
+    let opts = make_mqtt_options(config, "ve");
+    let (client, mut connection) = Client::new(opts, 16);
+
+    wait_for_connack(&mut connection, Duration::from_secs(10))?;
+
+    client
+        .publish(
+            topic,
+            QoS::AtMostOnce,
+            false,
+            event_json.as_bytes().to_vec(),
+        )
+        .map_err(|e| format!("publish detection event: {e}"))?;
+
+    // Brief drain to let the publish flush before disconnect.
+    let _ = connection.recv_timeout(Duration::from_millis(300));
+
+    let _ = client.disconnect();
     Ok(())
 }
 
-/// Publish availability last-will configuration during startup.
-/// WRONG STUB: returns Ok without setting up any last-will.
-///   - TH-18 → last-will unwired, availability stays online on kill → FAIL
+// ── Availability publisher ─────────────────────────────────────────────────
+
+/// Publish the "online" availability payload to the given topic as a
+/// retained message.  Used during startup after a successful MQTT connect.
 pub fn publish_availability_online(
-    _config: &MqttConfig,
-    _availability_topic: &str,
+    config: &MqttConfig,
+    availability_topic: &str,
 ) -> Result<(), String> {
+    let opts = make_mqtt_options(config, "va");
+    let (client, mut connection) = Client::new(opts, 16);
+
+    wait_for_connack(&mut connection, Duration::from_secs(5))?;
+
+    client
+        .publish(
+            availability_topic,
+            QoS::AtMostOnce,
+            true,
+            b"online" as &[u8],
+        )
+        .map_err(|e| format!("publish availability: {e}"))?;
+
+    let _ = connection.recv_timeout(Duration::from_millis(200));
+    let _ = client.disconnect();
     Ok(())
+}
+
+// ── Long-lived detection event publisher ──────────────────────────────────
+
+const DETECTION_PUBLISH_CHANNEL_CAPACITY: usize = 32;
+
+/// How long after the last detection a camera's motion binary_sensor stays ON.
+const MOTION_ACTIVE_WINDOW: Duration = Duration::from_secs(30);
+
+/// Messages sent to the background publisher thread.
+enum PublisherMsg {
+    /// Detection event payload: publish to `topic` with QoS 0, retain=false.
+    Detection(String, Vec<u8>),
+    /// Motion-active signal for a camera: publish "ON" retained to `active_topic`,
+    /// then publish "OFF" retained after `MOTION_ACTIVE_WINDOW` of no further signals.
+    MotionActive(String),
+}
+
+/// Long-lived outbound detection publisher.
+///
+/// The detector thread calls `try_publish` / `notify_active` (non-blocking) —
+/// they never open a connection or block on ConnAck.  A dedicated background
+/// thread owns a single persistent MQTT client and drains the channel.
+///
+/// On detection channel overflow: increments `overflow_count`, logs loudly,
+/// and flips health to `KeepPaceFailed`.
+/// On motion-active overflow: silently drops (the ON is best-effort retained;
+/// the next detection will re-trigger it).
+pub struct DetectionPublisher {
+    tx: mpsc::SyncSender<PublisherMsg>,
+    /// Counts detection publishes dropped due to channel overflow.
+    pub overflow_count: Arc<AtomicUsize>,
+    health: crate::health::HealthState,
+}
+
+impl DetectionPublisher {
+    /// Non-blocking send of a detection event payload.  Never blocks.
+    pub fn try_publish(&self, topic: String, json: String) {
+        match self
+            .tx
+            .try_send(PublisherMsg::Detection(topic, json.into_bytes()))
+        {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                let n = self.overflow_count.fetch_add(1, Ordering::SeqCst) + 1;
+                println!("mqtt_detection_publish_overflow=true total={n}");
+                self.health.set(
+                    crate::health::HealthStatus::KeepPaceFailed,
+                    "mqtt outbound channel overflow",
+                );
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                println!("mqtt_detection_publisher_disconnected=true");
+            }
+        }
+    }
+
+    /// Non-blocking signal that a detection occurred for the camera whose
+    /// `active_topic` is `vigil/{service_id}/{camera_id}/active`.
+    ///
+    /// The background thread publishes "ON" retained immediately and schedules
+    /// an "OFF" retained after `MOTION_ACTIVE_WINDOW` of no further signals.
+    /// Overflow is silently dropped — the retained "ON" from the next detection
+    /// will re-arm the sensor.
+    pub fn notify_active(&self, active_topic: String) {
+        match self.tx.try_send(PublisherMsg::MotionActive(active_topic)) {
+            Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                println!("mqtt_detection_publisher_disconnected=true");
+            }
+        }
+    }
+}
+
+/// Handle for the background detection publisher thread.
+pub struct DetectionPublisherHandle {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl DetectionPublisherHandle {
+    pub fn shutdown_and_join(mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(h) = self.thread.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Spawn a long-lived detection publisher.
+///
+/// Returns `(Arc<DetectionPublisher>, DetectionPublisherHandle)`.
+/// The publisher is cheaply cloneable via Arc.  Drop or join the handle
+/// after camera threads have exited (so all senders are gone).
+pub fn spawn_detection_publisher(
+    config: &MqttConfig,
+    health: crate::health::HealthState,
+) -> (Arc<DetectionPublisher>, DetectionPublisherHandle) {
+    let (tx, rx) = mpsc::sync_channel::<PublisherMsg>(DETECTION_PUBLISH_CHANNEL_CAPACITY);
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    let publisher = Arc::new(DetectionPublisher {
+        tx,
+        overflow_count: Arc::new(AtomicUsize::new(0)),
+        health,
+    });
+
+    let config = config.clone();
+    let shutdown_clone = Arc::clone(&shutdown);
+
+    let thread = thread::spawn(move || {
+        let opts = make_mqtt_options(&config, "vp");
+        let (client, mut connection) = Client::new(opts, 64);
+        let mut connected = false;
+        let mut reconnect_delay_ms: u64 = 500;
+        // topic → time of last MotionActive signal; publisher publishes OFF after
+        // MOTION_ACTIVE_WINDOW of no further signals.
+        let mut last_active: HashMap<String, Instant> = HashMap::new();
+
+        loop {
+            if shutdown_clone.load(Ordering::SeqCst) {
+                break;
+            }
+
+            // Drive the event loop to maintain the connection.
+            match connection.recv_timeout(Duration::from_millis(50)) {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
+                    connected = true;
+                    reconnect_delay_ms = 500;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => {
+                    connected = false;
+                    thread::sleep(Duration::from_millis(reconnect_delay_ms));
+                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(30_000);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+
+            // Drain pending messages and manage motion OFF timer while connected.
+            if connected {
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        PublisherMsg::Detection(topic, payload) => {
+                            if client
+                                .publish(&topic, QoS::AtMostOnce, false, payload)
+                                .is_err()
+                            {
+                                // Outbound queue full; event lost but publisher stays alive.
+                                println!("mqtt_detection_publisher_client_full=true");
+                            }
+                        }
+                        PublisherMsg::MotionActive(topic) => {
+                            // Publish ON retained immediately, then arm the OFF timer.
+                            let _ = client.publish(
+                                &topic,
+                                QoS::AtMostOnce,
+                                true,
+                                "ON".as_bytes().to_vec(),
+                            );
+                            last_active.insert(topic, Instant::now());
+                        }
+                    }
+                }
+                // Publish OFF retained for any camera that has been quiet for
+                // MOTION_ACTIVE_WINDOW.
+                let now = Instant::now();
+                last_active.retain(|topic, last_at| {
+                    if now.duration_since(*last_at) > MOTION_ACTIVE_WINDOW {
+                        let _ =
+                            client.publish(topic, QoS::AtMostOnce, true, "OFF".as_bytes().to_vec());
+                        false // remove from map
+                    } else {
+                        true // keep watching
+                    }
+                });
+            }
+        }
+
+        // Drain remaining detection events before exiting (best-effort flush).
+        // MotionActive signals are skipped — broker retains the last ON/OFF state.
+        let flush_deadline = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < flush_deadline {
+            if let Ok(PublisherMsg::Detection(topic, payload)) = rx.try_recv() {
+                let _ = client.publish(&topic, QoS::AtMostOnce, false, payload);
+            }
+            match connection.recv_timeout(Duration::from_millis(20)) {
+                Ok(Ok(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+                Ok(Err(_)) => break,
+            }
+        }
+        let _ = client.disconnect();
+    });
+
+    (
+        publisher,
+        DetectionPublisherHandle {
+            shutdown,
+            thread: Some(thread),
+        },
+    )
 }

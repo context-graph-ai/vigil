@@ -264,14 +264,25 @@ pub(crate) fn handle_why_read(
         Ok(audit_entries) => audit_entries,
         Err(error) => return Err(error.to_string()),
     };
-    let observations = match store.list_observations(None) {
-        Ok(observations) => observations,
-        Err(error) => return Err(error.to_string()),
-    };
-    let observation_id = resolve_observation_id(&observations, request)?;
-    let observation = match store.get_observation(observation_id) {
-        Ok(observation) => observation,
-        Err(error) => return Err(error.to_string()),
+    // Resolve the observation, scoping to the site context (vigil is one-context-per-site).
+    // For a direct UUID: fetch without scanning the store at all.
+    // For --latest: use list_contexts() to get the site context (one per site),
+    // then scope list_observations to that context — cheaper than probing all observations.
+    let observation = if request != "--latest" && !request.is_empty() {
+        let uuid = uuid::Uuid::parse_str(request).map_err(|_| "event not found".to_string())?;
+        store
+            .get_observation(ObservationId::from(uuid))
+            .map_err(|_| "event not found".to_string())?
+    } else {
+        let site_ctx = store
+            .list_contexts()
+            .ok()
+            .and_then(|ctxs| ctxs.into_iter().next().map(|c| c.id));
+        let all_detections = store
+            .list_observations(site_ctx)
+            .map_err(|e| e.to_string())?;
+        let obs_id = resolve_observation_id(&all_detections, "--latest")?;
+        store.get_observation(obs_id).map_err(|e| e.to_string())?
     };
     let _observation_seen = observation.id;
     let decision_id = resolve_decision_id(&audit_entries, &observation)?;
@@ -321,10 +332,19 @@ pub(crate) fn handle_events_read(
     store: &Store,
     limit: usize,
 ) -> Result<StoreBackedEventsResponse, String> {
-    let mut observations = match store.list_observations(None) {
+    // Scope the scan to the site context (vigil is one-context-per-site).
+    // list_contexts() is cheaper than a full observation probe — typically returns one entry.
+    let site_ctx = store
+        .list_contexts()
+        .ok()
+        .and_then(|ctxs| ctxs.into_iter().next().map(|c| c.id));
+    let mut observations = match store.list_observations(site_ctx) {
         Ok(observations) => observations,
         Err(error) => return Err(error.to_string()),
     };
+    // Only surface detection observations — corrections and other cg-internal bookkeeping
+    // (ingestion, digest, etc.) must never appear on the events display or events API surface.
+    observations.retain(|o| o.observation_type == "detection");
     observations.sort_by(|left, right| {
         right
             .observed_at
@@ -414,8 +434,12 @@ fn resolve_observation_id(
     request: &str,
 ) -> Result<ObservationId, String> {
     if request == "--latest" || request.is_empty() {
+        // `--latest` must select the newest DETECTION, never a correction or other type.
+        // `vigil why --latest` is a detection-review entry point; picking a correction
+        // observation would break the provenance walk (no decision/intention chain).
         return observations
             .iter()
+            .filter(|o| o.observation_type == "detection")
             .max_by(|left, right| {
                 left.observed_at
                     .cmp(&right.observed_at)

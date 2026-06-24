@@ -11,6 +11,7 @@ mod runtime;
 mod runtime_stats;
 mod shutdown;
 mod store;
+mod supervisor;
 mod yolox_detector;
 
 pub use correction::{
@@ -23,9 +24,11 @@ pub use ha_discovery::{
     parse_command_topic,
 };
 pub use ha_mqtt_tasks::{
-    MqttConfig, SubscriberHandle, mqtt_connect_intent, publish_detection_event,
-    publish_discovery_to_broker, spawn_correction_subscriber, spawn_wired_correction_subscriber,
+    DetectionPublisher, DetectionPublisherHandle, MqttConfig, SubscriberHandle,
+    WiredSubscriberConfig, mqtt_connect_intent, publish_detection_event,
+    publish_discovery_to_broker, spawn_detection_publisher, spawn_production_subscriber,
 };
+pub use health::{HealthState, HealthStatus};
 
 use std::ffi::OsString;
 use std::path::Path;

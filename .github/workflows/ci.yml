@@ -1,0 +1,263 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [main, dev]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Run the full slow lane"
+        required: false
+        default: "true"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fast:
+    name: Fast PR lane
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout vigil
+        uses: actions/checkout@v4
+        with:
+          path: vigil
+
+      - name: Checkout context-graph
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: dev
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Checkout contextdb
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: dev
+          path: contextdb
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+
+      - name: Format
+        working-directory: vigil
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: vigil
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Fast tests
+        working-directory: vigil
+        run: cargo nextest run --profile pr --workspace
+
+      - name: Debug build
+        working-directory: vigil
+        run: cargo build --workspace
+
+  full-tests:
+    name: Full slow lane shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    needs: fast
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-full')
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Free hosted-runner disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Checkout vigil
+        uses: actions/checkout@v4
+        with:
+          path: vigil
+
+      - name: Checkout context-graph
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: dev
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Checkout contextdb
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: dev
+          path: contextdb
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+
+      - name: Add musl targets
+        working-directory: vigil
+        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Setup RTSP and musl harness
+        working-directory: vigil
+        run: cargo xtask setup-harness
+
+      - name: Pull Docker base images
+        run: docker pull busybox:1.37.0-musl
+
+      - name: Pre-build release binaries
+        working-directory: vigil
+        run: |
+          cargo build -p vigil --release
+          cargo build -p vigil --release --target x86_64-unknown-linux-musl
+          cargo build -p vigil --release --target aarch64-unknown-linux-musl
+
+      - name: Full tests
+        working-directory: vigil
+        run: >
+          cargo nextest run --release --profile ci-full --workspace
+          --features first-light-acceptance,acceptance
+          --partition hash:${{ matrix.shard }}/4
+
+  static-musl:
+    name: Static musl builds
+    runs-on: ubuntu-latest
+    needs: full-tests
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-full')
+    steps:
+      - name: Free hosted-runner disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+
+      - name: Checkout vigil
+        uses: actions/checkout@v4
+        with:
+          path: vigil
+
+      - name: Checkout context-graph
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: dev
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Checkout contextdb
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: dev
+          path: contextdb
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+
+      - name: Add musl targets
+        working-directory: vigil
+        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+      - name: Install ffmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Setup RTSP and musl harness
+        working-directory: vigil
+        run: cargo xtask setup-harness
+
+      - name: Build x86_64 static binary
+        working-directory: vigil
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Build aarch64 static binary
+        working-directory: vigil
+        run: cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: Upload static binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: vigil-static-musl
+          path: |
+            vigil/target/x86_64-unknown-linux-musl/release/vigil
+            vigil/target/aarch64-unknown-linux-musl/release/vigil
+
+  docker:
+    name: Multi-arch Docker build
+    runs-on: ubuntu-latest
+    needs: static-musl
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'ci-full')
+    steps:
+      - name: Checkout vigil
+        uses: actions/checkout@v4
+        with:
+          path: vigil
+
+      - name: Download static binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: vigil-static-musl
+          path: vigil/target
+
+      - name: Restore artifact paths
+        working-directory: vigil
+        run: |
+          mkdir -p target/x86_64-unknown-linux-musl/release target/aarch64-unknown-linux-musl/release
+          x86="$(find target -path '*/x86_64-unknown-linux-musl/release/vigil' -type f | head -n 1)"
+          arm="$(find target -path '*/aarch64-unknown-linux-musl/release/vigil' -type f | head -n 1)"
+          test -n "${x86}"
+          test -n "${arm}"
+          if [ "${x86}" != "target/x86_64-unknown-linux-musl/release/vigil" ]; then
+            cp "${x86}" target/x86_64-unknown-linux-musl/release/vigil
+          fi
+          if [ "${arm}" != "target/aarch64-unknown-linux-musl/release/vigil" ]; then
+            cp "${arm}" target/aarch64-unknown-linux-musl/release/vigil
+          fi
+          chmod +x target/x86_64-unknown-linux-musl/release/vigil target/aarch64-unknown-linux-musl/release/vigil
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-arch image
+        working-directory: vigil
+        run: docker buildx build --platform linux/amd64,linux/arm64 .

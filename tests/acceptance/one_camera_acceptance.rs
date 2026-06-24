@@ -888,7 +888,7 @@ fn first_light_config(
     let config_path = dir.path().join("vigil.toml");
     let detector_model_path = workspace_root().join("tests/fixtures/models/yolox-tiny-coco.pth");
     let config = format!(
-        "data_dir = \"{}\"\nstore_path = \"{}\"\nhealth_port = {}\nrtsp_url = \"{}\"\ndetector_model_path = \"{}\"\n",
+        "data_dir = \"{}\"\nstore_path = \"{}\"\nhealth_port = {}\nrtsp_url = \"{}\"\ndetector_model_path = \"{}\"\ndetector_sample_frames = 1\n",
         escape_toml_path(data_dir),
         escape_toml_path(store_path),
         health_port,

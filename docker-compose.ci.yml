@@ -1,0 +1,27 @@
+services:
+  # Local-dev only: hosted CI shards the full lane directly in .github/workflows/ci.yml.
+  slow-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    working_dir: /workspace/vigil
+    environment:
+      CARGO_TARGET_DIR: /workspace/vigil/target
+    volumes:
+      - .:/workspace/vigil
+      - ../context-graph:/workspace/context-graph:ro
+      - ../contextdb:/workspace/contextdb:ro
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/workspace/vigil/target
+      - fixture-cache:/workspace/vigil/tests/fixtures/.cache
+    command: >
+      bash -lc "cargo xtask setup-harness &&
+      cargo nextest run --release --profile ci-full --workspace
+      --features first-light-acceptance,acceptance"
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target:
+  fixture-cache:

@@ -567,6 +567,10 @@ impl DockerProbe {
         }
         let name = unique_container_name();
         let volume_arg = format!("{}:/data", volume.display());
+        #[cfg(unix)]
+        let user_arg = format!("{}:{}", unsafe { libc::getuid() }, unsafe {
+            libc::getgid()
+        });
         let mut args = vec![
             "run",
             "-d",
@@ -578,9 +582,13 @@ impl DockerProbe {
             "VIGIL_STORE_PATH=/data/store.contextgraph",
             "-e",
             "VIGIL_HEALTH_PORT=8099",
+            "-e",
+            "VIGIL_DROP_PRIVILEGES=0",
             "-v",
             &volume_arg,
         ];
+        #[cfg(unix)]
+        args.extend(["--user", &user_arg]);
         let port_arg;
         if network_none {
             args.extend(["--network", "none"]);

@@ -1,5 +1,8 @@
 mod config;
 mod control_socket;
+pub mod correction;
+pub mod ha_discovery;
+pub mod ha_mqtt_tasks;
 mod health;
 mod live_read;
 mod media_pipeline;
@@ -9,6 +12,20 @@ mod runtime_stats;
 mod shutdown;
 mod store;
 mod yolox_detector;
+
+pub use correction::{
+    CorrectionError, CorrectionReceipt, CorrectionRequest, CorrectionType, EventRow, EventsView,
+    RecordedCorrection, ReviewError, WhyView, record_correction, review_events, review_why,
+};
+pub use ha_discovery::{
+    CameraConfig, CommandTopicMessage, DetectionInput, DiscoveryPayload, EventPayload, ParseError,
+    ServiceConfig, generate_discovery_payloads, map_detection_to_event_payload,
+    parse_command_topic,
+};
+pub use ha_mqtt_tasks::{
+    MqttConfig, SubscriberHandle, mqtt_connect_intent, publish_detection_event,
+    publish_discovery_to_broker, spawn_correction_subscriber, spawn_wired_correction_subscriber,
+};
 
 use std::ffi::OsString;
 use std::path::Path;

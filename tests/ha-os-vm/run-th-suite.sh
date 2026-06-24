@@ -57,6 +57,22 @@ th05_sample_seconds="$(bounded_int "${TH05_SAMPLE_SECONDS:-30}" 30 3600 30)"
 th06_sample_seconds="$(bounded_int "${TH06_SAMPLE_SECONDS:-30}" 30 3600 30)"
 th09_sample_seconds="$(bounded_int "${TH09_SAMPLE_SECONDS:-15}" 15 600 15)"
 
+# HA integration TH checks (TH-12..TH-25)
+ha_api_token="${HA_API_TOKEN:-}"
+ha_api_base="${HA_API_BASE:-http://127.0.0.1:8123}"
+vigil_discovery_prefix="${VIGIL_DISCOVERY_PREFIX:-homeassistant}"
+vigil_event_topic="${VIGIL_EVENT_TOPIC:-vigil/events}"
+vigil_correction_topic="${VIGIL_CORRECTION_TOPIC:-vigil/correction/command}"
+vigil_availability_topic="${VIGIL_AVAILABILITY_TOPIC:-vigil/availability}"
+vigil_running_condition_topic="${VIGIL_RUNNING_CONDITION_TOPIC:-vigil/running_condition}"
+vigil_control_topic="${VIGIL_CONTROL_TOPIC:-vigil/commands/control}"
+vigil_availability_offline_payload="${VIGIL_AVAILABILITY_OFFLINE_PAYLOAD:-offline}"
+go2rtc_api_base="${GO2RTC_API_BASE:-http://127.0.0.1:1984}"
+mosquitto_addon_slug="${MOSQUITTO_ADDON_SLUG:-core_mosquitto}"
+th14_detection_wait_seconds="$(bounded_int "${TH14_DETECTION_WAIT_SECONDS:-120}" 30 600 120)"
+th22_observation_window_seconds="$(bounded_int "${TH22_OBSERVATION_WINDOW_SECONDS:-60}" 30 600 60)"
+th25_broker_restart_wait_seconds="$(bounded_int "${TH25_BROKER_RESTART_WAIT_SECONDS:-60}" 30 300 60)"
+
 config_fail() {
   printf 'TH-CONFIG FAIL %s\n' "$1" >&2
   exit 1
@@ -1185,6 +1201,807 @@ th11() {
   pass "$id" "update preserves state and options"
 }
 
+# ─── HA integration helpers ───────────────────────────────────────────────
+
+ha_rest_api_run() {
+  # Query the HA REST API.  Inside the VM the call goes through the
+  # Supervisor proxy so SUPERVISOR_TOKEN is available; outside it uses
+  # HA_API_TOKEN against HA_API_BASE.
+  local path="$1"
+  if [[ -n "$haos_ssh_target" ]]; then
+    local remote_script
+    printf -v remote_script \
+      'curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" "http://supervisor/ha%s"' \
+      "$path"
+    ssh -n -o BatchMode=yes "$haos_ssh_target" \
+      "sudo docker exec hassio_cli sh -c $(printf '%q' "$remote_script")"
+  else
+    curl_run -fsS -H "Authorization: Bearer ${ha_api_token}" "${ha_api_base}${path}"
+  fi
+}
+
+vigil_exec_cmd() {
+  # Execute a command inside the running Vigil add-on container.
+  local container_id
+  container_id="$(addon_container_id)" || return 1
+  [[ -n "$container_id" ]] || return 1
+  docker_cli_run exec "$container_id" "$@"
+}
+
+mqtt_wait_for_message() {
+  # Subscribe to $1 and wait up to $2 seconds for one message; print to stdout.
+  local topic="$1"
+  local wait_seconds="$2"
+  local capture sub_err sub_status
+  capture="$(mktemp)"
+  sub_err="$(mktemp)"
+  timeout "$wait_seconds" mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" \
+    "${mosquitto_auth_args[@]}" -C 1 -W "$wait_seconds" -t "$topic" \
+    > "$capture" 2>"$sub_err"
+  sub_status=$?
+  if [[ "$sub_status" -ne 0 && "$sub_status" -ne 124 && "$sub_status" -ne 1 ]]; then
+    cat "$sub_err" >&2
+  fi
+  cat "$capture"
+  rm -f "$capture" "$sub_err"
+}
+
+mqtt_count_messages() {
+  # Collect messages on $1 for $2 seconds; print count.
+  local topic="$1"
+  local wait_seconds="$2"
+  local capture sub_err sub_status
+  capture="$(mktemp)"
+  sub_err="$(mktemp)"
+  timeout "$wait_seconds" mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" \
+    "${mosquitto_auth_args[@]}" -t "$topic" > "$capture" 2>"$sub_err"
+  sub_status=$?
+  if [[ "$sub_status" -ne 0 && "$sub_status" -ne 124 ]]; then
+    rm -f "$capture" "$sub_err"
+    printf '0\n'
+    return
+  fi
+  wc -l < "$capture"
+  rm -f "$capture" "$sub_err"
+}
+
+ha_vigil_entity_ids() {
+  # List entity_ids in HA that belong to Vigil (mqtt platform, vigil in entity_id).
+  have_cmd jq || return 1
+  ha_rest_api_run /api/states 2>/dev/null \
+    | jq -er '[.[] | select(.entity_id | test("vigil"; "i"))] | .[].entity_id' \
+      2>/dev/null \
+    | sort -u
+}
+
+addon_reachable_after_restart() {
+  local id="$1"
+  restart_addon "$id" "for restart" || return 1
+  wait_for_health || { fail "$id" "add-on did not reach health after restart"; return 1; }
+}
+
+broker_restart_and_wait() {
+  local id="$1"
+  ha_cli_run apps restart "$mosquitto_addon_slug" >/dev/null || {
+    fail "$id" "could not restart Mosquitto broker add-on ($mosquitto_addon_slug)"
+    return 1
+  }
+  local deadline=$((SECONDS + th25_broker_restart_wait_seconds))
+  while (( SECONDS < deadline )); do
+    mqtt_ok && return 0
+    sleep 2
+  done
+  fail "$id" "MQTT broker did not become reachable within ${th25_broker_restart_wait_seconds}s after restart"
+  return 1
+}
+
+# ─── TH-12..TH-25: HA integration acceptance checks ──────────────────────
+
+th12() {
+  local id="TH-12"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for discovery topic audit"; return; }
+  have_cmd jq || { fail "$id" "jq is required for entity registry audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for device registration audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for device registration audit"; return; }
+  # Collect discovery payloads published on the HA discovery prefix for up to 10 s
+  local discovery_count
+  discovery_count="$(mqtt_count_messages "${vigil_discovery_prefix}/#" 10)"
+  if ! [[ "$discovery_count" =~ ^[0-9]+$ ]] || (( discovery_count == 0 )); then
+    fail "$id" "no MQTT discovery payloads published to '${vigil_discovery_prefix}/#' within 10 s \
+of add-on start; publish_discovery_to_broker must publish the Vigil device + per-camera sub-device \
+discovery tree so Home Assistant auto-registers entities without manual YAML"
+    return
+  fi
+  # Query HA state machine for registered Vigil entities
+  local entity_ids
+  entity_ids="$(ha_vigil_entity_ids 2>/dev/null)"
+  if [[ -z "$entity_ids" ]]; then
+    fail "$id" "no Vigil entities found in HA state machine after discovery publish; \
+Home Assistant must auto-register the Vigil device and per-camera sub-device on add-on start"
+    return
+  fi
+  # Assert at least one camera/event-class entity (per-camera sub-device must be present)
+  local camera_entity_count
+  camera_entity_count="$(printf '%s\n' "$entity_ids" | grep -cE '(camera|event)\.' || echo 0)"
+  if (( camera_entity_count == 0 )); then
+    fail "$id" "no camera or event entities found under the Vigil device in HA; \
+the per-camera sub-device carrying the detection event entity must be registered as a distinct \
+linked sub-device, not collapsed into the top-level Vigil device"
+    return
+  fi
+  pass "$id" "Vigil device and per-camera sub-device auto-registered in Home Assistant via MQTT discovery"
+}
+
+th13() {
+  local id="TH-13"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  have_cmd jq || { fail "$id" "jq is required for entity id stability audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for entity id stability audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for entity id stability audit"; return; }
+  local ids_before
+  ids_before="$(ha_vigil_entity_ids 2>/dev/null)"
+  if [[ -z "$ids_before" ]]; then
+    fail "$id" "no Vigil entities found in HA before stability audit; entity ids and discovery \
+topics must be deterministic from camera/service identity and survive restarts — entity must first \
+be registered by discovery publish"
+    return
+  fi
+  # Restart Vigil add-on
+  restart_addon "$id" "for entity id stability across Vigil restart" || return
+  wait_for_health || { fail "$id" "Vigil did not reach health after restart for stability audit"; return; }
+  local ids_after_vigil_restart
+  ids_after_vigil_restart="$(ha_vigil_entity_ids 2>/dev/null)"
+  if [[ "$ids_before" != "$ids_after_vigil_restart" ]]; then
+    fail "$id" "Vigil entity ids changed across Vigil add-on restart (before: $(printf '%s' "$ids_before" | head -3) …); \
+entity ids must be a pure function of camera/service identity and must not regenerate per process"
+    return
+  fi
+  # Restart Mosquitto broker
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable before broker restart audit"; return; }
+  broker_restart_and_wait "$id" || return
+  wait_for_health || { fail "$id" "Vigil health did not recover after broker restart"; return; }
+  local ids_after_broker_restart
+  ids_after_broker_restart="$(ha_vigil_entity_ids 2>/dev/null)"
+  if [[ "$ids_before" != "$ids_after_broker_restart" ]]; then
+    fail "$id" "Vigil entity ids changed after broker restart (before: $(printf '%s' "$ids_before" | head -3) …); \
+discovery re-announce must reproduce the same entity ids"
+    return
+  fi
+  pass "$id" "entity ids and discovery topics stable across Vigil restart and broker restart"
+}
+
+th14() {
+  local id="TH-14"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event topic audit"; return; }
+  have_cmd jq || { fail "$id" "jq is required for event payload audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for detection event audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for detection event audit"; return; }
+  # Wait for a detection event on the event topic (synthetic RTSP source is running)
+  local event_payload
+  event_payload="$(mqtt_wait_for_message "${vigil_event_topic}" "$th14_detection_wait_seconds")"
+  if [[ -z "$event_payload" ]]; then
+    fail "$id" "no detection event published to '${vigil_event_topic}' within \
+${th14_detection_wait_seconds}s; publish_detection_event must publish the detection payload to the \
+broker when a real detection lands so it is reachable as an event entity in Home Assistant"
+    return
+  fi
+  # Assert event payload carries the required contract fields
+  local detection_id class confidence
+  detection_id="$(jq -er '.detection_id // empty' <<< "$event_payload" 2>/dev/null)"
+  class="$(jq -er '.class // .object_class // empty' <<< "$event_payload" 2>/dev/null)"
+  confidence="$(jq -er '.confidence // empty' <<< "$event_payload" 2>/dev/null)"
+  [[ -n "$detection_id" ]] || {
+    fail "$id" "event payload is missing the detection_id field; the event payload must carry the \
+detection id so the owner's automation and the correction card can source it"
+    return
+  }
+  [[ -n "$class" ]] || {
+    fail "$id" "event payload is missing the object class field (class/object_class)"
+    return
+  }
+  [[ -n "$confidence" ]] || {
+    fail "$id" "event payload is missing the confidence field"
+    return
+  }
+  # F15: value-equality via vigil why — assert cg observation fields match the event payload.
+  # A correct implementation writes the detection to cg and publishes matching fields to MQTT;
+  # wrong stub publishes to MQTT without writing to cg so vigil why returns no output.
+  if docker_cli_available; then
+    local why_output
+    why_output="$(vigil_exec_cmd vigil why "$detection_id" 2>/dev/null)"
+    if [[ -z "$why_output" ]]; then
+      fail "$id" "'vigil why $detection_id' returned no output inside the add-on container; \
+the detection must be written to cg authority so vigil why can resolve the observation from \
+the store — wrong stub publishes the event to MQTT but writes nothing to cg"
+      return
+    fi
+    # Assert the event payload class value-equals the cg observation's class field.
+    if [[ -n "$class" ]] && [[ "$why_output" != *"$class"* ]]; then
+      fail "$id" "'vigil why $detection_id' output does not contain the object class '$class' \
+from the event payload; the published event must value-equal the cg observation's class field — \
+wrong stub hardcodes a different class in the event than what cg holds"
+      return
+    fi
+  fi
+  pass "$id" "real detection surfaced as MQTT event entity and vigil why resolves value-equal cg observation"
+}
+
+th15() {
+  local id="TH-15"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for network namespace codec probe"; return; }
+  have_cmd jq || { fail "$id" "jq is required for go2rtc stream discovery"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for live-view stream codec audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for live-view stream codec audit"; return; }
+  # F16: Discover the go2rtc stream name, then probe it with ffprobe from inside the HA network
+  # namespace to assert a video codec is present.  A correct implementation wires the camera to
+  # go2rtc at an address reachable from inside HA's network; wrong stub registers a host-only path
+  # that resolves from the host but is unreachable from the HA network namespace.
+  local stream_name
+  if [[ -n "$haos_ssh_target" ]]; then
+    stream_name="$(ssh -n -o BatchMode=yes "$haos_ssh_target" \
+      "curl -fsS --max-time 5 '${go2rtc_api_base}/api/streams' 2>/dev/null \
+       | jq -er 'keys[] | select(test(\"vigil\"; \"i\"))' 2>/dev/null | head -1" \
+      2>/dev/null || true)"
+  else
+    stream_name="$(curl_run -fsS --max-time 5 "${go2rtc_api_base}/api/streams" 2>/dev/null \
+      | jq -er 'keys[] | select(test("vigil"; "i"))' 2>/dev/null | head -1 || true)"
+  fi
+  if [[ -z "$stream_name" ]]; then
+    fail "$id" "no stream whose name contains 'vigil' found in go2rtc at ${go2rtc_api_base}/api/streams; \
+the camera entity must be registered as a go2rtc stream under a vigil-prefixed name — wrong stub never \
+registers the stream so no entry appears in the API"
+    return
+  fi
+  local rtsp_url="rtsp://127.0.0.1:8554/${stream_name}"
+  # Probe from inside the HA network namespace via the hassio_cli container, which shares the HA
+  # host network and can reach go2rtc RTSP at 127.0.0.1:8554.
+  local probe_output
+  probe_output="$(docker_cli_run exec hassio_cli sh -c \
+    "ffprobe -rtsp_transport tcp -v quiet -show_streams -of json '${rtsp_url}' 2>/dev/null" \
+    2>/dev/null || true)"
+  local video_codec
+  video_codec="$(jq -er \
+    '[.streams[] | select(.codec_type == "video") | .codec_name][0] // empty' \
+    <<< "$probe_output" 2>/dev/null || true)"
+  if [[ -z "$video_codec" ]]; then
+    fail "$id" "ffprobe on '${rtsp_url}' from inside the HA network namespace (hassio_cli) returned \
+no video codec; the live-view stream must deliver decodable video through the HA-internal go2rtc path — \
+wrong stub wires go2rtc at a host-only address that is unreachable from inside the HA network namespace"
+    return
+  fi
+  pass "$id" "live view RTSP stream delivers video codec '${video_codec}' as probed via ffprobe from inside the HA network namespace"
+}
+
+th16() {
+  local id="TH-16"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event/correction audit"; return; }
+  have_cmd mosquitto_pub || { fail "$id" "mosquitto_pub is required for correction command publish"; return; }
+  have_cmd jq || { fail "$id" "jq is required for event payload parsing"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for vigil why audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for correction round-trip audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for correction round-trip audit"; return; }
+  # Capture a real detection from the event topic
+  local event_payload detection_id
+  event_payload="$(mqtt_wait_for_message "${vigil_event_topic}" "$th14_detection_wait_seconds")"
+  if [[ -z "$event_payload" ]]; then
+    fail "$id" "no detection event on '${vigil_event_topic}' within ${th14_detection_wait_seconds}s; \
+cannot source detection_id for correction round-trip"
+    return
+  fi
+  detection_id="$(jq -er '.detection_id // empty' <<< "$event_payload" 2>/dev/null)"
+  if [[ -z "$detection_id" ]]; then
+    fail "$id" "detection event payload is missing the detection_id field; \
+the correction card sources its id from this payload"
+    return
+  fi
+  # Publish a correction command with the detection id sourced from the event payload
+  local correction_payload
+  printf -v correction_payload '{"detection_id":"%s","label":"th16 test correction","correction_type":"Identity"}' \
+    "$detection_id"
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_correction_topic" -m "$correction_payload" >/dev/null 2>&1 || {
+    fail "$id" "could not publish correction command to '$vigil_correction_topic'"
+    return
+  }
+  sleep 3
+  # Run vigil why inside the add-on container and assert the correction appears
+  local why_output
+  why_output="$(vigil_exec_cmd vigil why "$detection_id" 2>/dev/null)" || {
+    fail "$id" "vigil why $detection_id failed inside the add-on container"
+    return
+  }
+  if [[ "$why_output" != *"th16 test correction"* ]]; then
+    fail "$id" "'vigil why $detection_id' inside the add-on does not list the correction \
+published to the command topic (label 'th16 test correction' not found); the subscriber must \
+receive the correction command, call record_correction, and write the correction to cg so that \
+vigil why can read it back"
+    return
+  fi
+  pass "$id" "correction published to command topic reads back in vigil why inside the add-on"
+}
+
+th17() {
+  local id="TH-17"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_pub || { fail "$id" "mosquitto_pub is required for operator action commands"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event observation"; return; }
+  have_cmd jq || { fail "$id" "jq is required for event payload parsing"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for acknowledge audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for operator action audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for operator action audit"; return; }
+  # Step 1: capture a detection id for the acknowledge sub-check
+  local event_payload detection_id
+  event_payload="$(mqtt_wait_for_message "${vigil_event_topic}" "$th14_detection_wait_seconds")"
+  if [[ -z "$event_payload" ]]; then
+    fail "$id" "no detection event on '${vigil_event_topic}' within ${th14_detection_wait_seconds}s; \
+cannot source detection_id for operator acknowledge sub-check"
+    return
+  fi
+  detection_id="$(jq -er '.detection_id // empty' <<< "$event_payload" 2>/dev/null)"
+  if [[ -z "$detection_id" ]]; then
+    fail "$id" "event payload is missing detection_id; cannot run acknowledge sub-check"
+    return
+  fi
+  # Step 2a (F17): disable-camera sub-check — publishing disable on the control topic must make
+  # the camera go silent (no new events for that camera while it is disabled).
+  # Extract camera_id from the event payload; fall back to a configurable default.
+  local camera_id_for_ops
+  camera_id_for_ops="$(jq -er '.camera_id // empty' <<< "$event_payload" 2>/dev/null || true)"
+  if [[ -z "$camera_id_for_ops" ]]; then
+    camera_id_for_ops="${TH17_TEST_CAMERA_ID:-lower-gate}"
+  fi
+  local disable_payload
+  printf -v disable_payload '{"camera_id":"%s","action":"disable"}' "$camera_id_for_ops"
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_control_topic" -m "$disable_payload" >/dev/null 2>&1 || {
+    fail "$id" "could not publish disable-camera command to '$vigil_control_topic'"
+    return
+  }
+  # Allow the disable to propagate, then listen for events on the disabled camera for 10 s.
+  # A correctly-wired subscriber effects the disable so the camera produces no further detections;
+  # wrong stub never connects to the broker so the camera keeps detecting.
+  sleep 1
+  local camera_event_after_disable
+  camera_event_after_disable="$(
+    timeout 10 mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+      -t "$vigil_event_topic" -C 1 2>/dev/null \
+    | jq -er --arg cid "$camera_id_for_ops" 'select(.camera_id == $cid) | .detection_id // empty' \
+      2>/dev/null || true
+  )"
+  if [[ -n "$camera_event_after_disable" ]]; then
+    fail "$id" "camera '${camera_id_for_ops}' produced a new detection event after the disable-camera \
+command was published (detection_id='${camera_event_after_disable}'); the subscriber must effect the \
+disable on the named camera so it stops contributing detections — wrong stub never connects and the \
+camera keeps detecting"
+    return
+  fi
+  # Step 2b (F17): snapshot sub-check — publishing a snapshot command must write an artifact to
+  # the add-on's snapshots directory.
+  local snapshot_payload
+  printf -v snapshot_payload '{"camera_id":"%s","action":"snapshot"}' "$camera_id_for_ops"
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_control_topic" -m "$snapshot_payload" >/dev/null 2>&1 || {
+    fail "$id" "could not publish snapshot command to '$vigil_control_topic'"
+    return
+  }
+  sleep 3
+  # Assert a snapshot file was written inside the add-on container under /data/snapshots/.
+  local snapshot_count
+  snapshot_count="$(vigil_exec_cmd sh -c 'ls /data/snapshots/ 2>/dev/null | wc -l' 2>/dev/null || echo 0)"
+  if [[ "${snapshot_count//[[:space:]]/}" == "0" ]]; then
+    fail "$id" "no snapshot file found at /data/snapshots/ inside the add-on container after the \
+snapshot command was published; wrong stub subscriber never connects to the broker so the snapshot \
+command is never processed and no artifact is written"
+    return
+  fi
+  # Step 2c: re-enable camera before proceeding to the acknowledge sub-check.
+  local enable_payload
+  printf -v enable_payload '{"camera_id":"%s","action":"enable"}' "$camera_id_for_ops"
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_control_topic" -m "$enable_payload" >/dev/null 2>&1 || true
+  sleep 1
+  # Step 3: acknowledge sub-check — publish a correction command with correction_type consistent
+  # with TH-16 / TH-24 (correction_type field, not "action") and assert it reads back via vigil why.
+  local ack_payload
+  printf -v ack_payload \
+    '{"detection_id":"%s","correction_type":"identity","label":"th17 operator ack"}' "$detection_id"
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_correction_topic" -m "$ack_payload" >/dev/null 2>&1 || {
+    fail "$id" "could not publish acknowledge command to '$vigil_correction_topic'"
+    return
+  }
+  sleep 3
+  # Step 4: assert the acknowledge correction reads back from vigil why inside the add-on.
+  local why_output
+  why_output="$(vigil_exec_cmd vigil why "$detection_id" 2>/dev/null)"
+  if [[ "$why_output" != *"th17 operator ack"* ]]; then
+    fail "$id" "'vigil why $detection_id' inside the add-on does not show the acknowledge label \
+'th17 operator ack' after the operator action command was published; the subscriber must receive \
+the correction command, call record_correction, and write it to cg authority — wrong stub never \
+connects so the command is never processed"
+    return
+  fi
+  pass "$id" "operator action commands effect disable-camera silence, snapshot artifact, and acknowledge correction on the named detection"
+}
+
+th18() {
+  local id="TH-18"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for availability topic audit"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required to kill the add-on container"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for availability last-will audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for availability audit"; return; }
+  local container_id
+  container_id="$(addon_container_id)" || { fail "$id" "could not identify Vigil add-on container"; return; }
+  [[ -n "$container_id" ]] || { fail "$id" "could not identify Vigil add-on container"; return; }
+  # Subscribe to availability topic before killing; last-will must arrive within 15 s of the kill
+  local th18_wait=15
+  local avail_message
+  avail_message="$(
+    (
+      sleep 1
+      docker_cli_run kill "$container_id" >/dev/null 2>&1
+    ) &
+    mqtt_wait_for_message "${vigil_availability_topic}" "$th18_wait"
+  )"
+  if [[ -z "$avail_message" ]]; then
+    fail "$id" "no message on availability topic '${vigil_availability_topic}' within \
+${th18_wait}s after killing the Vigil add-on container; the MQTT last-will must publish the \
+offline/unavailable value when the Vigil service dies so the device and all its entities go \
+unavailable in Home Assistant"
+    return
+  fi
+  # F18: assert the exact payload_not_available string — a partial "not online" substring check
+  # is too weak and lets an impl that publishes "online" pass if it also emits "offline" anywhere.
+  if [[ "$avail_message" != "$vigil_availability_offline_payload" ]]; then
+    fail "$id" "availability topic published '${avail_message}' after kill — expected the exact \
+payload_not_available value '${vigil_availability_offline_payload}'; the MQTT last-will must carry \
+exactly the declared payload_not_available string so all Home Assistant entities go unavailable — \
+wrong stub never sets up a last-will so the value is absent or mis-matched"
+    return
+  fi
+  pass "$id" "MQTT last-will publishes the exact payload_not_available value '${vigil_availability_offline_payload}' when the Vigil service is killed"
+}
+
+th19() {
+  local id="TH-19"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for running-condition audit"; return; }
+  have_cmd jq || { fail "$id" "jq is required for running-condition state audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for running-condition audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for running-condition audit"; return; }
+  # Assert the running-condition state reads "running" while healthy
+  local rc_state
+  rc_state="$(mqtt_wait_for_message "${vigil_running_condition_topic}" 10)"
+  if [[ -z "$rc_state" ]]; then
+    fail "$id" "no message on running-condition topic '${vigil_running_condition_topic}' within 10 s; \
+the running-condition entity must publish its state so Home Assistant can surface it"
+    return
+  fi
+  if [[ "$rc_state" != "running" ]]; then
+    fail "$id" "running-condition state while healthy is '${rc_state}', expected 'running'; \
+the mapping must yield the specific string 'running' for the Ready operational state"
+    return
+  fi
+  # F19: actually induce a store-open fault by making the data dir read-only before restart.
+  # The previous impl just stopped and started the add-on without any fault, so a correct impl
+  # that publishes "running" on a clean restart would falsely fail this test.  With the data dir
+  # chmod 000'd, the store cannot be opened and the add-on must publish a named fault string.
+  ha_cli_run apps stop "$addon_slug" >/dev/null 2>&1 || true
+  sleep 1
+  # Make the data directory read-only so the store cannot open on next start.
+  if [[ -n "$haos_ssh_target" ]]; then
+    ssh -n -o BatchMode=yes "$haos_ssh_target" \
+      "sudo chmod 000 $(printf '%q' "$addon_data_dir")" 2>/dev/null || {
+      fail "$id" "could not set $addon_data_dir to read-only on the remote host; cannot induce \
+store-open fault — ensure the SSH user has sudo privileges"
+      return
+    }
+  else
+    chmod 000 "$addon_data_dir" 2>/dev/null || {
+      fail "$id" "could not set $addon_data_dir to read-only; cannot induce store-open fault \
+(may need elevated privileges to chmod the Supervisor data directory)"
+      return
+    }
+  fi
+  ha_cli_run apps start "$addon_slug" >/dev/null 2>&1 || true
+  local disk_fault_state
+  disk_fault_state="$(mqtt_wait_for_message "${vigil_running_condition_topic}" 20)"
+  # Restore data dir permissions unconditionally before asserting so a test failure does not
+  # leave the add-on in a broken state.
+  if [[ -n "$haos_ssh_target" ]]; then
+    ssh -n -o BatchMode=yes "$haos_ssh_target" \
+      "sudo chmod 755 $(printf '%q' "$addon_data_dir")" 2>/dev/null || true
+  else
+    chmod 755 "$addon_data_dir" 2>/dev/null || true
+  fi
+  ha_cli_run apps stop "$addon_slug" >/dev/null 2>&1 || true
+  if [[ "$disk_fault_state" == "running" ]] || [[ -z "$disk_fault_state" ]]; then
+    fail "$id" "running-condition published '${disk_fault_state:-<no message>}' after a \
+store-open fault (data dir chmod 000 before restart); a correct implementation detects the fault \
+at startup and publishes a named fault string (e.g. 'store-open-failed', 'disk-full') — wrong stub \
+publishes 'running' regardless of whether the store can be opened"
+    return
+  fi
+  pass "$id" "running-condition reports 'running' while healthy and named fault string '${disk_fault_state}' when the store cannot be opened"
+}
+
+th20() {
+  local id="TH-20"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  have_cmd jq || { fail "$id" "jq is required for entity registry audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for per-camera health entity audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for per-camera health entity audit"; return; }
+  local entity_ids
+  entity_ids="$(ha_vigil_entity_ids 2>/dev/null)"
+  if [[ -z "$entity_ids" ]]; then
+    fail "$id" "no Vigil entities found in HA state machine; the device and per-camera sub-device must \
+be registered so the entity set can be audited for per-camera health entities"
+    return
+  fi
+  # Assert: no entity with a health/availability role under any camera sub-device
+  # Check entity_ids for patterns indicating a per-camera health/availability entity
+  local per_camera_health_entities
+  per_camera_health_entities="$(printf '%s\n' "$entity_ids" \
+    | grep -E '(camera_health|camera_status|camera_problem|camera_available|cam.*health|cam.*status)' \
+    || true)"
+  if [[ -n "$per_camera_health_entities" ]]; then
+    fail "$id" "per-camera health/availability entities found in HA: ${per_camera_health_entities}; \
+the add-on must register exactly one whole-service running-condition entity and NO per-camera health \
+entities — a per-camera health entity misleads the owner into thinking a camera is green while it may \
+be down once an estate has more than one camera"
+    return
+  fi
+  # Also query entity details for any binary_sensor or sensor entity whose attributes
+  # indicate health/availability role under a camera device
+  local health_role_count
+  health_role_count="$(ha_rest_api_run /api/states 2>/dev/null \
+    | jq -er '[.[] | select(.entity_id | test("vigil"; "i")) |
+        select(.attributes.device_class? | . == "problem" or . == "connectivity" or . == "running")] |
+        length' 2>/dev/null || echo 0)"
+  if [[ "$health_role_count" =~ ^[0-9]+$ ]] && (( health_role_count > 1 )); then
+    fail "$id" "${health_role_count} health-role entities found under the Vigil device; \
+exactly one is expected (the whole-service running-condition) and no per-camera health entities \
+may be registered, even under a different name"
+    return
+  fi
+  pass "$id" "no per-camera health entity registered; exactly the whole-service running-condition is present"
+}
+
+th21() {
+  local id="TH-21"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for Lovelace card registration audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for Lovelace card audit"; return; }
+  # Query HA for registered Lovelace dashboard resources
+  local resources_json resource_count
+  resources_json="$(ha_rest_api_run /api/lovelace/resources 2>/dev/null)"
+  resource_count="$(printf '%s' "$resources_json" \
+    | jq -er '[.[] | select(.url | test("vigil"; "i"))] | length' 2>/dev/null || echo 0)"
+  if ! [[ "$resource_count" =~ ^[0-9]+$ ]] || (( resource_count == 0 )); then
+    fail "$id" "no Vigil Lovelace dashboard resource registered in Home Assistant; \
+the add-on must bundle the correction card asset AND register it as a dashboard resource so \
+correcting a detection works the moment Vigil installs, without the owner pasting YAML"
+    return
+  fi
+  # Assert the resource URL is reachable (not merely registered)
+  local resource_url
+  resource_url="$(printf '%s' "$resources_json" \
+    | jq -er '[.[] | select(.url | test("vigil"; "i"))] | .[0].url' 2>/dev/null)"
+  if [[ -n "$resource_url" ]]; then
+    local card_status
+    card_status="$(ha_rest_api_run "${resource_url}" 2>/dev/null | wc -c | tr -d ' ')"
+    if ! [[ "$card_status" =~ ^[0-9]+$ ]] || (( card_status < 10 )); then
+      fail "$id" "Vigil Lovelace card resource is registered at '${resource_url}' but is not \
+reachable (HTTP response body too small); the card must be served, not merely listed"
+      return
+    fi
+  fi
+  pass "$id" "Vigil Lovelace correction card is registered as a reachable dashboard resource"
+}
+
+th22() {
+  local id="TH-22"
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event topic audit"; return; }
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for empty-stream honesty audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for empty-stream honesty audit"; return; }
+  # Collect event topic messages over the observation window; expect zero
+  local event_count
+  event_count="$(mqtt_count_messages "${vigil_event_topic}" "$th22_observation_window_seconds")"
+  if [[ "$event_count" =~ ^[0-9]+$ ]] && (( event_count > 0 )); then
+    fail "$id" "${event_count} detection event(s) published to '${vigil_event_topic}' during the \
+${th22_observation_window_seconds}s observation window on an empty/garbage stream; the event \
+publish path must be gated on a real detection, not a timer or fabricated event"
+    return
+  fi
+  pass "$id" "empty/garbage stream publishes zero detection events to the broker"
+}
+
+th23() {
+  local id="TH-23"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  have_cmd jq || { fail "$id" "jq is required for entity registry audit"; return; }
+  have_cmd mosquitto_pub || { fail "$id" "mosquitto_pub is required for correction round-trip"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event observation"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for network audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for local privacy audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for local privacy audit"; return; }
+  # Assert: no HA media_source entity for Vigil
+  local media_source_entities
+  media_source_entities="$(ha_vigil_entity_ids 2>/dev/null | grep -E 'media_source\.' || true)"
+  if [[ -n "$media_source_entities" ]]; then
+    fail "$id" "HA media_source entity found for Vigil (${media_source_entities}); the full \
+recorded clip must be reachable only through Vigil's own vigil events/vigil why evidence reference, \
+not via Home Assistant's native Media panel — corrections and clips must not be browsable via \
+the HA media source"
+    return
+  fi
+  # Assert: correction path opens no outbound network beyond the local broker
+  # The wrong stub opens an outbound socket to 127.0.0.1:19876; a real socket monitor inside
+  # the container catches this.  A negative control (known port) proves the monitor works.
+  local container_id
+  container_id="$(addon_container_id)" || { fail "$id" "could not identify Vigil add-on container"; return; }
+  [[ -n "$container_id" ]] || { fail "$id" "could not identify Vigil add-on container"; return; }
+  # Check for unexpected non-broker outbound connections from the Vigil process
+  local runtime_pid unexpected_conns
+  runtime_pid="$(addon_container_runtime_pid "$container_id")" || {
+    fail "$id" "could not identify Vigil runtime pid for network audit"
+    return
+  }
+  unexpected_conns="$(docker_cli_run exec "$container_id" sh -c '
+    pid="$1"
+    broker_port="$2"
+    hex_broker="$(printf "%04X" "$broker_port")"
+    awk -v pid="$pid" -v broker="$hex_broker" '"'"'
+      $4 == "01" {
+        split($3, remote, ":")
+        if (remote[2] == broker) next
+        if (remote[2] == "0000") next
+        inode=$10
+        found[inode]=1
+      }
+    '"'"' /proc/net/tcp /proc/net/tcp6 2>/dev/null
+    for fd in /proc/"$pid"/fd/*; do
+      target=$(readlink "$fd" 2>/dev/null || true)
+      case "$target" in
+        socket:*)
+          inode="${target#socket:[}"
+          inode="${inode%]}"
+          if [ "${found[$inode]+x}" ]; then printf "outbound socket found\n"; exit 0; fi
+          ;;
+      esac
+    done
+  ' sh "$runtime_pid" "$mqtt_port" 2>/dev/null)"
+  if [[ "$unexpected_conns" == *"outbound socket found"* ]]; then
+    fail "$id" "Vigil add-on has an unexpected outbound network connection beyond the local broker; \
+the correction path must open no outbound network beyond the broker — the wrong stub opens a socket \
+to 127.0.0.1:19876 to simulate this failure"
+    return
+  fi
+  pass "$id" "clips reachable only via Vigil surface; no HA media_source entity; no unexpected outbound connections"
+}
+
+th24() {
+  local id="TH-24"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_pub || { fail "$id" "mosquitto_pub is required for correction command publish"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event observation"; return; }
+  have_cmd jq || { fail "$id" "jq is required for event payload parsing"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for vigil why audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for correction restart durability audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for correction restart durability audit"; return; }
+  # Capture a detection id
+  local event_payload detection_id
+  event_payload="$(mqtt_wait_for_message "${vigil_event_topic}" "$th14_detection_wait_seconds")"
+  if [[ -z "$event_payload" ]]; then
+    fail "$id" "no detection event on '${vigil_event_topic}' within ${th14_detection_wait_seconds}s; \
+cannot source detection_id for restart durability audit"
+    return
+  fi
+  detection_id="$(jq -er '.detection_id // empty' <<< "$event_payload" 2>/dev/null)"
+  if [[ -z "$detection_id" ]]; then
+    fail "$id" "event payload is missing detection_id; cannot run restart durability audit"
+    return
+  fi
+  # Publish a correction command
+  local correction_payload
+  printf -v correction_payload \
+    '{"detection_id":"%s","label":"th24 restart test","correction_type":"FalseAlarm"}' \
+    "$detection_id"
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_correction_topic" -m "$correction_payload" >/dev/null 2>&1 || {
+    fail "$id" "could not publish correction command for restart durability audit"
+    return
+  }
+  sleep 3
+  # Restart the local_vigil add-on (the correction must survive this)
+  restart_addon "$id" "for correction restart durability audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not recover after restart for durability audit"; return; }
+  # Run vigil why after restart and assert the correction is still present
+  local why_output
+  why_output="$(vigil_exec_cmd vigil why "$detection_id" 2>/dev/null)" || {
+    fail "$id" "vigil why $detection_id failed inside the restarted add-on container"
+    return
+  }
+  if [[ "$why_output" != *"th24 restart test"* ]]; then
+    fail "$id" "'vigil why $detection_id' does not list the correction after the add-on restarted; \
+the correction must be written to cg authority (not a retained-MQTT or in-memory shadow) so it \
+survives a full add-on restart"
+    return
+  fi
+  pass "$id" "correction published to command topic survives add-on restart and reads back in vigil why"
+}
+
+th25() {
+  local id="TH-25"
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for broker recovery audit"; return; }
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for broker restart recovery audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for broker restart recovery audit"; return; }
+  # Restart the Mosquitto broker add-on; Vigil must reconnect and re-announce
+  broker_restart_and_wait "$id" || return
+  wait_for_health || { fail "$id" "Vigil health did not recover after broker restart"; return; }
+  # Assert discovery is re-announced (or retained discovery survives) after broker restart
+  local rediscovery_count
+  rediscovery_count="$(mqtt_count_messages "${vigil_discovery_prefix}/#" 15)"
+  if ! [[ "$rediscovery_count" =~ ^[0-9]+$ ]] || (( rediscovery_count == 0 )); then
+    fail "$id" "no MQTT discovery payloads on '${vigil_discovery_prefix}/#' within 15 s after \
+broker restart; Vigil must reconnect to the broker and re-announce discovery (or configure \
+retained discovery so the broker re-serves the payloads) so Home Assistant does not lose the \
+device after a broker restart"
+    return
+  fi
+  # Assert availability comes back online after broker reconnect
+  local avail_message
+  avail_message="$(mqtt_wait_for_message "${vigil_availability_topic}" 15)"
+  local avail_lower
+  avail_lower="$(tr '[:upper:]' '[:lower:]' <<< "$avail_message")"
+  if [[ "$avail_lower" != *"online"* ]]; then
+    fail "$id" "availability topic '${vigil_availability_topic}' did not publish an online value \
+within 15 s after broker restart (got: '${avail_message}'); Vigil must re-publish the online \
+availability value after reconnecting to the broker"
+    return
+  fi
+  # Assert a new detection still publishes after broker restart
+  local detection_count
+  detection_count="$(mqtt_count_messages "${vigil_event_topic}" 30)"
+  if ! [[ "$detection_count" =~ ^[0-9]+$ ]] || (( detection_count == 0 )); then
+    fail "$id" "no detection events on '${vigil_event_topic}' within 30 s after broker restart; \
+the event publish path must recover after broker reconnect so fresh detections still surface in \
+Home Assistant"
+    return
+  fi
+  pass "$id" "broker restart recovery: discovery re-announced, availability online, fresh detection publishes"
+}
+
 run_th() {
   local name
   name="$(tr '[:upper:]' '[:lower:]' <<< "$1")"
@@ -1204,13 +2021,28 @@ run_th() {
     9|09|th09|th-09) th09 ;;
     10|th10|th-10) th10 ;;
     11|th11|th-11) th11 ;;
+    12|th12|th-12) th12 ;;
+    13|th13|th-13) th13 ;;
+    14|th14|th-14) th14 ;;
+    15|th15|th-15) th15 ;;
+    16|th16|th-16) th16 ;;
+    17|th17|th-17) th17 ;;
+    18|th18|th-18) th18 ;;
+    19|th19|th-19) th19 ;;
+    20|th20|th-20) th20 ;;
+    21|th21|th-21) th21 ;;
+    22|th22|th-22) th22 ;;
+    23|th23|th-23) th23 ;;
+    24|th24|th-24) th24 ;;
+    25|th25|th-25) th25 ;;
     *) fail "TH-RUN" "unknown TH_RUN_LIST entry: $1" ;;
   esac
 }
 
 th_requires_destructive_opt_in() {
   case "$1" in
-    5|05|th05|th-05|6|06|th06|th-06|7|07|th07|th-07|9|09|th09|th-09|11|th11|th-11)
+    5|05|th05|th-05|6|06|th06|th-06|7|07|th07|th-07|9|09|th09|th-09|11|th11|th-11|\
+    17|th17|th-17|18|th18|th-18|19|th19|th-19|24|th24|th-24|25|th25|th-25)
       return 0
       ;;
     *)

@@ -34,6 +34,7 @@ libc.workspace = true
 mp4.workspace = true
 openh264.workspace = true
 retina.workspace = true
+rumqttc.workspace = true
 rust_h265.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -42,6 +43,7 @@ signal-hook.workspace = true
 tokio.workspace = true
 toml.workspace = true
 url.workspace = true
+uuid.workspace = true
 yolox-burn.workspace = true
 
 [features]
@@ -52,8 +54,18 @@ first-light-acceptance = []
 
 [dev-dependencies]
 tempfile.workspace = true
+uuid.workspace = true
 
 [[test]]
 name = "first_light_loop"
 path = "tests/first_light_loop.rs"
 required-features = ["first-light-acceptance"]
+
+[[test]]
+name = "ha_correction_seam"
+path = "tests/ha_correction_seam.rs"
+required-features = ["first-light-acceptance"]
+
+[[test]]
+name = "ha_mqtt_broker"
+path = "tests/ha_mqtt_broker.rs"

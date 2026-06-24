@@ -315,6 +315,7 @@ where
     let started = tokio::time::Instant::now();
     let mut last_video_at = started;
     let mut segment_started_at = None;
+    let mut any_frames_decoded = false;
     while !shutdown.load(Ordering::SeqCst) {
         match tokio::time::timeout(Duration::from_millis(500), demuxed.next()).await {
             Ok(Some(Ok(CodecItem::VideoFrame(frame)))) if frame.stream_id() == stream_i => {
@@ -336,6 +337,7 @@ where
                     segment_started_at.get_or_insert(last_video_at);
                 }
                 decoded_frames.append(&mut unit_frames);
+                any_frames_decoded = any_frames_decoded || !decoded_frames.is_empty();
                 if decoded_frames.len() >= max_frames {
                     let units = std::mem::take(&mut encoded_units);
                     let mut frames = std::mem::take(&mut decoded_frames);
@@ -373,7 +375,7 @@ where
                 if last_video_at.elapsed() > Duration::from_secs(8) {
                     return Err("RTSP capture timed out waiting for video access units".to_string());
                 }
-                if decoded_frames.is_empty() && started.elapsed() > Duration::from_secs(30) {
+                if !any_frames_decoded && started.elapsed() > Duration::from_secs(30) {
                     return Err(
                         "RTSP capture timed out waiting for decodable video frames".to_string()
                     );

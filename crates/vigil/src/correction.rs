@@ -275,6 +275,19 @@ pub fn record_correction(
 
 /// Return the provenance walk for a detection plus all corrections anchored to it.
 pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewError> {
+    if detection_id != "--latest" && !detection_id.is_empty() {
+        let uuid = uuid::Uuid::parse_str(detection_id)
+            .map_err(|e| ReviewError::NotFound(format!("invalid detection id: {e}")))?;
+        let observation = store
+            .get_observation(ObservationId::from(uuid))
+            .map_err(|e| ReviewError::NotFound(format!("detection not found: {e}")))?;
+        if observation.observation_type != "detection" {
+            return Err(ReviewError::NotFound(format!(
+                "observation {} has type '{}', expected 'detection'",
+                detection_id, observation.observation_type
+            )));
+        }
+    }
     let resp = handle_why_read(store, detection_id).map_err(ReviewError::StoreError)?;
 
     // Find all corrections anchored to this detection.

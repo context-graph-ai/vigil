@@ -20,7 +20,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) data_dir: PathBuf,
     pub(crate) store_path: PathBuf,
     pub(crate) health_port: u16,
-    pub(crate) review_port: Option<u16>,
+    pub(crate) review_port: u16,
     pub(crate) site_name: String,
     /// First camera's name — retained for backward-compat with log_startup and
     /// single-camera deployments.
@@ -160,7 +160,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         .store_path
         .unwrap_or_else(|| data_dir.join("store.contextgraph"));
     let health_port = partial.health_port.unwrap_or(8099);
-    let review_port = partial.review_port;
+    let review_port = partial.review_port.unwrap_or(8098);
     let site_name = partial.site_name.unwrap_or_else(|| "site-1".to_string());
     let camera_name = partial
         .camera_name
@@ -243,6 +243,7 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
             "--data-dir" => cli.data_dir = Some(next_path(&mut iter, "--data-dir")?),
             "--store-path" => cli.store_path = Some(next_path(&mut iter, "--store-path")?),
             "--health-port" => cli.health_port = Some(next_port(&mut iter, "--health-port")?),
+            "--review-port" => cli.review_port = Some(next_port(&mut iter, "--review-port")?),
             "--site-name" => cli.site_name = Some(next_string(&mut iter, "--site-name")?),
             "--camera-name" => cli.camera_name = Some(next_string(&mut iter, "--camera-name")?),
             "--rtsp-url" => cli.rtsp_url = Some(next_string(&mut iter, "--rtsp-url")?),
@@ -482,6 +483,24 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N]"
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+
+    use super::{load, run_usage};
+
+    #[test]
+    fn review_port_cli_override_is_documented_and_loaded() {
+        assert!(run_usage().contains("--review-port PORT"));
+        let config = load(vec![
+            OsString::from("--review-port"),
+            OsString::from("8765"),
+        ])
+        .expect("review port CLI override loads");
+        assert_eq!(config.review_port, 8765);
+    }
 }

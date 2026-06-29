@@ -40,6 +40,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 signal-hook.workspace = true
+tiny_http.workspace = true
 tokio.workspace = true
 toml.workspace = true
 url.workspace = true
@@ -69,7 +70,6 @@ required-features = ["first-light-acceptance"]
 [[test]]
 name = "http_data_plane"
 path = "tests/http_data_plane.rs"
-required-features = ["first-light-acceptance"]
 
 [[test]]
 name = "ha_mqtt_broker"

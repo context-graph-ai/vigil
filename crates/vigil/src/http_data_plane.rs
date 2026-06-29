@@ -1,16 +1,48 @@
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use context_graph::Store;
 use serde_json::{Value, json};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+use crate::{
+    CorrectionError, CorrectionRequest, CorrectionType, EventRow, ReviewError, WhyView,
+    record_correction, review_events, review_why,
+};
+
+const DEFAULT_EVENT_LIMIT: usize = 100;
+const MAX_CORRECTION_BODY_BYTES: usize = 64 * 1024;
+
+struct ShutdownAwareReader<R> {
+    inner: R,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl<R> ShutdownAwareReader<R> {
+    fn new(inner: R, shutdown: Arc<AtomicBool>) -> Self {
+        Self { inner, shutdown }
+    }
+}
+
+impl<R: Read> Read for ShutdownAwareReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Ok(0);
+        }
+        self.inner.read(buffer)
+    }
+}
 
 pub struct ReviewDataPlaneHandle {
     local_addr: SocketAddr,
-    _handle: JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
 }
 
 impl ReviewDataPlaneHandle {
@@ -19,229 +51,521 @@ impl ReviewDataPlaneHandle {
     }
 
     pub fn shutdown(self) {
-        let _ = self;
+        drop(self);
+    }
+}
+
+impl Drop for ReviewDataPlaneHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let wake_addr = SocketAddr::from(([127, 0, 0, 1], self.local_addr.port()));
+        let _ = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(100));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
 pub fn spawn_review_data_plane(
     store: Store,
-    _data_dir: PathBuf,
+    data_dir: PathBuf,
     port: u16,
 ) -> Result<ReviewDataPlaneHandle, String> {
-    let listener = TcpListener::bind(("0.0.0.0", port))
+    let server = Server::http(("0.0.0.0", port))
         .map_err(|error| format!("review port {port} bind failed: {error}"))?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|error| format!("review port {port} local addr failed: {error}"))?;
+    let local_addr = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| "review data plane did not bind an IP socket".to_string())?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker_shutdown = Arc::clone(&shutdown);
     let store = Arc::new(store);
+    let data_dir = Arc::new(data_dir);
     let handle = thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            handle_client(stream, Arc::clone(&store));
+        let mut handlers: Vec<JoinHandle<()>> = Vec::new();
+        while !worker_shutdown.load(Ordering::SeqCst) {
+            match server.recv_timeout(Duration::from_millis(100)) {
+                Ok(Some(request)) => {
+                    let data_dir = Arc::clone(&data_dir);
+                    let shutdown = Arc::clone(&worker_shutdown);
+                    let is_media = request.method() == &Method::Get
+                        && request
+                            .url()
+                            .split('?')
+                            .next()
+                            .unwrap_or(request.url())
+                            .starts_with("/media/");
+                    if is_media {
+                        thread::spawn(move || {
+                            handle_media_request(request, data_dir, shutdown);
+                        });
+                    } else {
+                        let store = Arc::clone(&store);
+                        handlers.push(thread::spawn(move || {
+                            handle_request(request, store);
+                        }));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("review_data_plane_accept_error={error}");
+                }
+            }
+            join_finished_handlers(&mut handlers);
+        }
+        for handler in handlers {
+            let _ = handler.join();
         }
     });
+
     Ok(ReviewDataPlaneHandle {
         local_addr,
-        _handle: handle,
+        shutdown,
+        handle: Some(handle),
     })
 }
 
-fn handle_client(mut stream: TcpStream, store: Arc<Store>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
-    let request = read_request(&mut stream);
-    let Some(first_line) = request.lines().next() else {
-        write_response(
-            &mut stream,
-            404,
-            "application/json",
-            br#"{"error":"not_found"}"#,
-            &[],
-        );
-        return;
-    };
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("/");
-    let path_no_query = path.split('?').next().unwrap_or(path);
-
-    match (method, path_no_query) {
-        ("GET", "/events") => {
-            let body = wrong_events_body(&store);
-            write_response(&mut stream, 200, "application/json", body.as_bytes(), &[]);
-        }
-        ("POST", "/events") | ("POST", "/correction") => {
-            let body = br#"{"correction_id":""}"#;
-            write_response(&mut stream, 200, "application/json", body, &[]);
-        }
-        ("OPTIONS", "/correction") => {
-            write_response(&mut stream, 204, "application/json", b"", &[]);
-        }
-        ("GET", path) if path.starts_with("/why/") => {
-            let body = wrong_why_body();
-            write_response(&mut stream, 200, "application/json", body.as_bytes(), &[]);
-        }
-        (_, path) if path.starts_with("/media/") => {
-            write_response(
-                &mut stream,
-                200,
-                "text/plain",
-                b"wrong canned media bytes\n",
-                &[],
-            );
-        }
-        _ => {
-            write_response(
-                &mut stream,
-                404,
-                "application/json",
-                br#"{"error":"not_found"}"#,
-                &[],
-            );
-        }
-    }
-}
-
-fn read_request(stream: &mut TcpStream) -> String {
-    let mut raw = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    let Ok(read) = stream.read(&mut buffer) else {
-        return String::new();
-    };
-    raw.extend_from_slice(&buffer[..read]);
-
-    let header_end = raw.windows(4).position(|window| window == b"\r\n\r\n");
-    let content_length = header_end
-        .and_then(|end| std::str::from_utf8(&raw[..end]).ok())
-        .and_then(parse_content_length)
-        .unwrap_or(0);
-    let mut body_read = header_end
-        .map(|end| raw.len().saturating_sub(end + 4))
-        .unwrap_or(0);
-    while body_read < content_length {
-        match stream.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                body_read = body_read.saturating_add(read);
-                raw.extend_from_slice(&buffer[..read]);
-            }
-        }
-    }
-
-    String::from_utf8_lossy(&raw).to_string()
-}
-
-fn parse_content_length(headers: &str) -> Option<usize> {
-    headers.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            value.trim().parse().ok()
+fn join_finished_handlers(handlers: &mut Vec<JoinHandle<()>>) {
+    let mut idx = 0;
+    while idx < handlers.len() {
+        if handlers[idx].is_finished() {
+            let handle = handlers.swap_remove(idx);
+            let _ = handle.join();
         } else {
-            None
+            idx += 1;
         }
+    }
+}
+
+fn handle_media_request(request: Request, data_dir: Arc<PathBuf>, shutdown: Arc<AtomicBool>) {
+    let raw_url = request.url().to_string();
+    let path = raw_url.split('?').next().unwrap_or(raw_url.as_str());
+    let response = media_response(&data_dir, &request, path, shutdown);
+    let _ = request.respond(response);
+}
+
+fn handle_request(mut request: Request, store: Arc<Store>) {
+    let method = request.method().clone();
+    let raw_url = request.url().to_string();
+    let path = raw_url.split('?').next().unwrap_or(raw_url.as_str());
+    let response = match (&method, path) {
+        (Method::Get, "/events") => events_response(&store, &raw_url),
+        (Method::Get, path) if path.starts_with("/why/") => why_response(&store, path),
+        (Method::Post, "/correction") => correction_response(&store, &mut request),
+        (Method::Options, _) => empty_response(204),
+        (Method::Post, "/events") => json_error(405, "method_not_allowed"),
+        _ => json_error(404, "not_found"),
+    };
+    let _ = request.respond(response);
+}
+
+fn events_response(store: &Store, raw_url: &str) -> Response<Box<dyn Read + Send>> {
+    match review_events(store, event_limit(raw_url)) {
+        Ok(events) => {
+            let rows = events.rows.iter().map(event_row_json).collect::<Vec<_>>();
+            json_response(200, &Value::Array(rows))
+        }
+        Err(ReviewError::NotFound(_)) => json_error(404, "not_found"),
+        Err(ReviewError::StoreError(_)) => json_error(500, "store_error"),
+    }
+}
+
+fn event_limit(raw_url: &str) -> usize {
+    raw_url
+        .split_once('?')
+        .and_then(|(_, query)| {
+            query.split('&').find_map(|pair| {
+                let (name, value) = pair.split_once('=')?;
+                (name == "limit")
+                    .then(|| value.parse::<usize>().ok())
+                    .flatten()
+            })
+        })
+        .filter(|limit| *limit > 0)
+        .map(|limit| limit.min(500))
+        .unwrap_or(DEFAULT_EVENT_LIMIT)
+}
+
+fn event_row_json(row: &EventRow) -> Value {
+    json!({
+        "observation_id": row.observation_id,
+        "observed_at": row.observed_at,
+        "camera_name": row.camera_name,
+        "class_name": row.class_name,
+        "confidence": row.confidence,
+        "bbox": row.bbox,
+        "frame_index": row.frame_index,
+        "clip_ref": media_route(&row.clip_ref),
+        "detector_image_ref": media_route(&row.detector_image_ref),
+        "correction_recorded": row.correction_recorded,
+        "confirmed": row.confirmed,
     })
 }
 
-fn wrong_events_body(store: &Store) -> String {
-    let rows = store
-        .list_observations(None)
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-        .map(|(idx, observation)| {
-            let camera_name = store
-                .get_entity(observation.entity_id)
-                .ok()
-                .flatten()
-                .map(|entity| entity.name)
-                .unwrap_or_default();
+fn why_response(store: &Store, path: &str) -> Response<Box<dyn Read + Send>> {
+    let detection_id = path.trim_start_matches("/why/");
+    if detection_id.is_empty() || detection_id == "--latest" {
+        return json_error(404, "not_found");
+    }
+    match review_why(store, detection_id) {
+        Ok(why) => json_response(200, &why_json(&why)),
+        Err(error) => why_error_response(error),
+    }
+}
+
+fn why_json(why: &WhyView) -> Value {
+    let corrections = why
+        .corrections
+        .iter()
+        .map(|correction| {
             json!({
-                "observation_id": format!("00000000-0000-0000-0000-{idx:012}"),
-                "observed_at": observation.observed_at.to_rfc3339(),
-                "camera_name": camera_name,
-                "class_name": observed_string(&observation.observed_properties, "class"),
-                "confidence": observed_f64(&observation.observed_properties, "confidence"),
-                "bbox": observed_string(&observation.observed_properties, "bbox"),
-                "frame_index": observed_u64(&observation.observed_properties, "frame_index"),
-                "clip_ref": format!("/media/wrong-{idx}.h264"),
-                "detector_image_ref": format!("/media/wrong-{idx}.png"),
-                "correction_recorded": false,
-                "confirmed": false
+                "label": correction.label,
+                "correction_type": correction_type_str(&correction.correction_type),
+                "anchored_detection_id": correction.anchored_detection_id,
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+    json!({
+        "observation_id": why.observation_id,
+        "observed_at": why.observed_at,
+        "clip_ref": media_route(&why.clip_ref),
+        "camera_id": why.camera_id,
+        "camera_name": why.camera_name,
+        "context_id": why.context_id,
+        "site_name": why.site_name,
+        "decision_id": why.decision_id,
+        "intention_id": why.intention_id,
+        "intention_description": why.intention_description,
+        "model_id": why.model_id,
+        "threshold": why.threshold,
+        "class_name": why.class_name,
+        "confidence": why.confidence,
+        "bbox": why.bbox,
+        "frame_index": why.frame_index,
+        "detector_image_ref": media_route(&why.detector_image_ref),
+        "corrections": corrections,
+    })
 }
 
-fn wrong_why_body() -> String {
-    serde_json::to_string(&json!({
-        "observation_id": "11111111-1111-1111-1111-111111111111",
-        "observed_at": "1970-01-01T00:00:00Z",
-        "clip_ref": "/media/wrong-why.h264",
-        "camera_id": "wrong-camera",
-        "camera_name": "wrong camera",
-        "camera_rtsp_url": "rtsp://127.0.0.1/lower-gate",
-        "context_id": "wrong-context",
-        "site_name": "wrong site",
-        "decision_id": "wrong-decision",
-        "intention_id": "wrong-intention",
-        "intention_description": "wrong intention",
-        "model_id": "wrong-model",
-        "threshold": 0.0,
-        "class_name": "wrong-class",
-        "confidence": 0.0,
-        "bbox": "0,0,0,0",
-        "frame_index": 0,
-        "detector_image_ref": "/media/wrong-why.png",
-        "corrections": [
-            {
-                "label": "not-the-recorded-correction",
-                "correction_type": "WrongClass",
-                "anchored_detection_id": "11111111-1111-1111-1111-111111111111"
-            }
-        ]
-    }))
-    .unwrap_or_else(|_| "{}".to_string())
-}
-
-fn observed_string(values: &std::collections::BTreeMap<String, Value>, key: &str) -> String {
-    values
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-fn observed_f64(values: &std::collections::BTreeMap<String, Value>, key: &str) -> f64 {
-    values.get(key).and_then(Value::as_f64).unwrap_or_default()
-}
-
-fn observed_u64(values: &std::collections::BTreeMap<String, Value>, key: &str) -> u64 {
-    values.get(key).and_then(Value::as_u64).unwrap_or_default()
-}
-
-fn write_response(
-    stream: &mut TcpStream,
-    code: u16,
-    content_type: &str,
-    body: &[u8],
-    extra_headers: &[(&str, &str)],
-) {
-    let reason = match code {
-        200 => "OK",
-        204 => "No Content",
-        404 => "Not Found",
-        _ => "OK",
+fn correction_response(store: &Store, request: &mut Request) -> Response<Box<dyn Read + Send>> {
+    let Some(body) = read_limited_body(request) else {
+        return json_error(413, "payload_too_large");
     };
-    let mut response = format!(
-        "HTTP/1.1 {code} {reason}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n",
-        body.len()
-    );
-    for (name, value) in extra_headers {
-        response.push_str(name);
-        response.push_str(": ");
-        response.push_str(value);
-        response.push_str("\r\n");
+    let value = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => value,
+        Err(_) => return json_error(400, "bad_json"),
+    };
+    let detection_id = match value.get("detection_id").and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => return json_error(400, "missing_detection_id"),
+    };
+    let correction_type = match value.get("correction_type").and_then(Value::as_str) {
+        Some("Identity") => CorrectionType::Identity,
+        Some("WrongClass") => CorrectionType::WrongClass,
+        Some("FalseAlarm") => CorrectionType::FalseAlarm,
+        _ => return json_error(400, "bad_correction_type"),
+    };
+    let label = value
+        .get("label")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    match record_correction(
+        store,
+        CorrectionRequest {
+            detection_id,
+            label,
+            correction_type,
+        },
+    ) {
+        Ok(receipt) => json_response(200, &json!({ "correction_id": receipt.correction_id })),
+        Err(CorrectionError::NoAnchor(_)) => json_error(404, "detection_not_found"),
+        Err(CorrectionError::WriteFailed(_)) => json_error(500, "write_failed"),
     }
-    response.push_str("\r\n");
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.write_all(body);
+}
+
+fn read_limited_body(request: &mut Request) -> Option<Vec<u8>> {
+    let len = request.body_length().unwrap_or(0);
+    if len > MAX_CORRECTION_BODY_BYTES {
+        return None;
+    }
+    let mut body = Vec::with_capacity(len);
+    let mut reader = request
+        .as_reader()
+        .take((MAX_CORRECTION_BODY_BYTES + 1) as u64);
+    if reader.read_to_end(&mut body).is_err() || body.len() > MAX_CORRECTION_BODY_BYTES {
+        return None;
+    }
+    Some(body)
+}
+
+fn media_response(
+    data_dir: &Path,
+    request: &Request,
+    path: &str,
+    shutdown: Arc<AtomicBool>,
+) -> Response<Box<dyn Read + Send>> {
+    let Some(file_name) = media_file_name(path) else {
+        return json_error(400, "bad_media_ref");
+    };
+    let clips_dir = data_dir.join("clips");
+    let Ok(clips_root) = clips_dir.canonicalize() else {
+        return json_error(404, "media_not_found");
+    };
+    let file_path = clips_dir.join(&file_name);
+    let Ok(file_path) = file_path.canonicalize() else {
+        return json_error(404, "media_not_found");
+    };
+    if !file_path.starts_with(&clips_root) {
+        return json_error(400, "bad_media_ref");
+    }
+    let Ok(mut file) = File::open(&file_path) else {
+        return json_error(404, "media_not_found");
+    };
+    let Ok(metadata) = file.metadata() else {
+        return json_error(404, "media_not_found");
+    };
+    let size = metadata.len();
+    let content_type = media_content_type(&file_name);
+    let range: Option<Result<(u64, u64), ()>> =
+        request_header(request, "Range").and_then(|value| parse_range(value, size));
+    match range {
+        Some(Ok((start, end))) => {
+            if file.seek(SeekFrom::Start(start)).is_err() {
+                return json_error(500, "media_seek_failed");
+            }
+            let len = end.saturating_sub(start).saturating_add(1);
+            let headers = media_headers(content_type)
+                .into_iter()
+                .chain([
+                    header("Content-Range", &format!("bytes {start}-{end}/{size}")),
+                    header("Content-Length", &len.to_string()),
+                ])
+                .collect::<Vec<_>>();
+            Response::new(
+                StatusCode(206),
+                headers,
+                Box::new(ShutdownAwareReader::new(file.take(len), shutdown))
+                    as Box<dyn Read + Send>,
+                Some(len as usize),
+                None,
+            )
+        }
+        Some(Err(())) => {
+            let headers = media_headers(content_type)
+                .into_iter()
+                .chain([
+                    header("Content-Range", &format!("bytes */{size}")),
+                    header("Content-Length", "0"),
+                ])
+                .collect::<Vec<_>>();
+            Response::new(
+                StatusCode(416),
+                headers,
+                Box::new(io::empty()) as Box<dyn Read + Send>,
+                Some(0),
+                None,
+            )
+        }
+        None => {
+            let headers = media_headers(content_type)
+                .into_iter()
+                .chain([header("Content-Length", &size.to_string())])
+                .collect::<Vec<_>>();
+            Response::new(
+                StatusCode(200),
+                headers,
+                Box::new(ShutdownAwareReader::new(file, shutdown)) as Box<dyn Read + Send>,
+                Some(size as usize),
+                None,
+            )
+        }
+    }
+}
+
+fn media_file_name(path: &str) -> Option<String> {
+    let encoded = path.strip_prefix("/media/")?;
+    let decoded = percent_decode(encoded)?;
+    if decoded.is_empty()
+        || decoded.contains('/')
+        || decoded.contains('\\')
+        || decoded.contains('\0')
+        || decoded == "."
+        || decoded == ".."
+        || decoded.contains("..")
+    {
+        return None;
+    }
+    Some(decoded)
+}
+
+fn media_route(source_ref: &str) -> String {
+    source_ref
+        .strip_prefix("vigil-edge:clip/")
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+        .map(|name| format!("/media/{}", percent_encode_path_segment(name)))
+        .unwrap_or_default()
+}
+
+fn parse_range(value: &str, size: u64) -> Option<Result<(u64, u64), ()>> {
+    let spec = value.trim().strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None;
+    }
+    if size == 0 {
+        return Some(Err(()));
+    }
+    let (start, end) = spec.split_once('-')?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().ok()?;
+        if suffix == 0 {
+            return Some(Err(()));
+        }
+        let start = size.saturating_sub(suffix);
+        return Some(Ok((start, size - 1)));
+    }
+    let start = start.parse::<u64>().ok()?;
+    if start >= size {
+        return Some(Err(()));
+    }
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>().ok()?.min(size - 1)
+    };
+    if end < start {
+        return Some(Err(()));
+    }
+    Some(Ok((start, end)))
+}
+
+fn why_error_response(error: ReviewError) -> Response<Box<dyn Read + Send>> {
+    match error {
+        ReviewError::NotFound(_) => json_error(404, "not_found"),
+        ReviewError::StoreError(_) => json_error(500, "store_error"),
+    }
+}
+
+fn json_response(status: u16, value: &Value) -> Response<Box<dyn Read + Send>> {
+    let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
+    let mut headers = cors_headers();
+    headers.push(header("Content-Type", "application/json"));
+    headers.push(header("Content-Length", &body.len().to_string()));
+    Response::new(
+        StatusCode(status),
+        headers,
+        Box::new(Cursor::new(body)) as Box<dyn Read + Send>,
+        None,
+        None,
+    )
+}
+
+fn json_error(status: u16, code: &str) -> Response<Box<dyn Read + Send>> {
+    json_response(status, &json!({ "error": code }))
+}
+
+fn empty_response(status: u16) -> Response<Box<dyn Read + Send>> {
+    let mut headers = cors_headers();
+    headers.push(header("Content-Length", "0"));
+    Response::new(
+        StatusCode(status),
+        headers,
+        Box::new(io::empty()) as Box<dyn Read + Send>,
+        Some(0),
+        None,
+    )
+}
+
+fn media_headers(content_type: &str) -> Vec<Header> {
+    let mut headers = cors_headers();
+    headers.push(header("Content-Type", content_type));
+    headers.push(header("Accept-Ranges", "bytes"));
+    headers
+}
+
+fn cors_headers() -> Vec<Header> {
+    vec![
+        header("Access-Control-Allow-Origin", "*"),
+        header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+        header("Access-Control-Allow-Headers", "content-type, range"),
+        header(
+            "Access-Control-Expose-Headers",
+            "content-range, accept-ranges, content-length, content-type",
+        ),
+    ]
+}
+
+fn header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static HTTP header is valid")
+}
+
+fn request_header<'a>(request: &'a Request, name: &'static str) -> Option<&'a str> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(name))
+        .map(|header| header.value.as_str())
+}
+
+fn correction_type_str(correction_type: &CorrectionType) -> &'static str {
+    match correction_type {
+        CorrectionType::Identity => "Identity",
+        CorrectionType::WrongClass => "WrongClass",
+        CorrectionType::FalseAlarm => "FalseAlarm",
+    }
+}
+
+fn media_content_type(file_name: &str) -> &'static str {
+    match Path::new(file_name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "mp4" => "video/mp4",
+        "h264" => "video/h264",
+        "h265" | "hevc" => "video/h265",
+        _ => "application/octet-stream",
+    }
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' {
+            let hi = *bytes.get(idx + 1)?;
+            let lo = *bytes.get(idx + 2)?;
+            out.push(hex_value(hi)? * 16 + hex_value(lo)?);
+            idx += 3;
+        } else {
+            out.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }

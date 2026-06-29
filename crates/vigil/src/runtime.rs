@@ -104,14 +104,21 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             let control_socket_path = crate::control_socket::control_socket_path(&config.data_dir);
             control =
                 start_control_listener(&control_socket_path, shutdown_flag.clone(), read_handler);
-            if let Some(review_port) = config.review_port {
-                let handle = crate::http_data_plane::spawn_review_data_plane(
-                    store.handle.clone(),
-                    config.data_dir.clone(),
-                    review_port,
-                )?;
-                println!("review_data_plane_started=true port={review_port}");
-                review_server = Some(handle);
+            match crate::http_data_plane::spawn_review_data_plane(
+                store.handle.clone(),
+                config.data_dir.clone(),
+                config.review_port,
+            ) {
+                Ok(handle) => {
+                    println!("review_data_plane_started=true port={}", config.review_port);
+                    review_server = Some(handle);
+                }
+                Err(error) => {
+                    println!(
+                        "review_data_plane_start_failed=true port={} error={error}",
+                        config.review_port
+                    );
+                }
             }
 
             // ── MQTT detection publisher — spawned before camera threads ──────
@@ -253,8 +260,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     //  2. Detection publisher (camera threads must exit first so all senders are gone)
     //  3. Camera probe threads (each holds a Store clone via Arc)
     //  4. Control listener (read_handler captures a Store clone)
-    //  5. Health server (no Store reference — safe to join before or after store)
-    //  6. drop(store) — all other Store holders are now joined and their clones dropped
+    //  5. Review data plane (holds a Store clone)
+    //  6. Health server (no Store reference — safe to join before or after store)
+    //  7. drop(store) — all other Store holders are now joined and their clones dropped
     if let Some(sub) = mqtt_subscriber {
         sub.shutdown_and_join();
         println!("mqtt_subscriber_stopped=true");
@@ -650,9 +658,7 @@ fn log_startup(config: &config::RuntimeConfig) {
     println!("data_dir={}", display(&config.data_dir));
     println!("store_path={}", display(&config.store_path));
     println!("health_port={}", config.health_port);
-    if let Some(review_port) = config.review_port {
-        println!("review_port={review_port}");
-    }
+    println!("review_port={}", config.review_port);
     if let Some(rtsp_url) = config.rtsp_url.as_ref() {
         println!("rtsp_url={}", media_pipeline::redact_rtsp_url(rtsp_url));
     }

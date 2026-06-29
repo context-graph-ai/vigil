@@ -20,6 +20,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) data_dir: PathBuf,
     pub(crate) store_path: PathBuf,
     pub(crate) health_port: u16,
+    pub(crate) review_port: Option<u16>,
     pub(crate) site_name: String,
     /// First camera's name — retained for backward-compat with log_startup and
     /// single-camera deployments.
@@ -57,6 +58,7 @@ struct PartialConfig {
     data_dir: Option<PathBuf>,
     store_path: Option<PathBuf>,
     health_port: Option<u16>,
+    review_port: Option<u16>,
     site_name: Option<String>,
     camera_name: Option<String>,
     rtsp_url: Option<String>,
@@ -82,6 +84,7 @@ struct CliOverrides {
     data_dir: Option<PathBuf>,
     store_path: Option<PathBuf>,
     health_port: Option<u16>,
+    review_port: Option<u16>,
     site_name: Option<String>,
     camera_name: Option<String>,
     rtsp_url: Option<String>,
@@ -112,6 +115,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             data_dir: cli.data_dir,
             store_path: cli.store_path,
             health_port: cli.health_port,
+            review_port: cli.review_port,
             site_name: cli.site_name,
             camera_name: cli.camera_name,
             rtsp_url: cli.rtsp_url,
@@ -156,6 +160,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         .store_path
         .unwrap_or_else(|| data_dir.join("store.contextgraph"));
     let health_port = partial.health_port.unwrap_or(8099);
+    let review_port = partial.review_port;
     let site_name = partial.site_name.unwrap_or_else(|| "site-1".to_string());
     let camera_name = partial
         .camera_name
@@ -210,6 +215,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         data_dir,
         store_path,
         health_port,
+        review_port,
         site_name,
         camera_name,
         rtsp_url: partial.rtsp_url,
@@ -344,6 +350,14 @@ fn env_overrides() -> Result<PartialConfig, String> {
             ),
             Err(_) => None,
         },
+        review_port: match std::env::var("VIGIL_REVIEW_PORT") {
+            Ok(value) => Some(
+                value
+                    .parse::<u16>()
+                    .map_err(|error| format!("VIGIL_REVIEW_PORT must be a TCP port: {error}"))?,
+            ),
+            Err(_) => None,
+        },
         site_name: std::env::var("VIGIL_SITE_NAME").ok(),
         camera_name: std::env::var("VIGIL_CAMERA_NAME").ok(),
         rtsp_url: std::env::var("VIGIL_RTSP_URL").ok(),
@@ -396,6 +410,9 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     }
     if source.health_port.is_some() {
         target.health_port = source.health_port;
+    }
+    if source.review_port.is_some() {
+        target.review_port = source.review_port;
     }
     if source.site_name.is_some() {
         target.site_name = source.site_name;

@@ -11,7 +11,9 @@ haos_ssh_target="${HAOS_SSH_TARGET:-}"
 ha_cli="${HA_CLI:-}"
 docker_cli="${DOCKER_CLI:-}"
 curl_cli="${CURL_CLI:-}"
+browser_bin="${VIGIL_BROWSER_BIN:-}"
 health_url="${VIGIL_HEALTH_URL:-}"
+review_url="${VIGIL_REVIEW_URL:-}"
 frigate_url="${FRIGATE_URL:-}"
 mqtt_host="${MQTT_HOST:-}"
 mqtt_port="${MQTT_PORT:-1883}"
@@ -49,6 +51,7 @@ store_probe="${VIGIL_STORE_PROBE:-cargo run --quiet --manifest-path $repo_root/C
 expected_runtime_store_path="${VIGIL_EXPECTED_RUNTIME_STORE_PATH:-/data/store.contextgraph}"
 expected_addon_store_path="${VIGIL_EXPECTED_ADDON_STORE_PATH:-$addon_data_dir/store.contextgraph}"
 expected_health_port="${VIGIL_EXPECTED_HEALTH_PORT:-8099}"
+expected_review_port="${VIGIL_EXPECTED_REVIEW_PORT:-8098}"
 expected_run_uid="${VIGIL_EXPECTED_RUN_UID:-1000}"
 th02_dwell_seconds="$(bounded_int "${TH02_DWELL_SECONDS:-600}" 600 7200 600)"
 th04_sample_seconds="$(bounded_int "${TH04_SAMPLE_SECONDS:-30}" 30 3600 30)"
@@ -82,6 +85,7 @@ if [[ -n "$haos_ssh_target" ]]; then
   ha_cli="ssh $haos_ssh_target sudo docker exec hassio_cli ha"
   docker_cli="ssh $haos_ssh_target sudo docker"
   [[ -n "$health_url" ]] || config_fail "VIGIL_HEALTH_URL is required when HAOS_SSH_TARGET is set"
+  [[ -n "$review_url" ]] || config_fail "VIGIL_REVIEW_URL is required when HAOS_SSH_TARGET is set"
   [[ -n "$frigate_url" ]] || config_fail "FRIGATE_URL is required when HAOS_SSH_TARGET is set"
   [[ -n "$mqtt_host" ]] || config_fail "MQTT_HOST is required when HAOS_SSH_TARGET is set"
 else
@@ -89,6 +93,7 @@ else
   docker_cli="${docker_cli:-docker}"
   curl_cli="${curl_cli:-curl}"
   health_url="${health_url:-http://127.0.0.1:8099/health}"
+  review_url="${review_url:-http://127.0.0.1:8098}"
   frigate_url="${frigate_url:-http://127.0.0.1:5000}"
   mqtt_host="${mqtt_host:-127.0.0.1}"
 fi
@@ -124,6 +129,24 @@ truthy() {
     1|true|yes|y|on) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+valid_child_pid() {
+  local pid="${1:-}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  (( pid > 1 )) || return 1
+  local parent
+  parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')" || return 1
+  [[ "$parent" == "$$" ]]
+}
+
+signal_child_pid() {
+  local pid="${1:-}"
+  valid_child_pid "$pid" || {
+    printf 'refusing to signal non-child or unsafe pid: %s\n' "${pid:-<empty>}" >&2
+    return 1
+  }
+  kill "$pid"
 }
 
 ha_cli_available() {
@@ -509,7 +532,7 @@ mqtt_subscription_roundtrip() {
   local sub_pid=$!
   sleep 1
   mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" -t "$topic" -m "$payload" >/dev/null 2>&1 || {
-    kill "$sub_pid" >/dev/null 2>&1 || true
+    signal_child_pid "$sub_pid" >/dev/null 2>&1 || true
     wait "$sub_pid" >/dev/null 2>&1 || true
     rm -f "$capture"
     return 1
@@ -811,7 +834,7 @@ addon_runtime_ports_clean() {
       printf '%d\n' "0x$hex_port"
     done <<< "$hex_ports" | sort -nu
   )"
-  [[ "$ports" == "8099" ]]
+  [[ "$ports" == $'8098\n8099' ]]
 }
 
 declared_addon_ports() {
@@ -850,8 +873,10 @@ supervisor_options_payload() {
       '[{name: $name, rtsp_url: $url}]')"
   fi
   jq -cn --arg store_path "$expected_runtime_store_path" \
-    --argjson health_port "$expected_health_port" --argjson cameras "$cams" \
-    '{store_path: $store_path, health_port: $health_port, cameras: $cameras}'
+    --argjson health_port "$expected_health_port" \
+    --argjson review_port "$expected_review_port" \
+    --argjson cameras "$cams" \
+    '{store_path: $store_path, health_port: $health_port, review_port: $review_port, cameras: $cameras}'
 }
 
 apply_supervisor_options() {
@@ -884,7 +909,7 @@ assert_supervisor_options_applied() {
   local id="$1"
   local logs store_path actual expected
   logs="$(ha_cli_run apps logs "$addon_slug" 2>/dev/null || true)"
-  for expected_text in "store_path=$expected_runtime_store_path" "health_port=$expected_health_port"; do
+  for expected_text in "store_path=$expected_runtime_store_path" "health_port=$expected_health_port" "review_port=$expected_review_port"; do
     if [[ "$logs" != *"$expected_text"* ]]; then
       fail "$id" "Supervisor option did not reach runtime logs: $expected_text"
       return 1
@@ -1162,18 +1187,18 @@ th10() {
   ensure_addon_installed "$id" || return
   local ports
   ports="$(declared_addon_ports)"
-  if [[ "$ports" != "8099/tcp" ]]; then
-    fail "$id" "config.yaml must declare exactly 8099/tcp and no other ports; found: ${ports:-none}"
+  if [[ "$ports" != $'8098/tcp\n8099/tcp' ]]; then
+    fail "$id" "config.yaml must declare exactly 8098/tcp and 8099/tcp and no other ports; found: ${ports:-none}"
     return
   fi
   start_addon "$id" "for runtime port audit" || return
   wait_for_health || { fail "$id" "Vigil health did not reach 200 for runtime port audit"; return; }
   addon_store_runtime_ready "$id" || return
   addon_runtime_ports_clean || {
-    fail "$id" "runtime port audit did not show only 8099 inside the Vigil container"
+    fail "$id" "runtime port audit did not show exactly 8098 and 8099 inside the Vigil container"
     return
   }
-  pass "$id" "only the health port is declared"
+  pass "$id" "only the health and review ports are declared"
 }
 
 th11() {
@@ -1681,7 +1706,7 @@ command is never processed and no artifact is written"
   mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
     -t "$vigil_control_topic" -m "$enable_payload" >/dev/null 2>&1 || true
   sleep 1
-  # Step 3: acknowledge sub-check — publish a correction command with correction_type consistent
+  # Acknowledge sub-check — publish a correction command with correction_type consistent
   # with TH-16 / TH-24 (correction_type field, not "action") and assert it reads back via vigil why.
   local ack_payload
   printf -v ack_payload \
@@ -2069,6 +2094,123 @@ Home Assistant"
   pass "$id" "broker restart recovery: discovery re-announced, availability online, fresh detection publishes"
 }
 
+find_browser_bin() {
+  if [[ -n "$browser_bin" ]]; then
+    if [[ -x "$browser_bin" ]]; then
+      printf '%s\n' "$browser_bin"
+      return 0
+    fi
+    if have_cmd "$browser_bin"; then
+      printf '%s\n' "$browser_bin"
+      return 0
+    fi
+  fi
+  local candidate
+  for candidate in chromium chromium-browser google-chrome google-chrome-stable chrome; do
+    if have_cmd "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+urlencode() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import quote
+print(quote(sys.argv[1], safe=""))
+PY
+}
+
+free_local_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+
+wait_for_local_http() {
+  local url="$1"
+  local deadline=$((SECONDS + 10))
+  while (( SECONDS < deadline )); do
+    if curl -fsS --max-time 1 "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+review_events_have_rows() {
+  local events_json
+  events_json="$(curl -fsS --max-time 5 "$review_url/events" 2>/dev/null)" || return 1
+  jq -e 'type == "array" and length > 0' <<< "$events_json" >/dev/null 2>&1
+}
+
+th26() {
+  local id="TH-26"
+  ensure_addon_installed "$id" || return
+  start_addon "$id" "for browser review data-plane audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 before browser data-plane audit"; return; }
+  have_cmd python3 || { fail "$id" "python3 is required to host the foreign-origin browser test page"; return; }
+  have_cmd curl || { fail "$id" "curl is required to wait for the local browser test page"; return; }
+  have_cmd jq || { fail "$id" "jq is required to verify the browser event fixture"; return; }
+  review_events_have_rows || {
+    fail "$id" "Vigil review data plane at $review_url has no event rows; seed a real detection before running browser review acceptance"
+    return
+  }
+  local browser
+  browser="$(find_browser_bin)" || {
+    fail "$id" "a real headless browser is required; set VIGIL_BROWSER_BIN to chromium or chrome"
+    return
+  }
+
+  local origin_port page_url encoded_base server_log server_pid dump browser_status
+  origin_port="$(free_local_port)" || { fail "$id" "could not allocate foreign-origin page port"; return; }
+  encoded_base="$(urlencode "$review_url")" || { fail "$id" "could not encode review URL"; return; }
+  page_url="http://127.0.0.1:${origin_port}/browser-cross-origin-fetch.html?base=${encoded_base}"
+  server_log="$(mktemp)"
+  (
+    cd "$script_dir" || exit 1
+    python3 -m http.server "$origin_port" --bind 127.0.0.1
+  ) >"$server_log" 2>&1 &
+  server_pid=$!
+  if ! valid_child_pid "$server_pid"; then
+    fail "$id" "foreign-origin page server pid was unsafe: ${server_pid:-<empty>}"
+    rm -f "$server_log"
+    return
+  fi
+
+  if ! wait_for_local_http "http://127.0.0.1:${origin_port}/browser-cross-origin-fetch.html"; then
+    signal_child_pid "$server_pid" >/dev/null 2>&1 || true
+    wait "$server_pid" >/dev/null 2>&1 || true
+    fail "$id" "foreign-origin page server did not start: $(tr '\n' ' ' < "$server_log")"
+    rm -f "$server_log"
+    return
+  fi
+
+  dump="$("$browser" --headless=new --disable-gpu --no-sandbox \
+    --virtual-time-budget=15000 --dump-dom "$page_url" 2>&1)"
+  browser_status=$?
+  signal_child_pid "$server_pid" >/dev/null 2>&1 || true
+  wait "$server_pid" >/dev/null 2>&1 || true
+  rm -f "$server_log"
+
+  if (( browser_status != 0 )); then
+    fail "$id" "headless browser failed to load the foreign-origin check: ${dump:0:500}"
+    return
+  fi
+  if [[ "$dump" != *'data-status="PASS"'* ]]; then
+    fail "$id" "browser_cross_origin_fetch_renders_media_and_posts_correction failed from foreign origin ${page_url} to ${review_url}: ${dump:0:700}"
+    return
+  fi
+  pass "$id" "browser cross-origin fetch renders snapshot, range-fetches clip transport, and posts correction"
+}
+
 run_th() {
   local name
   name="$(tr '[:upper:]' '[:lower:]' <<< "$1")"
@@ -2102,6 +2244,7 @@ run_th() {
     23|th23|th-23) th23 ;;
     24|th24|th-24) th24 ;;
     25|th25|th-25) th25 ;;
+    26|th26|th-26|browser_cross_origin_fetch_renders_media_and_posts_correction) th26 ;;
     *) fail "TH-RUN" "unknown TH_RUN_LIST entry: $1" ;;
   esac
 }
@@ -2119,7 +2262,7 @@ th_requires_destructive_opt_in() {
 }
 
 if [[ -z "$th_run_list" ]]; then
-  th_run_list="TH-01 TH-02 TH-03 TH-04"
+  th_run_list="TH-01 TH-02 TH-03 TH-04 TH-26"
 fi
 
 for th_name in $th_run_list; do

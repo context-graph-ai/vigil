@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Vigil browser review data-plane check</title>
+</head>
+<body data-status="RUNNING">
+<script>
+const params = new URLSearchParams(window.location.search);
+const base = params.get("base");
+
+function joinBase(ref) {
+  return new URL(ref || "/", base).href;
+}
+
+function fail(message) {
+  document.body.dataset.status = "FAIL";
+  document.body.textContent = `FAIL ${message}`;
+}
+
+function pass() {
+  document.body.dataset.status = "PASS";
+  document.body.textContent = "PASS";
+}
+
+function assertOk(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`snapshot image failed to load: ${src}`));
+    img.src = src;
+    document.body.appendChild(img);
+  });
+}
+
+async function run() {
+  try {
+    assertOk(base, "missing Vigil review base URL");
+    const eventsResponse = await fetch(joinBase("/events"));
+    assertOk(eventsResponse.ok, `/events status ${eventsResponse.status}`);
+    const events = await eventsResponse.json();
+    assertOk(Array.isArray(events) && events.length > 0, "/events returned no rows");
+    const row = events[0];
+    assertOk(row.observation_id, "event row missing observation_id");
+
+    const whyResponse = await fetch(joinBase(`/why/${row.observation_id}`));
+    assertOk(whyResponse.ok, `/why status ${whyResponse.status}`);
+    const why = await whyResponse.json();
+    assertOk(why.observation_id === row.observation_id, "/why did not return the clicked event");
+
+    const img = await loadImage(joinBase(row.detector_image_ref));
+    assertOk(img.naturalWidth > 0 && img.naturalHeight > 0, "snapshot image has zero dimensions");
+
+    const clipResponse = await fetch(joinBase(row.clip_ref), {
+      headers: { Range: "bytes=0-1023" },
+    });
+    assertOk(clipResponse.status === 206, `clip range status ${clipResponse.status}`);
+    const clipBytes = await clipResponse.arrayBuffer();
+    assertOk(clipBytes.byteLength > 0 && clipBytes.byteLength <= 1024, "clip range returned wrong byte count");
+
+    const correctionResponse = await fetch(joinBase("/correction"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        detection_id: row.observation_id,
+        correction_type: "FalseAlarm",
+      }),
+    });
+    assertOk(correctionResponse.ok, `/correction status ${correctionResponse.status}`);
+
+    const whyAfterResponse = await fetch(joinBase(`/why/${row.observation_id}`));
+    assertOk(whyAfterResponse.ok, `/why after correction status ${whyAfterResponse.status}`);
+    const whyAfter = await whyAfterResponse.json();
+    const corrections = Array.isArray(whyAfter.corrections) ? whyAfter.corrections : [];
+    assertOk(
+      corrections.some((correction) =>
+        correction.correction_type === "FalseAlarm" &&
+        correction.anchored_detection_id === row.observation_id
+      ),
+      "FalseAlarm correction did not appear in why walk-back"
+    );
+
+    pass();
+  } catch (error) {
+    fail(error && error.message ? error.message : String(error));
+  }
+}
+
+window.addEventListener("load", run);
+</script>
+</body>
+</html>

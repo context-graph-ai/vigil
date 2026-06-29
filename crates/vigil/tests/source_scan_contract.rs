@@ -25,6 +25,57 @@ fn live_read_and_owner_control_source_contracts_are_fast() {
     }
 }
 
+#[test]
+fn ha_os_vm_shell_signals_stay_behind_child_pid_validator() {
+    let script_path = workspace_root().join("tests/ha-os-vm/run-th-suite.sh");
+    let script = fs::read_to_string(&script_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
+    let mut failures = Vec::new();
+
+    for required in [
+        "valid_child_pid()",
+        "signal_child_pid()",
+        "(( pid > 1 ))",
+        "ps -o ppid= -p \"$pid\"",
+        "[[ \"$parent\" == \"$$\" ]]",
+        "signal_child_pid \"$sub_pid\"",
+    ] {
+        if !script.contains(required) {
+            failures.push(format!(
+                "HA-OS VM harness omitted guarded shell-signal marker {required}"
+            ));
+        }
+    }
+
+    for (line_number, line) in script.lines().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("kill ") {
+            continue;
+        }
+        if trimmed == "kill \"$pid\"" {
+            continue;
+        }
+        failures.push(format!(
+            "{}:{} uses raw shell kill outside signal_child_pid: {}",
+            script_path.display(),
+            line_number + 1,
+            trimmed
+        ));
+    }
+
+    for forbidden in ["kill -", "kill -- -", "kill 0", "kill -0", "kill -1"] {
+        if script.contains(forbidden) {
+            failures.push(format!(
+                "HA-OS VM harness contains forbidden process-group or wildcard signal target {forbidden}"
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
 fn assert_context_graph_owns_generic_owner_control_transport(
     sources: &[SourceFile],
     failures: &mut Vec<String>,

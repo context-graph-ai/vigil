@@ -67,5 +67,10 @@ path = "tests/ha_correction_seam.rs"
 required-features = ["first-light-acceptance"]
 
 [[test]]
+name = "http_data_plane"
+path = "tests/http_data_plane.rs"
+required-features = ["first-light-acceptance"]
+
+[[test]]
 name = "ha_mqtt_broker"
 path = "tests/ha_mqtt_broker.rs"

@@ -82,6 +82,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let mut detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>> = None;
     let mut detection_publisher_handle: Option<crate::ha_mqtt_tasks::DetectionPublisherHandle> =
         None;
+    let mut review_server = None;
     let store = match store::open(&config.store_path) {
         Ok(store) => {
             let state = if store.created {
@@ -103,6 +104,15 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             let control_socket_path = crate::control_socket::control_socket_path(&config.data_dir);
             control =
                 start_control_listener(&control_socket_path, shutdown_flag.clone(), read_handler);
+            if let Some(review_port) = config.review_port {
+                let handle = crate::http_data_plane::spawn_review_data_plane(
+                    store.handle.clone(),
+                    config.data_dir.clone(),
+                    review_port,
+                )?;
+                println!("review_data_plane_started=true port={review_port}");
+                review_server = Some(handle);
+            }
 
             // ── MQTT detection publisher — spawned before camera threads ──────
             // The publisher owns one persistent MQTT connection for all detection
@@ -259,6 +269,9 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     }
     if let Some(handle) = control.take() {
         let _ = handle.join();
+    }
+    if let Some(handle) = review_server {
+        handle.shutdown();
     }
     server.join();
     drop(store);
@@ -637,6 +650,9 @@ fn log_startup(config: &config::RuntimeConfig) {
     println!("data_dir={}", display(&config.data_dir));
     println!("store_path={}", display(&config.store_path));
     println!("health_port={}", config.health_port);
+    if let Some(review_port) = config.review_port {
+        println!("review_port={review_port}");
+    }
     if let Some(rtsp_url) = config.rtsp_url.as_ref() {
         println!("rtsp_url={}", media_pipeline::redact_rtsp_url(rtsp_url));
     }

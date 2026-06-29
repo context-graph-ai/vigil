@@ -4,6 +4,7 @@ pub mod correction;
 pub mod ha_discovery;
 pub mod ha_mqtt_tasks;
 mod health;
+mod http_data_plane;
 mod live_read;
 mod media_pipeline;
 mod privilege;
@@ -29,6 +30,7 @@ pub use ha_mqtt_tasks::{
     publish_discovery_to_broker, spawn_detection_publisher, spawn_production_subscriber,
 };
 pub use health::{HealthState, HealthStatus};
+pub use http_data_plane::{ReviewDataPlaneHandle, spawn_review_data_plane};
 
 use std::ffi::OsString;
 use std::path::Path;

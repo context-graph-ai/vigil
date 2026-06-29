@@ -11,8 +11,10 @@ arch:
   - aarch64
 ports:
   8099/tcp: 8099
+  8098/tcp: 8098
 ports_description:
   8099/tcp: Health endpoint
+  8098/tcp: Review data plane
 # Declare the HA Mosquitto broker as an optional service dependency.
 # When the Mosquitto add-on is installed and running, Vigil discovers the broker
 # credentials at startup by calling the Supervisor services API
@@ -30,10 +32,12 @@ map:
 options:
   store_path: /data/store.contextgraph
   health_port: 8099
+  review_port: 8098
   cameras: []
 schema:
   store_path: str
   health_port: int
+  review_port: int
   detector_model_path: str?
   cameras:
     - name: str

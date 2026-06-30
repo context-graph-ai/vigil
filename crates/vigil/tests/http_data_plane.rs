@@ -791,6 +791,12 @@ fn snapshot_read_serves_image_bytes_with_image_content_type() {
         content_type.starts_with("image/"),
         "snapshot must be served with image/* content-type, got {content_type}"
     );
+    let expected_snapshot_len = snapshot_response.body.len().to_string();
+    assert_eq!(
+        snapshot_response.header("content-length"),
+        Some(expected_snapshot_len.as_str()),
+        "snapshot response must carry Content-Length so HA/browser proxies can stream it without treating it as an indeterminate body"
+    );
     assert!(
         snapshot_response.body.starts_with(b"\x89PNG\r\n"),
         "snapshot body must begin with PNG magic bytes"
@@ -800,6 +806,56 @@ fn snapshot_read_serves_image_bytes_with_image_content_type() {
         fs::read(&snapshot_path).expect("read expected snapshot bytes"),
         "snapshot body must equal the on-disk detector image"
     );
+}
+
+#[test]
+fn large_media_reads_use_fixed_content_length_not_chunked_transfer() {
+    let (_tmp, store_path) =
+        review_store_copy(1).expect("seeded store for large media fixed-length read");
+    let data_dir = store_path.parent().expect("data dir").to_path_buf();
+    let expected_store = ha_test_support::open_store_at(&store_path).expect("expected store opens");
+    let (snapshot_path, clip_path) = first_expected_media_paths(&expected_store, &data_dir);
+    let mut large_snapshot = PNG_BYTES.to_vec();
+    large_snapshot.extend((0..(64 * 1024)).map(|offset| (offset % 251) as u8));
+    let large_clip = (0..(96 * 1024))
+        .map(|offset| ((offset * 3) % 251) as u8)
+        .collect::<Vec<_>>();
+    fs::write(&snapshot_path, &large_snapshot).expect("write large snapshot fixture");
+    fs::write(&clip_path, &large_clip).expect("write large clip fixture");
+
+    let (_server, port) = spawn_server(&store_path);
+    let served = rows(&get(port, "/events"));
+    let (snapshot_ref, clip_ref) = served_media_refs(&served[0]);
+
+    let snapshot = get(port, &snapshot_ref);
+    let expected_snapshot_len = large_snapshot.len().to_string();
+    assert_eq!(snapshot.status, 200, "large snapshot must return 200");
+    assert_eq!(
+        snapshot.header("content-length"),
+        Some(expected_snapshot_len.as_str()),
+        "large snapshot must carry Content-Length for HA/browser proxying"
+    );
+    assert_eq!(
+        snapshot.header("transfer-encoding"),
+        None,
+        "large snapshot must not switch to chunked transfer"
+    );
+    assert_eq!(snapshot.body, large_snapshot);
+
+    let clip = get(port, &clip_ref);
+    let expected_clip_len = large_clip.len().to_string();
+    assert_eq!(clip.status, 200, "large full clip read must return 200");
+    assert_eq!(
+        clip.header("content-length"),
+        Some(expected_clip_len.as_str()),
+        "large full clip read must carry Content-Length for HA/browser proxying"
+    );
+    assert_eq!(
+        clip.header("transfer-encoding"),
+        None,
+        "large full clip read must not switch to chunked transfer"
+    );
+    assert_eq!(clip.body, large_clip);
 }
 
 #[test]

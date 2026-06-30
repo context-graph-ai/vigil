@@ -4677,7 +4677,7 @@ fn detection_produces_observation_referencing_clip() {
 #[test]
 fn configured_camera_name_drives_provenance_and_clip_prefix() {
     let world = rtsp_world_or_fail();
-    if let Err(error) = world.set_camera_name("top gate") {
+    if let Err(error) = world.set_camera_name("front entry") {
         assert_contract(vec![error]);
     }
     let readiness = FixtureReadiness::probe(&world);
@@ -4709,11 +4709,11 @@ fn configured_camera_name_drives_provenance_and_clip_prefix() {
     let mut failures = readiness.missing_messages();
 
     if !runtime.rtsp_network_connected || !runtime.rtsp_fixture_read_observed {
-        failures.push("top-gate fixture was not consumed through RTSP".to_string());
+        failures.push("front-entry fixture was not consumed through RTSP".to_string());
     }
     if cameras
         .iter()
-        .filter(|camera| camera.name == "top gate")
+        .filter(|camera| camera.name == "front entry")
         .count()
         != 1
     {
@@ -4721,13 +4721,13 @@ fn configured_camera_name_drives_provenance_and_clip_prefix() {
     }
     if !intentions
         .iter()
-        .any(|intention| intention.description == "watch top gate")
+        .any(|intention| intention.description == "watch front entry")
     {
         failures.push("baseline Intention did not derive from configured camera name".to_string());
     }
     if !decisions
         .iter()
-        .any(|decision| decision.description == "Run local detector for top gate")
+        .any(|decision| decision.description == "Run local detector for front entry")
     {
         failures.push("detector Decision did not derive from configured camera name".to_string());
     }
@@ -4739,17 +4739,17 @@ fn configured_camera_name_drives_provenance_and_clip_prefix() {
             .any(|evidence| {
                 !evidence
                     .source_ref
-                    .starts_with("vigil-edge:clip/top-gate-event-")
+                    .starts_with("vigil-edge:clip/front-entry-event-")
             })
     }) {
         failures.push("durable clip source_ref did not use the configured camera slug".to_string());
     }
-    if !why.contains("camera_name=top gate")
-        || !why.contains("intention_description=watch top gate")
-        || !why.contains("clip_ref=vigil-edge:clip/top-gate-event-")
+    if !why.contains("camera_name=front entry")
+        || !why.contains("intention_description=watch front entry")
+        || !why.contains("clip_ref=vigil-edge:clip/front-entry-event-")
     {
         failures.push(format!(
-            "why output did not expose top-gate provenance:\n{why}"
+            "why output did not expose front-entry provenance:\n{why}"
         ));
     }
 

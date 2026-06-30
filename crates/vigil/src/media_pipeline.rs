@@ -13,11 +13,15 @@ use image::{
 };
 use imageproc::contrast::{ThresholdType, threshold};
 use imageproc::region_labelling::{Connectivity, connected_components};
-use mp4::{MediaType, Mp4Reader};
+use mp4::{AvcConfig, Bytes, MediaType, Mp4Config, Mp4Reader, Mp4Sample, Mp4Writer, TrackConfig};
 use openh264::decoder::{
     DecodeOptions, Decoder as H264Decoder, DecoderConfig as H264DecoderConfig, Flush,
 };
-use openh264::formats::YUVSource;
+use openh264::encoder::{
+    BitRate, Encoder as H264Encoder, EncoderConfig as H264EncoderConfig, FrameRate,
+    RateControlMode, SpsPpsStrategy,
+};
+use openh264::formats::{RgbSliceU8, YUVBuffer, YUVSource};
 use retina::client::{
     Credentials as RetinaCredentials, PlayOptions, Session, SessionOptions, SetupOptions,
 };
@@ -27,6 +31,8 @@ use sha2::{Digest, Sha256};
 use tokio::runtime::Builder;
 use url::Url;
 
+const PLAYABLE_MAX_WIDTH: u32 = 1280;
+const PLAYABLE_MAX_HEIGHT: u32 = 720;
 const MOTION_WIDTH: u32 = 64;
 const MOTION_HEIGHT: u32 = 36;
 
@@ -554,6 +560,209 @@ pub(crate) fn write_encoded_clip(segment: &DecodedVideoSegment, path: &Path) -> 
         .map_err(|error| format!("sync {}: {error}", path.display()))
 }
 
+pub(crate) fn write_browser_playable_mp4_clip(
+    segment: &DecodedVideoSegment,
+    path: &Path,
+) -> Result<(), String> {
+    let (width, height) = playable_frame_dimensions(segment)?;
+    let fps = playable_fps(segment.fps);
+    let frame_duration = (1000.0 / fps).round().max(1.0) as u32;
+    let mut encoder = H264Encoder::with_api_config(
+        openh264::OpenH264API::from_source(),
+        H264EncoderConfig::new()
+            .bitrate(BitRate::from_bps(playable_bitrate_bps(width, height, fps)))
+            .max_frame_rate(FrameRate::from_hz(fps as f32))
+            .rate_control_mode(RateControlMode::Off)
+            .skip_frames(false)
+            .sps_pps_strategy(SpsPpsStrategy::ConstantId),
+    )
+    .map_err(|error| format!("create H.264 review encoder: {error}"))?;
+    encoder.force_intra_frame();
+
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
+    let mut samples = Vec::with_capacity(segment.frames.len());
+    let mut start_time = 0_u64;
+    for frame in &segment.frames {
+        let rgb = frame_rgb_for_dimensions(frame, width, height)?;
+        let rgb_source = RgbSliceU8::new(&rgb, (width as usize, height as usize));
+        let yuv = YUVBuffer::from_rgb8_source(rgb_source);
+        let bitstream = encoder
+            .encode(&yuv)
+            .map_err(|error| format!("encode H.264 review frame {}: {error}", frame.index))?;
+        let mut sample = Vec::new();
+        let mut is_sync = false;
+        for layer_index in 0..bitstream.num_layers() {
+            let Some(layer) = bitstream.layer(layer_index) else {
+                continue;
+            };
+            for nal_index in 0..layer.nal_count() {
+                let Some(raw_nal) = layer.nal_unit(nal_index) else {
+                    continue;
+                };
+                let nal = strip_h264_start_code(raw_nal);
+                let Some(header) = nal.first().copied() else {
+                    continue;
+                };
+                match header & 0x1f {
+                    7 => sps = nal.to_vec(),
+                    8 => pps = nal.to_vec(),
+                    5 => {
+                        is_sync = true;
+                        append_avcc_nal(&mut sample, nal)?;
+                    }
+                    _ => append_avcc_nal(&mut sample, nal)?,
+                }
+            }
+        }
+        if sample.is_empty() {
+            continue;
+        }
+        samples.push(Mp4Sample {
+            start_time,
+            duration: frame_duration,
+            rendering_offset: 0,
+            is_sync,
+            bytes: Bytes::from(sample),
+        });
+        start_time = start_time.saturating_add(u64::from(frame_duration));
+    }
+
+    if sps.is_empty() || pps.is_empty() {
+        return Err("H.264 review encoder did not emit SPS/PPS metadata".to_string());
+    }
+    if samples.is_empty() {
+        return Err("H.264 review encoder did not emit playable frame samples".to_string());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create clip dir {}: {error}", parent.display()))?;
+    }
+    let mut file =
+        fs::File::create(path).map_err(|error| format!("create {}: {error}", path.display()))?;
+    let mp4_config = Mp4Config {
+        major_brand: "isom".parse().expect("isom is a valid MP4 brand"),
+        minor_version: 512,
+        compatible_brands: vec![
+            "isom".parse().expect("isom is a valid MP4 brand"),
+            "iso2".parse().expect("iso2 is a valid MP4 brand"),
+            "avc1".parse().expect("avc1 is a valid MP4 brand"),
+            "mp41".parse().expect("mp41 is a valid MP4 brand"),
+        ],
+        timescale: 1000,
+    };
+    let avc_config = AvcConfig {
+        width: u16::try_from(width).map_err(|_| format!("review MP4 width {width} exceeds u16"))?,
+        height: u16::try_from(height)
+            .map_err(|_| format!("review MP4 height {height} exceeds u16"))?,
+        seq_param_set: sps,
+        pic_param_set: pps,
+    };
+    let mut writer = Mp4Writer::write_start(&mut file, &mp4_config)
+        .map_err(|error| format!("start MP4 writer {}: {error}", path.display()))?;
+    writer
+        .add_track(&TrackConfig::from(avc_config))
+        .map_err(|error| format!("add H.264 review MP4 track {}: {error}", path.display()))?;
+    for sample in &samples {
+        writer.write_sample(1, sample).map_err(|error| {
+            format!("write H.264 review MP4 sample {}: {error}", path.display())
+        })?;
+    }
+    writer
+        .write_end()
+        .map_err(|error| format!("finish MP4 writer {}: {error}", path.display()))?;
+    drop(writer);
+    file.sync_all()
+        .map_err(|error| format!("sync {}: {error}", path.display()))
+}
+
+fn playable_frame_dimensions(segment: &DecodedVideoSegment) -> Result<(u32, u32), String> {
+    let first = segment
+        .frames
+        .first()
+        .ok_or_else(|| "video segment has no decoded frames for review MP4".to_string())?;
+    let source_width = first.width - (first.width % 2);
+    let source_height = first.height - (first.height % 2);
+    let (width, height) = playable_scaled_dimensions(
+        source_width,
+        source_height,
+        PLAYABLE_MAX_WIDTH,
+        PLAYABLE_MAX_HEIGHT,
+    );
+    if width < 2 || height < 2 {
+        return Err(format!(
+            "review MP4 frame dimensions {}x{} are too small",
+            first.width, first.height
+        ));
+    }
+    Ok((width, height))
+}
+
+fn playable_scaled_dimensions(
+    source_width: u32,
+    source_height: u32,
+    max_width: u32,
+    max_height: u32,
+) -> (u32, u32) {
+    if source_width <= max_width && source_height <= max_height {
+        return (source_width, source_height);
+    }
+    let source_width_u64 = u64::from(source_width);
+    let source_height_u64 = u64::from(source_height);
+    let width_limited_height = (source_height_u64 * u64::from(max_width) / source_width_u64) as u32;
+    let (width, height) = if width_limited_height <= max_height {
+        (max_width, width_limited_height)
+    } else {
+        (
+            (source_width_u64 * u64::from(max_height) / source_height_u64) as u32,
+            max_height,
+        )
+    };
+    (width - (width % 2), height - (height % 2))
+}
+
+fn playable_fps(fps: f64) -> f64 {
+    if fps.is_finite() && (1.0..=60.0).contains(&fps) {
+        fps
+    } else {
+        5.0
+    }
+}
+
+fn playable_bitrate_bps(width: u32, height: u32, fps: f64) -> u32 {
+    let estimated = (width as f64 * height as f64 * fps * 0.12).round() as u32;
+    estimated.clamp(800_000, 4_000_000)
+}
+
+fn frame_rgb_for_dimensions(
+    frame: &DecodedRgbFrame,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, String> {
+    if frame.width == width && frame.height == height {
+        return Ok(frame.rgb.clone());
+    }
+    resize_rgb_frame(frame, width, height)
+}
+
+fn strip_h264_start_code(nal: &[u8]) -> &[u8] {
+    if nal.starts_with(&[0, 0, 0, 1]) {
+        &nal[4..]
+    } else if nal.starts_with(&[0, 0, 1]) {
+        &nal[3..]
+    } else {
+        nal
+    }
+}
+
+fn append_avcc_nal(output: &mut Vec<u8>, nal: &[u8]) -> Result<(), String> {
+    let len = u32::try_from(nal.len())
+        .map_err(|_| format!("H.264 NAL too large for MP4 sample: {} bytes", nal.len()))?;
+    output.extend_from_slice(&len.to_be_bytes());
+    output.extend_from_slice(nal);
+    Ok(())
+}
+
 pub(crate) fn sha256_path(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     Ok(sha256_hex(&bytes))
@@ -1075,6 +1284,80 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_playable_mp4_writer_round_trips_to_h264_mp4() {
+        let tmp = tempfile::TempDir::new().expect("create temp dir");
+        let path = tmp.path().join("review.mp4");
+        let segment = DecodedVideoSegment {
+            codec: VideoCodec::H265,
+            frames: (0..6)
+                .map(|index| synthetic_rgb_frame(index, 64, 48))
+                .collect(),
+            encoded_units: vec![b"raw-camera-evidence".to_vec()],
+            fps: 6.0,
+            observed_at: None,
+        };
+
+        write_browser_playable_mp4_clip(&segment, &path)
+            .expect("write browser-playable review MP4");
+        let bytes = std::fs::read(&path).expect("read review MP4");
+        assert!(
+            bytes.windows(4).any(|window| window == b"avc1"),
+            "review MP4 must advertise an H.264 avc1 track"
+        );
+        assert!(
+            bytes.windows(4).any(|window| window == b"moov"),
+            "review MP4 must be finalized with a moov box"
+        );
+
+        let decoded = decode_video_file(&path).expect("decode generated review MP4");
+        assert_eq!(decoded.codec, VideoCodec::H264);
+        assert!(
+            decoded.frame_count() >= 2,
+            "generated review MP4 must contain multiple decodable frames"
+        );
+    }
+
+    #[test]
+    fn playable_dimensions_cap_large_review_clips_without_upscaling() {
+        assert_eq!(
+            playable_scaled_dimensions(1920, 1080, PLAYABLE_MAX_WIDTH, PLAYABLE_MAX_HEIGHT),
+            (1280, 720)
+        );
+        assert_eq!(
+            playable_scaled_dimensions(1080, 1920, PLAYABLE_MAX_WIDTH, PLAYABLE_MAX_HEIGHT),
+            (404, 720)
+        );
+        assert_eq!(
+            playable_scaled_dimensions(640, 360, PLAYABLE_MAX_WIDTH, PLAYABLE_MAX_HEIGHT),
+            (640, 360)
+        );
+    }
+
+    fn synthetic_rgb_frame(index: u64, width: u32, height: u32) -> DecodedRgbFrame {
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        for y in 0..height {
+            for x in 0..width {
+                let marker = x >= 8 + index as u32 && x < 24 + index as u32 && y >= 12 && y < 34;
+                if marker {
+                    rgb.extend_from_slice(&[230, 50, 40]);
+                } else {
+                    rgb.extend_from_slice(&[
+                        ((x * 3 + index as u32) % 255) as u8,
+                        ((y * 5) % 255) as u8,
+                        80,
+                    ]);
+                }
+            }
+        }
+        DecodedRgbFrame {
+            index,
+            width,
+            height,
+            rgb,
+        }
+    }
 
     #[test]
     fn credentialed_rtsp_url_is_stripped_for_session_and_kept_for_auth() {

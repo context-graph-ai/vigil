@@ -1,11 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, TrySendError, sync_channel};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,7 +28,7 @@ use crate::shutdown;
 use crate::store;
 use crate::yolox_detector;
 
-const DETECTOR_QUEUE_CAPACITY: usize = 4;
+const DETECTOR_QUEUE_CAPACITY: usize = 1;
 const DETECTOR_INPUT_WIDTH: u32 = 640;
 const DETECTOR_INPUT_HEIGHT: u32 = 640;
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -760,7 +759,8 @@ fn start_rtsp_probe(
             .unwrap_or(DETECTOR_QUEUE_CAPACITY);
         let detector_work_delay =
             Duration::from_millis(env_u64("VIGIL_DETECTOR_WORK_DELAY_MS").unwrap_or_default());
-        let (detector_tx, detector_rx) = sync_channel::<CapturedSegment>(detector_queue_capacity);
+        let detector_queue: Arc<LatestSegmentQueue<CapturedSegment>> =
+            Arc::new(LatestSegmentQueue::new(detector_queue_capacity));
         let active_stream_generation = Arc::new(AtomicU64::new(0));
         let detector_handle = detector.map(|detector| {
             let config = config.clone();
@@ -768,15 +768,16 @@ fn start_rtsp_probe(
             let stats = stats.clone();
             let health = health.clone();
             let shutdown = shutdown.clone();
+            let detector_queue = detector_queue.clone();
             let active_stream_generation = active_stream_generation.clone();
             let detection_publisher = detection_publisher.clone();
             thread::spawn(move || {
                 let mut detector_total = 0_u64;
                 while !shutdown.load(Ordering::SeqCst) {
-                    let segment = match detector_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(segment) => segment,
-                        Err(RecvTimeoutError::Timeout) => continue,
-                        Err(RecvTimeoutError::Disconnected) => break,
+                    let segment = match detector_queue.recv_timeout(Duration::from_millis(100)) {
+                        LatestSegmentRecv::Item(segment) => segment,
+                        LatestSegmentRecv::Timeout => continue,
+                        LatestSegmentRecv::Closed => break,
                     };
                     if segment.stream_generation < active_stream_generation.load(Ordering::SeqCst) {
                         println!(
@@ -827,7 +828,7 @@ fn start_rtsp_probe(
                         }
                     }
                 }
-                for segment in detector_rx.try_iter() {
+                for segment in detector_queue.drain() {
                     let _ = fs::remove_file(&segment.path);
                 }
             })
@@ -885,10 +886,9 @@ fn start_rtsp_probe(
                         println!("motion_gate_suppressed_segment=true");
                         let _ = fs::remove_file(&segment.path);
                     } else if detector_handle.is_some() {
-                        match detector_tx.try_send(segment) {
-                            Ok(()) => {}
-                            Err(TrySendError::Full(segment)) => {
-                                let dropped = segment.motion_positive_frames.max(1);
+                        match detector_queue.push_latest(segment) {
+                            Ok(Some(dropped_segment)) => {
+                                let dropped = dropped_segment.motion_positive_frames.max(1);
                                 stats.update(|stats| {
                                     stats.dropped_motion_positive_frames = stats
                                         .dropped_motion_positive_frames
@@ -902,9 +902,14 @@ fn start_rtsp_probe(
                                     HealthStatus::KeepPaceFailed,
                                     "detector queue fell behind",
                                 );
-                                let _ = fs::remove_file(&segment.path);
+                                println!(
+                                    "detector_queue_replaced_pending_segment=true dropped_sequence={}",
+                                    dropped_segment.sequence
+                                );
+                                let _ = fs::remove_file(&dropped_segment.path);
                             }
-                            Err(TrySendError::Disconnected(segment)) => {
+                            Ok(None) => {}
+                            Err(segment) => {
                                 println!("detector queue disconnected");
                                 let _ = fs::remove_file(&segment.path);
                             }
@@ -939,7 +944,7 @@ fn start_rtsp_probe(
                 }
             }
         }
-        drop(detector_tx);
+        detector_queue.close();
         if let Some(handle) = detector_handle {
             let _ = handle.join();
         }
@@ -975,10 +980,7 @@ fn build_captured_segment(
         .map(|duration| duration.subsec_nanos())
         .unwrap_or_default();
     let camera_slug = camera_slug(camera_name);
-    let file_name = format!(
-        "{camera_slug}-event-{stamp}-{sequence}-{nanos}.{}",
-        media.codec.extension()
-    );
+    let file_name = format!("{camera_slug}-event-{stamp}-{sequence}-{nanos}.mp4");
     let staging_path = staging_dir.join(&file_name);
     let final_path = clip_dir.join(&file_name);
     let clip_sha256 = encoded_clip_sha256(&media);
@@ -999,7 +1001,7 @@ fn build_captured_segment(
         stream_generation,
         frames,
         fps: media.fps,
-        mime_type: media.codec.mime_type().to_string(),
+        mime_type: "video/mp4".to_string(),
         clip_sha256,
         decoded_frames_sha256,
         motion_positive_frames,
@@ -1054,7 +1056,9 @@ fn finalize_clip(
     stats: &RuntimeStatsState,
     health: &HealthState,
 ) -> Result<(), String> {
-    if let Err(error) = media_pipeline::write_encoded_clip(&segment.media, &segment.path) {
+    if let Err(error) =
+        media_pipeline::write_browser_playable_mp4_clip(&segment.media, &segment.path)
+    {
         return Err(clip_write_failure(
             stats,
             health,
@@ -1189,6 +1193,82 @@ fn env_u64(key: &str) -> Option<u64> {
 fn maybe_crash_after_startup_node(node: &str) {
     if env_is("VIGIL_FAULT_CRASH_AFTER_STARTUP_NODE", node) {
         std::process::exit(3);
+    }
+}
+
+struct LatestSegmentQueue<T> {
+    inner: Mutex<LatestSegmentQueueState<T>>,
+    available: Condvar,
+}
+
+struct LatestSegmentQueueState<T> {
+    pending: VecDeque<T>,
+    capacity: usize,
+    closed: bool,
+}
+
+enum LatestSegmentRecv<T> {
+    Item(T),
+    Timeout,
+    Closed,
+}
+
+impl<T> LatestSegmentQueue<T> {
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(LatestSegmentQueueState {
+                pending: VecDeque::new(),
+                capacity: capacity.max(1),
+                closed: false,
+            }),
+            available: Condvar::new(),
+        }
+    }
+
+    fn push_latest(&self, segment: T) -> Result<Option<T>, T> {
+        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
+        if inner.closed {
+            return Err(segment);
+        }
+        let dropped = if inner.pending.len() >= inner.capacity {
+            inner.pending.pop_front()
+        } else {
+            None
+        };
+        inner.pending.push_back(segment);
+        self.available.notify_one();
+        Ok(dropped)
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> LatestSegmentRecv<T> {
+        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
+        if inner.pending.is_empty() && !inner.closed {
+            let (next_inner, _) = self
+                .available
+                .wait_timeout_while(inner, timeout, |state| {
+                    state.pending.is_empty() && !state.closed
+                })
+                .expect("latest segment queue poisoned while waiting");
+            inner = next_inner;
+        }
+        if let Some(segment) = inner.pending.pop_front() {
+            LatestSegmentRecv::Item(segment)
+        } else if inner.closed {
+            LatestSegmentRecv::Closed
+        } else {
+            LatestSegmentRecv::Timeout
+        }
+    }
+
+    fn close(&self) {
+        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
+        inner.closed = true;
+        self.available.notify_all();
+    }
+
+    fn drain(&self) -> Vec<T> {
+        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
+        inner.pending.drain(..).collect()
     }
 }
 
@@ -1722,4 +1802,43 @@ fn get_or_create_decision(
             agent_id: None,
         })
         .map_err(|error| format!("create decision: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LatestSegmentQueue, LatestSegmentRecv};
+    use std::time::Duration;
+
+    #[test]
+    fn latest_segment_queue_keeps_newest_pending_work_when_full() {
+        let queue = LatestSegmentQueue::new(1);
+
+        assert_eq!(queue.push_latest(1), Ok(None));
+        assert_eq!(queue.push_latest(2), Ok(Some(1)));
+        assert_eq!(queue.push_latest(3), Ok(Some(2)));
+
+        match queue.recv_timeout(Duration::from_millis(0)) {
+            LatestSegmentRecv::Item(value) => assert_eq!(value, 3),
+            LatestSegmentRecv::Timeout => panic!("expected newest pending segment"),
+            LatestSegmentRecv::Closed => panic!("queue closed unexpectedly"),
+        }
+        match queue.recv_timeout(Duration::from_millis(0)) {
+            LatestSegmentRecv::Timeout => {}
+            LatestSegmentRecv::Item(value) => panic!("unexpected pending segment {value}"),
+            LatestSegmentRecv::Closed => panic!("queue closed unexpectedly"),
+        }
+    }
+
+    #[test]
+    fn latest_segment_queue_wakes_receiver_when_closed() {
+        let queue = LatestSegmentQueue::<u64>::new(1);
+        queue.close();
+
+        match queue.recv_timeout(Duration::from_secs(5)) {
+            LatestSegmentRecv::Closed => {}
+            LatestSegmentRecv::Timeout => panic!("closed queue should not wait until timeout"),
+            LatestSegmentRecv::Item(value) => panic!("unexpected pending segment {value}"),
+        }
+        assert_eq!(queue.push_latest(1), Err(1));
+    }
 }

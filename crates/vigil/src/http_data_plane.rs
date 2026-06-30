@@ -334,6 +334,9 @@ fn media_response(
                 return json_error(500, "media_seek_failed");
             }
             let len = end.saturating_sub(start).saturating_add(1);
+            let Ok(data_len) = usize::try_from(len) else {
+                return json_error(500, "media_too_large");
+            };
             let headers = media_headers(content_type)
                 .into_iter()
                 .chain([
@@ -346,9 +349,10 @@ fn media_response(
                 headers,
                 Box::new(ShutdownAwareReader::new(file.take(len), shutdown))
                     as Box<dyn Read + Send>,
-                Some(len as usize),
+                Some(data_len),
                 None,
             )
+            .with_chunked_threshold(usize::MAX)
         }
         Some(Err(())) => {
             let headers = media_headers(content_type)
@@ -365,8 +369,12 @@ fn media_response(
                 Some(0),
                 None,
             )
+            .with_chunked_threshold(usize::MAX)
         }
         None => {
+            let Ok(data_len) = usize::try_from(size) else {
+                return json_error(500, "media_too_large");
+            };
             let headers = media_headers(content_type)
                 .into_iter()
                 .chain([header("Content-Length", &size.to_string())])
@@ -375,9 +383,10 @@ fn media_response(
                 StatusCode(200),
                 headers,
                 Box::new(ShutdownAwareReader::new(file, shutdown)) as Box<dyn Read + Send>,
-                Some(size as usize),
+                Some(data_len),
                 None,
             )
+            .with_chunked_threshold(usize::MAX)
         }
     }
 }

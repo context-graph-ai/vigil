@@ -87,6 +87,7 @@ pub struct EventRow {
     pub confidence: f64,
     pub bbox: String,
     pub frame_index: u64,
+    pub zone: Option<String>,
     pub clip_ref: String,
     pub detector_image_ref: String,
     /// True when a WrongClass or FalseAlarm correction has been recorded against this
@@ -428,6 +429,7 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
             confidence: row.confidence,
             bbox: row.bbox.clone(),
             frame_index: row.frame_index,
+            zone: row.zone.clone(),
             clip_ref: row.clip_ref.clone(),
             detector_image_ref: row.detector_image_ref.clone(),
             correction_recorded: correction_summary

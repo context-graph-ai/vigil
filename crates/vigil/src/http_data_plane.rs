@@ -195,6 +195,7 @@ fn event_row_json(row: &EventRow) -> Value {
         "confidence": row.confidence,
         "bbox": row.bbox,
         "frame_index": row.frame_index,
+        "zone": row.zone,
         "clip_ref": media_route(&row.clip_ref),
         "detector_image_ref": media_route(&row.detector_image_ref),
         "correction_recorded": row.correction_recorded,

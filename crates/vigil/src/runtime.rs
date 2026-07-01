@@ -640,6 +640,7 @@ fn start_rtsp_probe(
                             stats.stream_reconnects = stats.stream_reconnects.saturating_add(1);
                         }
                     });
+                    health.set(HealthStatus::Ready, "RTSP ingest active");
                     reconnect_pending = false;
                     retry_delay_ms = retry_initial_ms;
                     if motion_positive == 0 {

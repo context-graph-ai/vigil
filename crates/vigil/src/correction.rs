@@ -307,7 +307,7 @@ pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewEr
         .list_observations(Some(context_id))
         .map_err(|e| ReviewError::StoreError(e.to_string()))?;
 
-    let corrections: Vec<RecordedCorrection> = all_obs
+    let mut corrections: Vec<_> = all_obs
         .iter()
         .filter_map(|obs| {
             let anchored = obs
@@ -331,12 +331,25 @@ pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewEr
                 .or_else(|| obs.properties.get("label"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            Some(RecordedCorrection {
-                label,
-                correction_type,
-                anchored_detection_id: anchored.to_string(),
-            })
+            Some((
+                obs.observed_at,
+                obs.id,
+                RecordedCorrection {
+                    label,
+                    correction_type,
+                    anchored_detection_id: anchored.to_string(),
+                },
+            ))
         })
+        .collect();
+    corrections.sort_by(|(left_at, left_id, _left), (right_at, right_id, _right)| {
+        right_at
+            .cmp(left_at)
+            .then_with(|| right_id.as_uuid().cmp(&left_id.as_uuid()))
+    });
+    let corrections = corrections
+        .into_iter()
+        .map(|(_observed_at, _id, correction)| correction)
         .collect();
 
     Ok(WhyView {

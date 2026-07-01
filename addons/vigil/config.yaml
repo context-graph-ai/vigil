@@ -23,12 +23,6 @@ ports_description:
 # accepted as a fallback for non-Supervisor deployments.
 services:
   - mqtt:want
-# Mount the HA config directory read-write so Vigil can install its Lovelace
-# card into /homeassistant/www/ (served by HA as /local/).
-# The current Supervisor schema mounts `homeassistant_config:rw` at
-# /homeassistant — NOT the legacy `config:rw` path /config.
-map:
-  - homeassistant_config:rw
 options:
   store_path: /data/store.contextgraph
   health_port: 8099
@@ -47,6 +41,6 @@ schema:
 apparmor: true
 host_network: false
 host_pid: false
-# Required for Supervisor REST API access (go2rtc stream registration,
-# Lovelace resource registration) and for SUPERVISOR_TOKEN injection.
+# Required for Supervisor REST API access to MQTT credentials and Generic Camera
+# config-flow registration, and for SUPERVISOR_TOKEN injection.
 homeassistant_api: true

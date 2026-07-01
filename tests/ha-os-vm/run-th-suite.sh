@@ -1883,33 +1883,23 @@ th21() {
   local id="TH-21"
   ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
   ensure_addon_installed "$id" || return
-  start_addon "$id" "for Lovelace card registration audit" || return
-  wait_for_health || { fail "$id" "Vigil health did not reach 200 for Lovelace card audit"; return; }
-  # Query HA for registered Lovelace dashboard resources
-  local resources_json resource_count
+  start_addon "$id" "for legacy frontend absence audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for legacy frontend absence audit"; return; }
+  # Query HA for registered Lovelace dashboard resources.
+  local resources_json legacy_count
   resources_json="$(ha_rest_api_run /api/lovelace/resources 2>/dev/null)"
-  resource_count="$(printf '%s' "$resources_json" \
-    | jq -er '[.[] | select(.url | test("vigil"; "i"))] | length' 2>/dev/null || echo 0)"
-  if ! [[ "$resource_count" =~ ^[0-9]+$ ]] || (( resource_count == 0 )); then
-    fail "$id" "no Vigil Lovelace dashboard resource registered in Home Assistant; \
-the add-on must bundle the correction card asset AND register it as a dashboard resource so \
-correcting a detection works the moment Vigil installs, without the owner pasting YAML"
+  legacy_count="$(printf '%s' "$resources_json" \
+    | jq -er '[.[] | select(.url == "/local/vigil-event-gallery-card.js")] | length' 2>/dev/null || echo 0)"
+  if ! [[ "$legacy_count" =~ ^[0-9]+$ ]]; then
+    fail "$id" "could not inspect Home Assistant Lovelace resources for the obsolete Vigil gallery card"
     return
   fi
-  # Assert the resource URL is reachable (not merely registered)
-  local resource_url
-  resource_url="$(printf '%s' "$resources_json" \
-    | jq -er '[.[] | select(.url | test("vigil"; "i"))] | .[0].url' 2>/dev/null)"
-  if [[ -n "$resource_url" ]]; then
-    local card_status
-    card_status="$(ha_rest_api_run "${resource_url}" 2>/dev/null | wc -c | tr -d ' ')"
-    if ! [[ "$card_status" =~ ^[0-9]+$ ]] || (( card_status < 10 )); then
-      fail "$id" "Vigil Lovelace card resource is registered at '${resource_url}' but is not \
-reachable (HTTP response body too small); the card must be served, not merely listed"
-      return
-    fi
+  if (( legacy_count > 0 )); then
+    fail "$id" "obsolete /local/vigil-event-gallery-card.js resource is still registered; \
+the owner UI must come from Advanced Camera Card, not the add-on's old gallery card"
+    return
   fi
-  pass "$id" "Vigil Lovelace correction card is registered as a reachable dashboard resource"
+  pass "$id" "obsolete Vigil gallery card is not registered; owner UI belongs to Advanced Camera Card"
 }
 
 th22() {

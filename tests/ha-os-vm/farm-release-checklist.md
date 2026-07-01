@@ -123,8 +123,8 @@ Run `tests/ha-os-vm/ha-integration-smoke.sh` with a live farm camera and the HA-
 
 ### HA-S6 Correction made from inside Home Assistant
 
-- Vigil event-gallery Lovelace card visible on dashboard (no manual YAML paste):
-- Detection from HA-S2 tapped in the correction card:
+- Advanced Camera Card Vigil view visible on the dashboard:
+- Detection from HA-S2 tapped in the Advanced Camera Card correction UI:
 - Label entered and correction type selected:
 - Correction published to broker command topic (card sends `{detection_id, label, correction_type}`):
 - correction_type used:

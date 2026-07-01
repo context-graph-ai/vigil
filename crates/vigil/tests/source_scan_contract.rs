@@ -180,6 +180,57 @@ fn yolox_oracle_uses_library_decode_path_without_dead_code_link_shims() {
     }
 }
 
+#[test]
+fn generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url() {
+    let root = workspace_root();
+    let config_path = root.join("crates/vigil/src/config.rs");
+    let runtime_path = root.join("crates/vigil/src/runtime.rs");
+    let addon_config_path = root.join("addons/vigil/config.yaml");
+    let config = fs::read_to_string(&config_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", config_path.display()));
+    let runtime = fs::read_to_string(&runtime_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", runtime_path.display()));
+    let addon_config = fs::read_to_string(&addon_config_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", addon_config_path.display()));
+    let mut failures = Vec::new();
+
+    if !addon_config.contains("live_rtsp_url: str?") {
+        failures.push(format!(
+            "{} must expose optional cameras[].live_rtsp_url in the add-on schema",
+            addon_config_path.display()
+        ));
+    }
+    for required in [
+        "live_rtsp_url: Option<String>",
+        "live_rtsp_url: c.live_rtsp_url",
+        "live_rtsp_url: partial.live_rtsp_url.clone()",
+    ] {
+        if !config.contains(required) {
+            failures.push(format!(
+                "{} does not preserve camera live RTSP marker {required}",
+                config_path.display()
+            ));
+        }
+    }
+    for required in [
+        "let generic_camera_url = camera",
+        ".live_rtsp_url",
+        ".or(camera.rtsp_url.as_deref())",
+        "register_generic_camera(&cam_id, generic_camera_url, &config.data_dir)",
+    ] {
+        if !runtime.contains(required) {
+            failures.push(format!(
+                "{} does not route Generic Camera registration through the live RTSP URL marker {required}",
+                runtime_path.display()
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
 fn assert_context_graph_owns_generic_owner_control_transport(
     sources: &[SourceFile],
     failures: &mut Vec<String>,

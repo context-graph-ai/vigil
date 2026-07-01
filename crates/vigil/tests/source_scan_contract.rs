@@ -274,6 +274,31 @@ fn generic_camera_registration_confirms_home_assistant_preview_step() {
     }
 }
 
+#[test]
+fn rtsp_success_recovers_health_after_transient_ingest_failure() {
+    let root = workspace_root();
+    let runtime_path = root.join("crates/vigil/src/runtime.rs");
+    let runtime = fs::read_to_string(&runtime_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", runtime_path.display()));
+    let mut failures = Vec::new();
+
+    for required in [
+        "stats.ingest_signal = \"ok\".to_string()",
+        "health.set(HealthStatus::Ready, \"RTSP ingest active\")",
+    ] {
+        if !runtime.contains(required) {
+            failures.push(format!(
+                "{} does not recover health on successful RTSP ingest marker {required}",
+                runtime_path.display()
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
 fn assert_context_graph_owns_generic_owner_control_transport(
     sources: &[SourceFile],
     failures: &mut Vec<String>,

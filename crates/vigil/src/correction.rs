@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use context_graph::{
     ContextId, EvidenceId, EvidenceKind, EvidenceProducer, EvidenceRef, ObservationId,
@@ -96,6 +96,12 @@ pub struct EventRow {
     /// True when an Identity correction ("confirmed") has been recorded against this
     /// detection.  Distinct from `correction_recorded` which is for WrongClass / FalseAlarm.
     pub confirmed: bool,
+    /// Server-decided latest correction kind for this detection.  This is the
+    /// durable authority the Home Assistant card renders; it is not derived
+    /// client-side from the legacy booleans.
+    pub current_correction: Option<CorrectionType>,
+    /// Latest corrected-to label from WrongClass corrections, if any.
+    pub corrected_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -366,7 +372,7 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
     //
     // Identity ("confirmed") is a POSITIVE signal: it must NOT set `correction_recorded`.
     // Only WrongClass and FalseAlarm corrections set `correction_recorded = true`.
-    let (corrected_ids, confirmed_ids): (HashSet<String>, HashSet<String>) =
+    let correction_summary: BTreeMap<String, EventCorrectionSummary> =
         if let Some(first_row) = resp.rows.first() {
             let context_id_opt = uuid::Uuid::parse_str(&first_row.observation_id)
                 .ok()
@@ -374,8 +380,7 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
                 .and_then(|obs_id| store.get_observation(obs_id).ok())
                 .map(|obs| obs.context_id);
             if let Some(ctx_id) = context_id_opt {
-                let mut corrected = HashSet::new();
-                let mut confirmed = HashSet::new();
+                let mut summary = BTreeMap::new();
                 for obs in store.list_observations(Some(ctx_id)).unwrap_or_default() {
                     let anchored = obs
                         .observed_properties
@@ -388,25 +393,28 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
                         .get("correction_type")
                         .or_else(|| obs.properties.get("correction_type"))
                         .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                        .and_then(correction_type_from_str);
+                    let label = obs
+                        .observed_properties
+                        .get("label")
+                        .or_else(|| obs.properties.get("label"))
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
                     if let Some(id) = anchored {
-                        match ct {
-                            "Identity" => {
-                                confirmed.insert(id);
-                            }
-                            "WrongClass" | "FalseAlarm" => {
-                                corrected.insert(id);
-                            }
-                            _ => {}
+                        if let Some(correction_type) = ct {
+                            summary
+                                .entry(id)
+                                .or_insert_with(EventCorrectionSummary::default)
+                                .apply(&obs.observed_at, correction_type, label);
                         }
                     }
                 }
-                (corrected, confirmed)
+                summary
             } else {
-                (HashSet::new(), HashSet::new())
+                BTreeMap::new()
             }
         } else {
-            (HashSet::new(), HashSet::new())
+            BTreeMap::new()
         };
 
     let rows = resp
@@ -422,12 +430,67 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
             frame_index: row.frame_index,
             clip_ref: row.clip_ref.clone(),
             detector_image_ref: row.detector_image_ref.clone(),
-            correction_recorded: corrected_ids.contains(&row.observation_id),
-            confirmed: confirmed_ids.contains(&row.observation_id),
+            correction_recorded: correction_summary
+                .get(&row.observation_id)
+                .map(|summary| summary.corrected)
+                .unwrap_or(false),
+            confirmed: correction_summary
+                .get(&row.observation_id)
+                .map(|summary| summary.confirmed)
+                .unwrap_or(false),
+            current_correction: correction_summary
+                .get(&row.observation_id)
+                .and_then(|summary| summary.current_correction.clone()),
+            corrected_label: correction_summary
+                .get(&row.observation_id)
+                .and_then(|summary| summary.corrected_label.clone()),
         })
         .collect();
 
     Ok(EventsView { rows })
+}
+
+#[derive(Default)]
+struct EventCorrectionSummary {
+    corrected: bool,
+    confirmed: bool,
+    current_correction: Option<CorrectionType>,
+    current_observed_at: Option<chrono::DateTime<chrono::Utc>>,
+    corrected_label: Option<String>,
+}
+
+impl EventCorrectionSummary {
+    fn apply(
+        &mut self,
+        observed_at: &chrono::DateTime<chrono::Utc>,
+        correction_type: CorrectionType,
+        label: Option<String>,
+    ) {
+        match correction_type {
+            CorrectionType::Identity => {
+                self.confirmed = true;
+            }
+            CorrectionType::WrongClass => {
+                self.corrected = true;
+            }
+            CorrectionType::FalseAlarm => {
+                self.corrected = true;
+            }
+        }
+
+        if self
+            .current_observed_at
+            .map(|current| *observed_at > current)
+            .unwrap_or(true)
+        {
+            self.corrected_label = match correction_type {
+                CorrectionType::WrongClass => label,
+                CorrectionType::Identity | CorrectionType::FalseAlarm => None,
+            };
+            self.current_correction = Some(correction_type);
+            self.current_observed_at = Some(*observed_at);
+        }
+    }
 }
 
 /// Read the PNG bytes for the most-recent detector evidence frame for the named camera.

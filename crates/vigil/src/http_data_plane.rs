@@ -199,6 +199,8 @@ fn event_row_json(row: &EventRow) -> Value {
         "detector_image_ref": media_route(&row.detector_image_ref),
         "correction_recorded": row.correction_recorded,
         "confirmed": row.confirmed,
+        "current_correction": row.current_correction.as_ref().map(correction_type_str),
+        "corrected_label": row.corrected_label,
     })
 }
 

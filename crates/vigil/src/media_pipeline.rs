@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -208,22 +207,6 @@ pub(crate) enum VideoCodec {
     H265,
 }
 
-impl VideoCodec {
-    pub(crate) fn extension(self) -> &'static str {
-        match self {
-            VideoCodec::H264 => "h264",
-            VideoCodec::H265 => "h265",
-        }
-    }
-
-    pub(crate) fn mime_type(self) -> &'static str {
-        match self {
-            VideoCodec::H264 => "video/h264",
-            VideoCodec::H265 => "video/h265",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct DecodedRgbFrame {
     pub(crate) index: u64,
@@ -234,7 +217,6 @@ pub(crate) struct DecodedRgbFrame {
 
 #[derive(Clone)]
 pub(crate) struct DecodedVideoSegment {
-    pub(crate) codec: VideoCodec,
     pub(crate) frames: Vec<DecodedRgbFrame>,
     pub(crate) encoded_units: Vec<Vec<u8>>,
     pub(crate) fps: f64,
@@ -351,7 +333,6 @@ where
                     reindex_frames(&mut frames);
                     let segment_fps = segment_fps(fps, segment_started_at.take(), frames.len());
                     on_segment(DecodedVideoSegment {
-                        codec,
                         frames,
                         encoded_units: units,
                         fps: segment_fps,
@@ -368,7 +349,6 @@ where
                     reindex_frames(&mut frames);
                     let segment_fps = segment_fps(fps, segment_started_at.take(), frames.len());
                     on_segment(DecodedVideoSegment {
-                        codec,
                         frames,
                         encoded_units: units,
                         fps: segment_fps,
@@ -393,7 +373,6 @@ where
         reindex_frames(&mut decoded_frames);
         let segment_fps = segment_fps(fps, segment_started_at.take(), decoded_frames.len());
         on_segment(DecodedVideoSegment {
-            codec,
             frames: decoded_frames,
             encoded_units,
             fps: segment_fps,
@@ -543,21 +522,6 @@ pub(crate) fn decode_video_file(path: &Path) -> Result<DecodedVideoSegment, Stri
         Some("h265" | "265" | "hevc") => decode_annex_b_file(path, VideoCodec::H265),
         _ => decode_mp4_file(path),
     }
-}
-
-pub(crate) fn write_encoded_clip(segment: &DecodedVideoSegment, path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("create clip dir {}: {error}", parent.display()))?;
-    }
-    let mut file =
-        fs::File::create(path).map_err(|error| format!("create {}: {error}", path.display()))?;
-    for unit in &segment.encoded_units {
-        file.write_all(unit)
-            .map_err(|error| format!("write {}: {error}", path.display()))?;
-    }
-    file.sync_all()
-        .map_err(|error| format!("sync {}: {error}", path.display()))
 }
 
 pub(crate) fn write_browser_playable_mp4_clip(
@@ -1020,7 +984,6 @@ fn decode_encoded_units(
         return Err(format!("{codec:?} segment has no decodable frames"));
     }
     Ok(DecodedVideoSegment {
-        codec,
         frames: decoded,
         encoded_units,
         fps,
@@ -1290,7 +1253,6 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("create temp dir");
         let path = tmp.path().join("review.mp4");
         let segment = DecodedVideoSegment {
-            codec: VideoCodec::H265,
             frames: (0..6)
                 .map(|index| synthetic_rgb_frame(index, 64, 48))
                 .collect(),
@@ -1312,7 +1274,6 @@ mod tests {
         );
 
         let decoded = decode_video_file(&path).expect("decode generated review MP4");
-        assert_eq!(decoded.codec, VideoCodec::H264);
         assert!(
             decoded.frame_count() >= 2,
             "generated review MP4 must contain multiple decodable frames"

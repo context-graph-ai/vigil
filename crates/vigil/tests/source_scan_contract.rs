@@ -121,6 +121,65 @@ fn vigil_addon_does_not_auto_install_legacy_lovelace_gallery() {
     }
 }
 
+#[test]
+fn yolox_oracle_uses_library_decode_path_without_dead_code_link_shims() {
+    let root = workspace_root();
+    let oracle_path = root.join("crates/vigil/src/bin/yolox_burn_oracle.rs");
+    let media_path = root.join("crates/vigil/src/media_pipeline.rs");
+    let lib_path = root.join("crates/vigil/src/lib.rs");
+    let oracle = fs::read_to_string(&oracle_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", oracle_path.display()));
+    let media = fs::read_to_string(&media_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", media_path.display()));
+    let lib = fs::read_to_string(&lib_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", lib_path.display()));
+    let mut failures = Vec::new();
+
+    for forbidden in [
+        "#[path = \"../media_pipeline.rs\"]",
+        "mod media_pipeline;",
+        "keep_shared_media_symbols_linked",
+        "VIGIL_ORACLE_EXERCISE_UNUSED_MEDIA_PATHS",
+    ] {
+        if oracle.contains(forbidden) {
+            failures.push(format!(
+                "{} contains dead-code warning shim {forbidden}",
+                oracle_path.display()
+            ));
+        }
+    }
+
+    for forbidden in [
+        "fn write_encoded_clip",
+        "fn extension(self)",
+        "fn mime_type(self)",
+    ] {
+        if media.contains(forbidden) {
+            failures.push(format!(
+                "{} retained unused raw-media helper {forbidden}",
+                media_path.display()
+            ));
+        }
+    }
+
+    if !lib.contains("pub fn decode_sampled_detector_rgb_frames") {
+        failures.push(format!(
+            "{} does not expose the shared detector frame decode wrapper used by the oracle",
+            lib_path.display()
+        ));
+    }
+    if !oracle.contains("vigil::decode_sampled_detector_rgb_frames") {
+        failures.push(format!(
+            "{} does not call the shared library decode wrapper",
+            oracle_path.display()
+        ));
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
 fn assert_context_graph_owns_generic_owner_control_transport(
     sources: &[SourceFile],
     failures: &mut Vec<String>,

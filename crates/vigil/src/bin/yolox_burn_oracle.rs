@@ -2,17 +2,12 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use burn::tensor::{Device, Tensor, TensorData, backend::Backend};
 use burn_flex::Flex;
 use burn_store::{ModuleSnapshot, PytorchStore};
 use sha2::{Digest, Sha256};
 use yolox_burn::model::{BoundingBox, boxes::nms, yolox::Yolox};
-
-#[path = "../media_pipeline.rs"]
-mod media_pipeline;
 
 const HEIGHT: usize = 640;
 const WIDTH: usize = 640;
@@ -36,8 +31,6 @@ fn main() {
 }
 
 fn run_oracle(args: OracleArgs) -> Result<(), String> {
-    keep_shared_media_symbols_linked();
-
     let model_sha256 = load_record(&args.model)?;
 
     let device = Default::default();
@@ -64,48 +57,6 @@ fn run_oracle(args: OracleArgs) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-fn keep_shared_media_symbols_linked() {
-    if env::var_os("VIGIL_ORACLE_EXERCISE_UNUSED_MEDIA_PATHS").is_none() {
-        return;
-    }
-
-    let segment = media_pipeline::DecodedVideoSegment {
-        codec: media_pipeline::VideoCodec::H264,
-        frames: vec![media_pipeline::DecodedRgbFrame {
-            index: 0,
-            width: 2,
-            height: 2,
-            rgb: vec![0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 255, 0],
-        }],
-        encoded_units: Vec::new(),
-        fps: 0.0,
-        observed_at: None,
-    };
-    let _ = segment.codec.extension();
-    let _ = segment.codec.mime_type();
-    let _ = segment.frame_count();
-    let _ = segment.fps;
-    let _ = &segment.observed_at;
-    let _ = media_pipeline::motion_gate(&segment).motion_positive_frames;
-    let _ = media_pipeline::write_encoded_clip(&segment, Path::new("/dev/null"));
-    let _ = media_pipeline::sha256_path(Path::new("/dev/null"));
-    let _ = media_pipeline::write_detector_evidence_png(
-        &segment,
-        0,
-        "0,0,1,1",
-        Path::new("/tmp/vigil-oracle-unused-detector.png"),
-        2,
-        2,
-    );
-    let shutdown = Arc::new(AtomicBool::new(true));
-    if let Ok(source) =
-        media_pipeline::prepare_rtsp_source("rtsp://127.0.0.1:8554/probe", None, None)
-    {
-        let _ = source.session_url();
-        let _ = media_pipeline::capture_rtsp_segments(&source, 1, shutdown, || Ok(()), |_| Ok(()));
-    }
 }
 
 fn parse_args() -> Result<OracleArgs, String> {
@@ -195,13 +146,7 @@ fn decode_sampled_rgb_frames(
     clip: &Path,
     sample_frames: usize,
 ) -> Result<(Vec<u8>, usize), String> {
-    let segment = media_pipeline::decode_video_file(clip)?;
-    media_pipeline::sampled_detector_rgb(
-        &segment.frames,
-        sample_frames,
-        WIDTH as u32,
-        HEIGHT as u32,
-    )
+    vigil::decode_sampled_detector_rgb_frames(clip, sample_frames, WIDTH as u32, HEIGHT as u32)
 }
 
 struct Detection {

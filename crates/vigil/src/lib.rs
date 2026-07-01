@@ -76,6 +76,16 @@ pub fn open_context_graph_store_with_text_embedder_disabled(path: &Path) -> Resu
     store::open(path).map(|open| open.handle)
 }
 
+pub fn decode_sampled_detector_rgb_frames(
+    clip: &Path,
+    sample_frames: usize,
+    width: u32,
+    height: u32,
+) -> Result<(Vec<u8>, usize), String> {
+    let segment = media_pipeline::decode_video_file(clip)?;
+    media_pipeline::sampled_detector_rgb(&segment.frames, sample_frames, width, height)
+}
+
 fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
     match ask_runtime_owner(command, request) {
         Ok(response) => {

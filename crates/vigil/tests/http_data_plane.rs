@@ -548,6 +548,29 @@ fn correction_count(value: &Value, correction_type: &str, label: Option<&str>) -
         .unwrap_or_default()
 }
 
+fn first_correction(value: &Value) -> &Value {
+    value
+        .get("corrections")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .expect("/why response must include at least one correction")
+}
+
+fn correction_sequence(value: &Value) -> Vec<(String, Option<String>)> {
+    value
+        .get("corrections")
+        .and_then(Value::as_array)
+        .unwrap_or(&Vec::new())
+        .iter()
+        .map(|item| {
+            (
+                field_str(item, "correction_type"),
+                field_opt_str(item, "label").map(ToString::to_string),
+            )
+        })
+        .collect()
+}
+
 fn count_corrections_anchored(store: &Store, detection_id: &str, correction_type: &str) -> usize {
     list_all_observations(store)
         .iter()
@@ -1165,13 +1188,60 @@ fn http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent()
         "/why must list Identity labels carried over HTTP"
     );
 
+    let false_alarm =
+        format!(r#"{{"detection_id":"{detection_id}","correction_type":"FalseAlarm"}}"#);
+    let response = post_json(port, "/correction", &false_alarm);
+    assert!((200..300).contains(&response.status));
+    let why = json_body(&get(port, &format!("/why/{detection_id}")));
+    assert!(
+        correction_matches(&why, "FalseAlarm", None),
+        "/why must list later FalseAlarm correction"
+    );
+    assert_eq!(
+        field_str(first_correction(&why), "correction_type"),
+        "FalseAlarm",
+        "/why corrections must be newest-first so the card's precise correction is current server truth"
+    );
+
     let response = post_json(port, "/correction", &wrong_class);
     assert!((200..300).contains(&response.status));
     let why = json_body(&get(port, &format!("/why/{detection_id}")));
     assert_eq!(
+        field_str(first_correction(&why), "correction_type"),
+        "FalseAlarm",
+        "repeat WrongClass vehicle POST must not create a newer correction"
+    );
+    assert_eq!(
         correction_count(&why, "WrongClass", Some("vehicle")),
         1,
         "repeat WrongClass vehicle POST must be idempotent"
+    );
+
+    let newer_wrong_class = format!(
+        r#"{{"detection_id":"{detection_id}","correction_type":"WrongClass","label":"pickup truck"}}"#
+    );
+    let response = post_json(port, "/correction", &newer_wrong_class);
+    assert!((200..300).contains(&response.status));
+    let why = json_body(&get(port, &format!("/why/{detection_id}")));
+    assert_eq!(
+        field_str(first_correction(&why), "correction_type"),
+        "WrongClass",
+        "/why corrections must put the latest correction type first even when the latest type changes"
+    );
+    assert_eq!(
+        field_opt_str(first_correction(&why), "label"),
+        Some("pickup truck"),
+        "/why corrections must put the latest correction label first, not a type-priority placeholder"
+    );
+    assert_eq!(
+        correction_sequence(&why),
+        vec![
+            ("WrongClass".to_string(), Some("pickup truck".to_string())),
+            ("FalseAlarm".to_string(), None),
+            ("Identity".to_string(), Some("delivery van".to_string())),
+            ("WrongClass".to_string(), Some("vehicle".to_string())),
+        ],
+        "/why corrections must serialize the full correction history newest-first"
     );
 }
 

@@ -242,26 +242,29 @@ fn generic_camera_registration_confirms_home_assistant_preview_step() {
         .unwrap_or_else(|error| panic!("read {}: {error}", supervisor_path.display()));
     let mut failures = Vec::new();
 
-    for required in [
-        "build_generic_camera_flow_confirm_payload",
-        "confirmed_ok",
-    ] {
+    for required in ["build_generic_camera_flow_confirm_payload", "confirmed_ok"] {
         if !supervisor.contains(required) {
             failures.push(format!(
                 "{} does not define Generic Camera confirmation marker {required}",
                 supervisor_path.display()
             ));
         }
-        if !runtime.contains(required) {
-            failures.push(format!(
-                "{} does not submit Generic Camera confirmation marker {required}",
-                runtime_path.display()
-            ));
-        }
+    }
+    if !runtime.contains("build_generic_camera_flow_confirm_payload") {
+        failures.push(format!(
+            "{} does not call the Generic Camera confirmation payload builder",
+            runtime_path.display()
+        ));
     }
     if runtime.contains("supervisor_post_body(&step_url, &token, \"{}\")") {
         failures.push(format!(
             "{} still submits an empty body to the Generic Camera confirmation step",
+            runtime_path.display()
+        ));
+    }
+    if runtime.contains("confirmed_ok") {
+        failures.push(format!(
+            "{} should not inline the Generic Camera confirmation JSON; use the supervisor payload builder",
             runtime_path.display()
         ));
     }

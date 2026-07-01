@@ -372,12 +372,13 @@ fn register_generic_camera(cam_slug: &str, rtsp_url: &str, data_dir: &std::path:
     };
 
     // ── Handle optional confirm/preview intermediate step ─────────────────
-    // Some HA versions present an extra "form" step (preview, confirm, or verify)
-    // before completing the entry.  Submit an empty body to accept defaults.
+    // Some HA versions present an extra preview/confirm form before completing
+    // the entry. Accept it explicitly.
     let final_resp = if crate::supervisor::is_flow_create_entry(&step_resp) {
         step_resp
     } else {
-        match crate::supervisor::supervisor_post_body(&step_url, &token, "{}") {
+        let confirm_payload = crate::supervisor::build_generic_camera_flow_confirm_payload();
+        match crate::supervisor::supervisor_post_body(&step_url, &token, &confirm_payload) {
             Ok(resp) => resp,
             Err(e) => {
                 println!("generic_camera_flow_confirm_error camera={cam_slug} error={e}");

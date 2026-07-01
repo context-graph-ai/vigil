@@ -110,6 +110,11 @@ pub(crate) fn build_generic_camera_flow_step_payload(
     payload.to_string()
 }
 
+/// Build the confirmation payload for HA's Generic Camera preview step.
+pub(crate) fn build_generic_camera_flow_confirm_payload() -> String {
+    r#"{"confirmed_ok":true}"#.to_string()
+}
+
 /// Parse the `flow_id` field from a config-flow initiation response.
 /// Returns `None` if the field is absent or not a string.
 pub(crate) fn parse_flow_id(json: &str) -> Option<String> {
@@ -264,6 +269,18 @@ mod tests {
             v["still_image_url"].as_str(),
             Some("http://example.com/snapshot.jpg"),
             "still_image_url must be included in the payload when provided"
+        );
+    }
+
+    #[test]
+    fn build_generic_camera_flow_confirm_payload_accepts_preview_step() {
+        let payload = build_generic_camera_flow_confirm_payload();
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).expect("flow confirm payload must be valid JSON");
+        assert_eq!(
+            v.get("confirmed_ok").and_then(serde_json::Value::as_bool),
+            Some(true),
+            "Generic Camera preview step requires confirmed_ok=true"
         );
     }
 

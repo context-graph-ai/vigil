@@ -76,6 +76,51 @@ fn ha_os_vm_shell_signals_stay_behind_child_pid_validator() {
     }
 }
 
+#[test]
+fn vigil_addon_does_not_auto_install_legacy_lovelace_gallery() {
+    let root = workspace_root();
+    let mut failures = Vec::new();
+
+    let legacy_card_path = root.join("addons/vigil/www/vigil-event-gallery-card.js");
+    if legacy_card_path.exists() {
+        failures.push(format!(
+            "Vigil add-on still ships the obsolete Lovelace gallery card at {}; the owner UI must come from Advanced Camera Card",
+            legacy_card_path.display()
+        ));
+    }
+
+    for relative_path in [
+        "addons/vigil/Dockerfile",
+        "addons/vigil/config.yaml",
+        "crates/vigil/src/runtime.rs",
+    ] {
+        let path = root.join(relative_path);
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        for forbidden in [
+            "vigil-event-gallery-card",
+            "install_lovelace_card",
+            "register_lovelace_resource",
+            "lovelace_register_ws",
+            "lovelace/resources/create",
+            "homeassistant_config:rw",
+            "COPY www/",
+            "/www/",
+        ] {
+            if text.contains(forbidden) {
+                failures.push(format!(
+                    "{} contains obsolete frontend auto-install marker {forbidden}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
 fn assert_context_graph_owns_generic_owner_control_transport(
     sources: &[SourceFile],
     failures: &mut Vec<String>,

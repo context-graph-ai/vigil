@@ -215,6 +215,23 @@ fn field_bool(value: &Value, field: &str) -> bool {
         .unwrap_or_default()
 }
 
+fn field_opt_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value.get(field).and_then(Value::as_str)
+}
+
+fn assert_null_field(value: &Value, field: &str, row_label: &str) {
+    match value.get(field) {
+        Some(Value::Null) => {}
+        other => panic!("{row_label} must serialize {field}=null, got {other:?}"),
+    }
+}
+
+fn event_row_by_id<'a>(rows: &'a [Value], detection_id: &str) -> &'a Value {
+    rows.iter()
+        .find(|row| field_str(row, "observation_id") == detection_id)
+        .unwrap_or_else(|| panic!("events response must include detection row {detection_id}"))
+}
+
 fn assert_event_row_matches_transport(row: &Value, expected: &EventRow) {
     assert_eq!(
         field_str(row, "observation_id"),
@@ -1053,6 +1070,90 @@ fn http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent()
         1,
         "repeat WrongClass vehicle POST must be idempotent"
     );
+}
+
+#[test]
+fn event_list_serializes_current_correction_authority_fields() {
+    let (_tmp, store_path) =
+        review_store_copy(4).expect("seeded store for event-list correction authority fields");
+    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let mut detections = list_all_observations(&store)
+        .into_iter()
+        .filter(|observation| observation.observation_type == "detection")
+        .collect::<Vec<_>>();
+    assert!(
+        detections.len() >= 4,
+        "at least four detections are needed to cover Identity, latest WrongClass, FalseAlarm, and unreviewed rows"
+    );
+    detections.sort_by_key(|observation| observation.observed_at);
+    let identity_id = detections[0].id.to_string();
+    let wrong_class_id = detections[1].id.to_string();
+    let false_alarm_id = detections[2].id.to_string();
+    let unreviewed_id = detections[3].id.to_string();
+    let (_server, port) = spawn_server(&store_path);
+
+    let identity = format!(
+        r#"{{"detection_id":"{identity_id}","correction_type":"Identity","label":"operator confirmed"}}"#
+    );
+    let response = post_json(port, "/correction", &identity);
+    assert!((200..300).contains(&response.status));
+
+    let initial_identity = format!(
+        r#"{{"detection_id":"{wrong_class_id}","correction_type":"Identity","label":"initial confirmation"}}"#
+    );
+    let response = post_json(port, "/correction", &initial_identity);
+    assert!((200..300).contains(&response.status));
+    thread::sleep(Duration::from_millis(2));
+    let wrong_class = format!(
+        r#"{{"detection_id":"{wrong_class_id}","correction_type":"WrongClass","label":"cow"}}"#
+    );
+    let response = post_json(port, "/correction", &wrong_class);
+    assert!((200..300).contains(&response.status));
+
+    let false_alarm =
+        format!(r#"{{"detection_id":"{false_alarm_id}","correction_type":"FalseAlarm"}}"#);
+    let response = post_json(port, "/correction", &false_alarm);
+    assert!((200..300).contains(&response.status));
+
+    let response = get(port, "/events");
+    assert_eq!(response.status, 200, "GET /events must return 200");
+    let served = rows(&response);
+
+    let identity_row = event_row_by_id(&served, &identity_id);
+    assert_eq!(
+        field_opt_str(identity_row, "current_correction"),
+        Some("Identity"),
+        "Identity-reviewed row must serialize current_correction as PascalCase Identity"
+    );
+    assert_null_field(identity_row, "corrected_label", "Identity-reviewed row");
+
+    let wrong_class_row = event_row_by_id(&served, &wrong_class_id);
+    assert_eq!(
+        field_opt_str(wrong_class_row, "current_correction"),
+        Some("WrongClass"),
+        "when multiple corrections exist, /events must serialize the latest server-decided correction type"
+    );
+    assert_eq!(
+        field_opt_str(wrong_class_row, "corrected_label"),
+        Some("cow"),
+        "WrongClass row must serialize corrected_label for Home Assistant card reload"
+    );
+
+    let false_alarm_row = event_row_by_id(&served, &false_alarm_id);
+    assert_eq!(
+        field_opt_str(false_alarm_row, "current_correction"),
+        Some("FalseAlarm"),
+        "FalseAlarm-reviewed row must serialize current_correction as PascalCase FalseAlarm"
+    );
+    assert_null_field(
+        false_alarm_row,
+        "corrected_label",
+        "FalseAlarm-reviewed row",
+    );
+
+    let unreviewed_row = event_row_by_id(&served, &unreviewed_id);
+    assert_null_field(unreviewed_row, "current_correction", "unreviewed row");
+    assert_null_field(unreviewed_row, "corrected_label", "unreviewed row");
 }
 
 #[test]

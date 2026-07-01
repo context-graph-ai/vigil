@@ -5,6 +5,8 @@
 // REGRESSION GUARDs pass at scaffold.
 // RED tests fail on assertions via the deliberate wrong stubs.
 
+use std::{thread, time::Duration};
+
 use context_graph::{Observation, Store};
 use vigil::{
     CorrectionError, CorrectionRequest, CorrectionType, record_correction, review_events,
@@ -648,5 +650,135 @@ fn confirmed_correction_does_not_set_correction_recorded() {
     assert!(
         !row_b.confirmed,
         "FalseAlarm correction on detection B must NOT set confirmed=true; got confirmed=true"
+    );
+}
+
+/// RED — the Home Assistant card no longer derives durable correction state
+/// from local `confirmed` / `correction_recorded` booleans.  The event-list
+/// authority must expose the server-decided current correction and corrected
+/// label on each row.
+#[test]
+fn review_events_rows_expose_current_correction_authority_fields() {
+    let (_tmp, store_path) = ha_test_support::fresh_store_copy(4)
+        .expect("seeded store for review_events_rows_expose_current_correction_authority_fields");
+    let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+    let mut detections = list_all_observations(&store)
+        .into_iter()
+        .filter(|observation| observation.observation_type == "detection")
+        .collect::<Vec<_>>();
+    assert!(
+        detections.len() >= 4,
+        "at least four detections are needed to cover Identity, latest WrongClass, FalseAlarm, and unreviewed rows"
+    );
+    detections.sort_by_key(|observation| observation.observed_at);
+    let identity_id = detections[0].id.to_string();
+    let wrong_class_id = detections[1].id.to_string();
+    let false_alarm_id = detections[2].id.to_string();
+    let unreviewed_id = detections[3].id.to_string();
+
+    record_correction(
+        &store,
+        CorrectionRequest {
+            detection_id: identity_id.clone(),
+            label: Some("operator confirmed".to_string()),
+            correction_type: CorrectionType::Identity,
+        },
+    )
+    .expect("Identity correction must record");
+
+    record_correction(
+        &store,
+        CorrectionRequest {
+            detection_id: wrong_class_id.clone(),
+            label: Some("initial confirmation".to_string()),
+            correction_type: CorrectionType::Identity,
+        },
+    )
+    .expect("initial Identity correction must record");
+    thread::sleep(Duration::from_millis(2));
+    record_correction(
+        &store,
+        CorrectionRequest {
+            detection_id: wrong_class_id.clone(),
+            label: Some("cow".to_string()),
+            correction_type: CorrectionType::WrongClass,
+        },
+    )
+    .expect("latest WrongClass correction must record");
+
+    record_correction(
+        &store,
+        CorrectionRequest {
+            detection_id: false_alarm_id.clone(),
+            label: None,
+            correction_type: CorrectionType::FalseAlarm,
+        },
+    )
+    .expect("FalseAlarm correction must record");
+
+    let events = review_events(&store, 100).expect("review_events must not error");
+
+    let identity_row = events
+        .rows
+        .iter()
+        .find(|row| row.observation_id == identity_id)
+        .expect("review_events must include the Identity-reviewed detection");
+    assert_eq!(
+        identity_row.current_correction.as_ref(),
+        Some(&CorrectionType::Identity),
+        "Identity-reviewed event row must expose current_correction=Identity for card reload authority"
+    );
+    assert_eq!(
+        identity_row.corrected_label.as_deref(),
+        None,
+        "Identity confirmation must not invent a corrected_label"
+    );
+
+    let wrong_class_row = events
+        .rows
+        .iter()
+        .find(|row| row.observation_id == wrong_class_id)
+        .expect("review_events must include the detection with a latest WrongClass correction");
+    assert_eq!(
+        wrong_class_row.current_correction.as_ref(),
+        Some(&CorrectionType::WrongClass),
+        "when multiple corrections exist, the row must expose the latest server-decided correction type"
+    );
+    assert_eq!(
+        wrong_class_row.corrected_label.as_deref(),
+        Some("cow"),
+        "WrongClass event row must expose the corrected class label for Home Assistant reload"
+    );
+
+    let false_alarm_row = events
+        .rows
+        .iter()
+        .find(|row| row.observation_id == false_alarm_id)
+        .expect("review_events must include the FalseAlarm-reviewed detection");
+    assert_eq!(
+        false_alarm_row.current_correction.as_ref(),
+        Some(&CorrectionType::FalseAlarm),
+        "FalseAlarm event row must expose current_correction=FalseAlarm"
+    );
+    assert_eq!(
+        false_alarm_row.corrected_label.as_deref(),
+        None,
+        "FalseAlarm correction must not invent a corrected_label"
+    );
+
+    let unreviewed_row = events
+        .rows
+        .iter()
+        .find(|row| row.observation_id == unreviewed_id)
+        .expect("review_events must include the unreviewed detection");
+    assert_eq!(
+        unreviewed_row.current_correction.as_ref(),
+        None,
+        "unreviewed event row must expose current_correction=None, not a local card-derived fallback"
+    );
+    assert_eq!(
+        unreviewed_row.corrected_label.as_deref(),
+        None,
+        "unreviewed event row must expose corrected_label=None"
     );
 }

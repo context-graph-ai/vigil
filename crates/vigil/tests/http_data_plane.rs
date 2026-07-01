@@ -613,6 +613,59 @@ fn record_marker_detection(
         .expect("record marker detection");
 }
 
+fn record_zone_marker_detection(
+    store: &Store,
+    context_id: context_graph::ContextId,
+    entity_id: context_graph::EntityId,
+    class_name: &str,
+    source_ref: &str,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    zone: Option<&str>,
+) -> String {
+    let observation_id = ObservationId::new_v7();
+    let evidence = vec![EvidenceRef {
+        id: EvidenceId::new_v7(),
+        observation_id,
+        context_id,
+        kind: EvidenceKind::StructuredSignal,
+        source_ref: source_ref.to_string(),
+        captured_at: Some(observed_at),
+        producer: EvidenceProducer {
+            system: "vigil".to_string(),
+            model_name: ha_test_support::DETECTOR_MODEL_ID.to_string(),
+            model_version: "0.1".to_string(),
+            pipeline_version: "review-http-test".to_string(),
+            ..Default::default()
+        },
+        retention_status: RetentionStatus::NotStored,
+        ..Default::default()
+    }];
+    let mut observed_properties = BTreeMap::new();
+    observed_properties.insert("class".to_string(), Value::String(class_name.to_string()));
+    observed_properties.insert("confidence".to_string(), json!(0.71));
+    observed_properties.insert("bbox".to_string(), Value::String("5,6,7,8".to_string()));
+    observed_properties.insert("frame_index".to_string(), json!(11_u64));
+    if let Some(zone) = zone {
+        observed_properties.insert("zone".to_string(), Value::String(zone.to_string()));
+    }
+    store
+        .record_observation(RecordObservation {
+            id: observation_id,
+            entity_id,
+            context_id,
+            observation_type: "detection".to_string(),
+            source: "vigil".to_string(),
+            observed_at,
+            evidence,
+            observed_properties,
+            state_delta: BTreeMap::new(),
+            properties: BTreeMap::new(),
+            embeddings: Vec::new(),
+        })
+        .expect("record zone marker detection");
+    observation_id.to_string()
+}
+
 fn seed_foreign_context_detection(store: &Store) {
     let context = store
         .create_context(CreateContext {
@@ -665,6 +718,56 @@ fn is_4xx(status: u16) -> bool {
 fn port_accepts(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+}
+
+#[test]
+fn event_list_serializes_detection_zone_authority() {
+    let (_tmp, store_path) = review_store_copy(1).expect("seeded store for event-list zone");
+    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let seeded_detection = list_all_observations(&store)
+        .into_iter()
+        .find(|observation| observation.observation_type == "detection")
+        .expect("seeded store must include an unzoned detection");
+    let expected_zone = format!("lower_gate_{}", ObservationId::new_v7());
+    let zoned_at = chrono::Utc::now();
+    let unzoned_at = zoned_at + chrono::Duration::seconds(1);
+    let zoned_id = record_zone_marker_detection(
+        &store,
+        seeded_detection.context_id,
+        seeded_detection.entity_id,
+        "person",
+        "vigil-edge:signal/source-without-zone-name",
+        zoned_at,
+        Some(&expected_zone),
+    );
+    let unzoned_id = record_zone_marker_detection(
+        &store,
+        seeded_detection.context_id,
+        seeded_detection.entity_id,
+        "person",
+        "vigil-edge:signal/source-without-zone-name",
+        unzoned_at,
+        None,
+    );
+    let (_server, port) = spawn_server(&store_path);
+
+    let response = get(port, "/events");
+    assert_eq!(response.status, 200, "GET /events must return 200");
+    let served = rows(&response);
+
+    let zoned_row = event_row_by_id(&served, &zoned_id);
+    assert_eq!(
+        field_opt_str(zoned_row, "zone"),
+        Some(expected_zone.as_str()),
+        "Home Assistant reload rows must serialize the detection zone from cg observed_properties[\"zone\"]"
+    );
+
+    let unzoned_row = event_row_by_id(&served, &unzoned_id);
+    assert!(
+        matches!(unzoned_row.get("zone"), None | Some(Value::Null)),
+        "an event row without detection zone authority must serialize zone as absent or null, got {:?}",
+        unzoned_row.get("zone")
+    );
 }
 
 #[test]

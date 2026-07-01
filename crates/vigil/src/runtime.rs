@@ -160,12 +160,6 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                         }
                     }
 
-                    // Create a Generic Camera config entry in HA pointing at the
-                    // camera's RTSP directly. HA Core serves it over WebRTC via its
-                    // built-in go2rtc (2024.11+) with no separate stream registration.
-                    // The MQTT camera platform is image-only, so this is the live entity.
-                    register_generic_camera(&cam_id, url, &config.data_dir);
-
                     if is_disabled {
                         println!("camera_disabled_at_startup camera={cam_id}");
                     }
@@ -181,6 +175,13 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                         detection_publisher.clone(),
                     );
                     camera_handles.push(handle);
+                }
+
+                let generic_camera_url = generic_camera_url(camera);
+                if let Some(generic_camera_url) = generic_camera_url {
+                    // Create a Generic Camera config entry in HA for live view. When
+                    // live_rtsp_url is set, keep it separate from the detection ingest URL.
+                    register_generic_camera(&cam_id, generic_camera_url, &config.data_dir);
                 }
             }
 
@@ -298,9 +299,10 @@ fn slug_for_id(s: &str) -> String {
 /// Register each camera as an HA Generic Camera config entry via the Core config-flow API.
 ///
 /// The MQTT camera platform is image-only (no `stream_source` key), so live video requires
-/// a real streaming camera entity.  This creates one Generic Camera per camera, pointed at
-/// the camera's own RTSP URL; HA Core reaches the camera directly and serves the entity over
-/// WebRTC via its built-in go2rtc (2024.11+) with no separate stream registration.
+/// a real streaming camera entity. This creates one Generic Camera per camera, pointed at
+/// the camera's configured live RTSP URL when present, otherwise its detection RTSP URL.
+/// HA Core reaches the camera directly and serves the entity over WebRTC via its built-in
+/// go2rtc (2024.11+) with no separate stream registration.
 ///
 /// Flow:
 /// 1. Sentinel guard — if `data_dir/generic_camera_<slug>.registered` exists, skip.
@@ -396,6 +398,13 @@ fn register_generic_camera(cam_slug: &str, rtsp_url: &str, data_dir: &std::path:
             &final_resp[..final_resp.len().min(300)]
         );
     }
+}
+
+fn generic_camera_url(camera: &config::CameraEntry) -> Option<&str> {
+    camera
+        .live_rtsp_url
+        .as_deref()
+        .or(camera.rtsp_url.as_deref())
 }
 
 fn log_startup(config: &config::RuntimeConfig) {
@@ -1556,7 +1565,8 @@ fn get_or_create_decision(
 
 #[cfg(test)]
 mod tests {
-    use super::{LatestSegmentQueue, LatestSegmentRecv};
+    use super::{LatestSegmentQueue, LatestSegmentRecv, generic_camera_url};
+    use crate::config;
     use std::time::Duration;
 
     #[test]
@@ -1590,5 +1600,31 @@ mod tests {
             LatestSegmentRecv::Item(value) => panic!("unexpected pending segment {value}"),
         }
         assert_eq!(queue.push_latest(1), Err(1));
+    }
+
+    #[test]
+    fn generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url() {
+        let camera = config::CameraEntry {
+            name: "top-gate-cam".to_string(),
+            rtsp_url: Some("rtsp://camera/detect".to_string()),
+            live_rtsp_url: Some("rtsp://camera/live".to_string()),
+            username: None,
+            password: None,
+        };
+
+        assert_eq!(generic_camera_url(&camera), Some("rtsp://camera/live"));
+    }
+
+    #[test]
+    fn generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras() {
+        let camera = config::CameraEntry {
+            name: "single-stream-cam".to_string(),
+            rtsp_url: Some("rtsp://camera/main".to_string()),
+            live_rtsp_url: None,
+            username: None,
+            password: None,
+        };
+
+        assert_eq!(generic_camera_url(&camera), Some("rtsp://camera/main"));
     }
 }

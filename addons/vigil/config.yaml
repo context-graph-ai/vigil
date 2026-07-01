@@ -36,6 +36,7 @@ schema:
   cameras:
     - name: str
       rtsp_url: str?
+      live_rtsp_url: str?
       username: str?
       password: str?
 apparmor: true

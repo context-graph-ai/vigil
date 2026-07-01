@@ -11,6 +11,7 @@ use crate::ha_mqtt_tasks::MqttConfig;
 pub(crate) struct CameraEntry {
     pub(crate) name: String,
     pub(crate) rtsp_url: Option<String>,
+    pub(crate) live_rtsp_url: Option<String>,
     pub(crate) username: Option<String>,
     pub(crate) password: Option<String>,
 }
@@ -49,6 +50,7 @@ pub(crate) struct RuntimeConfig {
 struct CameraEntryPartial {
     name: String,
     rtsp_url: Option<String>,
+    live_rtsp_url: Option<String>,
     username: Option<String>,
     password: Option<String>,
 }
@@ -62,6 +64,7 @@ struct PartialConfig {
     site_name: Option<String>,
     camera_name: Option<String>,
     rtsp_url: Option<String>,
+    live_rtsp_url: Option<String>,
     rtsp_username: Option<String>,
     rtsp_password: Option<String>,
     detector_model_id: Option<String>,
@@ -88,6 +91,7 @@ struct CliOverrides {
     site_name: Option<String>,
     camera_name: Option<String>,
     rtsp_url: Option<String>,
+    live_rtsp_url: Option<String>,
     rtsp_username: Option<String>,
     rtsp_password: Option<String>,
     detector_model_id: Option<String>,
@@ -119,6 +123,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             site_name: cli.site_name,
             camera_name: cli.camera_name,
             rtsp_url: cli.rtsp_url,
+            live_rtsp_url: cli.live_rtsp_url,
             rtsp_username: cli.rtsp_username,
             rtsp_password: cli.rtsp_password,
             detector_model_id: cli.detector_model_id,
@@ -198,6 +203,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             .map(|c| CameraEntry {
                 name: c.name,
                 rtsp_url: c.rtsp_url,
+                live_rtsp_url: c.live_rtsp_url,
                 username: c.username,
                 password: c.password,
             })
@@ -206,6 +212,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         vec![CameraEntry {
             name: camera_name.clone(),
             rtsp_url: partial.rtsp_url.clone(),
+            live_rtsp_url: partial.live_rtsp_url.clone(),
             username: partial.rtsp_username.clone(),
             password: partial.rtsp_password.clone(),
         }]
@@ -247,6 +254,9 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
             "--site-name" => cli.site_name = Some(next_string(&mut iter, "--site-name")?),
             "--camera-name" => cli.camera_name = Some(next_string(&mut iter, "--camera-name")?),
             "--rtsp-url" => cli.rtsp_url = Some(next_string(&mut iter, "--rtsp-url")?),
+            "--live-rtsp-url" => {
+                cli.live_rtsp_url = Some(next_string(&mut iter, "--live-rtsp-url")?)
+            }
             "--rtsp-username" => {
                 cli.rtsp_username = Some(next_string(&mut iter, "--rtsp-username")?)
             }
@@ -362,6 +372,7 @@ fn env_overrides() -> Result<PartialConfig, String> {
         site_name: std::env::var("VIGIL_SITE_NAME").ok(),
         camera_name: std::env::var("VIGIL_CAMERA_NAME").ok(),
         rtsp_url: std::env::var("VIGIL_RTSP_URL").ok(),
+        live_rtsp_url: std::env::var("VIGIL_LIVE_RTSP_URL").ok(),
         rtsp_username: std::env::var("VIGIL_RTSP_USERNAME").ok(),
         rtsp_password: std::env::var("VIGIL_RTSP_PASSWORD").ok(),
         detector_model_id: std::env::var("VIGIL_DETECTOR_MODEL_ID").ok(),
@@ -424,6 +435,9 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.rtsp_url.is_some() {
         target.rtsp_url = source.rtsp_url;
     }
+    if source.live_rtsp_url.is_some() {
+        target.live_rtsp_url = source.live_rtsp_url;
+    }
     if source.rtsp_username.is_some() {
         target.rtsp_username = source.rtsp_username;
     }
@@ -483,7 +497,7 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N]"
         .to_string()
 }
 
@@ -502,5 +516,27 @@ mod tests {
         ])
         .expect("review port CLI override loads");
         assert_eq!(config.review_port, 8765);
+    }
+
+    #[test]
+    fn live_rtsp_url_is_distinct_from_detection_rtsp_url() {
+        assert!(run_usage().contains("--live-rtsp-url URL"));
+        let config = load(vec![
+            OsString::from("--rtsp-url"),
+            OsString::from("rtsp://camera/detect"),
+            OsString::from("--live-rtsp-url"),
+            OsString::from("rtsp://camera/live"),
+        ])
+        .expect("live RTSP CLI override loads");
+
+        assert_eq!(config.rtsp_url.as_deref(), Some("rtsp://camera/detect"));
+        assert_eq!(
+            config.cameras[0].rtsp_url.as_deref(),
+            Some("rtsp://camera/detect")
+        );
+        assert_eq!(
+            config.cameras[0].live_rtsp_url.as_deref(),
+            Some("rtsp://camera/live")
+        );
     }
 }

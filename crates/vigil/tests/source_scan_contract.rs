@@ -213,7 +213,7 @@ fn generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url() {
         }
     }
     for required in [
-        "let generic_camera_url = camera",
+        "fn generic_camera_url(camera: &config::CameraEntry) -> Option<&str>",
         ".live_rtsp_url",
         ".or(camera.rtsp_url.as_deref())",
         "register_generic_camera(&cam_id, generic_camera_url, &config.data_dir)",

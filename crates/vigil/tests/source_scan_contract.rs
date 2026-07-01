@@ -231,6 +231,46 @@ fn generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url() {
     }
 }
 
+#[test]
+fn generic_camera_registration_confirms_home_assistant_preview_step() {
+    let root = workspace_root();
+    let runtime_path = root.join("crates/vigil/src/runtime.rs");
+    let supervisor_path = root.join("crates/vigil/src/supervisor.rs");
+    let runtime = fs::read_to_string(&runtime_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", runtime_path.display()));
+    let supervisor = fs::read_to_string(&supervisor_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", supervisor_path.display()));
+    let mut failures = Vec::new();
+
+    for required in [
+        "build_generic_camera_flow_confirm_payload",
+        "confirmed_ok",
+    ] {
+        if !supervisor.contains(required) {
+            failures.push(format!(
+                "{} does not define Generic Camera confirmation marker {required}",
+                supervisor_path.display()
+            ));
+        }
+        if !runtime.contains(required) {
+            failures.push(format!(
+                "{} does not submit Generic Camera confirmation marker {required}",
+                runtime_path.display()
+            ));
+        }
+    }
+    if runtime.contains("supervisor_post_body(&step_url, &token, \"{}\")") {
+        failures.push(format!(
+            "{} still submits an empty body to the Generic Camera confirmation step",
+            runtime_path.display()
+        ));
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
 fn assert_context_graph_owns_generic_owner_control_transport(
     sources: &[SourceFile],
     failures: &mut Vec<String>,

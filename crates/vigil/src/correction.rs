@@ -414,13 +414,13 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
                         .or_else(|| obs.properties.get("label"))
                         .and_then(|v| v.as_str())
                         .map(ToString::to_string);
-                    if let Some(id) = anchored {
-                        if let Some(correction_type) = ct {
-                            summary
-                                .entry(id)
-                                .or_insert_with(EventCorrectionSummary::default)
-                                .apply(&obs.observed_at, correction_type, label);
-                        }
+                    if let Some(id) = anchored
+                        && let Some(correction_type) = ct
+                    {
+                        summary
+                            .entry(id)
+                            .or_insert_with(EventCorrectionSummary::default)
+                            .apply(&obs.observed_at, correction_type, label);
                     }
                 }
                 summary

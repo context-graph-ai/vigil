@@ -1300,7 +1300,8 @@ mod tests {
         let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
         for y in 0..height {
             for x in 0..width {
-                let marker = x >= 8 + index as u32 && x < 24 + index as u32 && y >= 12 && y < 34;
+                let marker =
+                    (8 + index as u32..24 + index as u32).contains(&x) && (12..34).contains(&y);
                 if marker {
                     rgb.extend_from_slice(&[230, 50, 40]);
                 } else {

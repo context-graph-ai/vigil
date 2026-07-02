@@ -143,6 +143,8 @@ pub fn publish_discovery_to_broker(
 /// Full configuration for the long-lived production subscriber.
 pub struct WiredSubscriberConfig {
     pub mqtt: MqttConfig,
+    /// Raw service_id used in Vigil MQTT state topics.
+    pub service_id: String,
     /// Stable MQTT client id derived from the service_id (does not reset on
     /// restart so the broker can correlate last-will with prior sessions).
     pub client_id: String,
@@ -197,6 +199,8 @@ fn re_announce_to_broker(
     availability_topic: &str,
     condition_topic: &str,
     current_condition: &str,
+    service_id: &str,
+    camera_flags: &BTreeMap<String, Arc<AtomicBool>>,
 ) {
     for payload in payloads {
         if let Ok(json) = serde_json::to_string(&payload.payload) {
@@ -216,17 +220,49 @@ fn re_announce_to_broker(
         true,
         current_condition.as_bytes().to_vec(),
     );
+    publish_enabled_states(client, service_id, camera_flags);
+}
+
+fn enabled_state_topic(service_id: &str, camera_id: &str) -> String {
+    format!("vigil/{service_id}/{camera_id}/enabled")
+}
+
+fn publish_enabled_states(
+    client: &Client,
+    service_id: &str,
+    camera_flags: &BTreeMap<String, Arc<AtomicBool>>,
+) {
+    for (camera_id, enabled) in camera_flags {
+        publish_enabled_state(
+            client,
+            service_id,
+            camera_id,
+            enabled.load(Ordering::SeqCst),
+        );
+    }
+}
+
+fn publish_enabled_state(client: &Client, service_id: &str, camera_id: &str, enabled: bool) {
+    let payload = if enabled { "ON" } else { "OFF" };
+    let _ = client.publish(
+        enabled_state_topic(service_id, camera_id),
+        QoS::AtMostOnce,
+        true,
+        payload.as_bytes().to_vec(),
+    );
 }
 
 fn handle_production_control(
     payload: &[u8],
     data_dir: Option<&std::path::Path>,
+    service_id: &str,
     camera_flags: &BTreeMap<String, Arc<AtomicBool>>,
     store: &Store,
     client: &Client,
 ) {
     #[derive(serde::Deserialize)]
     struct ControlCmd {
+        service_id: Option<String>,
         camera_id: String,
         action: String,
     }
@@ -237,20 +273,26 @@ fn handle_production_control(
 
     match cmd.action.as_str() {
         "disable" => {
-            let Some(dir) = data_dir else { return };
-            let disabled_dir = dir.join("camera-disabled");
-            let _ = std::fs::create_dir_all(&disabled_dir);
-            let _ = std::fs::write(disabled_dir.join(&cmd.camera_id), b"");
+            if let Some(dir) = data_dir {
+                let disabled_dir = dir.join("camera-disabled");
+                let _ = std::fs::create_dir_all(&disabled_dir);
+                let _ = std::fs::write(disabled_dir.join(&cmd.camera_id), b"");
+            }
+            let state_service_id = cmd.service_id.as_deref().unwrap_or(service_id);
             if let Some(flag) = camera_flags.get(&cmd.camera_id) {
                 flag.store(false, Ordering::SeqCst);
+                publish_enabled_state(client, state_service_id, &cmd.camera_id, false);
             }
         }
         "enable" => {
-            let Some(dir) = data_dir else { return };
-            let marker = dir.join("camera-disabled").join(&cmd.camera_id);
-            let _ = std::fs::remove_file(marker);
+            if let Some(dir) = data_dir {
+                let marker = dir.join("camera-disabled").join(&cmd.camera_id);
+                let _ = std::fs::remove_file(marker);
+            }
+            let state_service_id = cmd.service_id.as_deref().unwrap_or(service_id);
             if let Some(flag) = camera_flags.get(&cmd.camera_id) {
                 flag.store(true, Ordering::SeqCst);
+                publish_enabled_state(client, state_service_id, &cmd.camera_id, true);
             }
         }
         "snapshot" => {
@@ -275,7 +317,7 @@ fn handle_production_control(
 /// topic (`vigil/commands/control`).  Correction commands are forwarded via
 /// `command_tx` — if the channel is full, the command is dropped, `overflow_count`
 /// is incremented, and a log line is emitted.  Control commands
-/// (disable/enable/acknowledge) are handled inline.
+/// (disable/enable/snapshot) are handled inline.
 ///
 /// The caller owns the receive end of `command_tx`'s channel and is responsible
 /// for draining it (e.g. a worker thread calling `record_correction`).  Holding
@@ -379,6 +421,8 @@ pub fn spawn_production_subscriber(
                         &cfg.availability_topic,
                         &cfg.condition_topic,
                         conn_condition,
+                        &cfg.service_id,
+                        &camera_flags,
                     );
                 }
                 Ok(Event::Incoming(Packet::Publish(p))) => {
@@ -398,6 +442,8 @@ pub fn spawn_production_subscriber(
                                     &cfg.availability_topic,
                                     &cfg.condition_topic,
                                     ha_condition,
+                                    &cfg.service_id,
+                                    &camera_flags,
                                 );
                             }
                         }
@@ -420,6 +466,7 @@ pub fn spawn_production_subscriber(
                             handle_production_control(
                                 &p.payload,
                                 data_dir.as_deref(),
+                                &cfg.service_id,
                                 &camera_flags,
                                 store.as_ref(),
                                 &client,

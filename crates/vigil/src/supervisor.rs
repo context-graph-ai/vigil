@@ -68,6 +68,32 @@ pub(crate) fn supervisor_post_body(url: &str, token: &str, body: &str) -> Result
     }
 }
 
+fn supervisor_delete(url: &str, token: &str) -> Result<(), String> {
+    let auth = format!("Authorization: Bearer {token}");
+    let output = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "DELETE",
+            url,
+            "-H",
+            &auth,
+        ])
+        .output()
+        .map_err(|e| format!("curl spawn: {e}"))?;
+    let code_str = String::from_utf8_lossy(&output.stdout);
+    let code: u16 = code_str.trim().parse().unwrap_or(0);
+    if (200..300).contains(&code) {
+        Ok(())
+    } else {
+        Err(format!("supervisor DELETE {url} returned {code}"))
+    }
+}
+
 // ── Generic Camera config-flow helpers ────────────────────────────────────────
 //
 // HA's MQTT camera platform is image-only (no `stream_source` key).  Live video
@@ -115,6 +141,11 @@ pub(crate) fn build_generic_camera_flow_confirm_payload() -> String {
     r#"{"confirmed_ok":true}"#.to_string()
 }
 
+pub(crate) fn delete_flow(flow_id: &str, token: &str) -> Result<(), String> {
+    let url = format!("http://supervisor/core/api/config/config_entries/flow/{flow_id}");
+    supervisor_delete(&url, token)
+}
+
 /// Parse the `flow_id` field from a config-flow initiation response.
 /// Returns `None` if the field is absent or not a string.
 pub(crate) fn parse_flow_id(json: &str) -> Option<String> {
@@ -133,6 +164,30 @@ pub(crate) fn is_flow_create_entry(json: &str) -> bool {
                 .map(|t| t == "create_entry")
         })
         .unwrap_or(false)
+}
+
+pub(crate) fn flow_step_errors(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let errors = value.get("errors")?.as_object()?;
+    let summary = errors
+        .iter()
+        .filter_map(|(field, error)| {
+            let error = error
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| error.to_string());
+            if error.is_empty() {
+                None
+            } else {
+                Some(format!("{field}={error}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary.join(","))
+    }
 }
 
 /// Parse the `GET /services/mqtt` response body into an `MqttConfig`.

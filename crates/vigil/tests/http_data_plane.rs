@@ -325,6 +325,7 @@ fn seed_review_store(
             context_id: context.id,
             properties: BTreeMap::new(),
             tags: vec!["camera".to_string()],
+            blueprint_catalog_id: None,
         })
         .map_err(|error| format!("create review intention: {error}"))?;
     let mut decision_properties = BTreeMap::new();
@@ -658,7 +659,6 @@ fn record_zone_marker_detection(
             model_name: ha_test_support::DETECTOR_MODEL_ID.to_string(),
             model_version: "0.1".to_string(),
             pipeline_version: "review-http-test".to_string(),
-            ..Default::default()
         },
         retention_status: RetentionStatus::NotStored,
         ..Default::default()

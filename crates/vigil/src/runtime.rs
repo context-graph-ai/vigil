@@ -210,6 +210,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                 let client_id = format!("vigil-{}-sub", slug_for_id(&config.service_id));
                 let sub_cfg = crate::ha_mqtt_tasks::WiredSubscriberConfig {
                     mqtt: mqtt_cfg.clone(),
+                    service_id: config.service_id.clone(),
                     client_id,
                     availability_topic: avail_topic,
                     condition_topic,
@@ -367,9 +368,15 @@ fn register_generic_camera(cam_slug: &str, rtsp_url: &str, data_dir: &std::path:
         Ok(resp) => resp,
         Err(e) => {
             println!("generic_camera_flow_step_error camera={cam_slug} error={e}");
+            delete_generic_camera_flow(cam_slug, &flow_id, &token);
             return;
         }
     };
+    if let Some(errors) = crate::supervisor::flow_step_errors(&step_resp) {
+        println!("generic_camera_flow_step_validation_error camera={cam_slug} errors={errors}");
+        delete_generic_camera_flow(cam_slug, &flow_id, &token);
+        return;
+    }
 
     // ── Handle optional confirm/preview intermediate step ─────────────────
     // Some HA versions present an extra preview/confirm form before completing
@@ -382,6 +389,7 @@ fn register_generic_camera(cam_slug: &str, rtsp_url: &str, data_dir: &std::path:
             Ok(resp) => resp,
             Err(e) => {
                 println!("generic_camera_flow_confirm_error camera={cam_slug} error={e}");
+                delete_generic_camera_flow(cam_slug, &flow_id, &token);
                 return;
             }
         }
@@ -394,10 +402,27 @@ fn register_generic_camera(cam_slug: &str, rtsp_url: &str, data_dir: &std::path:
         }
         println!("generic_camera_registered camera={cam_slug}");
     } else {
+        if let Some(errors) = crate::supervisor::flow_step_errors(&final_resp) {
+            println!(
+                "generic_camera_flow_confirm_validation_error camera={cam_slug} errors={errors}"
+            );
+        }
         println!(
             "generic_camera_flow_unexpected_result camera={cam_slug} response={}",
             &final_resp[..final_resp.len().min(300)]
         );
+        delete_generic_camera_flow(cam_slug, &flow_id, &token);
+    }
+}
+
+fn delete_generic_camera_flow(cam_slug: &str, flow_id: &str, token: &str) {
+    match crate::supervisor::delete_flow(flow_id, token) {
+        Ok(()) => println!("generic_camera_flow_deleted camera={cam_slug} flow_id={flow_id}"),
+        Err(error) => {
+            println!(
+                "generic_camera_flow_delete_error camera={cam_slug} flow_id={flow_id} error={error}"
+            );
+        }
     }
 }
 
@@ -1499,6 +1524,7 @@ fn get_or_create_intention(
             context_id,
             properties: BTreeMap::new(),
             tags: vec!["camera".to_string()],
+            blueprint_catalog_id: None,
         })
         .map_err(|error| format!("create intention: {error}"))
 }

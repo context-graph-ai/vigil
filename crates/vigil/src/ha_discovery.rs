@@ -105,8 +105,8 @@ pub(crate) fn slug(s: &str) -> String {
 ///   `device.via_device` pointing to the service hub.
 ///   The live-view camera is registered as an HA Generic Camera config entry
 ///   via the config-flow API (POST /core/api/config/config_entries/flow,
-///   stream_source = rtsp://127.0.0.1:8554/<slug> — resolved by HA Core, which
-///   is host-networked with go2rtc on loopback) and is NOT part of MQTT discovery.
+///   stream_source = the configured live RTSP URL) and is NOT part of MQTT
+///   discovery.
 ///   The MQTT camera platform is image-only and cannot serve live streams.
 ///
 /// All IDs and topics derive deterministically from `service_id` and
@@ -174,6 +174,7 @@ pub fn generate_discovery_payloads(config: &ServiceConfig) -> Vec<DiscoveryPaylo
         // MQTT topic paths — raw camera_id (not slugged) matches runtime publishing.
         let detection_topic = format!("vigil/{}/{}/detection", config.service_id, camera.camera_id);
         let active_topic = format!("vigil/{}/{}/active", config.service_id, camera.camera_id);
+        let enabled_topic = format!("vigil/{}/{}/enabled", config.service_id, camera.camera_id);
         // Snapshot topic has no service_id prefix so the snapshot handler can derive
         // it from cmd.camera_id alone without needing service context.
         let snapshot_topic = format!("vigil/{}/snapshot", camera.camera_id);
@@ -186,7 +187,7 @@ pub fn generate_discovery_payloads(config: &ServiceConfig) -> Vec<DiscoveryPaylo
             payload: json!({
                 "component": "event",
                 "device": cam_device.clone(),
-                "name": format!("{} Detection", camera.camera_label),
+                "name": "Detection",
                 "default_entity_id": format!("event.{cam_identifier}_detection"),
                 "unique_id": format!("{cam_identifier}_detection"),
                 "state_topic": detection_topic,
@@ -204,7 +205,7 @@ pub fn generate_discovery_payloads(config: &ServiceConfig) -> Vec<DiscoveryPaylo
             payload: json!({
                 "component": "image",
                 "device": cam_device.clone(),
-                "name": format!("{} Snapshot", camera.camera_label),
+                "name": "Snapshot",
                 "default_entity_id": format!("image.{cam_identifier}_snapshot"),
                 "unique_id": format!("{cam_identifier}_snapshot"),
                 "image_topic": snapshot_topic,
@@ -221,7 +222,7 @@ pub fn generate_discovery_payloads(config: &ServiceConfig) -> Vec<DiscoveryPaylo
             payload: json!({
                 "component": "binary_sensor",
                 "device": cam_device.clone(),
-                "name": format!("{} Active", camera.camera_label),
+                "name": "Active",
                 "default_entity_id": format!("binary_sensor.{cam_identifier}_active"),
                 "unique_id": format!("{cam_identifier}_active"),
                 "device_class": "motion",
@@ -238,37 +239,29 @@ pub fn generate_discovery_payloads(config: &ServiceConfig) -> Vec<DiscoveryPaylo
         // image-only (no stream_source key), so it cannot serve live video.
         // Live view is provided by a Generic Camera config entry created at
         // runtime via the HA config-flow API (`register_generic_camera` in
-        // runtime.rs), with stream_source=rtsp://127.0.0.1:8554/<cam_slug>
-        // (resolved by HA Core, which is host-networked with go2rtc).
+        // runtime.rs), with stream_source set from the configured live RTSP URL.
 
-        // button — enable camera
+        // switch — enabled control with reflected retained state.
         payloads.push(DiscoveryPayload {
-            topic: format!("homeassistant/button/{cam_identifier}/enable/config"),
+            topic: format!("homeassistant/switch/{cam_identifier}/enabled/config"),
             payload: json!({
-                "component": "button",
+                "component": "switch",
                 "device": cam_device.clone(),
-                "name": format!("{} Enable", camera.camera_label),
-                "default_entity_id": format!("button.{cam_identifier}_enable"),
-                "unique_id": format!("{cam_identifier}_enable"),
+                "name": "Enabled",
+                "default_entity_id": format!("switch.{cam_identifier}_enabled"),
+                "unique_id": format!("{cam_identifier}_enabled"),
+                "state_topic": enabled_topic,
                 "command_topic": "vigil/commands/control",
-                "payload_press": format!(r#"{{"camera_id":"{}","action":"enable"}}"#, camera.camera_id),
-                "availability_topic": availability_topic,
-                "payload_available": "online",
-                "payload_not_available": "offline",
-            }),
-        });
-
-        // button — disable camera
-        payloads.push(DiscoveryPayload {
-            topic: format!("homeassistant/button/{cam_identifier}/disable/config"),
-            payload: json!({
-                "component": "button",
-                "device": cam_device.clone(),
-                "name": format!("{} Disable", camera.camera_label),
-                "default_entity_id": format!("button.{cam_identifier}_disable"),
-                "unique_id": format!("{cam_identifier}_disable"),
-                "command_topic": "vigil/commands/control",
-                "payload_press": format!(r#"{{"camera_id":"{}","action":"disable"}}"#, camera.camera_id),
+                "payload_on": format!(
+                    r#"{{"service_id":"{}","camera_id":"{}","action":"enable"}}"#,
+                    config.service_id, camera.camera_id
+                ),
+                "payload_off": format!(
+                    r#"{{"service_id":"{}","camera_id":"{}","action":"disable"}}"#,
+                    config.service_id, camera.camera_id
+                ),
+                "state_on": "ON",
+                "state_off": "OFF",
                 "availability_topic": availability_topic,
                 "payload_available": "online",
                 "payload_not_available": "offline",
@@ -281,7 +274,7 @@ pub fn generate_discovery_payloads(config: &ServiceConfig) -> Vec<DiscoveryPaylo
             payload: json!({
                 "component": "button",
                 "device": cam_device.clone(),
-                "name": format!("{} Snapshot", camera.camera_label),
+                "name": "Snapshot Trigger",
                 "default_entity_id": format!("button.{cam_identifier}_snapshot_trigger"),
                 "unique_id": format!("{cam_identifier}_snapshot_trigger"),
                 "command_topic": "vigil/commands/control",

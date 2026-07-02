@@ -275,6 +275,48 @@ fn generic_camera_registration_confirms_home_assistant_preview_step() {
 }
 
 #[test]
+fn review_data_plane_bounds_request_fanout_and_survives_accept_panics() {
+    let root = workspace_root();
+    let path = root.join("crates/vigil/src/http_data_plane.rs");
+    let source = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let mut failures = Vec::new();
+
+    for required in [
+        "MAX_REVIEW_DATA_PLANE_MEDIA_HANDLERS",
+        "AtomicUsize",
+        "fetch_add",
+        "fetch_sub",
+        "catch_unwind",
+        "review_data_plane_accept_panic",
+        "review_data_plane_busy",
+    ] {
+        if !source.contains(required) {
+            failures.push(format!(
+                "{} is missing bounded review data-plane marker {required}",
+                path.display()
+            ));
+        }
+    }
+
+    for forbidden in [
+        "handlers.push(thread::spawn(move || {\n                            handle_request",
+        "thread::spawn(move || {\n                            handle_media_request(request, data_dir, shutdown);",
+    ] {
+        if source.contains(forbidden) {
+            failures.push(format!(
+                "{} still contains unbounded review request fanout marker {forbidden:?}",
+                path.display()
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
+#[test]
 fn rtsp_success_recovers_health_after_transient_ingest_failure() {
     let root = workspace_root();
     let runtime_path = root.join("crates/vigil/src/runtime.rs");

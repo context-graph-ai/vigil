@@ -73,22 +73,39 @@ pub fn spawn_review_data_plane(
     data_dir: PathBuf,
     port: u16,
 ) -> Result<ReviewDataPlaneHandle, String> {
-    let server = Server::http(("0.0.0.0", port))
-        .map_err(|error| format!("review port {port} bind failed: {error}"))?;
-    let local_addr = server
-        .server_addr()
-        .to_ip()
-        .ok_or_else(|| "review data plane did not bind an IP socket".to_string())?;
+    let (server, local_addr) = bind_review_server(port)?;
+    let bind_port = local_addr.port();
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
     let store = Arc::new(store);
     let data_dir = Arc::new(data_dir);
     let active_media_handlers = Arc::new(AtomicUsize::new(0));
     let handle = thread::spawn(move || {
+        let mut server = Some(server);
         let mut media_handlers: Vec<JoinHandle<()>> = Vec::new();
         while !worker_shutdown.load(Ordering::SeqCst) {
+            if server.is_none() {
+                match bind_review_server(bind_port) {
+                    Ok((rebound_server, _)) => {
+                        eprintln!("review_data_plane_rebound=true port={bind_port}");
+                        server = Some(rebound_server);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "review_data_plane_rebind_failed=true port={bind_port} error={error}"
+                        );
+                        thread::sleep(Duration::from_millis(250));
+                        join_finished_handlers(&mut media_handlers);
+                        continue;
+                    }
+                }
+            }
+
+            let active_server = server
+                .as_ref()
+                .expect("review data-plane server is rebound before accept");
             let accepted = panic::catch_unwind(AssertUnwindSafe(|| {
-                server.recv_timeout(Duration::from_millis(100))
+                active_server.recv_timeout(Duration::from_millis(100))
             }));
             match accepted {
                 Ok(Ok(Some(request))) => {
@@ -113,15 +130,22 @@ pub fn spawn_review_data_plane(
                         }
                     } else {
                         let store = Arc::clone(&store);
-                        handle_request(request, store);
+                        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                            handle_request(request, store);
+                        }));
+                        if result.is_err() {
+                            eprintln!("review_data_plane_request_panic=true");
+                        }
                     }
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     eprintln!("review_data_plane_accept_error={error}");
+                    server = None;
                 }
                 Err(_) => {
                     eprintln!("review_data_plane_accept_panic=true");
+                    server = None;
                     thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -137,6 +161,16 @@ pub fn spawn_review_data_plane(
         shutdown,
         handle: Some(handle),
     })
+}
+
+fn bind_review_server(port: u16) -> Result<(Server, SocketAddr), String> {
+    let server = Server::http(("0.0.0.0", port))
+        .map_err(|error| format!("review port {port} bind failed: {error}"))?;
+    let local_addr = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| "review data plane did not bind an IP socket".to_string())?;
+    Ok((server, local_addr))
 }
 
 fn is_media_request(request: &Request) -> bool {

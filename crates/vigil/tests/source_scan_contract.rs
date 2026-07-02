@@ -275,6 +275,48 @@ fn generic_camera_registration_confirms_home_assistant_preview_step() {
 }
 
 #[test]
+fn generic_camera_registration_logs_validation_errors_and_deletes_failed_flows() {
+    let root = workspace_root();
+    let runtime_path = root.join("crates/vigil/src/runtime.rs");
+    let supervisor_path = root.join("crates/vigil/src/supervisor.rs");
+    let runtime = fs::read_to_string(&runtime_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", runtime_path.display()));
+    let supervisor = fs::read_to_string(&supervisor_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", supervisor_path.display()));
+    let mut failures = Vec::new();
+
+    for required in ["flow_step_errors", "delete_flow"] {
+        if !supervisor.contains(required) {
+            failures.push(format!(
+                "{} does not define Generic Camera failed-flow helper {required}",
+                supervisor_path.display()
+            ));
+        }
+        if !runtime.contains(required) {
+            failures.push(format!(
+                "{} does not use Generic Camera failed-flow helper {required}",
+                runtime_path.display()
+            ));
+        }
+    }
+    for required in [
+        "generic_camera_flow_step_validation_error",
+        "generic_camera_flow_deleted",
+    ] {
+        if !runtime.contains(required) {
+            failures.push(format!(
+                "{} does not log Generic Camera failure marker {required}",
+                runtime_path.display()
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
+#[test]
 fn review_data_plane_bounds_request_fanout_and_survives_accept_panics() {
     let root = workspace_root();
     let path = root.join("crates/vigil/src/http_data_plane.rs");

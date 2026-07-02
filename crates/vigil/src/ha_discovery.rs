@@ -100,8 +100,8 @@ pub(crate) fn slug(s: &str) -> String {
 /// Structure:
 /// - One service-hub payload (sensor "running condition") with no
 ///   `via_device` — registered under the service device.
-/// - Per-camera: six entity payloads (event, image, binary_sensor,
-///   button×3 [enable/disable/snapshot]), each carrying
+/// - Per-camera: five entity payloads (event, image, binary_sensor,
+///   switch [enabled], button [snapshot]), each carrying
 ///   `device.via_device` pointing to the service hub.
 ///   The live-view camera is registered as an HA Generic Camera config entry
 ///   via the config-flow API (POST /core/api/config/config_entries/flow,
@@ -459,32 +459,31 @@ mod tests {
             .filter_map(|p| p.payload.get("component").and_then(|c| c.as_str()))
             .collect();
         // Per-camera MQTT entities: event (detection), image (snapshot display),
-        // binary_sensor (active/motion), and button×3 (enable/disable/snapshot).
-        // BTreeSet deduplicates the three "button" payloads into one "button" key.
+        // binary_sensor (active/motion), switch (enabled), and button (snapshot).
         // The live-view camera is a Generic Camera config entry (not MQTT) — see
         // `register_generic_camera` in runtime.rs.
         let expected_components: std::collections::BTreeSet<&str> =
-            ["event", "image", "binary_sensor", "button"]
+            ["event", "image", "binary_sensor", "switch", "button"]
                 .iter()
                 .copied()
                 .collect();
         assert_eq!(
             via_device_components, expected_components,
             "per-camera sub-device must carry exactly the closed MQTT component set \
-             {{event, image, binary_sensor, button}} — no camera component (live view is a \
+             {{event, image, binary_sensor, switch, button}} — no camera component (live view is a \
              Generic Camera config entry, not MQTT); \
              wrong stub emits flat structure with no via_device → empty component set"
         );
 
-        // Exact count: 6 per-camera MQTT payloads.
-        // event(1) + image(1) + binary_sensor(1) + button×3(3) = 6.
+        // Exact count: 5 per-camera MQTT payloads.
+        // event(1) + image(1) + binary_sensor(1) + switch(1) + button(1) = 5.
         // The camera/live-view is a Generic Camera config entry, NOT an MQTT entity.
-        // Goes RED if an MQTT camera entity is re-added (would be 7).
+        // Goes RED if enable/disable remain blind buttons (would be 6).
         assert_eq!(
             sub_devices.len(),
-            6,
-            "per-camera MQTT discovery must register exactly 6 entities \
-             {{event, image, binary_sensor, button×3}} — the live-view camera is a \
+            5,
+            "per-camera MQTT discovery must register exactly 5 entities \
+             {{event, image, binary_sensor, switch, button}} — the live-view camera is a \
              Generic Camera config entry; got {}",
             sub_devices.len()
         );
@@ -514,6 +513,76 @@ mod tests {
             "expected two distinct per-camera sub-devices for two-camera config; got {}",
             distinct_sub_devices_two.len()
         );
+    }
+
+    #[test]
+    fn per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch() {
+        let config = one_camera_config();
+        let payloads = generate_discovery_payloads(&config);
+
+        let entity_by_id = |entity_id: &str| {
+            payloads
+                .iter()
+                .find(|payload| {
+                    payload
+                        .payload
+                        .get("default_entity_id")
+                        .and_then(|value| value.as_str())
+                        == Some(entity_id)
+                })
+                .unwrap_or_else(|| panic!("missing discovery payload for {entity_id}"))
+        };
+
+        for (entity_id, expected_name) in [
+            ("event.vigil_cam_lower_gate_detection", "Detection"),
+            ("image.vigil_cam_lower_gate_snapshot", "Snapshot"),
+            ("binary_sensor.vigil_cam_lower_gate_active", "Active"),
+            ("switch.vigil_cam_lower_gate_enabled", "Enabled"),
+            (
+                "button.vigil_cam_lower_gate_snapshot_trigger",
+                "Snapshot Trigger",
+            ),
+        ] {
+            let payload = entity_by_id(entity_id);
+            let actual_name = payload
+                .payload
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            assert_eq!(
+                actual_name, expected_name,
+                "per-camera entity {entity_id} must use the device-local name '{expected_name}', \
+                 not a camera-prefixed name like 'lower gate {expected_name}' that Home Assistant \
+                 displays as a doubled name under the camera device"
+            );
+        }
+
+        let enabled = entity_by_id("switch.vigil_cam_lower_gate_enabled");
+        assert_eq!(enabled.payload["component"].as_str(), Some("switch"));
+        assert_eq!(
+            enabled.payload["state_topic"].as_str(),
+            Some("vigil/vigil-site-alpha/cam-lower-gate/enabled"),
+            "enabled switch must have a retained state topic so HA reflects the live camera state"
+        );
+        assert_eq!(
+            enabled.payload["command_topic"].as_str(),
+            Some("vigil/commands/control"),
+            "enabled switch must send enable/disable commands through the existing control topic"
+        );
+        assert_eq!(
+            enabled.payload["payload_on"].as_str(),
+            Some(
+                r#"{"service_id":"vigil-site-alpha","camera_id":"cam-lower-gate","action":"enable"}"#
+            ),
+        );
+        assert_eq!(
+            enabled.payload["payload_off"].as_str(),
+            Some(
+                r#"{"service_id":"vigil-site-alpha","camera_id":"cam-lower-gate","action":"disable"}"#
+            ),
+        );
+        assert_eq!(enabled.payload["state_on"].as_str(), Some("ON"));
+        assert_eq!(enabled.payload["state_off"].as_str(), Some("OFF"));
     }
 
     /// RED — wrong stub emits object_id and omits default_entity_id.
@@ -768,6 +837,7 @@ mod tests {
     /// - event: state_topic + event_types
     /// - image: image_topic
     /// - binary_sensor: state_topic + payload_on + payload_off
+    /// - switch: state_topic + command_topic + payload/state on/off
     /// - All per-camera entities: availability_topic + payload_available + payload_not_available
     ///
     /// Note: there is no MQTT camera entity — live view is a Generic Camera config
@@ -884,6 +954,35 @@ mod tests {
                         payload_off, "OFF",
                         "binary_sensor on topic '{topic}' must have payload_off='OFF'; got '{payload_off}'"
                     );
+                }
+                "switch" => {
+                    let state_topic = p
+                        .payload
+                        .get("state_topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert!(
+                        !state_topic.is_empty(),
+                        "switch entity on topic '{topic}' is missing state_topic; the enabled control must reflect live state"
+                    );
+                    let command_topic = p
+                        .payload
+                        .get("command_topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    assert!(
+                        !command_topic.is_empty(),
+                        "switch entity on topic '{topic}' is missing command_topic"
+                    );
+                    for key in ["payload_on", "payload_off", "state_on", "state_off"] {
+                        assert!(
+                            p.payload
+                                .get(key)
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|value| !value.is_empty()),
+                            "switch entity on topic '{topic}' is missing required field '{key}'"
+                        );
+                    }
                 }
                 _ => {
                     // No MQTT camera entity — live view is a Generic Camera config

@@ -285,6 +285,40 @@ mod tests {
     }
 
     #[test]
+    fn flow_step_errors_extracts_generic_camera_validation_errors() {
+        let response = r#"{
+            "type": "form",
+            "step_id": "user",
+            "errors": {
+                "base": "cannot_connect",
+                "stream_source": "invalid_url"
+            }
+        }"#;
+
+        let errors = flow_step_errors(response).expect("validation errors must be extracted");
+        assert!(
+            errors.contains("base=cannot_connect"),
+            "base error must be visible in the log-safe summary: {errors}"
+        );
+        assert!(
+            errors.contains("stream_source=invalid_url"),
+            "field error must be visible in the log-safe summary: {errors}"
+        );
+    }
+
+    #[test]
+    fn flow_step_errors_ignores_non_error_responses() {
+        assert!(
+            flow_step_errors(r#"{"type":"create_entry","result":{"entry_id":"abc"}}"#).is_none(),
+            "successful create_entry responses must not be treated as validation errors"
+        );
+        assert!(
+            flow_step_errors(r#"{"type":"form","step_id":"confirm","errors":{}}"#).is_none(),
+            "empty errors objects must not block the confirmation step"
+        );
+    }
+
+    #[test]
     fn parse_flow_id_extracts_from_valid_response() {
         let json = r#"{"flow_id":"abc123","type":"form","step_id":"user"}"#;
         assert_eq!(

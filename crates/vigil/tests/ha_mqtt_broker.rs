@@ -115,6 +115,7 @@ fn open_store_at(path: &Path) -> Result<Store, String> {
 fn test_subscriber_cfg(mqtt: MqttConfig) -> WiredSubscriberConfig {
     WiredSubscriberConfig {
         mqtt,
+        service_id: "test".to_string(),
         client_id: "vigil-test-sub".to_string(),
         availability_topic: "vigil/test/availability".to_string(),
         condition_topic: "vigil/test/condition".to_string(),
@@ -416,6 +417,128 @@ fn correction_command_channel_overflow_is_loud() {
         overflow > 0,
         "overflow_count must be > 0 after flooding the correction command channel \
          beyond its bound; wrong stub never connects to the broker (overflow = {overflow})"
+    );
+}
+
+#[test]
+fn camera_enabled_switch_state_is_retained_and_updates_on_control_commands() {
+    let broker = match MosquittoFixture::start() {
+        Ok(broker) => broker,
+        Err(error) => {
+            assert!(
+                error.contains("not found"),
+                "mosquitto failed unexpectedly: {error}"
+            );
+            return;
+        }
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("data").join("store.contextgraph");
+    let store = Arc::new(open_store_at(&store_path).expect("store"));
+
+    let lower_gate_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let driveway_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut camera_flags = std::collections::BTreeMap::new();
+    camera_flags.insert("lower-gate".to_string(), Arc::clone(&lower_gate_enabled));
+    camera_flags.insert("driveway".to_string(), Arc::clone(&driveway_enabled));
+
+    let state_topic = "vigil/test/lower-gate/enabled".to_string();
+    let broker_port = broker.port;
+    let state_topic_for_subscriber = state_topic.clone();
+    let state_payloads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let state_payloads_for_subscriber = Arc::clone(&state_payloads);
+    let sub_thread = thread::spawn(move || {
+        use rumqttc::v5::mqttbytes::QoS;
+        use rumqttc::v5::mqttbytes::v5::Packet;
+        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
+
+        let mut opts = MqttOptions::new("vigil-test-enabled-state-sub", "127.0.0.1", broker_port);
+        opts.set_keep_alive(Duration::from_secs(5));
+        let (client, mut connection) = Client::new(opts, 10);
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut subscribed = false;
+        let mut payloads = Vec::new();
+        while Instant::now() < deadline {
+            match connection.recv_timeout(Duration::from_millis(100)) {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
+                    let _ = client.subscribe(&state_topic_for_subscriber, QoS::AtMostOnce);
+                    subscribed = true;
+                }
+                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
+                    if let Ok(payload) = std::str::from_utf8(&p.payload) {
+                        payloads.push(payload.to_string());
+                        if payloads.iter().any(|value| value == "OFF")
+                            && payloads.last().is_some_and(|value| value == "ON")
+                            && payloads.len() >= 3
+                        {
+                            break;
+                        }
+                    }
+                }
+                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if let Ok(mut locked) = state_payloads_for_subscriber.lock() {
+            *locked = payloads;
+        }
+    });
+
+    thread::sleep(Duration::from_millis(250));
+
+    let overflow_count = Arc::new(AtomicUsize::new(0));
+    let (tx, _rx) = mpsc::sync_channel::<CorrectionRequest>(8);
+    let handle = spawn_production_subscriber(
+        test_subscriber_cfg(broker.mqtt_config()),
+        store,
+        camera_flags,
+        tx,
+        Arc::clone(&overflow_count),
+    );
+
+    thread::sleep(Duration::from_millis(500));
+    mosquitto_pub_n(
+        broker.port,
+        "vigil/commands/control",
+        r#"{"service_id":"test","camera_id":"lower-gate","action":"disable"}"#,
+        1,
+    );
+    thread::sleep(Duration::from_millis(400));
+    mosquitto_pub_n(
+        broker.port,
+        "vigil/commands/control",
+        r#"{"service_id":"test","camera_id":"lower-gate","action":"enable"}"#,
+        1,
+    );
+
+    thread::sleep(Duration::from_millis(700));
+    handle.shutdown_and_join();
+    sub_thread.join().ok();
+
+    let payloads = state_payloads
+        .lock()
+        .map(|locked| locked.clone())
+        .unwrap_or_default();
+    assert!(
+        payloads.first().is_some_and(|value| value == "ON"),
+        "enabled switch state must be retained as ON at subscriber startup; got {payloads:?}"
+    );
+    assert!(
+        payloads.iter().any(|value| value == "OFF"),
+        "disable command must publish retained OFF to {state_topic}; got {payloads:?}"
+    );
+    assert!(
+        payloads.last().is_some_and(|value| value == "ON"),
+        "enable command must publish retained ON to {state_topic}; got {payloads:?}"
+    );
+    assert!(
+        lower_gate_enabled.load(std::sync::atomic::Ordering::SeqCst),
+        "enable command must restore the live lower-gate enabled flag"
+    );
+    assert!(
+        !driveway_enabled.load(std::sync::atomic::Ordering::SeqCst),
+        "lower-gate commands must not change the driveway enabled flag"
     );
 }
 
@@ -1281,6 +1404,7 @@ fn running_condition_tracks_live_health_retained() {
 
     let cfg = WiredSubscriberConfig {
         mqtt: broker.mqtt_config(),
+        service_id: "test-health-svc".to_string(),
         client_id: "vigil-test-health-sub".to_string(),
         availability_topic: "vigil/test-health-svc/availability".to_string(),
         condition_topic,

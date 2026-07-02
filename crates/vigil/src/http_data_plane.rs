@@ -1,9 +1,10 @@
 use std::fs::File;
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpStream};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use crate::{
 
 const DEFAULT_EVENT_LIMIT: usize = 100;
 const MAX_CORRECTION_BODY_BYTES: usize = 64 * 1024;
+const MAX_REVIEW_DATA_PLANE_MEDIA_HANDLERS: usize = 16;
 
 struct ShutdownAwareReader<R> {
     inner: R,
@@ -81,39 +83,51 @@ pub fn spawn_review_data_plane(
     let worker_shutdown = Arc::clone(&shutdown);
     let store = Arc::new(store);
     let data_dir = Arc::new(data_dir);
+    let active_media_handlers = Arc::new(AtomicUsize::new(0));
     let handle = thread::spawn(move || {
-        let mut handlers: Vec<JoinHandle<()>> = Vec::new();
+        let mut media_handlers: Vec<JoinHandle<()>> = Vec::new();
         while !worker_shutdown.load(Ordering::SeqCst) {
-            match server.recv_timeout(Duration::from_millis(100)) {
-                Ok(Some(request)) => {
-                    let data_dir = Arc::clone(&data_dir);
-                    let shutdown = Arc::clone(&worker_shutdown);
-                    let is_media = request.method() == &Method::Get
-                        && request
-                            .url()
-                            .split('?')
-                            .next()
-                            .unwrap_or(request.url())
-                            .starts_with("/media/");
-                    if is_media {
-                        thread::spawn(move || {
-                            handle_media_request(request, data_dir, shutdown);
-                        });
+            let accepted = panic::catch_unwind(AssertUnwindSafe(|| {
+                server.recv_timeout(Duration::from_millis(100))
+            }));
+            match accepted {
+                Ok(Ok(Some(request))) => {
+                    if is_media_request(&request) {
+                        let active_count = active_media_handlers.fetch_add(1, Ordering::SeqCst);
+                        if active_count >= MAX_REVIEW_DATA_PLANE_MEDIA_HANDLERS {
+                            active_media_handlers.fetch_sub(1, Ordering::SeqCst);
+                            let _ = request.respond(json_error(503, "review_data_plane_busy"));
+                        } else {
+                            let data_dir = Arc::clone(&data_dir);
+                            let shutdown = Arc::clone(&worker_shutdown);
+                            let active_media_handlers = Arc::clone(&active_media_handlers);
+                            media_handlers.push(thread::spawn(move || {
+                                let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                                    handle_media_request(request, data_dir, shutdown);
+                                }));
+                                active_media_handlers.fetch_sub(1, Ordering::SeqCst);
+                                if result.is_err() {
+                                    eprintln!("review_data_plane_media_panic=true");
+                                }
+                            }));
+                        }
                     } else {
                         let store = Arc::clone(&store);
-                        handlers.push(thread::spawn(move || {
-                            handle_request(request, store);
-                        }));
+                        handle_request(request, store);
                     }
                 }
-                Ok(None) => {}
-                Err(error) => {
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
                     eprintln!("review_data_plane_accept_error={error}");
                 }
+                Err(_) => {
+                    eprintln!("review_data_plane_accept_panic=true");
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
-            join_finished_handlers(&mut handlers);
+            join_finished_handlers(&mut media_handlers);
         }
-        for handler in handlers {
+        for handler in media_handlers {
             let _ = handler.join();
         }
     });
@@ -123,6 +137,16 @@ pub fn spawn_review_data_plane(
         shutdown,
         handle: Some(handle),
     })
+}
+
+fn is_media_request(request: &Request) -> bool {
+    request.method() == &Method::Get
+        && request
+            .url()
+            .split('?')
+            .next()
+            .unwrap_or(request.url())
+            .starts_with("/media/")
 }
 
 fn join_finished_handlers(handlers: &mut Vec<JoinHandle<()>>) {

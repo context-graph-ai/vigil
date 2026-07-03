@@ -197,10 +197,7 @@ fn seed_detection(world: &World, class: &str) -> ObservationId {
                 retention_status: RetentionStatus::RetainedExternal,
                 ..Default::default()
             }],
-            observed_properties: BTreeMap::from([(
-                "class".to_string(),
-                serde_json::json!(class),
-            )]),
+            observed_properties: BTreeMap::from([("class".to_string(), serde_json::json!(class))]),
             state_delta: BTreeMap::new(),
             properties: BTreeMap::new(),
             embeddings: Vec::new(),
@@ -213,15 +210,8 @@ fn seed_detection(world: &World, class: &str) -> ObservationId {
 /// crop, match, record the match observation anchored to the detection.
 fn embed_match_record(world: &World, detection: ObservationId, crop: &[u8]) -> MatchOutcome {
     let embedder = HashEmbedder;
-    let outcome = match_crop(
-        &world.store,
-        &embedder,
-        SPACE,
-        world.context_id,
-        crop,
-        0.6,
-    )
-    .expect("match runs");
+    let outcome = match_crop(&world.store, &embedder, SPACE, world.context_id, crop, 0.6)
+        .expect("match runs");
     let probe = hash_vector(crop);
     // The sighting's class comes from the seeded detection, exactly as the
     // runtime passes the detector's class — never assumed.
@@ -256,9 +246,13 @@ fn bbox_maps_from_detector_space_to_original_frame_pixels() {
     // Detector space is a plain 640×640 squash of the full frame: mapping back
     // is independent x/y scaling. A box at (64,128)-(320,384) in detector
     // space on a 1920×1080 frame lands at (192,216)-(960,648).
-    let rect = map_bbox_to_frame("64,128,320,384", 640, 640, 1920, 1080)
-        .expect("well-formed bbox maps");
-    assert_eq!(rect, (192, 216, 768, 432), "independent x/y scale, no padding offset");
+    let rect =
+        map_bbox_to_frame("64,128,320,384", 640, 640, 1920, 1080).expect("well-formed bbox maps");
+    assert_eq!(
+        rect,
+        (192, 216, 768, 432),
+        "independent x/y scale, no padding offset"
+    );
 }
 
 #[test]
@@ -298,7 +292,10 @@ fn crop_png_extracts_the_requested_region() {
 fn covered_classes_and_entity_types_route_all_classes_one_mechanism() {
     let config = RecognitionConfig::default();
     for class in ["person", "dog", "car"] {
-        assert!(class_is_covered(&config, class), "{class} covered by default");
+        assert!(
+            class_is_covered(&config, class),
+            "{class} covered by default"
+        );
     }
     assert!(!class_is_covered(&config, "kite"));
     assert_eq!(entity_type_for_class("person"), EntityType::Person);
@@ -387,13 +384,7 @@ fn below_threshold_sighting_stays_unknown() {
     let world = world("unknown");
     let detection = seed_detection(&world, "person");
     embed_match_record(&world, detection, &png(1));
-    record_enrollment(
-        &world.store,
-        &detection.to_string(),
-        "Roshan",
-        SPACE,
-    )
-    .expect("enroll");
+    record_enrollment(&world.store, &detection.to_string(), "Roshan", SPACE).expect("enroll");
 
     // A different subject: different bytes, near-orthogonal vector.
     let visitor_detection = seed_detection(&world, "person");
@@ -429,7 +420,10 @@ fn match_records_observation_against_the_matched_entity_with_vector_and_score() 
         })
         .expect("a match observation anchored to the sighting exists");
     let entities = world.store.list_entities(Default::default()).expect("list");
-    let person = entities.iter().find(|e| e.name == "Roshan").expect("entity");
+    let person = entities
+        .iter()
+        .find(|e| e.name == "Roshan")
+        .expect("entity");
     assert_eq!(
         match_obs.entity_id, person.id,
         "the match observation is recorded AGAINST the matched entity"
@@ -464,7 +458,10 @@ fn animal_class_enrolls_and_matches_as_an_animal_entity() {
     .expect("enroll Max");
 
     let entities = world.store.list_entities(Default::default()).expect("list");
-    let max = entities.iter().find(|e| e.name == "Max").expect("Max exists");
+    let max = entities
+        .iter()
+        .find(|e| e.name == "Max")
+        .expect("Max exists");
     assert_eq!(max.entity_type, EntityType::Animal);
 
     let sighting = seed_detection(&world, "dog");
@@ -482,8 +479,8 @@ fn forget_removes_references_and_the_subject_reverts_to_unknown() {
     embed_match_record(&world, detection, &crop);
     record_enrollment(&world.store, &detection.to_string(), "Roshan", SPACE).expect("enroll");
 
-    let removed = forget_named_entity(&world.store, "Roshan", Some(world.context_id))
-        .expect("forget runs");
+    let removed =
+        forget_named_entity(&world.store, "Roshan", Some(world.context_id)).expect("forget runs");
     assert!(removed >= 1, "at least one reference removed");
 
     let sighting = seed_detection(&world, "person");

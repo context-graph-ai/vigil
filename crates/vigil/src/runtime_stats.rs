@@ -29,6 +29,11 @@ pub(crate) struct RuntimeStats {
     pub(crate) processing_lag_ms: f64,
     pub(crate) processing_lag_bound_ms: f64,
     pub(crate) false_positive_count: u64,
+    pub(crate) crops_embedded: u64,
+    pub(crate) recognition_matches: u64,
+    pub(crate) recognition_unknowns: u64,
+    pub(crate) recognition_failures: u64,
+    pub(crate) embed_latency_max_ms: f64,
     pub(crate) health: String,
     pub(crate) ingest_signal: String,
 }
@@ -53,6 +58,11 @@ impl Default for RuntimeStats {
             processing_lag_ms: 0.0,
             processing_lag_bound_ms: 1.0,
             false_positive_count: 0,
+            crops_embedded: 0,
+            recognition_matches: 0,
+            recognition_unknowns: 0,
+            recognition_failures: 0,
+            embed_latency_max_ms: 0.0,
             health: "ready".to_string(),
             ingest_signal: "ok".to_string(),
         }
@@ -121,6 +131,11 @@ dropped-motion-positive-frames={}\n\
 processing-lag-ms={:.6}\n\
 processing-lag-bound-ms={:.6}\n\
 false-positive-count={}\n\
+crops-embedded={}\n\
+recognition-matches={}\n\
+recognition-unknowns={}\n\
+recognition-failures={}\n\
+embed-latency-max-ms={:.6}\n\
 health={}\n\
 ingest={}\n\
 telemetry-sink=local\n",
@@ -141,6 +156,11 @@ telemetry-sink=local\n",
         stats.processing_lag_ms,
         stats.processing_lag_bound_ms,
         stats.false_positive_count,
+        stats.crops_embedded,
+        stats.recognition_matches,
+        stats.recognition_unknowns,
+        stats.recognition_failures,
+        stats.embed_latency_max_ms,
         stats.health,
         stats.ingest_signal
     )

@@ -257,6 +257,44 @@ pub(crate) fn handle_owner_request(store: &Store, stats: &RuntimeStats, request:
             Err(error) => format!("events-error {error}\n"),
         },
         "stats" => format_stats(stats),
+        "enroll" => {
+            // "enroll <detection-id> <name...>" — the same enrollment the card
+            // correction drives, via the shared correction seam.
+            let mut pieces = argument.splitn(2, ' ');
+            let detection_id = pieces.next().unwrap_or_default().trim().to_string();
+            let name = pieces.next().unwrap_or_default().trim().to_string();
+            if detection_id.is_empty() || name.is_empty() {
+                "enroll-error usage: vigil enroll <detection-id> <name>\n".to_string()
+            } else {
+                match crate::correction::record_correction(
+                    store,
+                    crate::correction::CorrectionRequest {
+                        detection_id,
+                        label: Some(name.clone()),
+                        correction_type: crate::correction::CorrectionType::Enroll,
+                    },
+                ) {
+                    Ok(receipt) => format!(
+                        "enrolled=true name={name} correction_id={}\n",
+                        receipt.correction_id
+                    ),
+                    Err(error) => format!("enroll-error {error:?}\n"),
+                }
+            }
+        }
+        "forget" => {
+            let name = argument.trim();
+            if name.is_empty() {
+                "forget-error usage: vigil forget <name>\n".to_string()
+            } else {
+                match crate::recognition::forget_named_entity(store, name, None) {
+                    Ok(removed) => {
+                        format!("forgotten=true name={name} references_removed={removed}\n")
+                    }
+                    Err(error) => format!("forget-error {error}\n"),
+                }
+            }
+        }
         _ => format!("owner-error unknown-command={command}\n"),
     };
     format!("served-by=af_unix\n{body}")

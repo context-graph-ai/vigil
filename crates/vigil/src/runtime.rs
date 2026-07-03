@@ -79,8 +79,29 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let mut detection_publisher_handle: Option<crate::ha_mqtt_tasks::DetectionPublisherHandle> =
         None;
     let mut review_server = None;
-    let store = match store::open(&config.store_path) {
-        Ok(store) => {
+    let opened = match store::open_with_recognition(&config.store_path, &config.recognition) {
+        Ok((store, embedder)) => {
+            if embedder.is_some() {
+                println!(
+                    "recognition_enabled=true space={} threshold={}",
+                    config.recognition.embedding_space_id, config.recognition.match_threshold
+                );
+            }
+            Some((store, embedder))
+        }
+        Err(error) => {
+            println!(
+                "store open error path={} error={}",
+                config.store_path.display(),
+                error
+            );
+            health.set(HealthStatus::StoreOpenFailed, "store open failed");
+            None
+        }
+    };
+    let recognition_embedder = opened.as_ref().and_then(|(_, embedder)| embedder.clone());
+    let store = match opened {
+        Some((store, _)) => {
             let state = if store.created {
                 "store created"
             } else {
@@ -173,6 +194,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                         shutdown_flag.clone(),
                         Arc::clone(&enabled),
                         detection_publisher.clone(),
+                        recognition_embedder.clone(),
                     );
                     camera_handles.push(handle);
                 }
@@ -240,15 +262,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             }
             Some(store.handle)
         }
-        Err(error) => {
-            println!(
-                "store open error path={} error={}",
-                config.store_path.display(),
-                error
-            );
-            health.set(HealthStatus::StoreOpenFailed, "store open failed");
-            None
-        }
+        None => None,
     };
 
     shutdown.wait();
@@ -491,6 +505,7 @@ fn start_rtsp_probe(
     shutdown: Arc<AtomicBool>,
     enabled: Arc<AtomicBool>,
     detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>>,
+    recognition_embedder: Option<Arc<dyn context_graph::Embedder>>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         // Wait until enabled (respects startup disable marker).
@@ -521,24 +536,28 @@ fn start_rtsp_probe(
         };
         let rtsp_log_url = rtsp_source.session_url().to_string();
         println!("rtsp probe starting url={rtsp_log_url}");
-        let detector = match yolox_detector::load_detector(config.detector_model_path.as_deref()) {
-            Ok(detector) => {
-                println!(
-                    "detector model loaded id={} sha256={}",
-                    config.detector_model_id, detector.model_sha256
-                );
-                Some(detector)
-            }
-            Err(error) => {
-                println!("detector model load failed error={error}");
-                stats.update(|stats| {
-                    stats.ingest_signal = "detector-load-error".to_string();
-                    mark_health_condition(&mut stats.health, "ingest_failed");
-                });
-                health.set(HealthStatus::IngestFailed, "detector model load failed");
-                None
-            }
-        };
+        // The detector sits behind the engine-neutral trait: the pipeline sees
+        // `dyn Detector`, the engine lives in the implementation.
+        let detector: Option<Box<dyn crate::detector::Detector>> =
+            match yolox_detector::load_detector(config.detector_model_path.as_deref()) {
+                Ok(detector) => {
+                    println!(
+                        "detector model loaded id={} sha256={}",
+                        config.detector_model_id,
+                        crate::detector::Detector::model_sha256(&detector)
+                    );
+                    Some(Box::new(detector))
+                }
+                Err(error) => {
+                    println!("detector model load failed error={error}");
+                    stats.update(|stats| {
+                        stats.ingest_signal = "detector-load-error".to_string();
+                        mark_health_condition(&mut stats.health, "ingest_failed");
+                    });
+                    health.set(HealthStatus::IngestFailed, "detector model load failed");
+                    None
+                }
+            };
         let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
             .map(|capacity| capacity.max(1) as usize)
             .unwrap_or(DETECTOR_QUEUE_CAPACITY);
@@ -556,6 +575,7 @@ fn start_rtsp_probe(
             let detector_queue = detector_queue.clone();
             let active_stream_generation = active_stream_generation.clone();
             let detection_publisher = detection_publisher.clone();
+            let recognition_embedder = recognition_embedder.clone();
             thread::spawn(move || {
                 let mut detector_total = 0_u64;
                 while !shutdown.load(Ordering::SeqCst) {
@@ -579,8 +599,7 @@ fn start_rtsp_probe(
                     println!("detector_invocations={detector_total}");
                     sleep_shutdown_aware(&shutdown, detector_work_delay);
                     let detector_started = Instant::now();
-                    let output = yolox_detector::detect_segment(
-                        &detector,
+                    let output = detector.detect_segment(
                         &segment.media,
                         segment.clip_sha256.clone(),
                         config.detector_sample_frames,
@@ -604,6 +623,7 @@ fn start_rtsp_probe(
                                 &stats,
                                 &health,
                                 detection_publisher.as_deref(),
+                                recognition_embedder.as_deref(),
                             ) {
                                 println!("record_detection_failed error={error}");
                             }
@@ -1110,6 +1130,7 @@ fn maintain_runtime_memory(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_detected_events(
     store: &Store,
     config: &config::RuntimeConfig,
@@ -1118,6 +1139,7 @@ fn record_detected_events(
     stats: &RuntimeStatsState,
     health: &HealthState,
     detection_publisher: Option<&crate::ha_mqtt_tasks::DetectionPublisher>,
+    recognition_embedder: Option<&dyn context_graph::Embedder>,
 ) -> Result<(), String> {
     if output.detections.is_empty() {
         let _ = fs::remove_file(&segment.path);
@@ -1162,6 +1184,24 @@ fn record_detected_events(
                 });
                 set_ready_unless_latched_fault(health, "event recorded");
                 println!("observation_written=true");
+                // Recognition: crop the sighting, embed it, match it against
+                // the site library, and record it into site memory. A failure
+                // here is loud but never drops the detection event.
+                let recognition = recognition_embedder.and_then(|embedder| {
+                    recognize_detection(
+                        store,
+                        embedder,
+                        config,
+                        &nodes,
+                        detection,
+                        segment,
+                        &observation_id.to_string(),
+                        stats,
+                    )
+                });
+                let (entity_name, match_score) = recognition
+                    .map(|outcome| (outcome.name, Some(outcome.score)))
+                    .unwrap_or((None, None));
                 // Publish the detection event via the long-lived publisher when configured.
                 if let Some(publisher) = detection_publisher {
                     let input = crate::ha_discovery::DetectionInput {
@@ -1173,8 +1213,8 @@ fn record_detected_events(
                         evidence_ref: segment.source_ref.clone(),
                         snapshot_ref,
                         zone: None,
-                        entity_name: None,
-                        match_score: None,
+                        entity_name,
+                        match_score,
                     };
                     let cam_slug = camera_slug(&config.camera_name);
                     let topic = format!("vigil/{}/{}/detection", config.service_id, cam_slug);
@@ -1240,6 +1280,102 @@ fn duplicate_detection_seen(
             })
         })
         .unwrap_or(false)
+}
+
+/// The recognition step for one covered detection: crop the subject from the
+/// native-resolution frame, embed it, match it open-set against the site's
+/// enrolled references, and record the sighting into site memory anchored to
+/// its detection. Errors are loud (counted and printed) but never fail the
+/// detection write.
+#[allow(clippy::too_many_arguments)]
+fn recognize_detection(
+    store: &Store,
+    embedder: &dyn context_graph::Embedder,
+    config: &config::RuntimeConfig,
+    nodes: &MemoryNodes,
+    detection: &yolox_detector::Detection,
+    segment: &CapturedSegment,
+    anchored_detection_id: &str,
+    stats: &RuntimeStatsState,
+) -> Option<crate::recognition::MatchOutcome> {
+    let recognition = &config.recognition;
+    if !crate::recognition::class_is_covered(recognition, &detection.class_name) {
+        return None;
+    }
+    let fail = |stage: &str, error: String| {
+        println!("recognition_failed=true stage={stage} error={error}");
+        stats.update(|stats| {
+            stats.recognition_failures = stats.recognition_failures.saturating_add(1);
+        });
+        None::<crate::recognition::MatchOutcome>
+    };
+    let Some(frame) = segment.media.frames.get(detection.frame_index as usize) else {
+        return fail(
+            "frame",
+            format!("frame index {} not in segment", detection.frame_index),
+        );
+    };
+    let Some(rect) = crate::recognition::map_bbox_to_frame(
+        &detection.bbox,
+        DETECTOR_INPUT_WIDTH,
+        DETECTOR_INPUT_HEIGHT,
+        frame.width,
+        frame.height,
+    ) else {
+        return fail("bbox", format!("bbox {} does not map", detection.bbox));
+    };
+    let crop = match crate::recognition::crop_png(&frame.rgb, frame.width, frame.height, rect) {
+        Ok(crop) => crop,
+        Err(error) => return fail("crop", error),
+    };
+    let embed_started = Instant::now();
+    let probe = match embedder.embed(context_graph::EmbeddingInput::ImageBytes(crop)) {
+        Ok(output) => output.vector,
+        Err(error) => return fail("embed", format!("{error}")),
+    };
+    let embed_ms = embed_started.elapsed().as_secs_f64() * 1000.0;
+    let outcome = match crate::recognition::match_vector(
+        store,
+        &recognition.embedding_space_id,
+        nodes.context_id,
+        &probe,
+        recognition.match_threshold,
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => return fail("match", error),
+    };
+    if let Err(error) = crate::recognition::record_match_observation(
+        store,
+        nodes.camera_id,
+        nodes.context_id,
+        anchored_detection_id,
+        &outcome,
+        &probe,
+        &detection.class_name,
+        &segment.source_ref,
+    ) {
+        return fail("record", error);
+    }
+    stats.update(|stats| {
+        stats.crops_embedded = stats.crops_embedded.saturating_add(1);
+        stats.embed_latency_max_ms = stats.embed_latency_max_ms.max(embed_ms);
+        if outcome.entity_id.is_some() {
+            stats.recognition_matches = stats.recognition_matches.saturating_add(1);
+        } else {
+            stats.recognition_unknowns = stats.recognition_unknowns.saturating_add(1);
+        }
+    });
+    match &outcome.name {
+        Some(name) => println!(
+            "recognition_match=true name={name} score={:.4}",
+            outcome.score
+        ),
+        None => println!(
+            "recognition_match=false class={} score={:.4}",
+            detection.class_name, outcome.score
+        ),
+    }
+    Some(outcome)
 }
 
 /// Record a single detection event into cg and return the new observation id plus the

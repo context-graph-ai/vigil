@@ -24,6 +24,7 @@ categories = ["command-line-utilities"]
 
 [workspace.dependencies]
 context-graph = { path = "../context-graph/crates/context-graph", default-features = false }
+cg-vision-embedder = { path = "../context-graph/crates/cg-vision-embedder" }
 burn = { version = "0.21.0", default-features = false }
 burn-flex = { version = "0.21.0" }
 burn-store = { version = "0.21.0", default-features = false, features = ["std", "pytorch"] }

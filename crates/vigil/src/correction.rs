@@ -310,12 +310,8 @@ pub fn record_correction(
     // and the CLI.
     if request.correction_type == CorrectionType::Enroll {
         let name = request.label.as_deref().unwrap_or_default();
-        crate::recognition::record_enrollment_from_correction(
-            store,
-            &request.detection_id,
-            name,
-        )
-        .map_err(CorrectionError::WriteFailed)?;
+        crate::recognition::record_enrollment_from_correction(store, &request.detection_id, name)
+            .map_err(CorrectionError::WriteFailed)?;
     }
 
     Ok(CorrectionReceipt {
@@ -406,8 +402,7 @@ pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewEr
                 .get("anchored_detection_id")
                 .and_then(|v| v.as_str())
                 == Some(resp.observation_id.as_str())
-                && obs.observed_properties.get("matched")
-                    == Some(&serde_json::Value::Bool(true))
+                && obs.observed_properties.get("matched") == Some(&serde_json::Value::Bool(true))
         })
         .and_then(|obs| {
             let name = obs

@@ -145,7 +145,10 @@ pub fn crop_png(
     let crop = image::imageops::crop_imm(&image, x, y, w, h).to_image();
     let mut bytes = Vec::new();
     image::DynamicImage::ImageRgb8(crop)
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .map_err(|e| format!("png encode failed: {e}"))?;
     Ok(bytes)
 }
@@ -174,7 +177,13 @@ pub fn match_crop(
     let output = embedder
         .embed(EmbeddingInput::ImageBytes(crop_png_bytes.to_vec()))
         .map_err(|e| format!("embed failed: {e}"))?;
-    match_vector(store, embedding_space_id, context_id, &output.vector, threshold)
+    match_vector(
+        store,
+        embedding_space_id,
+        context_id,
+        &output.vector,
+        threshold,
+    )
 }
 
 /// Match an already-computed probe vector (the hot path holds one).
@@ -377,8 +386,7 @@ pub fn record_enrollment(
     let detection = store
         .get_observation(ObservationId::from(uuid))
         .map_err(|e| format!("detection not found: {e}"))?;
-    let (probe, class, _space) =
-        anchored_recognition(store, detection_id, detection.context_id)?;
+    let (probe, class, _space) = anchored_recognition(store, detection_id, detection.context_id)?;
 
     let entities = store
         .list_entities(context_graph::ListEntityFilter {

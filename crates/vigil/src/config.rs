@@ -43,6 +43,10 @@ pub(crate) struct RuntimeConfig {
     /// Stable service identifier derived from site_name or explicitly configured
     /// via VIGIL_SERVICE_ID.  Used as the MQTT topic namespace and HA device id.
     pub(crate) service_id: String,
+    /// Recognition: crop → embed → enroll → match. Off unless a weights
+    /// directory is configured; a configured-but-missing weights dir fails
+    /// loud at startup, never silently.
+    pub(crate) recognition: crate::recognition::RecognitionConfig,
 }
 
 /// Per-camera entry as it appears in TOML/JSON config files.
@@ -79,6 +83,10 @@ struct PartialConfig {
     mqtt_username: Option<String>,
     mqtt_password: Option<String>,
     service_id: Option<String>,
+    recognition_weights_dir: Option<PathBuf>,
+    recognition_space_id: Option<String>,
+    recognition_threshold: Option<f64>,
+    recognition_covered_classes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -98,6 +106,7 @@ struct CliOverrides {
     detector_model_path: Option<PathBuf>,
     detector_confidence_threshold: Option<f64>,
     detector_sample_frames: Option<usize>,
+    recognition_weights_dir: Option<PathBuf>,
 }
 
 pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
@@ -138,6 +147,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             mqtt_username: None,
             mqtt_password: None,
             service_id: None,
+            recognition_weights_dir: cli.recognition_weights_dir,
+            recognition_space_id: None,
+            recognition_threshold: None,
+            recognition_covered_classes: None,
         },
     );
     merge(&mut partial, env_overrides()?);
@@ -218,6 +231,22 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         }]
     };
 
+    // Recognition switches on when a weights directory is configured.
+    let mut recognition = crate::recognition::RecognitionConfig::default();
+    if let Some(weights_dir) = partial.recognition_weights_dir {
+        recognition.enabled = true;
+        recognition.weights_dir = Some(weights_dir);
+    }
+    if let Some(space) = partial.recognition_space_id {
+        recognition.embedding_space_id = space;
+    }
+    if let Some(threshold) = partial.recognition_threshold {
+        recognition.match_threshold = threshold;
+    }
+    if let Some(classes) = partial.recognition_covered_classes {
+        recognition.covered_classes = classes;
+    }
+
     Ok(RuntimeConfig {
         data_dir,
         store_path,
@@ -235,6 +264,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         cameras,
         mqtt,
         service_id,
+        recognition,
     })
 }
 
@@ -249,6 +279,10 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
             "--config" => cli.config_path = Some(next_path(&mut iter, "--config")?),
             "--data-dir" => cli.data_dir = Some(next_path(&mut iter, "--data-dir")?),
             "--store-path" => cli.store_path = Some(next_path(&mut iter, "--store-path")?),
+            "--recognition-weights-dir" => {
+                cli.recognition_weights_dir =
+                    Some(next_path(&mut iter, "--recognition-weights-dir")?)
+            }
             "--health-port" => cli.health_port = Some(next_port(&mut iter, "--health-port")?),
             "--review-port" => cli.review_port = Some(next_port(&mut iter, "--review-port")?),
             "--site-name" => cli.site_name = Some(next_string(&mut iter, "--site-name")?),
@@ -377,6 +411,15 @@ fn env_overrides() -> Result<PartialConfig, String> {
         rtsp_password: std::env::var("VIGIL_RTSP_PASSWORD").ok(),
         detector_model_id: std::env::var("VIGIL_DETECTOR_MODEL_ID").ok(),
         detector_model_path: std::env::var_os("VIGIL_DETECTOR_MODEL_PATH").map(Into::into),
+        recognition_weights_dir: std::env::var_os("VIGIL_RECOGNITION_WEIGHTS_DIR").map(Into::into),
+        recognition_space_id: std::env::var("VIGIL_RECOGNITION_SPACE_ID").ok(),
+        recognition_threshold: match std::env::var("VIGIL_RECOGNITION_THRESHOLD") {
+            Ok(value) => Some(value.parse::<f64>().map_err(|error| {
+                format!("VIGIL_RECOGNITION_THRESHOLD must be a number: {error}")
+            })?),
+            Err(_) => None,
+        },
+        recognition_covered_classes: None,
         detector_confidence_threshold: match std::env::var("VIGIL_DETECTOR_CONFIDENCE_THRESHOLD") {
             Ok(value) => Some(value.parse::<f64>().map_err(|error| {
                 format!("VIGIL_DETECTOR_CONFIDENCE_THRESHOLD must be a number: {error}")
@@ -452,6 +495,18 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     }
     if source.detector_confidence_threshold.is_some() {
         target.detector_confidence_threshold = source.detector_confidence_threshold;
+    }
+    if source.recognition_weights_dir.is_some() {
+        target.recognition_weights_dir = source.recognition_weights_dir;
+    }
+    if source.recognition_space_id.is_some() {
+        target.recognition_space_id = source.recognition_space_id;
+    }
+    if source.recognition_threshold.is_some() {
+        target.recognition_threshold = source.recognition_threshold;
+    }
+    if source.recognition_covered_classes.is_some() {
+        target.recognition_covered_classes = source.recognition_covered_classes;
     }
     if source.detector_sample_frames.is_some() {
         target.detector_sample_frames = source.detector_sample_frames;

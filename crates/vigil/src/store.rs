@@ -1,13 +1,58 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use context_graph::{EmbedderConfig, Store, StoreConfig};
+use context_graph::{Embedder, EmbedderConfig, Store, StoreConfig};
 
 pub(crate) struct OpenStore {
     pub(crate) handle: Store,
     pub(crate) path: PathBuf,
     pub(crate) created: bool,
     pub(crate) trace: String,
+}
+
+/// Open the store, registering the real vision embedder when recognition is
+/// configured. A configured weights dir that fails to load is a LOUD startup
+/// failure — recognition never degrades silently. Returns the embedder handle
+/// for the hot path.
+pub(crate) fn open_with_recognition(
+    path: &Path,
+    recognition: &crate::recognition::RecognitionConfig,
+) -> Result<(OpenStore, Option<Arc<dyn Embedder>>), String> {
+    if !recognition.enabled {
+        return Ok((open(path)?, None));
+    }
+    let weights_dir = recognition
+        .weights_dir
+        .clone()
+        .ok_or_else(|| "recognition enabled without a weights dir".to_string())?;
+    let embedder: Arc<dyn Embedder> = Arc::new(
+        cg_vision_embedder::SiglipVisionEmbedder::load(cg_vision_embedder::SiglipEmbedderConfig {
+            weights_dir,
+            embedding_space_id: recognition.embedding_space_id.clone(),
+            model_name: "siglip".to_string(),
+            model_version: "2-base".to_string(),
+        })
+        .map_err(|error| format!("recognition embedder failed to load: {error}"))?,
+    );
+    let created = !path.exists();
+    let handle = crate::recognition::open_store_with_embedder(
+        path,
+        &recognition.embedding_space_id,
+        embedder.clone(),
+    )?;
+    let trace = handle
+        .last_query_trace()
+        .map_err(|error| format!("could not read store trace: {error}"))?;
+    Ok((
+        OpenStore {
+            path: handle.db_path().to_path_buf(),
+            handle,
+            created,
+            trace,
+        },
+        Some(embedder),
+    ))
 }
 
 pub(crate) fn open(path: &Path) -> Result<OpenStore, String> {

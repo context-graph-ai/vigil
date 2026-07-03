@@ -1,14 +1,15 @@
 mod config;
 mod control_socket;
 pub mod correction;
+mod detector;
 pub mod ha_discovery;
 pub mod ha_mqtt_tasks;
-pub mod recognition;
 mod health;
 mod http_data_plane;
 mod live_read;
 mod media_pipeline;
 mod privilege;
+pub mod recognition;
 mod runtime;
 mod runtime_stats;
 mod shutdown;
@@ -64,6 +65,28 @@ where
             print_control_or_direct("why", &request)
         }
         Some(command) if command == "stats" => print_control_or_direct("stats", ""),
+        Some(command) if command == "enroll" => {
+            let detection_id = args.next().and_then(|a| a.into_string().ok());
+            let name = args.next().and_then(|a| a.into_string().ok());
+            match (detection_id, name) {
+                (Some(detection_id), Some(name)) => {
+                    print_control_or_direct("enroll", &format!("{detection_id} {name}"))
+                }
+                _ => {
+                    eprintln!("usage: vigil enroll <detection-id> <name>");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Some(command) if command == "forget" => {
+            match args.next().and_then(|a| a.into_string().ok()) {
+                Some(name) => print_control_or_direct("forget", &name),
+                None => {
+                    eprintln!("usage: vigil forget <name>");
+                    ExitCode::from(2)
+                }
+            }
+        }
         Some(command) if command == "detector-probe" => runtime::run_detector_probe(args.collect()),
         Some(command) if command == "run" => runtime::run(args.collect()),
         _ => {
@@ -144,6 +167,40 @@ fn direct_read_local(command: &str, request: &str) -> Result<String, String> {
             .map(|response| live_read::format_events_cli(&response)),
         "why" => live_read::handle_why_read(&open.handle, request)
             .map(|response| live_read::format_why_cli(&response)),
+        // Offline enroll/forget work on a plain re-open: enrollment reads the
+        // sighting's stored probe vector (no embedder needed) and the embedding
+        // space is already persisted in the store.
+        "enroll" => {
+            let mut pieces = request.splitn(2, ' ');
+            let detection_id = pieces.next().unwrap_or_default().trim().to_string();
+            let name = pieces.next().unwrap_or_default().trim().to_string();
+            if detection_id.is_empty() || name.is_empty() {
+                return Err("usage: vigil enroll <detection-id> <name>".to_string());
+            }
+            correction::record_correction(
+                &open.handle,
+                correction::CorrectionRequest {
+                    detection_id,
+                    label: Some(name.clone()),
+                    correction_type: correction::CorrectionType::Enroll,
+                },
+            )
+            .map(|receipt| {
+                format!(
+                    "enrolled=true name={name} correction_id={}\n",
+                    receipt.correction_id
+                )
+            })
+            .map_err(|error| format!("{error:?}"))
+        }
+        "forget" => {
+            let name = request.trim();
+            if name.is_empty() {
+                return Err("usage: vigil forget <name>".to_string());
+            }
+            recognition::forget_named_entity(&open.handle, name, None)
+                .map(|removed| format!("forgotten=true name={name} references_removed={removed}\n"))
+        }
         _ => Err(format!("unknown control command {command}")),
     }
 }

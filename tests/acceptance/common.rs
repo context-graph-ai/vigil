@@ -1280,7 +1280,9 @@ fn network_line_is_outbound(line: &str) -> bool {
     }
     !(line.contains("127.0.0.1")
         || line.contains("127.0.1.1")
+        || line.contains("inet_addr(\"0.0.0.0\")")
         || line.contains("\"::1\"")
+        || line.contains("sin6_addr=inet_pton(AF_INET6, \"::\")")
         || line.contains("sin6_addr=inet_pton(AF_INET6, \"::1\")"))
 }
 
@@ -1336,7 +1338,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{direct_child_target_is_safe, free_port, workspace_root};
+    use super::{direct_child_target_is_safe, free_port, network_line_is_outbound, workspace_root};
 
     #[test]
     fn free_port_allocates_unique_ports_within_acceptance_process() {
@@ -1364,6 +1366,16 @@ mod tests {
         assert!(
             direct_child_target_is_safe(std::process::id()).is_err(),
             "direct child cleanup must refuse the current acceptance process"
+        );
+    }
+
+    #[test]
+    fn network_trace_does_not_classify_unspecified_local_connect_as_outbound() {
+        let line = r#"connect(8, {sa_family=AF_INET, sin_port=htons(8098), sin_addr=inet_addr("0.0.0.0")}, 16) = 0"#;
+
+        assert!(
+            !network_line_is_outbound(line),
+            "0.0.0.0 is a local unspecified address, not outbound egress"
         );
     }
 

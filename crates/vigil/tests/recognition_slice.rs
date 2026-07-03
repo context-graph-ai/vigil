@@ -8,7 +8,6 @@
 // live smoke and the identity-depth measurement, never CI.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use context_graph::{
@@ -428,7 +427,7 @@ fn match_records_observation_against_the_matched_entity_with_vector_and_score() 
         match_obs.entity_id, person.id,
         "the match observation is recorded AGAINST the matched entity"
     );
-    assert!(match_obs.observed_properties.get("score").is_some());
+    assert!(match_obs.observed_properties.contains_key("score"));
     assert!(
         match_obs
             .observed_properties

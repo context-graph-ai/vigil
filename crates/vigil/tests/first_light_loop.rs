@@ -6401,7 +6401,7 @@ fn startup_crash_mid_config_heals_on_restart() {
     if !second.spawned {
         failures.push("startup/restart sequence did not run through the binary".to_string());
     }
-    if !second.logs.contains("runtime memory ready") {
+    if !second.logs.contains("runtime_memory_ready") {
         failures.push("restart did not rebuild the runtime memory graph".to_string());
     }
     if list_context_count(store.as_ref()) != 1 {

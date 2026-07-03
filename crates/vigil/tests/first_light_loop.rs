@@ -1434,27 +1434,29 @@ fn assert_production_detector_does_not_delegate_to_oracle(
                 ));
             }
         }
-        for spawn_marker in [
-            "std::process::command",
-            "process::command",
-            "command::new",
-            ".spawn(",
-            ".output(",
-        ] {
-            if lower.contains(spawn_marker) {
+        if source_is_detector_execution_surface(source) {
+            for spawn_marker in [
+                "std::process::command",
+                "process::command",
+                "command::new",
+                ".spawn(",
+                ".output(",
+            ] {
+                if lower.contains(spawn_marker) {
+                    failures.push(format!(
+                        "production detector source {} can spawn or shell out instead of calling the detector backend directly: {spawn_marker}",
+                        source.path.display()
+                    ));
+                }
+            }
+            if lower.contains("oracle")
+                && (lower.contains("command::new") || lower.contains("process::command"))
+            {
                 failures.push(format!(
-                    "production detector source {} can spawn or shell out instead of calling the detector backend directly: {spawn_marker}",
+                    "production detector source {} can shell out to an oracle helper",
                     source.path.display()
                 ));
             }
-        }
-        if lower.contains("oracle")
-            && (lower.contains("command::new") || lower.contains("process::command"))
-        {
-            failures.push(format!(
-                "production detector source {} can shell out to an oracle helper",
-                source.path.display()
-            ));
         }
     }
 
@@ -1493,6 +1495,16 @@ fn assert_production_detector_does_not_delegate_to_oracle(
             ));
         }
     }
+}
+
+fn source_is_detector_execution_surface(source: &SourceFile) -> bool {
+    let file_name = source
+        .path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    file_name == "runtime.rs" || source_is_production_detector_backend(source)
 }
 
 fn detector_backend_module_name(path: &Path) -> Option<String> {

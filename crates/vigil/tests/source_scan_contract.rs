@@ -122,28 +122,26 @@ fn vigil_addon_does_not_auto_install_legacy_lovelace_gallery() {
 }
 
 #[test]
-fn yolox_oracle_uses_library_decode_path_without_dead_code_link_shims() {
+fn yolox_oracle_owns_decode_path_without_dead_code_link_shims() {
     let root = workspace_root();
     let oracle_path = root.join("crates/vigil/src/bin/yolox_burn_oracle.rs");
     let media_path = root.join("crates/vigil/src/media_pipeline.rs");
-    let lib_path = root.join("crates/vigil/src/lib.rs");
     let oracle = fs::read_to_string(&oracle_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", oracle_path.display()));
     let media = fs::read_to_string(&media_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", media_path.display()));
-    let lib = fs::read_to_string(&lib_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", lib_path.display()));
     let mut failures = Vec::new();
 
     for forbidden in [
         "#[path = \"../media_pipeline.rs\"]",
-        "mod media_pipeline;",
         "keep_shared_media_symbols_linked",
         "VIGIL_ORACLE_EXERCISE_UNUSED_MEDIA_PATHS",
+        "vigil::decode_sampled_detector_rgb_frames",
+        "use vigil",
     ] {
         if oracle.contains(forbidden) {
             failures.push(format!(
-                "{} contains dead-code warning shim {forbidden}",
+                "{} contains shared decode or dead-code warning shim {forbidden}",
                 oracle_path.display()
             ));
         }
@@ -162,15 +160,24 @@ fn yolox_oracle_uses_library_decode_path_without_dead_code_link_shims() {
         }
     }
 
-    if !lib.contains("pub fn decode_sampled_detector_rgb_frames") {
-        failures.push(format!(
-            "{} does not expose the shared detector frame decode wrapper used by the oracle",
-            lib_path.display()
-        ));
+    for required in [
+        "mod media_pipeline",
+        "media_pipeline::decode_video_file",
+        "sampled_detector_rgb",
+        "decode_h264_units",
+        "Mp4Reader::read_header",
+        "H264Decoder::with_api_config",
+    ] {
+        if !oracle.contains(required) {
+            failures.push(format!(
+                "{} does not contain independent oracle decode marker {required}",
+                oracle_path.display()
+            ));
+        }
     }
-    if !oracle.contains("vigil::decode_sampled_detector_rgb_frames") {
+    if !oracle.contains("decode_sampled_rgb_frames") {
         failures.push(format!(
-            "{} does not call the shared library decode wrapper",
+            "{} does not call the oracle-owned sampled decode path",
             oracle_path.display()
         ));
     }

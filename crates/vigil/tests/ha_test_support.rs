@@ -387,12 +387,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 // First process to start seeds; the others poll `SEEDED` and inherit.
 // Stale locks (process crashed before releasing) are detected by mtime > 720 s.
 
+const TEMPLATE_MIN_OBSERVATIONS: usize = 3;
+
 fn template_data_dir() -> Option<&'static PathBuf> {
     // In-process cache so a single process only seeds/polls once even if
     // multiple tests in the same process call fresh_store_copy concurrently.
     static CACHED: OnceLock<Option<PathBuf>> = OnceLock::new();
     CACHED
-        .get_or_init(|| resolve_or_seed_template(3).ok())
+        .get_or_init(|| resolve_or_seed_template(TEMPLATE_MIN_OBSERVATIONS).ok())
         .as_ref()
 }
 

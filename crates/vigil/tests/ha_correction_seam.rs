@@ -7,7 +7,7 @@
 
 use std::{thread, time::Duration};
 
-use context_graph::{Observation, Store};
+use context_graph::{EvidenceId, Observation, ObservationId, RecordObservation, Store};
 use vigil::{
     CorrectionError, CorrectionRequest, CorrectionType, record_correction, review_events,
     review_why,
@@ -19,6 +19,33 @@ mod ha_test_support;
 /// List all observations from the store (across all contexts).
 fn list_all_observations(store: &Store) -> Vec<Observation> {
     store.list_observations(None).unwrap_or_default()
+}
+
+fn clone_detection_for_unreviewed_row(store: &Store, source: &Observation) -> String {
+    let cloned_id = ObservationId::new_v7();
+    let mut evidence = source.evidence.clone();
+    for evidence_ref in &mut evidence {
+        evidence_ref.id = EvidenceId::new_v7();
+        evidence_ref.observation_id = cloned_id;
+    }
+
+    store
+        .record_observation(RecordObservation {
+            id: cloned_id,
+            entity_id: source.entity_id,
+            context_id: source.context_id,
+            observation_type: source.observation_type.clone(),
+            source: source.source.clone(),
+            observed_at: source.observed_at,
+            evidence,
+            observed_properties: source.observed_properties.clone(),
+            state_delta: source.state_delta.clone(),
+            properties: source.properties.clone(),
+            embeddings: Vec::new(),
+        })
+        .expect("cloned unreviewed detection must record");
+
+    cloned_id.to_string()
 }
 
 // ── REGRESSION GUARD ──────────────────────────────────────────────────────
@@ -659,7 +686,7 @@ fn confirmed_correction_does_not_set_correction_recorded() {
 /// label on each row.
 #[test]
 fn review_events_rows_expose_current_correction_authority_fields() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(4)
+    let (_tmp, store_path) = ha_test_support::fresh_store_copy(3)
         .expect("seeded store for review_events_rows_expose_current_correction_authority_fields");
     let store = ha_test_support::open_store_at(&store_path).expect("store must open");
     let mut detections = list_all_observations(&store)
@@ -667,14 +694,14 @@ fn review_events_rows_expose_current_correction_authority_fields() {
         .filter(|observation| observation.observation_type == "detection")
         .collect::<Vec<_>>();
     assert!(
-        detections.len() >= 4,
-        "at least four detections are needed to cover Identity, latest WrongClass, FalseAlarm, and unreviewed rows"
+        detections.len() >= 3,
+        "at least three real seeded detections are needed to cover Identity, latest WrongClass, and FalseAlarm rows"
     );
     detections.sort_by_key(|observation| observation.observed_at);
     let identity_id = detections[0].id.to_string();
     let wrong_class_id = detections[1].id.to_string();
     let false_alarm_id = detections[2].id.to_string();
-    let unreviewed_id = detections[3].id.to_string();
+    let unreviewed_id = clone_detection_for_unreviewed_row(&store, &detections[2]);
 
     record_correction(
         &store,

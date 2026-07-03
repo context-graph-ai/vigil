@@ -46,6 +46,11 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
+      - name: Install MQTT test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto mosquitto-clients
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -121,8 +126,10 @@ jobs:
         working-directory: vigil
         run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
-      - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+      - name: Install system test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg mosquitto mosquitto-clients
 
       - name: Setup RTSP and musl harness
         working-directory: vigil
@@ -192,8 +199,10 @@ jobs:
         working-directory: vigil
         run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
-      - name: Install ffmpeg
-        run: sudo apt-get install -y ffmpeg
+      - name: Install system test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg mosquitto mosquitto-clients
 
       - name: Setup RTSP and musl harness
         working-directory: vigil

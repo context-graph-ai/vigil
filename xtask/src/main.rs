@@ -45,6 +45,9 @@ fn setup_harness() -> Result<(), String> {
 
     let ffmpeg = require_tool("ffmpeg")?;
     let ffprobe = require_tool("ffprobe")?;
+    require_tool("mosquitto")?;
+    require_tool("mosquitto_pub")?;
+    require_tool("mosquitto_sub")?;
     require_tool("curl")?;
     require_tool("tar")?;
     require_tool("rustc")?;

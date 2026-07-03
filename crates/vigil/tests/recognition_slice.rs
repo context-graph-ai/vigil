@@ -223,6 +223,18 @@ fn embed_match_record(world: &World, detection: ObservationId, crop: &[u8]) -> M
     )
     .expect("match runs");
     let probe = hash_vector(crop);
+    // The sighting's class comes from the seeded detection, exactly as the
+    // runtime passes the detector's class — never assumed.
+    let detection_row = world
+        .store
+        .get_observation(detection)
+        .expect("detection read");
+    let class = detection_row
+        .observed_properties
+        .get("class")
+        .and_then(|value| value.as_str())
+        .expect("seeded detection carries its class")
+        .to_string();
     record_match_observation(
         &world.store,
         world.camera_id,
@@ -230,7 +242,7 @@ fn embed_match_record(world: &World, detection: ObservationId, crop: &[u8]) -> M
         &detection.to_string(),
         &outcome,
         &probe,
-        "person",
+        &class,
         &format!("vigil-edge:clip/{detection}-frame.png"),
     )
     .expect("match observation records");

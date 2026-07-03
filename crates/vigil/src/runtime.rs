@@ -665,7 +665,7 @@ fn start_rtsp_probe(
                             stats.stream_reconnects = stats.stream_reconnects.saturating_add(1);
                         }
                     });
-                    health.set(HealthStatus::Ready, "RTSP ingest active");
+                    set_ready_unless_latched_fault(&health, "RTSP ingest active");
                     reconnect_pending = false;
                     retry_delay_ms = retry_initial_ms;
                     if motion_positive == 0 {
@@ -954,6 +954,17 @@ fn mark_health_condition(current: &mut String, condition: &str) {
     }
 }
 
+fn set_ready_unless_latched_fault(health: &HealthState, detail: &'static str) {
+    let (status, _) = health.snapshot();
+    if matches!(
+        status,
+        HealthStatus::DiskFull | HealthStatus::KeepPaceFailed
+    ) {
+        return;
+    }
+    health.set(HealthStatus::Ready, detail);
+}
+
 fn decoded_frames_sha256(media: &media_pipeline::DecodedVideoSegment) -> String {
     let mut hasher = Sha256::new();
     for frame in &media.frames {
@@ -1149,7 +1160,7 @@ fn record_detected_events(
                         stats.health = "ready".to_string();
                     }
                 });
-                health.set(HealthStatus::Ready, "event recorded");
+                set_ready_unless_latched_fault(health, "event recorded");
                 println!("observation_written=true");
                 // Publish the detection event via the long-lived publisher when configured.
                 if let Some(publisher) = detection_publisher {

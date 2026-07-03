@@ -378,7 +378,8 @@ fn rtsp_success_recovers_health_after_transient_ingest_failure() {
 
     for required in [
         "stats.ingest_signal = \"ok\".to_string()",
-        "health.set(HealthStatus::Ready, \"RTSP ingest active\")",
+        "set_ready_unless_latched_fault(&health, \"RTSP ingest active\")",
+        "HealthStatus::DiskFull | HealthStatus::KeepPaceFailed",
     ] {
         if !runtime.contains(required) {
             failures.push(format!(

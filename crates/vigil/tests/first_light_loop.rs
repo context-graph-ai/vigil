@@ -635,7 +635,7 @@ fn runtime_reached_pipeline_terminal_signal(logs: &str) -> bool {
         && (logs.contains("observation_written=true")
             || logs.contains("motion_gate_suppressed_segment=true")
             || logs.contains("detector_detections=0")
-            || logs.contains("record detection failed")
+            || logs.contains("record_detection_failed")
             || logs.contains("detector invocation failed")
             || logs.contains("rtsp probe failed"))
 }
@@ -5786,7 +5786,7 @@ fn observation_never_references_undurable_clip() {
     if let Err(error) = failed_world.make_clip_dir_read_only() {
         failures.push(error);
     }
-    let _ = failed_world.run_runtime_until_log_contains("record detection failed");
+    let _ = failed_world.run_runtime_until_log_contains("record_detection_failed");
     let failed_store = failed_world.open_store().ok();
     let failed_observations = list_observations(failed_store.as_ref());
     let failed_stats = command_text(&failed_world.run_cli(["stats"]));
@@ -6459,7 +6459,7 @@ fn disk_full_on_clip_write_surfaces_and_drops_no_evidence() {
     }
     let mut runtime = LiveRuntime::spawn(&world);
     let faulted_runtime = runtime
-        .observe_until_log_contains("record detection failed", Duration::from_secs(360))
+        .observe_until_log_contains("record_detection_failed", Duration::from_secs(360))
         .with_fixture_evidence(&world);
     let faulted_health = wait_for_unhealthy_health(world.health_port, Duration::from_secs(2));
     let _ = runtime.terminate();
@@ -6472,7 +6472,7 @@ fn disk_full_on_clip_write_surfaces_and_drops_no_evidence() {
     if !faulted_runtime.rtsp_network_connected || !faulted_runtime.rtsp_fixture_read_observed {
         failures.push("disk-full stimulus was not consumed over the RTSP fixture".to_string());
     }
-    if !faulted_runtime.logs.contains("record detection failed") {
+    if !faulted_runtime.logs.contains("record_detection_failed") {
         failures.push(format!(
             "disk-full runtime did not reach the clip-write failure path; logs:\n{}",
             faulted_runtime.logs
@@ -6866,7 +6866,7 @@ fn vigil_stats_reports_live_pipeline_counters() {
         failures.push(error);
     }
     let second_runtime = world.run_runtime_until_log_contains_with_env(
-        "record detection failed",
+        "record_detection_failed",
         &[
             PRESSURE_CAPTURE_FRAMES_ENV,
             PRESSURE_DETECTOR_QUEUE_ENV,
@@ -6925,7 +6925,7 @@ fn vigil_stats_reports_live_pipeline_counters() {
             first_runtime.decoded_frames
         ));
     }
-    if !second_runtime.logs.contains("record detection failed") {
+    if !second_runtime.logs.contains("record_detection_failed") {
         failures.push("pressure workload did not reach a real clip-write failure".to_string());
     }
     let delivered_frames = (first_runtime.decoded_frames + second_runtime.decoded_frames) as f64;

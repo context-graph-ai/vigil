@@ -22,6 +22,9 @@ pub enum CorrectionType {
     Identity,
     WrongClass,
     FalseAlarm,
+    /// Enroll the detection's subject as a named entity: the label is the
+    /// name; the sighting's own vector becomes the first enrolled reference.
+    Enroll,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +79,19 @@ pub struct WhyView {
     pub frame_index: u64,
     pub detector_image_ref: String,
     pub corrections: Vec<RecordedCorrection>,
+    /// Match provenance when this detection was recognized: which enrolled
+    /// subject matched, at what similarity, through which reference, and the
+    /// correction that enrolled it.
+    pub recognition: Option<MatchProvenance>,
+}
+
+/// Why a sighting carries a name: the recognition provenance chain.
+#[derive(Debug, Clone)]
+pub struct MatchProvenance {
+    pub name: String,
+    pub score: f64,
+    pub reference_label: String,
+    pub enrolled_by_correction_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +119,9 @@ pub struct EventRow {
     pub current_correction: Option<CorrectionType>,
     /// Latest corrected-to label from WrongClass corrections, if any.
     pub corrected_label: Option<String>,
+    /// The recognized entity's name when this detection matched an enrolled
+    /// subject — the durable authority the card renders next to the event.
+    pub entity_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +153,7 @@ fn correction_type_to_str(ct: &CorrectionType) -> &'static str {
         CorrectionType::Identity => "Identity",
         CorrectionType::WrongClass => "WrongClass",
         CorrectionType::FalseAlarm => "FalseAlarm",
+        CorrectionType::Enroll => "Enroll",
     }
 }
 
@@ -142,6 +162,7 @@ fn correction_type_from_str(s: &str) -> Option<CorrectionType> {
         "Identity" => Some(CorrectionType::Identity),
         "WrongClass" => Some(CorrectionType::WrongClass),
         "FalseAlarm" => Some(CorrectionType::FalseAlarm),
+        "Enroll" => Some(CorrectionType::Enroll),
         _ => None,
     }
 }
@@ -182,6 +203,14 @@ pub fn record_correction(
             "anchor {} has type '{}', expected 'detection'",
             request.detection_id, detection_obs.observation_type
         )));
+    }
+
+    if request.correction_type == CorrectionType::Enroll
+        && request.label.as_deref().unwrap_or("").trim().is_empty()
+    {
+        return Err(CorrectionError::WriteFailed(
+            "enroll requires a name label".to_string(),
+        ));
     }
 
     let correction_type_str = correction_type_to_str(&request.correction_type);
@@ -275,6 +304,20 @@ pub fn record_correction(
         })
         .map_err(|e| CorrectionError::WriteFailed(format!("cg record_observation failed: {e}")))?;
 
+    // An enroll correction ALSO performs the enrollment: the named entity is
+    // created (typed by the sighting's class) and the sighting's stored probe
+    // vector becomes its first enrolled reference. One seam serves MQTT, HTTP,
+    // and the CLI.
+    if request.correction_type == CorrectionType::Enroll {
+        let name = request.label.as_deref().unwrap_or_default();
+        crate::recognition::record_enrollment_from_correction(
+            store,
+            &request.detection_id,
+            name,
+        )
+        .map_err(CorrectionError::WriteFailed)?;
+    }
+
     Ok(CorrectionReceipt {
         correction_id: correction_id.to_string(),
     })
@@ -347,10 +390,57 @@ pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewEr
             .cmp(left_at)
             .then_with(|| right_id.as_uuid().cmp(&left_id.as_uuid()))
     });
-    let corrections = corrections
+    let corrections: Vec<RecordedCorrection> = corrections
         .into_iter()
         .map(|(_observed_at, _id, correction)| correction)
         .collect();
+
+    // Match provenance: the "recognition" observation anchored to this
+    // detection, when it matched. The enrolling correction is the Enroll
+    // correction whose label is the matched name.
+    let recognition = all_obs
+        .iter()
+        .filter(|obs| obs.observation_type == "recognition")
+        .find(|obs| {
+            obs.observed_properties
+                .get("anchored_detection_id")
+                .and_then(|v| v.as_str())
+                == Some(resp.observation_id.as_str())
+                && obs.observed_properties.get("matched")
+                    == Some(&serde_json::Value::Bool(true))
+        })
+        .and_then(|obs| {
+            let name = obs
+                .observed_properties
+                .get("matched_name")
+                .and_then(|v| v.as_str())?
+                .to_string();
+            let enrolled_by_correction_id = all_obs
+                .iter()
+                .find(|c| {
+                    c.observation_type == "correction"
+                        && c.observed_properties.get("correction_type")
+                            == Some(&serde_json::Value::String("Enroll".to_string()))
+                        && c.observed_properties.get("label")
+                            == Some(&serde_json::Value::String(name.clone()))
+                })
+                .map(|c| c.id.to_string());
+            Some(MatchProvenance {
+                name,
+                score: obs
+                    .observed_properties
+                    .get("score")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                reference_label: obs
+                    .observed_properties
+                    .get("reference_label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                enrolled_by_correction_id,
+            })
+        });
 
     Ok(WhyView {
         observation_id: resp.observation_id,
@@ -372,6 +462,7 @@ pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewEr
         frame_index: resp.frame_index,
         detector_image_ref: resp.detector_image_ref,
         corrections,
+        recognition,
     })
 }
 
@@ -396,6 +487,25 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
             if let Some(ctx_id) = context_id_opt {
                 let mut summary = BTreeMap::new();
                 for obs in store.list_observations(Some(ctx_id)).unwrap_or_default() {
+                    if obs.observation_type == "recognition" {
+                        let anchored = obs
+                            .observed_properties
+                            .get("anchored_detection_id")
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string);
+                        let matched_name = obs
+                            .observed_properties
+                            .get("matched_name")
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string);
+                        if let (Some(id), Some(name)) = (anchored, matched_name) {
+                            summary
+                                .entry(id)
+                                .or_insert_with(EventCorrectionSummary::default)
+                                .entity_name = Some(name);
+                        }
+                        continue;
+                    }
                     let anchored = obs
                         .observed_properties
                         .get("anchored_detection_id")
@@ -459,6 +569,9 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
             corrected_label: correction_summary
                 .get(&row.observation_id)
                 .and_then(|summary| summary.corrected_label.clone()),
+            entity_name: correction_summary
+                .get(&row.observation_id)
+                .and_then(|summary| summary.entity_name.clone()),
         })
         .collect();
 
@@ -472,6 +585,7 @@ struct EventCorrectionSummary {
     current_correction: Option<CorrectionType>,
     current_observed_at: Option<chrono::DateTime<chrono::Utc>>,
     corrected_label: Option<String>,
+    entity_name: Option<String>,
 }
 
 impl EventCorrectionSummary {
@@ -491,6 +605,11 @@ impl EventCorrectionSummary {
             CorrectionType::FalseAlarm => {
                 self.corrected = true;
             }
+            // Enroll is a positive signal like Identity: the subject was named,
+            // nothing about the detection was wrong.
+            CorrectionType::Enroll => {
+                self.confirmed = true;
+            }
         }
 
         if self
@@ -500,7 +619,9 @@ impl EventCorrectionSummary {
         {
             self.corrected_label = match correction_type {
                 CorrectionType::WrongClass => label,
-                CorrectionType::Identity | CorrectionType::FalseAlarm => None,
+                CorrectionType::Identity | CorrectionType::FalseAlarm | CorrectionType::Enroll => {
+                    None
+                }
             };
             self.current_correction = Some(correction_type);
             self.current_observed_at = Some(*observed_at);

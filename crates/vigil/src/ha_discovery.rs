@@ -38,6 +38,10 @@ pub struct DetectionInput {
     pub evidence_ref: String,
     pub snapshot_ref: String,
     pub zone: Option<String>,
+    /// The recognized entity's name when the detection matched an enrolled
+    /// subject; None keeps the event an honest "unknown <class>".
+    pub entity_name: Option<String>,
+    pub match_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -53,6 +57,8 @@ pub struct EventPayload {
     pub evidence_ref: String,
     pub snapshot_ref: String,
     pub zone: Option<String>,
+    pub entity_name: Option<String>,
+    pub match_score: Option<f64>,
 }
 
 // ── Command-topic wire type ────────────────────────────────────────────────
@@ -320,6 +326,8 @@ pub fn map_detection_to_event_payload(detection: &DetectionInput) -> EventPayloa
         evidence_ref: detection.evidence_ref.clone(),
         snapshot_ref: detection.snapshot_ref.clone(),
         zone: detection.zone.clone(),
+        entity_name: detection.entity_name.clone(),
+        match_score: detection.match_score,
     }
 }
 
@@ -341,9 +349,10 @@ pub fn parse_command_topic(msg: &CommandTopicMessage) -> Result<CorrectionReques
         "identity" | "Identity" => CorrectionType::Identity,
         "wrong_class" | "WrongClass" => CorrectionType::WrongClass,
         "false_alarm" | "FalseAlarm" => CorrectionType::FalseAlarm,
+        "enroll" | "Enroll" => CorrectionType::Enroll,
         other => {
             return Err(ParseError(format!(
-                "unknown correction_type '{other}'; expected identity|wrong_class|false_alarm"
+                "unknown correction_type '{other}'; expected identity|wrong_class|false_alarm|enroll"
             )));
         }
     };
@@ -672,6 +681,8 @@ mod tests {
             evidence_ref: "clips/2024-01-01/clip-abc.mp4".to_string(),
             snapshot_ref: "snapshots/2024-01-01/snap-abc.jpg".to_string(), // distinct from evidence_ref
             zone: None,
+            entity_name: None,
+            match_score: None,
         };
 
         let payload = map_detection_to_event_payload(&detection);

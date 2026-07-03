@@ -3,6 +3,7 @@ mod control_socket;
 pub mod correction;
 pub mod ha_discovery;
 pub mod ha_mqtt_tasks;
+pub mod recognition;
 mod health;
 mod http_data_plane;
 mod live_read;

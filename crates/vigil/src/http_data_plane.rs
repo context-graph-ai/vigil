@@ -581,6 +581,7 @@ fn correction_type_str(correction_type: &CorrectionType) -> &'static str {
         CorrectionType::Identity => "Identity",
         CorrectionType::WrongClass => "WrongClass",
         CorrectionType::FalseAlarm => "FalseAlarm",
+        CorrectionType::Enroll => "Enroll",
     }
 }
 

@@ -1173,6 +1173,8 @@ fn record_detected_events(
                         evidence_ref: segment.source_ref.clone(),
                         snapshot_ref,
                         zone: None,
+                        entity_name: None,
+                        match_score: None,
                     };
                     let cam_slug = camera_slug(&config.camera_name);
                     let topic = format!("vigil/{}/{}/detection", config.service_id, cam_slug);

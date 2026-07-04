@@ -573,6 +573,9 @@ impl EventCorrectionSummary {
             // nothing about the detection was wrong.
             CorrectionType::Enroll => {
                 self.confirmed = true;
+                if let Some(name) = label.as_ref() {
+                    self.entity_name.get_or_insert_with(|| name.clone());
+                }
             }
         }
 

@@ -379,15 +379,36 @@ pub fn recognition_provenance(
         .get("matched_name")
         .and_then(|v| v.as_str())?
         .to_string();
-    let enrolled_by_correction_id = observations
-        .iter()
-        .find(|c| {
-            c.observation_type == "correction"
-                && c.observed_properties.get("correction_type")
-                    == Some(&Value::String("Enroll".to_string()))
-                && c.observed_properties.get("label") == Some(&Value::String(name.clone()))
-        })
-        .map(|c| c.id.to_string());
+    let reference_label = matched
+        .observed_properties
+        .get("reference_label")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let enrolled_by_correction_id = if reference_label.is_empty() {
+        observations
+            .iter()
+            .find(|c| {
+                c.observation_type == "correction"
+                    && c.observed_properties.get("correction_type")
+                        == Some(&Value::String("Enroll".to_string()))
+                    && c.observed_properties.get("label") == Some(&Value::String(name.clone()))
+            })
+            .map(|c| c.id.to_string())
+    } else {
+        observations
+            .iter()
+            .find(|c| {
+                c.observation_type == "correction"
+                    && c.observed_properties.get("correction_type")
+                        == Some(&Value::String("Enroll".to_string()))
+                    && c.observed_properties
+                        .get("anchored_detection_id")
+                        .or_else(|| c.properties.get("anchored_detection_id"))
+                        == Some(&Value::String(reference_label.clone()))
+            })
+            .map(|c| c.id.to_string())
+    };
     Some(RecognitionProvenance {
         name,
         score: matched
@@ -395,12 +416,7 @@ pub fn recognition_provenance(
             .get("score")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0),
-        reference_label: matched
-            .observed_properties
-            .get("reference_label")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        reference_label,
         enrolled_by_correction_id,
     })
 }

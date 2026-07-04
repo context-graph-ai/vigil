@@ -413,6 +413,7 @@ fn addon_config_exposes_recognition_options_and_schema() {
     }
 
     for key in [
+        "detector_stationary_interval_secs",
         "recognition_space_id",
         "recognition_threshold",
         "recognition_covered_classes",
@@ -444,6 +445,7 @@ fn addon_config_exposes_recognition_options_and_schema() {
     }
 
     for (key, expected_schema) in [
+        ("detector_stationary_interval_secs", "int"),
         ("recognition_weights_dir", "str?"),
         ("recognition_space_id", "str?"),
         ("recognition_threshold", "float?"),

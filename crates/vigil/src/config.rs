@@ -627,6 +627,7 @@ mod tests {
                 "recognition_weights_dir": weights_dir,
                 "recognition_space_id": "vigil_site_vision_smoke",
                 "recognition_threshold": 0.73,
+                "detector_stationary_interval_secs": 30,
                 "recognition_covered_classes": ["person", "dog"]
             })
             .to_string(),
@@ -653,6 +654,10 @@ mod tests {
             "vigil_site_vision_smoke"
         );
         assert_eq!(config.recognition.match_threshold, 0.73);
+        assert_eq!(
+            config.detector_stationary_interval_secs, 30,
+            "detector_stationary_interval_secs in add-on options must let the owner smoke run periodic detector scans on no-motion segments so a visible stationary person is not skipped before recognition"
+        );
         assert_eq!(
             config.recognition.covered_classes,
             vec!["person".to_string(), "dog".to_string()],

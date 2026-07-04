@@ -1759,7 +1759,10 @@ fn get_or_create_decision(
 
 #[cfg(test)]
 mod tests {
-    use super::{LatestSegmentQueue, LatestSegmentRecv, generic_camera_url};
+    use super::{
+        DetectorSegmentDecision, LatestSegmentQueue, LatestSegmentRecv, detector_segment_decision,
+        generic_camera_url,
+    };
     use crate::config;
     use std::time::Duration;
 
@@ -1820,5 +1823,43 @@ mod tests {
         };
 
         assert_eq!(generic_camera_url(&camera), Some("rtsp://camera/main"));
+    }
+
+    #[test]
+    fn detector_gate_still_enqueues_motion_positive_segments() {
+        assert_eq!(
+            detector_segment_decision(3, Duration::from_secs(30), Some(Duration::ZERO)),
+            DetectorSegmentDecision::Enqueue {
+                stationary_scan: false
+            }
+        );
+    }
+
+    #[test]
+    fn detector_gate_suppresses_motion_free_segments_when_stationary_scan_is_disabled() {
+        assert_eq!(
+            detector_segment_decision(0, Duration::ZERO, None),
+            DetectorSegmentDecision::SuppressMotionGate
+        );
+    }
+
+    #[test]
+    fn detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan() {
+        assert_eq!(
+            detector_segment_decision(0, Duration::from_secs(30), None),
+            DetectorSegmentDecision::Enqueue {
+                stationary_scan: true
+            }
+        );
+        assert_eq!(
+            detector_segment_decision(0, Duration::from_secs(30), Some(Duration::from_secs(29))),
+            DetectorSegmentDecision::SuppressMotionGate
+        );
+        assert_eq!(
+            detector_segment_decision(0, Duration::from_secs(30), Some(Duration::from_secs(30))),
+            DetectorSegmentDecision::Enqueue {
+                stationary_scan: true
+            }
+        );
     }
 }

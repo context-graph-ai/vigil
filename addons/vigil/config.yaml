@@ -29,6 +29,9 @@ options:
   review_port: 8098
   recognition_space_id: vigil_site_vision_v1
   recognition_threshold: 0.6
+  recognition_covered_classes:
+    - person
+    - dog
   cameras: []
 schema:
   store_path: str
@@ -38,6 +41,8 @@ schema:
   recognition_weights_dir: str?
   recognition_space_id: str?
   recognition_threshold: float?
+  recognition_covered_classes:
+    - "list(person|dog|cat|bird|horse|sheep|cow|car|truck|bus|motorcycle|bicycle)"
   cameras:
     - name: str
       rtsp_url: str?

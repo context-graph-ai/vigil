@@ -1350,12 +1350,13 @@ fn recognize_detection(
         Err(error) => return fail("embed", format!("{error}")),
     };
     let embed_ms = embed_started.elapsed().as_secs_f64() * 1000.0;
-    let outcome = match crate::recognition::match_vector(
+    let outcome = match crate::recognition::match_vector_for_class(
         store,
         &recognition.embedding_space_id,
         nodes.context_id,
         &probe,
         recognition.match_threshold,
+        &detection.class_name,
     ) {
         Ok(outcome) => outcome,
         Err(error) => return fail("match", error),

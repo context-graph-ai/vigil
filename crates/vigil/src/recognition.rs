@@ -212,6 +212,31 @@ pub fn match_crop(
     )
 }
 
+/// Embed a crop and only allow matches to entities of the same semantic type as
+/// the detector class. This prevents a high-scoring vehicle or animal crop from
+/// resolving to a named person entity.
+pub fn match_crop_for_class(
+    store: &Store,
+    embedder: &dyn Embedder,
+    embedding_space_id: &str,
+    context_id: context_graph::ContextId,
+    crop_png_bytes: &[u8],
+    threshold: f64,
+    class: &str,
+) -> Result<MatchOutcome, String> {
+    let output = embedder
+        .embed(EmbeddingInput::ImageBytes(crop_png_bytes.to_vec()))
+        .map_err(|e| format!("embed failed: {e}"))?;
+    match_vector_for_class(
+        store,
+        embedding_space_id,
+        context_id,
+        &output.vector,
+        threshold,
+        class,
+    )
+}
+
 /// Match an already-computed probe vector (the hot path holds one).
 pub fn match_vector(
     store: &Store,
@@ -245,6 +270,57 @@ pub fn match_vector(
             name,
             reference_label: best.label.clone(),
             score,
+            embedding_space_id: embedding_space_id.to_string(),
+        });
+    }
+    Ok(MatchOutcome {
+        entity_id: None,
+        name: None,
+        reference_label: None,
+        score,
+        embedding_space_id: embedding_space_id.to_string(),
+    })
+}
+
+/// Match an already-computed probe vector, constrained to the entity type that
+/// the detector class enrolls as.
+pub fn match_vector_for_class(
+    store: &Store,
+    embedding_space_id: &str,
+    context_id: context_graph::ContextId,
+    probe: &[f32],
+    threshold: f64,
+    class: &str,
+) -> Result<MatchOutcome, String> {
+    let target_entity_type = entity_type_for_class(class);
+    let matches = store
+        .match_entity_reference(
+            embedding_space_id,
+            probe,
+            EntityReferenceMatchOptions {
+                context_id: Some(context_id),
+                top_k: Some(8),
+                min_score: None,
+            },
+        )
+        .map_err(|e| format!("match failed: {e}"))?;
+    let score = matches.first().map(|m| m.score as f64).unwrap_or(0.0);
+    for candidate in matches.iter().filter(|candidate| {
+        let candidate_score = candidate.score as f64;
+        candidate_score >= threshold
+    }) {
+        let entity = store
+            .get_entity(candidate.entity_id)
+            .map_err(|e| format!("matched entity read failed: {e}"))?
+            .ok_or_else(|| format!("matched entity {} was missing", candidate.entity_id))?;
+        if entity.entity_type != target_entity_type {
+            continue;
+        }
+        return Ok(MatchOutcome {
+            entity_id: Some(candidate.entity_id.to_string()),
+            name: Some(entity.name),
+            reference_label: candidate.label.clone(),
+            score: candidate.score as f64,
             embedding_space_id: embedding_space_id.to_string(),
         });
     }

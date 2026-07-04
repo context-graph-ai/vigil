@@ -567,3 +567,120 @@ fn why_view_shows_match_provenance_reference_score_and_enrolling_correction() {
         "the enrolling correction is named"
     );
 }
+
+// ── External-review findings (2026-07-04): surface + atomicity guards ──────
+
+#[test]
+fn enroll_failure_writes_no_correction_row() {
+    // Enrollment must be atomic with its correction row: a detection with NO
+    // recognition observation (no stored probe vector) cannot enroll, and the
+    // failed attempt must not strand an Enroll correction row — a stranded row
+    // dedups later retries into silent no-ops.
+    let world = world("enroll-atomic");
+    let detection = seed_detection(&world, "person");
+    let result = record_correction(
+        &world.store,
+        CorrectionRequest {
+            detection_id: detection.to_string(),
+            label: Some("Roshan".to_string()),
+            correction_type: CorrectionType::Enroll,
+        },
+    );
+    assert!(result.is_err(), "enroll without a sighting vector must fail");
+    let stranded = world
+        .store
+        .list_observations(None)
+        .expect("list")
+        .into_iter()
+        .filter(|o| o.observation_type == "correction")
+        .count();
+    assert_eq!(
+        stranded, 0,
+        "a failed enrollment must not persist a correction row"
+    );
+}
+
+#[test]
+fn http_event_rows_and_why_carry_recognition_for_the_card() {
+    // The card reads the HTTP JSON, not vigil's internal structs: the event
+    // row must carry entity_name and the why payload the match provenance.
+    let world = world("http-surface");
+    let crop = png(23);
+    let detection = seed_detection(&world, "person");
+    embed_match_record(&world, detection, &crop);
+    record_correction(
+        &world.store,
+        CorrectionRequest {
+            detection_id: detection.to_string(),
+            label: Some("Roshan".to_string()),
+            correction_type: CorrectionType::Enroll,
+        },
+    )
+    .expect("enroll");
+    let sighting = seed_detection(&world, "person");
+    embed_match_record(&world, sighting, &crop);
+
+    let plane = vigil::spawn_review_data_plane(
+        world.store.clone(),
+        world._dir.path().to_path_buf(),
+        0,
+    )
+    .expect("data plane");
+    let port = plane.local_addr().port();
+    let fetch = |path: &str| -> serde_json::Value {
+        let body = std::process::Command::new("curl")
+            .arg("-s")
+            .arg(format!("http://127.0.0.1:{port}{path}"))
+            .output()
+            .expect("curl runs");
+        serde_json::from_slice(&body.stdout).expect("json")
+    };
+
+    let events = fetch("/events");
+    let row = events["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["observation_id"] == serde_json::json!(sighting.to_string()))
+        .expect("sighting row")
+        .clone();
+    assert_eq!(
+        row["entity_name"],
+        serde_json::json!("Roshan"),
+        "the HTTP event row the card renders must carry the name, got {row}"
+    );
+
+    let why = fetch(&format!("/why/{sighting}"));
+    let recognition = &why["recognition"];
+    assert_eq!(recognition["name"], serde_json::json!("Roshan"));
+    assert!(
+        recognition["score"].as_f64().unwrap_or(0.0) > 0.9,
+        "why JSON carries the match score, got {why}"
+    );
+    assert!(
+        recognition["enrolled_by_correction_id"].is_string(),
+        "why JSON names the enrolling correction, got {why}"
+    );
+}
+
+#[test]
+fn covered_class_indices_map_names_to_coco_indices_including_person() {
+    // The detector emits COCO class indices; recognition targets a set of
+    // names. The mapping must be exact so a "dog" detection actually reaches
+    // the animal-recognition path — and person is always covered for the
+    // baseline NVR promise.
+    use vigil::recognition::{coco_class_index, covered_class_indices};
+    assert_eq!(coco_class_index("person"), Some(0));
+    assert_eq!(coco_class_index("car"), Some(2));
+    assert_eq!(coco_class_index("dog"), Some(16));
+    assert_eq!(coco_class_index("cow"), Some(19));
+    assert_eq!(coco_class_index("truck"), Some(7));
+    assert_eq!(coco_class_index("kite"), Some(33));
+    assert_eq!(coco_class_index("not-a-class"), None);
+
+    let config = RecognitionConfig::default();
+    let indices = covered_class_indices(&config);
+    assert!(indices.contains(&0), "person is always covered");
+    assert!(indices.contains(&16), "dog maps into the covered set");
+    assert!(indices.contains(&2), "car maps into the covered set");
+}

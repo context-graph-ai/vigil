@@ -17,8 +17,8 @@ use context_graph::{
 };
 use vigil::recognition::{
     MatchOutcome, RecognitionConfig, class_is_covered, crop_png, entity_type_for_class,
-    forget_named_entity, map_bbox_to_frame, match_crop_for_class, open_store_with_embedder,
-    record_enrollment, record_match_observation,
+    forget_named_entity, map_bbox_to_frame, match_crop_for_class, match_vector_for_class,
+    open_store_with_embedder, record_enrollment, record_match_observation,
 };
 use vigil::{CorrectionRequest, CorrectionType, parse_command_topic, record_correction};
 
@@ -105,6 +105,19 @@ fn png(seed: u8) -> Vec<u8> {
     )
     .expect("encode png");
     bytes
+}
+
+fn axis_vector(slot: usize) -> Vec<f32> {
+    let mut vector = vec![0.0f32; DIM];
+    vector[slot] = 1.0;
+    vector
+}
+
+fn vector_with_cosine_to_axis(score: f32) -> Vec<f32> {
+    let mut vector = vec![0.0f32; DIM];
+    vector[0] = score;
+    vector[1] = (1.0 - score * score).sqrt();
+    vector
 }
 
 struct World {
@@ -401,6 +414,56 @@ fn below_threshold_sighting_stays_unknown() {
         "an un-enrolled visitor stays unknown, got {outcome:?}"
     );
     assert!(outcome.score < 0.6);
+}
+
+#[test]
+fn medium_confidence_single_person_gallery_match_stays_unknown() {
+    let world = world("single-person-gallery-unknown");
+    let john_detection = seed_detection(&world, "person");
+    record_match_observation(
+        &world.store,
+        world.camera_id,
+        world.context_id,
+        &john_detection.to_string(),
+        &MatchOutcome {
+            entity_id: None,
+            name: None,
+            reference_label: None,
+            score: 0.0,
+            embedding_space_id: SPACE.to_string(),
+        },
+        &axis_vector(0),
+        "person",
+        &format!("vigil-edge:clip/{john_detection}-frame.png"),
+    )
+    .expect("John reference sighting records");
+    record_enrollment(&world.store, &john_detection.to_string(), "John", SPACE)
+        .expect("enroll John");
+
+    // Live smoke: a different person/rider was named John at 0.8489186167
+    // because John was the only enrolled person. That score is useful
+    // provenance, but it is not decisive enough for automatic naming.
+    let smoke_false_positive_score = 0.848_918_6f32;
+    let probe = vector_with_cosine_to_axis(smoke_false_positive_score);
+    let outcome = match_vector_for_class(
+        &world.store,
+        SPACE,
+        world.context_id,
+        &probe,
+        0.6,
+        "person",
+    )
+    .expect("match runs");
+
+    assert!(
+        outcome.name.is_none(),
+        "a one-person gallery match at the observed smoke false-positive score must stay unknown, got {outcome:?}"
+    );
+    assert!(
+        (outcome.score - smoke_false_positive_score as f64).abs() < 1e-5,
+        "the unknown outcome must preserve the nearest-neighbor score for review provenance, got {}",
+        outcome.score
+    );
 }
 
 // ── Match memory + provenance (AC4) ────────────────────────────────────────

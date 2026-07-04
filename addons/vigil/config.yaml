@@ -27,7 +27,6 @@ options:
   store_path: /data/store.contextgraph
   health_port: 8099
   review_port: 8098
-  recognition_weights_dir: null
   recognition_space_id: vigil_site_vision_v1
   recognition_threshold: 0.6
   cameras: []

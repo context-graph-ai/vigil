@@ -466,6 +466,10 @@ fn log_startup(config: &config::RuntimeConfig) {
         config.detector_confidence_threshold
     );
     println!("detector_sample_frames={}", config.detector_sample_frames);
+    println!(
+        "detector_stationary_interval_secs={}",
+        config.detector_stationary_interval_secs
+    );
     if let Some(model_path) = config.detector_model_path.as_ref() {
         println!("detector_model_path={}", display(model_path));
     }
@@ -657,6 +661,9 @@ fn start_rtsp_probe(
         let mut decoded_total = 0_u64;
         let mut reconnect_pending = false;
         let mut stream_generation = active_stream_generation.load(Ordering::SeqCst);
+        let mut last_stationary_detector_scan: Option<Instant> = None;
+        let stationary_detector_interval =
+            Duration::from_secs(config.detector_stationary_interval_secs);
         let retry_initial_ms = env_u64("VIGIL_RTSP_RETRY_INITIAL_MS").unwrap_or(2_000);
         let retry_max_ms = env_u64("VIGIL_RTSP_RETRY_MAX_MS")
             .unwrap_or(30_000)
@@ -704,10 +711,22 @@ fn start_rtsp_probe(
                     set_ready_unless_latched_fault(&health, "RTSP ingest active");
                     reconnect_pending = false;
                     retry_delay_ms = retry_initial_ms;
-                    if motion_positive == 0 {
+                    let decision = detector_segment_decision(
+                        motion_positive,
+                        stationary_detector_interval,
+                        last_stationary_detector_scan.map(|last| last.elapsed()),
+                    );
+                    if decision == DetectorSegmentDecision::SuppressMotionGate {
                         println!("motion_gate_suppressed_segment=true");
                         let _ = fs::remove_file(&segment.path);
                     } else if detector_handle.is_some() {
+                        if let DetectorSegmentDecision::Enqueue {
+                            stationary_scan: true,
+                        } = decision
+                        {
+                            last_stationary_detector_scan = Some(Instant::now());
+                            println!("stationary_detector_scan=true");
+                        }
                         match detector_queue.push_latest(segment) {
                             Ok(Some(dropped_segment)) => {
                                 let dropped = dropped_segment.motion_positive_frames.max(1);
@@ -1102,6 +1121,36 @@ impl<T> LatestSegmentQueue<T> {
     fn drain(&self) -> Vec<T> {
         let mut inner = self.inner.lock().expect("latest segment queue poisoned");
         inner.pending.drain(..).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetectorSegmentDecision {
+    Enqueue { stationary_scan: bool },
+    SuppressMotionGate,
+}
+
+fn detector_segment_decision(
+    motion_positive_frames: u64,
+    stationary_interval: Duration,
+    elapsed_since_last_stationary_scan: Option<Duration>,
+) -> DetectorSegmentDecision {
+    if motion_positive_frames > 0 {
+        return DetectorSegmentDecision::Enqueue {
+            stationary_scan: false,
+        };
+    }
+    if stationary_interval.is_zero() {
+        return DetectorSegmentDecision::SuppressMotionGate;
+    }
+    match elapsed_since_last_stationary_scan {
+        None => DetectorSegmentDecision::Enqueue {
+            stationary_scan: true,
+        },
+        Some(elapsed) if elapsed >= stationary_interval => DetectorSegmentDecision::Enqueue {
+            stationary_scan: true,
+        },
+        Some(_) => DetectorSegmentDecision::SuppressMotionGate,
     }
 }
 

@@ -27,6 +27,7 @@ options:
   store_path: /data/store.contextgraph
   health_port: 8099
   review_port: 8098
+  detector_stationary_interval_secs: 30
   recognition_space_id: vigil_site_vision_v1
   recognition_threshold: 0.6
   recognition_covered_classes:
@@ -38,6 +39,7 @@ schema:
   health_port: int
   review_port: int
   detector_model_path: str?
+  detector_stationary_interval_secs: int
   recognition_weights_dir: str?
   recognition_space_id: str?
   recognition_threshold: float?

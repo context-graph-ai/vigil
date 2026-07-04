@@ -445,15 +445,9 @@ fn medium_confidence_single_person_gallery_match_stays_unknown() {
     // provenance, but it is not decisive enough for automatic naming.
     let smoke_false_positive_score = 0.848_918_6f32;
     let probe = vector_with_cosine_to_axis(smoke_false_positive_score);
-    let outcome = match_vector_for_class(
-        &world.store,
-        SPACE,
-        world.context_id,
-        &probe,
-        0.6,
-        "person",
-    )
-    .expect("match runs");
+    let outcome =
+        match_vector_for_class(&world.store, SPACE, world.context_id, &probe, 0.6, "person")
+            .expect("match runs");
 
     assert!(
         outcome.name.is_none(),

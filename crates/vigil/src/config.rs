@@ -34,6 +34,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) detector_model_path: Option<PathBuf>,
     pub(crate) detector_confidence_threshold: f64,
     pub(crate) detector_sample_frames: usize,
+    pub(crate) detector_stationary_interval_secs: u64,
     /// Canonical multi-camera list.  Always contains at least one entry (the
     /// single camera_name/rtsp_url for backward compat).
     pub(crate) cameras: Vec<CameraEntry>,
@@ -75,6 +76,7 @@ struct PartialConfig {
     detector_model_path: Option<PathBuf>,
     detector_confidence_threshold: Option<f64>,
     detector_sample_frames: Option<usize>,
+    detector_stationary_interval_secs: Option<u64>,
     /// Multi-camera list.  When present, supersedes camera_name/rtsp_url.
     cameras: Option<Vec<CameraEntryPartial>>,
     // MQTT broker — provided by HA Supervisor or env vars when broker is configured.
@@ -106,6 +108,7 @@ struct CliOverrides {
     detector_model_path: Option<PathBuf>,
     detector_confidence_threshold: Option<f64>,
     detector_sample_frames: Option<usize>,
+    detector_stationary_interval_secs: Option<u64>,
     recognition_weights_dir: Option<PathBuf>,
 }
 
@@ -139,6 +142,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             detector_model_path: cli.detector_model_path,
             detector_confidence_threshold: cli.detector_confidence_threshold,
             detector_sample_frames: cli.detector_sample_frames,
+            detector_stationary_interval_secs: cli.detector_stationary_interval_secs,
             // Multi-camera list not exposed as CLI flags; comes from config file or options.json.
             cameras: None,
             // MQTT fields are not exposed as CLI flags; they come from env vars or options.json.
@@ -192,6 +196,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         partial.detector_sample_frames.unwrap_or(5),
         "detector_sample_frames",
     )?;
+    let detector_stationary_interval_secs = partial.detector_stationary_interval_secs.unwrap_or(0);
 
     // MQTT broker: present when a host is configured.
     let mqtt = partial.mqtt_host.map(|host| MqttConfig {
@@ -261,6 +266,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         detector_model_path: partial.detector_model_path,
         detector_confidence_threshold,
         detector_sample_frames,
+        detector_stationary_interval_secs,
         cameras,
         mqtt,
         service_id,
@@ -313,6 +319,12 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
                 let value = next_string(&mut iter, "--detector-sample-frames")?;
                 cli.detector_sample_frames = Some(value.parse().map_err(|error| {
                     format!("--detector-sample-frames must be an integer: {error}")
+                })?);
+            }
+            "--detector-stationary-interval-secs" => {
+                let value = next_string(&mut iter, "--detector-stationary-interval-secs")?;
+                cli.detector_stationary_interval_secs = Some(value.parse().map_err(|error| {
+                    format!("--detector-stationary-interval-secs must be an integer: {error}")
                 })?);
             }
             "--help" | "-h" => return Err(run_usage()),
@@ -435,6 +447,14 @@ fn env_overrides() -> Result<PartialConfig, String> {
             )?),
             Err(_) => None,
         },
+        detector_stationary_interval_secs: match std::env::var(
+            "VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS",
+        ) {
+            Ok(value) => Some(value.parse::<u64>().map_err(|error| {
+                format!("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS must be an integer: {error}")
+            })?),
+            Err(_) => None,
+        },
         // MQTT credentials — HA Supervisor injects these via env when `services: [mqtt:want]`
         // is declared in the add-on config.yaml.
         mqtt_host: std::env::var("MQTT_HOST").ok(),
@@ -510,6 +530,9 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     }
     if source.detector_sample_frames.is_some() {
         target.detector_sample_frames = source.detector_sample_frames;
+    }
+    if source.detector_stationary_interval_secs.is_some() {
+        target.detector_stationary_interval_secs = source.detector_stationary_interval_secs;
     }
     if source.mqtt_host.is_some() {
         target.mqtt_host = source.mqtt_host;

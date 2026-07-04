@@ -24,6 +24,8 @@ use context_graph::{
 };
 use serde_json::Value;
 
+const STRONG_IDENTITY_MATCH_THRESHOLD: f64 = 0.90;
+
 /// Site recognition configuration. Class lists and the threshold are
 /// operator-configurable; the defaults are generic COCO classes, never
 /// site-specific.
@@ -305,9 +307,10 @@ pub fn match_vector_for_class(
         )
         .map_err(|e| format!("match failed: {e}"))?;
     let score = matches.first().map(|m| m.score as f64).unwrap_or(0.0);
+    let effective_threshold = threshold.max(STRONG_IDENTITY_MATCH_THRESHOLD);
     for candidate in matches.iter().filter(|candidate| {
         let candidate_score = candidate.score as f64;
-        candidate_score >= threshold
+        candidate_score >= effective_threshold
     }) {
         let entity = store
             .get_entity(candidate.entity_id)

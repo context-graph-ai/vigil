@@ -82,10 +82,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let opened = match store::open_with_recognition(&config.store_path, &config.recognition) {
         Ok((store, embedder)) => {
             if embedder.is_some() {
-                println!(
-                    "recognition_enabled=true space={} threshold={}",
-                    config.recognition.embedding_space_id, config.recognition.match_threshold
-                );
+                println!("{}", recognition_enabled_startup_line(&config.recognition));
             }
             Some((store, embedder))
         }
@@ -482,6 +479,15 @@ fn log_startup(config: &config::RuntimeConfig) {
     } else {
         println!("mqtt=disabled");
     }
+}
+
+pub(crate) fn recognition_enabled_startup_line(
+    recognition: &crate::recognition::RecognitionConfig,
+) -> String {
+    format!(
+        "recognition_enabled=true space={} threshold={}",
+        recognition.embedding_space_id, recognition.match_threshold
+    )
 }
 
 fn startup_epoch() -> u64 {

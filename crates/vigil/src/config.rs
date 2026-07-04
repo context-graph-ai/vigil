@@ -115,11 +115,11 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
 
     if let Some(path) = cli.config_path.as_ref() {
         merge(&mut partial, read_toml_config(path)?);
-    } else if Path::new("/data/options.json").exists() {
-        merge(
-            &mut partial,
-            read_options_json(Path::new("/data/options.json"))?,
-        );
+    } else {
+        let options_path = default_options_json_path();
+        if options_path.exists() {
+            merge(&mut partial, read_options_json(&options_path)?);
+        }
     }
 
     merge(
@@ -551,6 +551,15 @@ fn default_data_dir() -> PathBuf {
         .join("vigil-data")
 }
 
+fn default_options_json_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os("VIGIL_TEST_OPTIONS_JSON") {
+        return PathBuf::from(path);
+    }
+
+    PathBuf::from("/data/options.json")
+}
+
 fn run_usage() -> String {
     "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N]"
         .to_string()
@@ -559,8 +568,15 @@ fn run_usage() -> String {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
 
     use super::{load, run_usage};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn review_port_cli_override_is_documented_and_loaded() {
@@ -593,5 +609,97 @@ mod tests {
             config.cameras[0].live_rtsp_url.as_deref(),
             Some("rtsp://camera/live")
         );
+    }
+
+    #[test]
+    fn addon_options_json_recognition_fields_enable_runtime_config_and_startup_line() {
+        let _guard = env_lock().lock().expect("env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let data_dir = tmp.path().join("data");
+        let weights_dir = tmp.path().join("recognition").join("siglip");
+        fs::create_dir_all(&weights_dir).expect("create weights dir");
+        let options_path = tmp.path().join("options.json");
+        fs::write(
+            &options_path,
+            serde_json::json!({
+                "data_dir": data_dir,
+                "store_path": tmp.path().join("store.contextgraph"),
+                "recognition_weights_dir": weights_dir,
+                "recognition_space_id": "vigil_site_vision_smoke",
+                "recognition_threshold": 0.73
+            })
+            .to_string(),
+        )
+        .expect("write add-on options json");
+
+        let _options_env = EnvVarGuard::set("VIGIL_TEST_OPTIONS_JSON", &options_path);
+        let _weights_env = EnvVarGuard::remove("VIGIL_RECOGNITION_WEIGHTS_DIR");
+        let _space_env = EnvVarGuard::remove("VIGIL_RECOGNITION_SPACE_ID");
+        let _threshold_env = EnvVarGuard::remove("VIGIL_RECOGNITION_THRESHOLD");
+
+        let config = load(Vec::<OsString>::new()).expect("load add-on options json");
+
+        assert!(
+            config.recognition.enabled,
+            "recognition_weights_dir in add-on options must enable local recognition"
+        );
+        assert_eq!(
+            config.recognition.weights_dir.as_deref(),
+            Some(weights_dir.as_path())
+        );
+        assert_eq!(
+            config.recognition.embedding_space_id,
+            "vigil_site_vision_smoke"
+        );
+        assert_eq!(config.recognition.match_threshold, 0.73);
+        assert_eq!(
+            crate::runtime::recognition_enabled_startup_line(&config.recognition),
+            "recognition_enabled=true space=vigil_site_vision_smoke threshold=0.73",
+            "the runtime startup line must expose that local add-on recognition is active"
+        );
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let guard = Self {
+                key,
+                previous: std::env::var_os(key),
+            };
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            guard
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let guard = Self {
+                key,
+                previous: std::env::var_os(key),
+            };
+            unsafe {
+                std::env::remove_var(key);
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            restore_env(self.key, self.previous.take());
+        }
+    }
+
+    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 }

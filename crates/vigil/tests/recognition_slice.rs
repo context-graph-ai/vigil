@@ -535,6 +535,49 @@ fn review_events_row_carries_the_entity_name() {
 }
 
 #[test]
+fn review_events_enroll_row_carries_server_authoritative_name() {
+    let world = world("enroll-event-row");
+    let crop = png(29);
+    let detection = seed_detection(&world, "person");
+    embed_match_record(&world, detection, &crop);
+    record_correction(
+        &world.store,
+        CorrectionRequest {
+            detection_id: detection.to_string(),
+            label: Some("Roshan".to_string()),
+            correction_type: CorrectionType::Enroll,
+        },
+    )
+    .expect("enroll correction succeeds");
+
+    let view = vigil::review_events(&world.store, 50).expect("review_events");
+    let row = view
+        .rows
+        .iter()
+        .find(|r| r.observation_id == detection.to_string())
+        .expect("the enrolled source detection row exists");
+
+    assert_eq!(
+        row.current_correction,
+        Some(CorrectionType::Enroll),
+        "the anchored source detection must read back the latest correction as Enroll"
+    );
+    assert!(
+        row.confirmed,
+        "Enroll is the owner's positive confirmation that this detection is the named subject"
+    );
+    assert!(
+        !row.correction_recorded,
+        "Enroll must not be treated as a negative correction or false-alarm-style edit"
+    );
+    assert_eq!(
+        row.entity_name.as_deref(),
+        Some("Roshan"),
+        "the HA card must reload the server-authoritative enrolled name for the source detection, not a local-only saved state"
+    );
+}
+
+#[test]
 fn why_view_shows_match_provenance_reference_score_and_enrolling_correction() {
     let world = world("why");
     let crop = png(17);
@@ -565,6 +608,81 @@ fn why_view_shows_match_provenance_reference_score_and_enrolling_correction() {
     assert!(
         recognition.enrolled_by_correction_id.is_some(),
         "the enrolling correction is named"
+    );
+}
+
+#[test]
+fn recognition_provenance_joins_enroll_correction_by_matched_reference_label() {
+    let world = world("why-reference-label");
+    let first_crop = png(31);
+    let second_crop = png(32);
+
+    let first_detection = seed_detection(&world, "person");
+    let first_detection_id = first_detection.to_string();
+    embed_match_record(&world, first_detection, &first_crop);
+    let first_receipt = record_correction(
+        &world.store,
+        CorrectionRequest {
+            detection_id: first_detection_id,
+            label: Some("Roshan".to_string()),
+            correction_type: CorrectionType::Enroll,
+        },
+    )
+    .expect("first Roshan enrollment succeeds");
+
+    let second_detection = seed_detection(&world, "person");
+    let second_detection_id = second_detection.to_string();
+    embed_match_record(&world, second_detection, &second_crop);
+    let second_receipt = record_correction(
+        &world.store,
+        CorrectionRequest {
+            detection_id: second_detection_id.clone(),
+            label: Some("Roshan".to_string()),
+            correction_type: CorrectionType::Enroll,
+        },
+    )
+    .expect("second Roshan reference enrollment succeeds");
+    assert_ne!(
+        first_receipt.correction_id, second_receipt.correction_id,
+        "two distinct source detections must keep distinct Enroll correction records"
+    );
+
+    let later_sighting = seed_detection(&world, "person");
+    let outcome = embed_match_record(&world, later_sighting, &second_crop);
+    assert_eq!(outcome.name.as_deref(), Some("Roshan"));
+    assert_eq!(
+        outcome.reference_label.as_deref(),
+        Some(second_detection_id.as_str()),
+        "the exact second enrolled reference must win for the second crop"
+    );
+
+    let direct =
+        vigil::recognition::recognition_provenance(&world.store, &later_sighting.to_string())
+            .expect("matched sighting carries direct recognition provenance");
+    assert_eq!(direct.name, "Roshan");
+    assert_eq!(
+        direct.reference_label, second_detection_id,
+        "recognition provenance must preserve the matched reference label"
+    );
+    assert_eq!(
+        direct.enrolled_by_correction_id.as_deref(),
+        Some(second_receipt.correction_id.as_str()),
+        "recognition provenance must join to the Enroll correction anchored to the matched reference label, not the first same-name correction"
+    );
+
+    let why = vigil::review_why(&world.store, &later_sighting.to_string()).expect("review_why");
+    let recognition = why
+        .recognition
+        .expect("why view carries recognition provenance");
+    assert_eq!(recognition.name, "Roshan");
+    assert_eq!(
+        recognition.reference_label, second_detection_id,
+        "review_why must report the matched enrolled reference"
+    );
+    assert_eq!(
+        recognition.enrolled_by_correction_id.as_deref(),
+        Some(second_receipt.correction_id.as_str()),
+        "review_why must name the Enroll correction for the matched reference label"
     );
 }
 

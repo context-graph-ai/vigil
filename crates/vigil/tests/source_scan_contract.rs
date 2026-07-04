@@ -394,6 +394,41 @@ fn rtsp_success_recovers_health_after_transient_ingest_failure() {
     }
 }
 
+#[test]
+fn addon_config_exposes_recognition_options_and_schema() {
+    let root = workspace_root();
+    let addon_config_path = root.join("addons/vigil/config.yaml");
+    let addon_config = fs::read_to_string(&addon_config_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", addon_config_path.display()));
+    let mut failures = Vec::new();
+
+    let options = top_level_yaml_section(&addon_config, "options");
+    let schema = top_level_yaml_section(&addon_config, "schema");
+
+    for (key, expected_schema) in [
+        ("recognition_weights_dir", "str?"),
+        ("recognition_space_id", "str?"),
+        ("recognition_threshold", "float?"),
+    ] {
+        if !yaml_section_contains_key(&options, key) {
+            failures.push(format!(
+                "{} must expose top-level options.{key} so a Home Assistant add-on user can enable recognition from the add-on UI",
+                addon_config_path.display()
+            ));
+        }
+        if !yaml_section_contains_entry(&schema, key, expected_schema) {
+            failures.push(format!(
+                "{} must declare top-level schema.{key}: {expected_schema} so Home Assistant validates the recognition option",
+                addon_config_path.display()
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
 fn assert_context_graph_owns_generic_owner_control_transport(
     sources: &[SourceFile],
     failures: &mut Vec<String>,
@@ -582,6 +617,45 @@ fn join_sources(sources: &[SourceFile]) -> String {
         .map(|source| source.text.as_str())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn top_level_yaml_section<'a>(yaml: &'a str, name: &str) -> Vec<&'a str> {
+    let header = format!("{name}:");
+    let mut in_section = false;
+    let mut lines = Vec::new();
+
+    for line in yaml.lines() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let is_top_level = !line.starts_with(' ') && !line.starts_with('\t');
+        if is_top_level {
+            if line.trim_end() == header {
+                in_section = true;
+                continue;
+            }
+            if in_section {
+                break;
+            }
+        }
+        if in_section {
+            lines.push(line);
+        }
+    }
+
+    lines
+}
+
+fn yaml_section_contains_key(lines: &[&str], key: &str) -> bool {
+    let prefix = format!("  {key}:");
+    lines
+        .iter()
+        .any(|line| line.starts_with(&prefix) || line.trim() == format!("{key}:"))
+}
+
+fn yaml_section_contains_entry(lines: &[&str], key: &str, expected_value: &str) -> bool {
+    let expected = format!("{key}: {expected_value}");
+    lines.iter().any(|line| line.trim() == expected)
 }
 
 struct SourceFile {

@@ -586,7 +586,10 @@ fn enroll_failure_writes_no_correction_row() {
             correction_type: CorrectionType::Enroll,
         },
     );
-    assert!(result.is_err(), "enroll without a sighting vector must fail");
+    assert!(
+        result.is_err(),
+        "enroll without a sighting vector must fail"
+    );
     let stranded = world
         .store
         .list_observations(None)
@@ -620,12 +623,9 @@ fn http_event_rows_and_why_carry_recognition_for_the_card() {
     let sighting = seed_detection(&world, "person");
     embed_match_record(&world, sighting, &crop);
 
-    let plane = vigil::spawn_review_data_plane(
-        world.store.clone(),
-        world._dir.path().to_path_buf(),
-        0,
-    )
-    .expect("data plane");
+    let plane =
+        vigil::spawn_review_data_plane(world.store.clone(), world._dir.path().to_path_buf(), 0)
+            .expect("data plane");
     let port = plane.local_addr().port();
     let fetch = |path: &str| -> serde_json::Value {
         let body = std::process::Command::new("curl")
@@ -637,9 +637,9 @@ fn http_event_rows_and_why_carry_recognition_for_the_card() {
     };
 
     let events = fetch("/events");
-    let row = events["rows"]
+    let row = events
         .as_array()
-        .expect("rows")
+        .expect("events is a json array")
         .iter()
         .find(|r| r["observation_id"] == serde_json::json!(sighting.to_string()))
         .expect("sighting row")

@@ -538,26 +538,36 @@ fn start_rtsp_probe(
         println!("rtsp probe starting url={rtsp_log_url}");
         // The detector sits behind the engine-neutral trait: the pipeline sees
         // `dyn Detector`, the engine lives in the implementation.
-        let detector: Option<Box<dyn crate::detector::Detector>> =
-            match yolox_detector::load_detector(config.detector_model_path.as_deref()) {
-                Ok(detector) => {
-                    println!(
-                        "detector model loaded id={} sha256={}",
-                        config.detector_model_id,
-                        crate::detector::Detector::model_sha256(&detector)
-                    );
-                    Some(Box::new(detector))
-                }
-                Err(error) => {
-                    println!("detector model load failed error={error}");
-                    stats.update(|stats| {
-                        stats.ingest_signal = "detector-load-error".to_string();
-                        mark_health_condition(&mut stats.health, "ingest_failed");
-                    });
-                    health.set(HealthStatus::IngestFailed, "detector model load failed");
-                    None
-                }
-            };
+        // Person-only by default (baseline NVR, first-light contract); widen to
+        // the covered COCO classes when recognition is on, so dog/vehicle
+        // sightings reach the match path.
+        let detector_load = if config.recognition.enabled {
+            yolox_detector::load_detector_with_classes(
+                config.detector_model_path.as_deref(),
+                &crate::recognition::covered_class_indices(&config.recognition),
+            )
+        } else {
+            yolox_detector::load_detector(config.detector_model_path.as_deref())
+        };
+        let detector: Option<Box<dyn crate::detector::Detector>> = match detector_load {
+            Ok(detector) => {
+                println!(
+                    "detector model loaded id={} sha256={}",
+                    config.detector_model_id,
+                    crate::detector::Detector::model_sha256(&detector)
+                );
+                Some(Box::new(detector))
+            }
+            Err(error) => {
+                println!("detector model load failed error={error}");
+                stats.update(|stats| {
+                    stats.ingest_signal = "detector-load-error".to_string();
+                    mark_health_condition(&mut stats.health, "ingest_failed");
+                });
+                health.set(HealthStatus::IngestFailed, "detector model load failed");
+                None
+            }
+        };
         let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
             .map(|capacity| capacity.max(1) as usize)
             .unwrap_or(DETECTOR_QUEUE_CAPACITY);

@@ -260,6 +260,7 @@ fn event_row_json(row: &EventRow) -> Value {
         "confirmed": row.confirmed,
         "current_correction": row.current_correction.as_ref().map(correction_type_str),
         "corrected_label": row.corrected_label,
+        "entity_name": row.entity_name,
     })
 }
 
@@ -297,6 +298,12 @@ fn why_json(why: &WhyView) -> Value {
         "decision_id": why.decision_id,
         "intention_id": why.intention_id,
         "intention_description": why.intention_description,
+        "recognition": why.recognition.as_ref().map(|r| json!({
+            "name": r.name,
+            "score": r.score,
+            "reference_label": r.reference_label,
+            "enrolled_by_correction_id": r.enrolled_by_correction_id,
+        })),
         "model_id": why.model_id,
         "threshold": why.threshold,
         "class_name": why.class_name,

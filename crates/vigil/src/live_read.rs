@@ -26,6 +26,10 @@ pub(crate) struct StoreBackedWhyResponse {
     pub(crate) bbox: String,
     pub(crate) frame_index: u64,
     pub(crate) detector_image_ref: String,
+    pub(crate) recognition_name: Option<String>,
+    pub(crate) recognition_score: Option<f64>,
+    pub(crate) recognition_reference_label: Option<String>,
+    pub(crate) recognition_enrolled_by: Option<String>,
 }
 
 impl StoreBackedWhyResponse {
@@ -104,6 +108,10 @@ impl StoreBackedWhyResponse {
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
             detector_image_ref,
+            recognition_name: None,
+            recognition_score: None,
+            recognition_reference_label: None,
+            recognition_enrolled_by: None,
         })
     }
 }
@@ -360,7 +368,7 @@ pub(crate) fn handle_why_read(
     };
     let _context_seen = context.id;
     let selection = why_selection_label(request);
-    let response = StoreBackedWhyResponse::from_store_reads(
+    let mut response = StoreBackedWhyResponse::from_store_reads(
         selection,
         audit_entries, // StoreBackedWhyResponse
         observation,   // StoreBackedWhyResponse
@@ -369,6 +377,16 @@ pub(crate) fn handle_why_read(
         entity,        // StoreBackedWhyResponse
         context,       // StoreBackedWhyResponse
     )?;
+    // Recognition provenance from the shared read-surface helper — the CLI why
+    // and the HTTP why must show the same match story.
+    if let Some(provenance) =
+        crate::recognition::recognition_provenance(store, &response.observation_id)
+    {
+        response.recognition_name = Some(provenance.name);
+        response.recognition_score = Some(provenance.score);
+        response.recognition_reference_label = Some(provenance.reference_label);
+        response.recognition_enrolled_by = provenance.enrolled_by_correction_id;
+    }
     Ok(response)
 }
 
@@ -418,7 +436,7 @@ pub(crate) fn handle_events_read(
 }
 
 pub(crate) fn format_why_cli(dto: &StoreBackedWhyResponse) -> String {
-    format!(
+    let mut line = format!(
         "selection={} observation_id={} observed_at={} class={} confidence={:.6} bbox={} frame_index={} clip_ref={} detector_image_ref={} camera_id={} camera_name={} camera_rtsp_url={} context_id={} site_name={} decision_id={} intention_id={} intention_description={} model_id={} threshold={}\n",
         dto.selection,
         dto.observation_id,
@@ -439,7 +457,16 @@ pub(crate) fn format_why_cli(dto: &StoreBackedWhyResponse) -> String {
         dto.intention_description,
         dto.model_id,
         dto.threshold
-    )
+    );
+    if let Some(name) = &dto.recognition_name {
+        line.push_str(&format!(
+            "recognition_name={name} recognition_score={:.6} recognition_reference={} recognition_enrolled_by={}\n",
+            dto.recognition_score.unwrap_or_default(),
+            dto.recognition_reference_label.as_deref().unwrap_or(""),
+            dto.recognition_enrolled_by.as_deref().unwrap_or(""),
+        ));
+    }
+    line
 }
 
 pub(crate) fn format_events_cli(dto: &StoreBackedEventsResponse) -> String {

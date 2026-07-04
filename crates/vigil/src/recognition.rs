@@ -71,6 +71,32 @@ pub fn class_is_covered(config: &RecognitionConfig, class: &str) -> bool {
         .any(|covered| covered.eq_ignore_ascii_case(class))
 }
 
+/// The COCO class index for a class name, or None if not a COCO class. The
+/// detector emits indices; recognition config names classes — this is the
+/// bridge. Mirrors `yolox_detector::COCO_CLASSES` order.
+pub fn coco_class_index(name: &str) -> Option<usize> {
+    crate::yolox_detector::COCO_CLASSES
+        .iter()
+        .position(|coco| coco.eq_ignore_ascii_case(name))
+}
+
+/// The COCO indices the detector should emit for a recognition config: every
+/// covered class that maps to a COCO class, always including person (the
+/// baseline NVR promise is never dropped by a recognition config).
+pub fn covered_class_indices(config: &RecognitionConfig) -> Vec<usize> {
+    let mut indices: Vec<usize> = std::iter::once(0)
+        .chain(
+            config
+                .covered_classes
+                .iter()
+                .filter_map(|c| coco_class_index(c)),
+        )
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
 /// The entity type a recognized subject of this detector class enrolls as.
 pub fn entity_type_for_class(class: &str) -> EntityType {
     match class.to_ascii_lowercase().as_str() {
@@ -317,6 +343,66 @@ pub fn record_match_observation(
         })
         .map_err(|e| format!("recognition observation failed: {e}"))?;
     Ok(id)
+}
+
+/// The recognition provenance for a detection: which enrolled subject its
+/// sighting matched, the similarity, the matched reference, and the enrolling
+/// correction. Shared by every read surface (HTTP why JSON, CLI why) so they
+/// never diverge. `resolved_detection_id` is the concrete observation id (after
+/// any `--latest` resolution).
+#[derive(Debug, Clone)]
+pub struct RecognitionProvenance {
+    pub name: String,
+    pub score: f64,
+    pub reference_label: String,
+    pub enrolled_by_correction_id: Option<String>,
+}
+
+pub fn recognition_provenance(
+    store: &Store,
+    resolved_detection_id: &str,
+) -> Option<RecognitionProvenance> {
+    let uuid = uuid::Uuid::parse_str(resolved_detection_id).ok()?;
+    let context_id = store
+        .get_observation(ObservationId::from(uuid))
+        .ok()?
+        .context_id;
+    let observations = store.list_observations(Some(context_id)).ok()?;
+    let matched = observations.iter().find(|o| {
+        o.observation_type == "recognition"
+            && o.observed_properties.get("anchored_detection_id")
+                == Some(&Value::String(resolved_detection_id.to_string()))
+            && o.observed_properties.get("matched") == Some(&Value::Bool(true))
+    })?;
+    let name = matched
+        .observed_properties
+        .get("matched_name")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let enrolled_by_correction_id = observations
+        .iter()
+        .find(|c| {
+            c.observation_type == "correction"
+                && c.observed_properties.get("correction_type")
+                    == Some(&Value::String("Enroll".to_string()))
+                && c.observed_properties.get("label") == Some(&Value::String(name.clone()))
+        })
+        .map(|c| c.id.to_string());
+    Some(RecognitionProvenance {
+        name,
+        score: matched
+            .observed_properties
+            .get("score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0),
+        reference_label: matched
+            .observed_properties
+            .get("reference_label")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        enrolled_by_correction_id,
+    })
 }
 
 /// The receipt of an enrollment: the (possibly new) entity and its reference.

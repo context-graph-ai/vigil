@@ -288,6 +288,19 @@ pub fn record_correction(
         ..Default::default()
     }];
 
+    // An enroll correction ALSO performs the enrollment. ORDER MATTERS: enroll
+    // FIRST, then write the correction row. If enrollment fails, no correction
+    // row is written — otherwise a stranded row would dedup later retries into
+    // a silent no-op, leaving a named-but-unenrolled subject. Enrollment
+    // (create-entity + enroll-reference) is idempotent, so a correction-write
+    // failure after a successful enroll converges on retry. One seam serves
+    // MQTT, HTTP, and the CLI.
+    if request.correction_type == CorrectionType::Enroll {
+        let name = request.label.as_deref().unwrap_or_default();
+        crate::recognition::record_enrollment_from_correction(store, &request.detection_id, name)
+            .map_err(CorrectionError::WriteFailed)?;
+    }
+
     store
         .record_observation(RecordObservation {
             id: correction_id,
@@ -303,16 +316,6 @@ pub fn record_correction(
             embeddings: vec![],
         })
         .map_err(|e| CorrectionError::WriteFailed(format!("cg record_observation failed: {e}")))?;
-
-    // An enroll correction ALSO performs the enrollment: the named entity is
-    // created (typed by the sighting's class) and the sighting's stored probe
-    // vector becomes its first enrolled reference. One seam serves MQTT, HTTP,
-    // and the CLI.
-    if request.correction_type == CorrectionType::Enroll {
-        let name = request.label.as_deref().unwrap_or_default();
-        crate::recognition::record_enrollment_from_correction(store, &request.detection_id, name)
-            .map_err(CorrectionError::WriteFailed)?;
-    }
 
     Ok(CorrectionReceipt {
         correction_id: correction_id.to_string(),
@@ -391,50 +394,16 @@ pub fn review_why(store: &Store, detection_id: &str) -> Result<WhyView, ReviewEr
         .map(|(_observed_at, _id, correction)| correction)
         .collect();
 
-    // Match provenance: the "recognition" observation anchored to this
-    // detection, when it matched. The enrolling correction is the Enroll
-    // correction whose label is the matched name.
-    let recognition = all_obs
-        .iter()
-        .filter(|obs| obs.observation_type == "recognition")
-        .find(|obs| {
-            obs.observed_properties
-                .get("anchored_detection_id")
-                .and_then(|v| v.as_str())
-                == Some(resp.observation_id.as_str())
-                && obs.observed_properties.get("matched") == Some(&serde_json::Value::Bool(true))
-        })
-        .and_then(|obs| {
-            let name = obs
-                .observed_properties
-                .get("matched_name")
-                .and_then(|v| v.as_str())?
-                .to_string();
-            let enrolled_by_correction_id = all_obs
-                .iter()
-                .find(|c| {
-                    c.observation_type == "correction"
-                        && c.observed_properties.get("correction_type")
-                            == Some(&serde_json::Value::String("Enroll".to_string()))
-                        && c.observed_properties.get("label")
-                            == Some(&serde_json::Value::String(name.clone()))
-                })
-                .map(|c| c.id.to_string());
-            Some(MatchProvenance {
-                name,
-                score: obs
-                    .observed_properties
-                    .get("score")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                reference_label: obs
-                    .observed_properties
-                    .get("reference_label")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                enrolled_by_correction_id,
-            })
+    // Match provenance via the shared read-surface helper (one implementation
+    // for HTTP why + CLI why).
+    let recognition =
+        crate::recognition::recognition_provenance(store, &resp.observation_id).map(|p| {
+            MatchProvenance {
+                name: p.name,
+                score: p.score,
+                reference_label: p.reference_label,
+                enrolled_by_correction_id: p.enrolled_by_correction_id,
+            }
         });
 
     Ok(WhyView {

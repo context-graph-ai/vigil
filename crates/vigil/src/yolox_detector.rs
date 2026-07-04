@@ -48,6 +48,10 @@ pub(crate) struct YoloxDetector {
     pub(crate) model_sha256: String,
     pub(crate) session_id: String,
     observer: Option<DetectorForwardProbe>,
+    /// COCO class indices this detector emits. Defaults to person only (the
+    /// baseline NVR behavior first-light depends on); recognition widens it to
+    /// the covered classes so a dog/vehicle sighting reaches the match path.
+    allowed_class_indices: Vec<usize>,
 }
 
 pub(crate) struct DetectorOutput {
@@ -123,16 +127,29 @@ pub(crate) fn run_detector_probe(args: Vec<OsString>) -> Result<(), String> {
 }
 
 pub(crate) fn load_detector(model: Option<&Path>) -> Result<YoloxDetector, String> {
+    load_detector_with_classes(model, &[PERSON_CLASS_INDEX])
+}
+
+pub(crate) fn load_detector_with_classes(
+    model: Option<&Path>,
+    allowed_class_indices: &[usize],
+) -> Result<YoloxDetector, String> {
     let model = model.ok_or_else(|| "detector model path is not configured".to_string())?;
     let model_sha256 = load_record(model)?;
     let device = Default::default();
     let model = load_yolox_tiny_from_checkpoint(model, &device)?;
+    let allowed = if allowed_class_indices.is_empty() {
+        vec![PERSON_CLASS_INDEX]
+    } else {
+        allowed_class_indices.to_vec()
+    };
     Ok(YoloxDetector {
         model,
         device,
         model_sha256,
         session_id: format!("detector-session-{}", event_seq()),
         observer: DetectorForwardProbe::from_env(),
+        allowed_class_indices: allowed,
     })
 }
 
@@ -184,7 +201,11 @@ fn detect_decoded_segment(
     let model_output: Tensor<Flex, 3> = detector.model.forward(tensor);
     let model_forward_sha256 = tensor_digest(model_output.clone());
     let detector_nms_sha256 = tensor_digest(model_output.clone());
-    let detections = run_nms(model_output, confidence_threshold as f32);
+    let detections = run_nms(
+        model_output,
+        confidence_threshold as f32,
+        &detector.allowed_class_indices,
+    );
     let result_sha256 = sha256_hex(result_digest_material(&detections).as_bytes());
     let seq = event_seq();
     let event = DetectorForwardEvent {
@@ -360,7 +381,11 @@ struct BackendDetection {
     bbox: BoundingBox,
 }
 
-fn run_nms(model_output: Tensor<Flex, 3>, confidence_threshold: f32) -> Vec<BackendDetection> {
+fn run_nms(
+    model_output: Tensor<Flex, 3>,
+    confidence_threshold: f32,
+    allowed_class_indices: &[usize],
+) -> Vec<BackendDetection> {
     let [batch_size, num_boxes, num_outputs] = model_output.dims();
     let boxes = model_output
         .clone()
@@ -387,7 +412,7 @@ fn run_nms(model_output: Tensor<Flex, 3>, confidence_threshold: f32) -> Vec<Back
                     })
                 })
         })
-        .filter(|detection| detection.class_index == PERSON_CLASS_INDEX)
+        .filter(|detection| allowed_class_indices.contains(&detection.class_index))
         .collect::<Vec<_>>();
     detections.sort_by(|left, right| {
         right
@@ -435,11 +460,91 @@ fn result_digest_material(detections: &[BackendDetection]) -> String {
         .join("|")
 }
 
+pub(crate) const COCO_CLASSES: [&str; 80] = [
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
+];
+
 fn coco_class_name(index: usize) -> &'static str {
-    match index {
-        PERSON_CLASS_INDEX => "person",
-        _ => "other",
-    }
+    COCO_CLASSES.get(index).copied().unwrap_or("other")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

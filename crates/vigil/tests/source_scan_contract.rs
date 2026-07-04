@@ -405,17 +405,27 @@ fn addon_config_exposes_recognition_options_and_schema() {
     let options = top_level_yaml_section(&addon_config, "options");
     let schema = top_level_yaml_section(&addon_config, "schema");
 
+    if yaml_section_contains_key(&options, "recognition_weights_dir") {
+        failures.push(format!(
+            "{} must not set options.recognition_weights_dir to null/empty by default; Home Assistant Supervisor treats optional strings as omitted, not nullable, and rejects the add-on before the owner can configure it",
+            addon_config_path.display()
+        ));
+    }
+
+    for key in ["recognition_space_id", "recognition_threshold"] {
+        if !yaml_section_contains_key(&options, key) {
+            failures.push(format!(
+                "{} must expose top-level options.{key} so a Home Assistant add-on user can see the active recognition setting",
+                addon_config_path.display()
+            ));
+        }
+    }
+
     for (key, expected_schema) in [
         ("recognition_weights_dir", "str?"),
         ("recognition_space_id", "str?"),
         ("recognition_threshold", "float?"),
     ] {
-        if !yaml_section_contains_key(&options, key) {
-            failures.push(format!(
-                "{} must expose top-level options.{key} so a Home Assistant add-on user can enable recognition from the add-on UI",
-                addon_config_path.display()
-            ));
-        }
         if !yaml_section_contains_entry(&schema, key, expected_schema) {
             failures.push(format!(
                 "{} must declare top-level schema.{key}: {expected_schema} so Home Assistant validates the recognition option",

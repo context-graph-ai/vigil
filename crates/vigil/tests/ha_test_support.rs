@@ -419,8 +419,12 @@ fn resolve_or_seed_template(minimum: usize) -> Result<PathBuf, String> {
         if count >= minimum {
             return Ok(data_dir);
         }
-        // Marker exists but store is stale/empty — remove marker and re-seed.
+        // Marker exists but store is stale/empty (e.g. seeded under an older
+        // cg schema version, which fails every open) — remove the marker AND
+        // the old data dir, else the seeder's children keep hitting the stale
+        // store and burn the full deadline without ever ingesting.
         let _ = fs::remove_file(&done_marker);
+        let _ = fs::remove_dir_all(&data_dir);
     }
 
     // ── Try to win the seeding race with an atomic O_CREAT|O_EXCL lock ───

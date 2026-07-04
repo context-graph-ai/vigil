@@ -17,7 +17,7 @@ use context_graph::{
 };
 use vigil::recognition::{
     MatchOutcome, RecognitionConfig, class_is_covered, crop_png, entity_type_for_class,
-    forget_named_entity, map_bbox_to_frame, match_crop, open_store_with_embedder,
+    forget_named_entity, map_bbox_to_frame, match_crop_for_class, open_store_with_embedder,
     record_enrollment, record_match_observation,
 };
 use vigil::{CorrectionRequest, CorrectionType, parse_command_topic, record_correction};
@@ -209,9 +209,6 @@ fn seed_detection(world: &World, class: &str) -> ObservationId {
 /// crop, match, record the match observation anchored to the detection.
 fn embed_match_record(world: &World, detection: ObservationId, crop: &[u8]) -> MatchOutcome {
     let embedder = HashEmbedder;
-    let outcome = match_crop(&world.store, &embedder, SPACE, world.context_id, crop, 0.6)
-        .expect("match runs");
-    let probe = hash_vector(crop);
     // The sighting's class comes from the seeded detection, exactly as the
     // runtime passes the detector's class — never assumed.
     let detection_row = world
@@ -224,6 +221,17 @@ fn embed_match_record(world: &World, detection: ObservationId, crop: &[u8]) -> M
         .and_then(|value| value.as_str())
         .expect("seeded detection carries its class")
         .to_string();
+    let outcome = match_crop_for_class(
+        &world.store,
+        &embedder,
+        SPACE,
+        world.context_id,
+        crop,
+        0.6,
+        &class,
+    )
+    .expect("match runs");
+    let probe = hash_vector(crop);
     record_match_observation(
         &world.store,
         world.camera_id,
@@ -466,6 +474,45 @@ fn animal_class_enrolls_and_matches_as_an_animal_entity() {
     let sighting = seed_detection(&world, "dog");
     let outcome = embed_match_record(&world, sighting, &crop);
     assert_eq!(outcome.name.as_deref(), Some("Max"));
+}
+
+#[test]
+fn vehicle_sighting_cannot_match_a_person_identity_even_with_identical_vector() {
+    let world = world("type-guard");
+    let crop = png(41);
+    let john_detection = seed_detection(&world, "person");
+    embed_match_record(&world, john_detection, &crop);
+    record_correction(
+        &world.store,
+        CorrectionRequest {
+            detection_id: john_detection.to_string(),
+            label: Some("John".to_string()),
+            correction_type: CorrectionType::Enroll,
+        },
+    )
+    .expect("enroll John");
+
+    let vehicle_detection = seed_detection(&world, "bicycle");
+    let outcome = embed_match_record(&world, vehicle_detection, &crop);
+
+    assert!(
+        outcome.name.is_none(),
+        "a bicycle crop must not resolve to a Person entity named John, even if its vector is identical; got {outcome:?}"
+    );
+    assert!(
+        outcome.score > 0.9,
+        "the guard must reject the high-scoring wrong entity type, not rely on score tuning"
+    );
+    let view = vigil::review_events(&world.store, 50).expect("review_events");
+    let row = view
+        .rows
+        .iter()
+        .find(|row| row.observation_id == vehicle_detection.to_string())
+        .expect("vehicle sighting row exists");
+    assert!(
+        row.entity_name.is_none(),
+        "the HA event row must not publish John for a vehicle detection"
+    );
 }
 
 // ── Deletion (AC6) ─────────────────────────────────────────────────────────

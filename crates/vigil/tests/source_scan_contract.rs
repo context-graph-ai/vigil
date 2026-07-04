@@ -412,10 +412,32 @@ fn addon_config_exposes_recognition_options_and_schema() {
         ));
     }
 
-    for key in ["recognition_space_id", "recognition_threshold"] {
+    for key in [
+        "recognition_space_id",
+        "recognition_threshold",
+        "recognition_covered_classes",
+    ] {
         if !yaml_section_contains_key(&options, key) {
             failures.push(format!(
                 "{} must expose top-level options.{key} so a Home Assistant add-on user can see the active recognition setting",
+                addon_config_path.display()
+            ));
+        }
+    }
+    for class_name in ["person", "dog"] {
+        let expected = format!("- {class_name}");
+        if !options.iter().any(|line| line.trim() == expected) {
+            failures.push(format!(
+                "{} must default options.recognition_covered_classes to include {class_name} for the John + Max owner smoke",
+                addon_config_path.display()
+            ));
+        }
+    }
+    for class_name in ["car", "truck", "bus", "motorcycle", "bicycle"] {
+        let forbidden = format!("- {class_name}");
+        if options.iter().any(|line| line.trim() == forbidden) {
+            failures.push(format!(
+                "{} must not default options.recognition_covered_classes to include traffic class {class_name}; traffic was auto-labeled as John during the owner smoke",
                 addon_config_path.display()
             ));
         }
@@ -432,6 +454,17 @@ fn addon_config_exposes_recognition_options_and_schema() {
                 addon_config_path.display()
             ));
         }
+    }
+    if !yaml_section_contains_key(&schema, "recognition_covered_classes")
+        || !schema.iter().any(|line| {
+            line.trim()
+                == "- \"list(person|dog|cat|bird|horse|sheep|cow|car|truck|bus|motorcycle|bicycle)\""
+        })
+    {
+        failures.push(format!(
+            "{} must declare schema.recognition_covered_classes as a Home Assistant list enum of supported COCO classes so the detector/recognizer allowlist is configurable outside Rust",
+            addon_config_path.display()
+        ));
     }
 
     if !failures.is_empty() {

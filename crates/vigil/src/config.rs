@@ -626,7 +626,8 @@ mod tests {
                 "store_path": tmp.path().join("store.contextgraph"),
                 "recognition_weights_dir": weights_dir,
                 "recognition_space_id": "vigil_site_vision_smoke",
-                "recognition_threshold": 0.73
+                "recognition_threshold": 0.73,
+                "recognition_covered_classes": ["person", "dog"]
             })
             .to_string(),
         )
@@ -652,6 +653,11 @@ mod tests {
             "vigil_site_vision_smoke"
         );
         assert_eq!(config.recognition.match_threshold, 0.73);
+        assert_eq!(
+            config.recognition.covered_classes,
+            vec!["person".to_string(), "dog".to_string()],
+            "recognition_covered_classes in add-on options must control the detector/recognizer class allowlist from HAOS, not require a Rust change"
+        );
         assert_eq!(
             crate::runtime::recognition_enabled_startup_line(&config.recognition),
             "recognition_enabled=true space=vigil_site_vision_smoke threshold=0.73",

@@ -25,7 +25,7 @@ use retina::client::{
     Credentials as RetinaCredentials, PlayOptions, Session, SessionOptions, SetupOptions,
 };
 use retina::codec::{CodecItem, FrameFormat};
-use rust_h265::{Decoder as H265Decoder, NalUnitType};
+use rust_h265::Decoder as H265Decoder;
 use sha2::{Digest, Sha256};
 use tokio::runtime::Builder;
 use url::Url;
@@ -522,52 +522,6 @@ fn segment_fps(declared_fps: f64, started_at: Option<tokio::time::Instant>, fram
         return 0.0;
     }
     frames as f64 / elapsed
-}
-
-fn h26x_contains_parameter_sets(codec: VideoCodec, unit: &[u8]) -> bool {
-    match codec {
-        VideoCodec::H264 => {
-            let mut has_sps = false;
-            let mut has_pps = false;
-            for nal in openh264::nal_units(unit) {
-                let Some(header) = h264_nal_header(nal) else {
-                    continue;
-                };
-                match header & 0x1f {
-                    7 => has_sps = true,
-                    8 => has_pps = true,
-                    _ => {}
-                }
-            }
-            has_sps && has_pps
-        }
-        VideoCodec::H265 => {
-            let mut has_vps = false;
-            let mut has_sps = false;
-            let mut has_pps = false;
-            for nal in rust_h265::parse_annex_b(unit) {
-                match nal.nal_unit_type {
-                    NalUnitType::Vps => has_vps = true,
-                    NalUnitType::Sps => has_sps = true,
-                    NalUnitType::Pps => has_pps = true,
-                    _ => {}
-                }
-            }
-            has_vps && has_sps && has_pps
-        }
-    }
-}
-
-fn h264_nal_header(nal: &[u8]) -> Option<u8> {
-    let mut zeros = 0usize;
-    for (index, byte) in nal.iter().copied().enumerate() {
-        match byte {
-            0 => zeros += 1,
-            1 if zeros >= 2 => return nal.get(index + 1).copied(),
-            _ => zeros = 0,
-        }
-    }
-    nal.first().copied()
 }
 
 pub(crate) enum StreamingDecoder {

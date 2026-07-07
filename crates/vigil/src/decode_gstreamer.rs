@@ -65,6 +65,7 @@ const KNOWN_SOFTWARE_DECODERS: &[&str] = &[
 pub struct GstreamerDecodeBackend {
     stream_id: StreamId,
     stream_epoch: u64,
+    codec: VideoCodec,
     pipeline: gst::Pipeline,
     appsrc: gst_app::AppSrc,
     appsink: gst_app::AppSink,
@@ -164,10 +165,16 @@ impl GstreamerDecodeBackend {
                     probe_status: crate::acceleration::ProbeStatus::Active,
                     failure_code: FailureCode::None,
                     evidence_kind: Some(EvidenceKind::SelectedBackend),
-                    evidence_fields: BTreeMap::from([(
-                        "selected_decoder".to_string(),
-                        element.clone(),
-                    )]),
+                    evidence_fields: BTreeMap::from([
+                        ("selected_decoder".to_string(), element.clone()),
+                        // Startup-probe cost: these real stream units were
+                        // consumed by the probe; the first segment starts at
+                        // the next parameter-set boundary (~one GOP).
+                        (
+                            "probe_units_consumed".to_string(),
+                            probe_sample.len().to_string(),
+                        ),
+                    ]),
                     action_kind: ActionKind::NoAction,
                     action_payload: None,
                 };
@@ -323,6 +330,7 @@ impl GstreamerDecodeBackend {
         Ok(Self {
             stream_id,
             stream_epoch,
+            codec,
             pipeline,
             appsrc,
             appsink,
@@ -342,6 +350,9 @@ impl GstreamerDecodeBackend {
                 expected: self.stream_epoch,
                 got: unit.stream_epoch,
             });
+        }
+        if unit.codec != self.codec {
+            return Err(DecodeBackendError::CodecViolation);
         }
         Ok(())
     }

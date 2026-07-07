@@ -346,7 +346,6 @@ fn doctor_decode_receipt_with_hardware_backend(
     use crate::media_pipeline::VideoCodec;
     use crate::workgraph::StreamId;
 
-    let _ = request;
     // Device access first: a blocked device is the actionable finding.
     let current_user = facts
         .env_var("USER")
@@ -398,7 +397,68 @@ fn doctor_decode_receipt_with_hardware_backend(
         0,
         &sample,
     ) {
-        Ok(selection) => selection.receipt,
+        Ok(selection) => {
+            let mut probe_receipt = selection.receipt;
+            if facts.effective_uid() == 0 {
+                // A root-run probe proves HOST capability only. Root-only
+                // access is never reported as runtime-active: the receipt
+                // stays active only when the resolved service user can also
+                // open the device group.
+                probe_receipt.evidence_fields.insert(
+                    "probed_as".to_string(),
+                    "root (host capability)".to_string(),
+                );
+                let service_user =
+                    match resolve_service_user(request.service_user_flag.as_deref(), facts) {
+                        ServiceUserResolution::Flag(user)
+                        | ServiceUserResolution::EnvVar(user)
+                        | ServiceUserResolution::SystemdUnit(user) => Some(user),
+                        ServiceUserResolution::Unresolved => None,
+                    };
+                let service_user_has_access = service_user.as_deref().is_some_and(|user| {
+                    facts.visible_render_devices().iter().all(|device| {
+                        let group = facts
+                            .device_facts(device)
+                            .map(|facts| facts.group)
+                            .unwrap_or_else(|| "render".to_string());
+                        facts
+                            .user_groups(user)
+                            .map(|groups| groups.iter().any(|g| g == &group))
+                            .unwrap_or(false)
+                    })
+                });
+                if !service_user_has_access {
+                    probe_receipt.probe_status = ProbeStatus::Fallback;
+                    probe_receipt.hardware_accelerated = false;
+                    probe_receipt.active_backend = "software".to_string();
+                    probe_receipt.failure_code = FailureCode::PermissionDenied;
+                    probe_receipt.evidence_kind = Some(EvidenceKind::ProcessCredentials);
+                    match service_user {
+                        Some(user) => {
+                            let group = facts
+                                .visible_render_devices()
+                                .first()
+                                .and_then(|device| facts.device_facts(device))
+                                .map(|facts| facts.group)
+                                .unwrap_or_else(|| "render".to_string());
+                            probe_receipt.action_kind = ActionKind::RunCommand;
+                            probe_receipt.action_payload = Some(format!(
+                                "sudo usermod -aG {group} {user}\nthen restart the vigil service"
+                            ));
+                        }
+                        None => {
+                            probe_receipt.action_kind = ActionKind::ManualActionRequired;
+                            probe_receipt.action_payload = Some(
+                                "host hardware decode works for root, but no service user \
+                                 could be resolved to verify runtime access"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            probe_receipt
+        }
         Err(fallback) => {
             receipt.probe_status = ProbeStatus::Fallback;
             receipt.failure_code = fallback.failure_code;

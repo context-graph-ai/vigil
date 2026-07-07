@@ -406,3 +406,50 @@ impl<T> BoundedStageQueue<T> {
         state.pending.drain(..).collect()
     }
 }
+
+/// Bounded, thread-safe log of the most recent stage receipts. The runtime
+/// records every stage attempt here; stats and operator surfaces render
+/// FROM these recorded receipts, so a printed id always references a real
+/// backend attempt.
+pub struct StageReceiptLog {
+    inner: Mutex<VecDeque<StageReceipt>>,
+    capacity: usize,
+    rejected_joins: AtomicU64,
+}
+
+impl StageReceiptLog {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(VecDeque::new()),
+            capacity: capacity.max(1),
+            rejected_joins: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record(&self, receipt: StageReceipt) {
+        let mut inner = self.inner.lock().expect("stage receipt log lock");
+        if inner.len() >= self.capacity {
+            inner.pop_front();
+        }
+        inner.push_back(receipt);
+    }
+
+    pub fn snapshot(&self) -> Vec<StageReceipt> {
+        self.inner
+            .lock()
+            .expect("stage receipt log lock")
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Count a result that failed `validate_result_join` — rejected work is
+    /// visible, never silent.
+    pub fn count_rejected_join(&self) {
+        self.rejected_joins.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn rejected_joins(&self) -> u64 {
+        self.rejected_joins.load(Ordering::SeqCst)
+    }
+}

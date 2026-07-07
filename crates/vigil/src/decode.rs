@@ -214,6 +214,8 @@ pub enum DecodeBackendError {
         got: u64,
     },
     StreamViolation,
+    /// The unit carries a different codec than this backend was opened for.
+    CodecViolation,
     Decode(String),
 }
 
@@ -268,6 +270,9 @@ impl SoftwareDecodeBackend {
                 got: unit.stream_epoch,
             });
         }
+        if unit.codec != self.codec {
+            return Err(DecodeBackendError::CodecViolation);
+        }
         Ok(())
     }
 }
@@ -305,7 +310,6 @@ impl DecodeBackend for SoftwareDecodeBackend {
         unit: &EncodedAccessUnit,
     ) -> Result<Vec<DecodedRgbFrame>, DecodeBackendError> {
         self.check_unit(unit)?;
-        let _ = self.codec;
         self.decoder
             .decode_unit(&unit.data)
             .map_err(DecodeBackendError::Decode)

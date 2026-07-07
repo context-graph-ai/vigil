@@ -64,6 +64,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let shutdown_flag = shutdown.flag();
     let health = HealthState::new();
     let accel = Arc::new(crate::acceleration::AccelerationState::new());
+    let stage_receipts = Arc::new(crate::workgraph::StageReceiptLog::new(64));
     let server = HealthServer::listen(
         config.health_port,
         health.clone(),
@@ -199,6 +200,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                         detection_publisher.clone(),
                         recognition_embedder.clone(),
                         accel.clone(),
+                        stage_receipts.clone(),
                     );
                     camera_handles.push(handle);
                 }
@@ -524,6 +526,7 @@ fn start_rtsp_probe(
     detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>>,
     recognition_embedder: Option<Arc<dyn context_graph::Embedder>>,
     accel: Arc<crate::acceleration::AccelerationState>,
+    receipts: Arc<crate::workgraph::StageReceiptLog>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         // Wait until enabled (respects startup disable marker).
@@ -625,6 +628,7 @@ fn start_rtsp_probe(
             let active_stream_generation = active_stream_generation.clone();
             let detection_publisher = detection_publisher.clone();
             let recognition_embedder = recognition_embedder.clone();
+            let receipts = receipts.clone();
             thread::spawn(move || {
                 let mut detector_total = 0_u64;
                 while !shutdown.load(Ordering::SeqCst) {
@@ -648,6 +652,9 @@ fn start_rtsp_probe(
                     println!("detector_invocations={detector_total}");
                     sleep_shutdown_aware(&shutdown, detector_work_delay);
                     let detector_started = Instant::now();
+                    let detection_started_at = chrono::Utc::now();
+                    let detection_work =
+                        derived_work(&segment.envelope, crate::workgraph::STAGE_DETECTION);
                     let output = detector.detect_segment(
                         &segment.media,
                         segment.clip_sha256.clone(),
@@ -664,32 +671,71 @@ fn start_rtsp_probe(
                     match output {
                         Ok(output) => {
                             println!("detector_detections={}", output.detections.len());
-                            stats.update(|stats| {
-                                crate::runtime_stats::push_recent_receipt(
-                                    stats,
-                                    format!(
-                                        "stage=detection work_id={} parent_work_id={} stream={} epoch={} seq={} detections={} receipt_id={}",
-                                        crate::workgraph::WorkId::generate(),
-                                        segment.work_id,
-                                        config.camera_name,
-                                        segment.stream_generation,
-                                        segment.sequence,
-                                        output.detections.len(),
-                                        crate::workgraph::ReceiptId::generate()
-                                    ),
-                                );
-                            });
-                            if let Err(error) = record_detected_events(
-                                &store,
-                                &config,
-                                &segment,
-                                &output,
-                                &stats,
-                                &health,
-                                detection_publisher.as_deref(),
-                                recognition_embedder.as_deref(),
+                            // The detection result joins back to its exact
+                            // work + recorded backend attempt, or it is
+                            // rejected — never guessed.
+                            let detector_backend = stats.snapshot().active_detector_backend;
+                            let detection_receipt = stage_receipt_for(
+                                &detection_work,
+                                crate::workgraph::STAGE_DETECTION,
+                                (!detector_backend.is_empty()).then_some(detector_backend),
+                                detection_started_at,
+                                output.detections.len() as u64,
+                                crate::workgraph::WorkDisposition::Completed,
+                            );
+                            let detection_result = crate::workgraph::ResultEnvelope {
+                                work_id: detection_work.work_id,
+                                parent_work_id: detection_work.parent_work_id,
+                                contributing_work_ids: detection_work.contributing_work_ids.clone(),
+                                stage: detection_work.stage.clone(),
+                                stream_id: detection_work.stream_id.clone(),
+                                media_item: detection_work.media_item,
+                                ordering: detection_work.ordering,
+                                observed_at: detection_work.observed_at,
+                                result_schema_version: detection_work.schema_version,
+                                receipt_id: detection_receipt.receipt_id,
+                            };
+                            match crate::workgraph::validate_result_join(
+                                &detection_work,
+                                &detection_result,
+                                Some(&detection_receipt),
                             ) {
-                                println!("record_detection_failed error={error}");
+                                Ok(()) => {
+                                    record_stage_receipt(
+                                        &receipts,
+                                        &stats,
+                                        detection_receipt,
+                                        &format!("detections={}", output.detections.len()),
+                                    );
+                                    if let Err(error) = record_detected_events(
+                                        &store,
+                                        &config,
+                                        &segment,
+                                        &output,
+                                        &stats,
+                                        &health,
+                                        detection_publisher.as_deref(),
+                                        recognition_embedder.as_deref(),
+                                        &detection_work,
+                                        &receipts,
+                                    ) {
+                                        println!("record_detection_failed error={error}");
+                                    }
+                                }
+                                Err(rejection) => {
+                                    receipts.count_rejected_join();
+                                    let mut rejected = detection_receipt;
+                                    rejected.disposition =
+                                        crate::workgraph::WorkDisposition::Rejected;
+                                    record_stage_receipt(
+                                        &receipts,
+                                        &stats,
+                                        rejected,
+                                        &format!("rejected={rejection:?}"),
+                                    );
+                                    println!("detection_result_rejected reason={rejection:?}");
+                                    let _ = fs::remove_file(&segment.path);
+                                }
                             }
                         }
                         Err(error) => {
@@ -703,6 +749,10 @@ fn start_rtsp_probe(
             })
         });
         let mut decoded_total = 0_u64;
+        // The active decode backend for this stream, as observed from the
+        // latest selection/fallback receipt. Receipt attribution reads it.
+        let current_decode_backend: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
         let mut reconnect_pending = false;
         let mut stream_generation = active_stream_generation.load(Ordering::SeqCst);
         let mut last_stationary_detector_scan: Option<Instant> = None;
@@ -723,6 +773,7 @@ fn start_rtsp_probe(
             let capture_frames = env_u64("VIGIL_CAPTURE_FRAMES").unwrap_or(48).max(1) as usize;
             let receipt_stats = stats.clone();
             let receipt_accel = accel.clone();
+            let receipt_backend = current_decode_backend.clone();
             let capture_result = media_pipeline::capture_rtsp_segments(
                 &rtsp_source,
                 capture_frames,
@@ -748,6 +799,9 @@ fn start_rtsp_probe(
                             receipt.failure_code.as_str()
                         );
                     }
+                    if let Ok(mut backend) = receipt_backend.lock() {
+                        *backend = Some(receipt.active_backend.clone());
+                    }
                     receipt_stats.update(|stats| {
                         if let Some(stream) = receipt.stream_id.as_ref() {
                             stats.active_decoder.insert(
@@ -769,7 +823,7 @@ fn start_rtsp_probe(
                     Ok(())
                 },
                 |media| {
-                    let segment = build_captured_segment(
+                    let mut segment = build_captured_segment(
                         media,
                         &config.data_dir,
                         &config.camera_name,
@@ -793,19 +847,23 @@ fn start_rtsp_probe(
                     set_ready_unless_latched_fault(&health, "RTSP ingest active");
                     reconnect_pending = false;
                     retry_delay_ms = retry_initial_ms;
+                    // Record the REAL decode stage attempt; the segment
+                    // carries its recorded receipt id into the graph.
+                    let decode_backend = current_decode_backend
+                        .lock()
+                        .ok()
+                        .and_then(|backend| backend.clone());
+                    let decode_receipt = stage_receipt_for(
+                        &segment.envelope,
+                        crate::workgraph::STAGE_DECODED_MEDIA,
+                        decode_backend,
+                        segment.observed_at,
+                        frames,
+                        crate::workgraph::WorkDisposition::Completed,
+                    );
+                    segment.decode_receipt_id = Some(decode_receipt.receipt_id);
+                    record_stage_receipt(&receipts, &stats, decode_receipt, "");
                     stats.update(|stats| {
-                        crate::runtime_stats::push_recent_receipt(
-                            stats,
-                            format!(
-                                "stage=decoded_media work_id={} parent_work_id=- stream={} epoch={} seq={} frames={} receipt_id={}",
-                                segment.work_id,
-                                config.camera_name,
-                                stream_generation,
-                                segment.sequence,
-                                frames,
-                                segment.decode_receipt_id
-                            ),
-                        );
                         let counters = detector_queue.counters();
                         stats.detector_queue = format!(
                             "depth={} capacity={} queued={} replaced={}",
@@ -820,10 +878,38 @@ fn start_rtsp_probe(
                         stationary_detector_interval,
                         last_stationary_detector_scan.map(|last| last.elapsed()),
                     );
+                    let motion_work =
+                        derived_work(&segment.envelope, crate::workgraph::STAGE_MOTION);
                     if decision == DetectorSegmentDecision::SuppressMotionGate {
                         println!("motion_gate_suppressed_segment=true");
+                        record_stage_receipt(
+                            &receipts,
+                            &stats,
+                            stage_receipt_for(
+                                &motion_work,
+                                crate::workgraph::STAGE_MOTION,
+                                None,
+                                segment.observed_at,
+                                0,
+                                crate::workgraph::WorkDisposition::Coalesced,
+                            ),
+                            "suppressed=true",
+                        );
                         let _ = fs::remove_file(&segment.path);
                     } else if detector_handle.is_some() {
+                        record_stage_receipt(
+                            &receipts,
+                            &stats,
+                            stage_receipt_for(
+                                &motion_work,
+                                crate::workgraph::STAGE_MOTION,
+                                None,
+                                segment.observed_at,
+                                motion_positive,
+                                crate::workgraph::WorkDisposition::Completed,
+                            ),
+                            "",
+                        );
                         if let DetectorSegmentDecision::Enqueue {
                             stationary_scan: true,
                         } = decision
@@ -947,6 +1033,87 @@ fn detection_acceleration_receipt(
     }
 }
 
+/// Record one stage attempt in the receipt log and surface its line in
+/// stats. The rendered ids come from the RECORDED receipt, never minted at
+/// print time.
+fn record_stage_receipt(
+    receipts: &crate::workgraph::StageReceiptLog,
+    stats: &RuntimeStatsState,
+    receipt: crate::workgraph::StageReceipt,
+    detail: &str,
+) {
+    let line = format!(
+        "stage={} work_id={} parent_work_id={} stream={} outputs={} disposition={:?} receipt_id={}{}{}",
+        receipt.stage,
+        receipt.work_id,
+        receipt
+            .parent_work_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        receipt.stream_id.as_str(),
+        receipt.output_count,
+        receipt.disposition,
+        receipt.receipt_id,
+        if detail.is_empty() { "" } else { " " },
+        detail
+    );
+    receipts.record(receipt);
+    stats.update(|stats| {
+        crate::runtime_stats::push_recent_receipt(stats, line.clone());
+    });
+}
+
+/// Build a stage receipt joined to its work envelope.
+#[allow(clippy::too_many_arguments)]
+fn stage_receipt_for(
+    work: &crate::workgraph::WorkEnvelope,
+    stage: &str,
+    active_backend: Option<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    output_count: u64,
+    disposition: crate::workgraph::WorkDisposition,
+) -> crate::workgraph::StageReceipt {
+    crate::workgraph::StageReceipt {
+        receipt_id: crate::workgraph::ReceiptId::generate(),
+        work_id: work.work_id,
+        parent_work_id: work.parent_work_id,
+        stage: crate::workgraph::StageId::new(stage),
+        stream_id: work.stream_id.clone(),
+        configured_backend: None,
+        attempted_backend: active_backend.clone(),
+        active_backend,
+        fallback_backend: None,
+        selected_device: None,
+        probe_result: None,
+        fallback_reason: None,
+        started_at,
+        ended_at: chrono::Utc::now(),
+        output_count,
+        disposition,
+    }
+}
+
+/// Derive one stage's work envelope from its parent.
+fn derived_work(
+    parent: &crate::workgraph::WorkEnvelope,
+    stage: &str,
+) -> crate::workgraph::WorkEnvelope {
+    crate::workgraph::WorkEnvelope {
+        work_id: crate::workgraph::WorkId::generate(),
+        parent_work_id: Some(parent.work_id),
+        contributing_work_ids: Vec::new(),
+        stage: crate::workgraph::StageId::new(stage),
+        stream_id: parent.stream_id.clone(),
+        media_item: parent.media_item,
+        ordering: parent.ordering,
+        observed_at: parent.observed_at,
+        received_at: chrono::Utc::now(),
+        priority: parent.priority,
+        deadline: parent.deadline,
+        schema_version: parent.schema_version,
+    }
+}
+
 fn sleep_shutdown_aware(shutdown: &AtomicBool, duration: Duration) {
     let started = Instant::now();
     while !shutdown.load(Ordering::SeqCst) && started.elapsed() < duration {
@@ -989,9 +1156,32 @@ fn build_captured_segment(
             staging_path.display()
         ));
     }
-    Ok(CapturedSegment {
+    let envelope = crate::workgraph::WorkEnvelope {
         work_id: crate::workgraph::WorkId::generate(),
-        decode_receipt_id: crate::workgraph::ReceiptId::generate(),
+        parent_work_id: None,
+        contributing_work_ids: Vec::new(),
+        stage: crate::workgraph::StageId::new(crate::workgraph::STAGE_DECODED_MEDIA),
+        stream_id: crate::workgraph::StreamId::new(camera_name.to_string()),
+        media_item: Some(crate::workgraph::MediaItemId::Segment {
+            segment_sequence: sequence,
+        }),
+        ordering: crate::workgraph::WorkOrdering {
+            stream_epoch: stream_generation,
+            stream_sequence: sequence,
+        },
+        observed_at: Some(observed_at),
+        received_at: chrono::Utc::now(),
+        priority: if motion_positive_frames > 0 {
+            crate::workgraph::WorkPriority::MOTION
+        } else {
+            crate::workgraph::WorkPriority::BACKGROUND
+        },
+        deadline: crate::workgraph::WorkDeadline::None,
+        schema_version: crate::workgraph::WORK_ENVELOPE_SCHEMA_VERSION,
+    };
+    Ok(CapturedSegment {
+        envelope,
+        decode_receipt_id: None,
         path: staging_path,
         final_path,
         source_ref: format!("vigil-edge:clip/{file_name}"),
@@ -1284,9 +1474,12 @@ fn detector_segment_decision(
 }
 
 struct CapturedSegment {
-    /// Work identity of the decoded_media stage item this segment is.
-    work_id: crate::workgraph::WorkId,
-    decode_receipt_id: crate::workgraph::ReceiptId,
+    /// The decoded_media work envelope this segment IS. Downstream stages
+    /// derive their work from it; receipts join back to it.
+    envelope: crate::workgraph::WorkEnvelope,
+    /// Receipt id of the RECORDED decode stage attempt (set when the decode
+    /// receipt is recorded, before the segment enters the graph).
+    decode_receipt_id: Option<crate::workgraph::ReceiptId>,
     path: PathBuf,
     final_path: PathBuf,
     source_ref: String,
@@ -1337,6 +1530,8 @@ fn record_detected_events(
     health: &HealthState,
     detection_publisher: Option<&crate::ha_mqtt_tasks::DetectionPublisher>,
     recognition_embedder: Option<&dyn context_graph::Embedder>,
+    detection_work: &crate::workgraph::WorkEnvelope,
+    receipts: &crate::workgraph::StageReceiptLog,
 ) -> Result<(), String> {
     if output.detections.is_empty() {
         let _ = fs::remove_file(&segment.path);
@@ -1369,6 +1564,19 @@ fn record_detected_events(
         let _ = fs::remove_file(&segment.path);
         return Err(error);
     }
+    record_stage_receipt(
+        receipts,
+        stats,
+        stage_receipt_for(
+            &derived_work(&segment.envelope, crate::workgraph::STAGE_CLIP_EVIDENCE),
+            crate::workgraph::STAGE_CLIP_EVIDENCE,
+            None,
+            segment.observed_at,
+            1,
+            crate::workgraph::WorkDisposition::Completed,
+        ),
+        "",
+    );
     let _ = fs::remove_file(&segment.path);
     for detection in output.detections.iter().take(1) {
         match record_one_event(store, &nodes, detection, output, segment, config) {
@@ -1384,6 +1592,7 @@ fn record_detected_events(
                 // Recognition: crop the sighting, embed it, match it against
                 // the site library, and record it into site memory. A failure
                 // here is loud but never drops the detection event.
+                let recognition_started_at = chrono::Utc::now();
                 let recognition = recognition_embedder.and_then(|embedder| {
                     recognize_detection(
                         store,
@@ -1396,6 +1605,22 @@ fn record_detected_events(
                         stats,
                     )
                 });
+                if recognition_embedder.is_some() {
+                    let matched = recognition.is_some();
+                    record_stage_receipt(
+                        receipts,
+                        stats,
+                        stage_receipt_for(
+                            &derived_work(detection_work, crate::workgraph::STAGE_RECOGNITION),
+                            crate::workgraph::STAGE_RECOGNITION,
+                            None,
+                            recognition_started_at,
+                            u64::from(matched),
+                            crate::workgraph::WorkDisposition::Completed,
+                        ),
+                        &format!("matched={matched}"),
+                    );
+                }
                 let (entity_name, match_score) = recognition
                     .map(|outcome| (outcome.name, Some(outcome.score)))
                     .unwrap_or((None, None));
@@ -1978,6 +2203,42 @@ mod tests {
             LatestSegmentRecv::Item(value) => panic!("unexpected pending segment {value}"),
         }
         assert_eq!(queue.push_latest(1), Err(1));
+    }
+
+    #[test]
+    fn runtime_detection_receipt_is_honest_for_this_artifact() {
+        // Guard for the production receipt builder (post-RED guard, not a
+        // criteria-coverage test): if a future artifact compiles an
+        // accelerated detector backend without updating this function, this
+        // pins the lie down. accelerated_detection=true on the CPU-only
+        // artifact is a backend_not_compiled FALLBACK; false is DISABLED.
+        let configured = super::detection_acceleration_receipt(true, "model-under-test");
+        assert!(configured.configured);
+        assert_eq!(
+            configured.probe_status,
+            crate::acceleration::ProbeStatus::Fallback
+        );
+        assert_eq!(
+            configured.failure_code,
+            crate::acceleration::FailureCode::BackendNotCompiled
+        );
+        assert_eq!(configured.active_backend, "burn-cpu");
+        assert!(!configured.hardware_accelerated);
+        assert_eq!(
+            configured.model_id.as_deref(),
+            Some("model-under-test"),
+            "the receipt names the model identity"
+        );
+
+        let disabled = super::detection_acceleration_receipt(false, "model-under-test");
+        assert_eq!(
+            disabled.probe_status,
+            crate::acceleration::ProbeStatus::Disabled
+        );
+        assert_eq!(
+            disabled.failure_code,
+            crate::acceleration::FailureCode::None
+        );
     }
 
     #[test]

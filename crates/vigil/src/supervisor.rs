@@ -285,12 +285,12 @@ mod tests {
     fn build_generic_camera_flow_step_payload_nests_advanced_fields() {
         // HA's generic-camera flow rejects a top-level rtsp_transport; rtsp_transport,
         // framerate, and verify_ssl live inside the REQUIRED `advanced` object.
-        let payload = build_generic_camera_flow_step_payload("rtsp://10.0.0.5:554/stream", None);
+        let payload = build_generic_camera_flow_step_payload("rtsp://192.0.2.5:554/stream", None);
         let v: serde_json::Value =
             serde_json::from_str(&payload).expect("flow step payload must be valid JSON");
         assert_eq!(
             v["stream_source"].as_str(),
-            Some("rtsp://10.0.0.5:554/stream"),
+            Some("rtsp://192.0.2.5:554/stream"),
             "step payload must carry the stream_source URL verbatim"
         );
         assert!(

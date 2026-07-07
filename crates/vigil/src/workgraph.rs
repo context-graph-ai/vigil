@@ -11,7 +11,7 @@
 //! a stable contract.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -218,8 +218,12 @@ pub enum JoinRejection {
     OrderingMismatch,
     ObservedAtMismatch,
     ParentMismatch,
-    SchemaIncompatible { result_schema_version: u32 },
+    SchemaIncompatible {
+        result_schema_version: u32,
+    },
     ReceiptMissing,
+    /// The referenced receipt was recorded for different work.
+    ReceiptMismatch,
 }
 
 /// A result joins only to the exact stream, media item, ordering, observed
@@ -231,8 +235,45 @@ pub fn validate_result_join(
     result: &ResultEnvelope,
     receipt: Option<&StageReceipt>,
 ) -> Result<(), JoinRejection> {
-    let _ = (work, result, receipt);
-    unimplemented!("scaffold: result-join validation is not implemented yet")
+    if result.result_schema_version != work.schema_version {
+        return Err(JoinRejection::SchemaIncompatible {
+            result_schema_version: result.result_schema_version,
+        });
+    }
+    if result.work_id != work.work_id {
+        return Err(JoinRejection::WorkIdMismatch);
+    }
+    if result.stage != work.stage {
+        return Err(JoinRejection::StageMismatch);
+    }
+    if result.stream_id != work.stream_id {
+        return Err(JoinRejection::StreamMismatch);
+    }
+    if result.media_item != work.media_item {
+        return Err(JoinRejection::MediaItemMismatch);
+    }
+    if result.ordering != work.ordering {
+        return Err(JoinRejection::OrderingMismatch);
+    }
+    if result.observed_at != work.observed_at {
+        return Err(JoinRejection::ObservedAtMismatch);
+    }
+    if result.parent_work_id != work.parent_work_id
+        || result.contributing_work_ids != work.contributing_work_ids
+    {
+        return Err(JoinRejection::ParentMismatch);
+    }
+    let Some(receipt) = receipt else {
+        return Err(JoinRejection::ReceiptMissing);
+    };
+    if receipt.receipt_id != result.receipt_id
+        || receipt.work_id != work.work_id
+        || receipt.stage != work.stage
+        || receipt.stream_id != work.stream_id
+    {
+        return Err(JoinRejection::ReceiptMismatch);
+    }
+    Ok(())
 }
 
 /// Counters for one bounded stage queue. Visible in stats; never silent.
@@ -261,15 +302,11 @@ pub struct BoundedStageQueue<T> {
     counters: QueueCountersState,
 }
 
-// Scaffold: fields are read once the queue implementation lands.
-#[allow(dead_code)]
 struct QueueState<T> {
     pending: VecDeque<T>,
     closed: bool,
 }
 
-// Scaffold: counters are read once the queue implementation lands.
-#[allow(dead_code)]
 #[derive(Default)]
 struct QueueCountersState {
     queued_total: AtomicU64,
@@ -297,28 +334,75 @@ impl<T> BoundedStageQueue<T> {
 
     /// Push, keeping the NEWEST work when full: the oldest pending item is
     /// returned to the caller as the replaced casualty (counted), so the
-    /// caller can release its resources visibly.
+    /// caller can release its resources visibly. `Err(item)` when closed.
     pub fn push_latest(&self, item: T) -> Result<Option<T>, T> {
-        let _ = item;
-        unimplemented!("scaffold: bounded stage queue push is not implemented yet")
+        let mut state = self.state.lock().expect("stage queue lock");
+        if state.closed {
+            self.counters
+                .rejected_closed_total
+                .fetch_add(1, Ordering::SeqCst);
+            return Err(item);
+        }
+        let replaced = if state.pending.len() >= self.capacity {
+            self.counters
+                .replaced_dropped_total
+                .fetch_add(1, Ordering::SeqCst);
+            state.pending.pop_front()
+        } else {
+            None
+        };
+        state.pending.push_back(item);
+        self.counters.queued_total.fetch_add(1, Ordering::SeqCst);
+        drop(state);
+        self.signal.notify_one();
+        Ok(replaced)
     }
 
     pub fn recv_timeout(&self, timeout: Duration) -> QueueRecv<T> {
-        let _ = timeout;
-        let _ = (&self.state, &self.signal);
-        unimplemented!("scaffold: bounded stage queue recv is not implemented yet")
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self.state.lock().expect("stage queue lock");
+        loop {
+            if let Some(item) = state.pending.pop_front() {
+                return QueueRecv::Item(item);
+            }
+            if state.closed {
+                return QueueRecv::Closed;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return QueueRecv::Timeout;
+            }
+            let (next, wait) = self
+                .signal
+                .wait_timeout(state, deadline - now)
+                .expect("stage queue lock");
+            state = next;
+            if wait.timed_out() && state.pending.is_empty() && !state.closed {
+                return QueueRecv::Timeout;
+            }
+        }
     }
 
     pub fn counters(&self) -> QueueCounters {
-        let _ = &self.counters;
-        unimplemented!("scaffold: bounded stage queue counters are not implemented yet")
+        let state = self.state.lock().expect("stage queue lock");
+        QueueCounters {
+            queued_total: self.counters.queued_total.load(Ordering::SeqCst),
+            replaced_dropped_total: self.counters.replaced_dropped_total.load(Ordering::SeqCst),
+            coalesced_total: self.counters.coalesced_total.load(Ordering::SeqCst),
+            rejected_closed_total: self.counters.rejected_closed_total.load(Ordering::SeqCst),
+            current_depth: state.pending.len() as u64,
+        }
     }
 
     pub fn close(&self) {
-        unimplemented!("scaffold: bounded stage queue close is not implemented yet")
+        let mut state = self.state.lock().expect("stage queue lock");
+        state.closed = true;
+        drop(state);
+        self.signal.notify_all();
     }
 
     pub fn drain(&self) -> Vec<T> {
-        unimplemented!("scaffold: bounded stage queue drain is not implemented yet")
+        let mut state = self.state.lock().expect("stage queue lock");
+        state.pending.drain(..).collect()
     }
 }

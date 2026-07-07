@@ -48,6 +48,11 @@ tokio = { version = "1", features = ["net", "rt", "time"] }
 toml = "0.9"
 url = "2.5"
 uuid = { version = "1", features = ["v4", "v7"] }
+# Hardware decode backend (feature-gated; native artifacts only — the
+# default static-musl build never compiles these).
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
 yolox-burn = { git = "https://github.com/tracel-ai/models.git", rev = "ec1b9e42e6692ef2b95f85c4ba783e07cd3d19af", package = "yolox-burn" }
 
 [dependencies]

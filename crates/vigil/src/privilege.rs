@@ -14,14 +14,35 @@ pub enum PrivilegeStep {
 
 /// Build the ordered privilege-drop plan from the run uid/gid plus the
 /// `VIGIL_RUN_SUPPLEMENTAL_GIDS` value (comma-separated numeric gids).
-/// An unparseable list fails loud; it is never silently ignored.
+/// An unparseable list fails loud; it is never silently ignored. Without
+/// the variable the plan still clears supplemental groups so the dropped
+/// process never inherits root's.
 pub fn privilege_drop_plan(
     uid: u32,
     gid: u32,
     supplemental_gids: Option<&str>,
 ) -> Result<Vec<PrivilegeStep>, String> {
-    let _ = (uid, gid, supplemental_gids);
-    unimplemented!("scaffold: privilege drop plan is not implemented yet")
+    let mut gids = Vec::new();
+    if let Some(list) = supplemental_gids {
+        for entry in list.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let parsed = entry.parse::<u32>().map_err(|error| {
+                format!(
+                    "VIGIL_RUN_SUPPLEMENTAL_GIDS entries must be numeric gids, \
+                     got {entry:?}: {error}"
+                )
+            })?;
+            gids.push(parsed);
+        }
+    }
+    Ok(vec![
+        PrivilegeStep::SetSupplementalGroups(gids),
+        PrivilegeStep::SetGid(gid),
+        PrivilegeStep::SetUid(uid),
+    ])
 }
 
 pub(crate) fn prepare_runtime_user(store_path: &Path) -> Result<(), String> {
@@ -59,19 +80,10 @@ fn drop_privileges(store_path: &Path, uid: u32, gid: u32) -> Result<(), String> 
     chown_if_exists(store_parent, uid, gid)?;
     chown_if_exists(store_path, uid, gid)?;
     chown_if_exists(&store_path.with_extension("lock"), uid, gid)?;
-    let setgid = unsafe { libc::setgid(gid) };
-    if setgid != 0 {
-        return Err(format!(
-            "setgid({gid}) failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let setuid = unsafe { libc::setuid(uid) };
-    if setuid != 0 {
-        return Err(format!(
-            "setuid({uid}) failed: {}",
-            std::io::Error::last_os_error()
-        ));
+    let supplemental = std::env::var("VIGIL_RUN_SUPPLEMENTAL_GIDS").ok();
+    let plan = privilege_drop_plan(uid, gid, supplemental.as_deref())?;
+    for step in plan {
+        execute_privilege_step(step)?;
     }
     let dumpable = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1) };
     if dumpable != 0 {
@@ -81,6 +93,43 @@ fn drop_privileges(store_path: &Path, uid: u32, gid: u32) -> Result<(), String> 
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn execute_privilege_step(step: PrivilegeStep) -> Result<(), String> {
+    match step {
+        PrivilegeStep::SetSupplementalGroups(gids) => {
+            let raw: Vec<libc::gid_t> = gids.iter().map(|gid| *gid as libc::gid_t).collect();
+            let result = unsafe { libc::setgroups(raw.len(), raw.as_ptr()) };
+            if result != 0 {
+                return Err(format!(
+                    "setgroups({gids:?}) failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(())
+        }
+        PrivilegeStep::SetGid(gid) => {
+            let result = unsafe { libc::setgid(gid) };
+            if result != 0 {
+                return Err(format!(
+                    "setgid({gid}) failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(())
+        }
+        PrivilegeStep::SetUid(uid) => {
+            let result = unsafe { libc::setuid(uid) };
+            if result != 0 {
+                return Err(format!(
+                    "setuid({uid}) failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(unix)]

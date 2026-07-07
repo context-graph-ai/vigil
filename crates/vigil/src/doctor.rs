@@ -65,8 +65,16 @@ pub fn resolve_service_user(
     flag_value: Option<&str>,
     facts: &dyn HostFacts,
 ) -> ServiceUserResolution {
-    let _ = (flag_value, facts);
-    unimplemented!("scaffold: service-user resolution is not implemented yet")
+    if let Some(user) = flag_value {
+        return ServiceUserResolution::Flag(user.to_string());
+    }
+    if let Some(user) = facts.env_var("VIGIL_SERVICE_USER") {
+        return ServiceUserResolution::EnvVar(user);
+    }
+    if let Some(user) = facts.systemd_service_user() {
+        return ServiceUserResolution::SystemdUnit(user);
+    }
+    ServiceUserResolution::Unresolved
 }
 
 /// One device-access finding: how the current process's access to a render
@@ -91,8 +99,86 @@ pub fn classify_device_access(
     path: &std::path::Path,
     current_user: &str,
 ) -> DeviceAccessFinding {
-    let _ = (facts, path, current_user);
-    unimplemented!("scaffold: device access classification is not implemented yet")
+    use crate::acceleration::{ActionKind, EvidenceKind, FailureCode};
+
+    let mut evidence_fields = BTreeMap::new();
+    evidence_fields.insert("path".to_string(), path.display().to_string());
+
+    let facts_for_device = facts.device_facts(path);
+    let visible =
+        facts.visible_render_devices().iter().any(|d| d == path) || facts_for_device.is_some();
+    if !visible {
+        return DeviceAccessFinding {
+            failure_code: FailureCode::NoDeviceVisible,
+            evidence_kind: EvidenceKind::DevicePath,
+            evidence_fields,
+            action_kind: ActionKind::ManualActionRequired,
+            action_payload: Some(
+                "no render/video device is visible to this process; check drivers, \
+                 VM passthrough, or container device mapping"
+                    .to_string(),
+            ),
+        };
+    }
+    if let Some(device) = &facts_for_device {
+        evidence_fields.insert("owner".to_string(), device.owner.clone());
+        evidence_fields.insert("group".to_string(), device.group.clone());
+        evidence_fields.insert("mode".to_string(), device.mode.clone());
+    }
+    evidence_fields.insert(
+        "effective_uid".to_string(),
+        facts.effective_uid().to_string(),
+    );
+    evidence_fields.insert(
+        "effective_gids".to_string(),
+        facts
+            .effective_gids()
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+
+    match facts.open_device(path) {
+        Ok(()) => DeviceAccessFinding {
+            failure_code: FailureCode::None,
+            evidence_kind: EvidenceKind::DevicePath,
+            evidence_fields,
+            action_kind: ActionKind::NoAction,
+            action_payload: None,
+        },
+        Err(DeviceOpenError::NotFound) => DeviceAccessFinding {
+            failure_code: FailureCode::NoDeviceVisible,
+            evidence_kind: EvidenceKind::DevicePath,
+            evidence_fields,
+            action_kind: ActionKind::ManualActionRequired,
+            action_payload: Some(
+                "the device path disappeared between listing and open".to_string(),
+            ),
+        },
+        Err(DeviceOpenError::PermissionDenied) => {
+            let group = facts_for_device
+                .as_ref()
+                .map(|device| device.group.clone())
+                .unwrap_or_else(|| "render".to_string());
+            DeviceAccessFinding {
+                failure_code: FailureCode::PermissionDenied,
+                evidence_kind: EvidenceKind::DevicePath,
+                evidence_fields,
+                action_kind: ActionKind::RunCommand,
+                action_payload: Some(format!(
+                    "sudo usermod -aG {group} {current_user}\nthen restart the vigil service (or log out and back in)"
+                )),
+            }
+        }
+        Err(DeviceOpenError::Other(error)) => DeviceAccessFinding {
+            failure_code: FailureCode::ProbeFailed,
+            evidence_kind: EvidenceKind::UpstreamError,
+            evidence_fields,
+            action_kind: ActionKind::ManualActionRequired,
+            action_payload: Some(error),
+        },
+    }
 }
 
 /// The doctor's structured output: one receipt per checked stage, rendered
@@ -118,18 +204,450 @@ pub struct DoctorRequest {
 /// Build the acceleration report from host facts + real probes. Pure with
 /// respect to `facts`; performs no host mutation ever.
 pub fn acceleration_report(request: &DoctorRequest, facts: &dyn HostFacts) -> DoctorReport {
-    let _ = (request, facts);
-    unimplemented!("scaffold: doctor acceleration report is not implemented yet")
+    use crate::acceleration::{
+        AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
+    };
+
+    let blank = |stage: AccelStage, configured: bool| AccelerationReceipt {
+        stage,
+        work_id: None,
+        parent_work_id: None,
+        stream_id: None,
+        media_item: None,
+        configured,
+        attempted_backend: "none".to_string(),
+        active_backend: match stage {
+            AccelStage::Decode => "software".to_string(),
+            AccelStage::Detection => "burn-cpu".to_string(),
+        },
+        hardware_accelerated: false,
+        selected_device: None,
+        codec: None,
+        model_id: None,
+        model_version: None,
+        input_shape: None,
+        probe_status: ProbeStatus::Disabled,
+        failure_code: FailureCode::None,
+        evidence_kind: None,
+        evidence_fields: BTreeMap::new(),
+        action_kind: ActionKind::NoAction,
+        action_payload: None,
+    };
+
+    // ── decode ──
+    let decode = if !request.hardware_decoding {
+        blank(AccelStage::Decode, false)
+    } else {
+        #[cfg(feature = "decode-gstreamer")]
+        {
+            doctor_decode_receipt_with_hardware_backend(request, facts, &blank)
+        }
+        #[cfg(not(feature = "decode-gstreamer"))]
+        {
+            // This artifact ships no native hardware decode runtime; that is
+            // the primary truth regardless of host devices. No device probe
+            // is attempted because the artifact could not use it anyway.
+            let mut receipt = blank(AccelStage::Decode, true);
+            receipt.probe_status = ProbeStatus::Fallback;
+            receipt.failure_code = FailureCode::UnsupportedByThisArtifact;
+            receipt.evidence_kind = Some(EvidenceKind::SelectedBackend);
+            receipt.evidence_fields.insert(
+                "compiled_decode_backends".to_string(),
+                "software".to_string(),
+            );
+            receipt.action_kind = ActionKind::InstallSupportedArtifact;
+            receipt.action_payload =
+                Some("install a hardware-enabled artifact, or keep software decode".to_string());
+            receipt
+        }
+    };
+
+    // ── detection ──
+    let detection = if !request.accelerated_detection {
+        blank(AccelStage::Detection, false)
+    } else {
+        // No accelerated Burn backend is compiled into this artifact today;
+        // when one exists this branch probes it with a real model forward.
+        let mut receipt = blank(AccelStage::Detection, true);
+        receipt.probe_status = ProbeStatus::Fallback;
+        receipt.failure_code = FailureCode::BackendNotCompiled;
+        receipt.evidence_kind = Some(EvidenceKind::SelectedBackend);
+        receipt
+            .evidence_fields
+            .insert("compiled_backends".to_string(), "burn-cpu".to_string());
+        receipt.action_kind = ActionKind::InstallSupportedArtifact;
+        receipt.action_payload = Some(
+            "install a build with an accelerated detector backend, or keep CPU fallback"
+                .to_string(),
+        );
+        receipt
+    };
+
+    // ── sudo-mode extras ──
+    let mut notes = BTreeMap::new();
+    if facts.effective_uid() == 0 {
+        match resolve_service_user(request.service_user_flag.as_deref(), facts) {
+            ServiceUserResolution::Unresolved => {
+                notes.insert(
+                    "service_user".to_string(),
+                    "manual_action_required: no --service-user flag, VIGIL_SERVICE_USER, or \
+                     vigil systemd unit User= identifies the runtime user; root capability \
+                     cannot be translated into a service-user fix"
+                        .to_string(),
+                );
+            }
+            resolution => {
+                let user = match &resolution {
+                    ServiceUserResolution::Flag(user)
+                    | ServiceUserResolution::EnvVar(user)
+                    | ServiceUserResolution::SystemdUnit(user) => user.clone(),
+                    ServiceUserResolution::Unresolved => unreachable!(),
+                };
+                for device in facts.visible_render_devices() {
+                    let device_group = facts
+                        .device_facts(&device)
+                        .map(|facts| facts.group)
+                        .unwrap_or_else(|| "render".to_string());
+                    let user_in_group = facts
+                        .user_groups(&user)
+                        .map(|groups| groups.iter().any(|group| group == &device_group))
+                        .unwrap_or(false);
+                    if !user_in_group {
+                        notes.insert(
+                            format!("service_user_access:{}", device.display()),
+                            format!(
+                                "run_command: sudo usermod -aG {device_group} {user} && \
+                                 restart the vigil service"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    DoctorReport {
+        decode,
+        detection,
+        notes,
+    }
+}
+
+#[cfg(feature = "decode-gstreamer")]
+fn doctor_decode_receipt_with_hardware_backend(
+    request: &DoctorRequest,
+    facts: &dyn HostFacts,
+    blank: &dyn Fn(
+        crate::acceleration::AccelStage,
+        bool,
+    ) -> crate::acceleration::AccelerationReceipt,
+) -> crate::acceleration::AccelerationReceipt {
+    use crate::acceleration::{AccelStage, ActionKind, EvidenceKind, FailureCode, ProbeStatus};
+    use crate::media_pipeline::VideoCodec;
+    use crate::workgraph::StreamId;
+
+    let _ = request;
+    // Device access first: a blocked device is the actionable finding.
+    let current_user = facts
+        .env_var("USER")
+        .unwrap_or_else(|| facts.effective_uid().to_string());
+    let mut device_finding: Option<DeviceAccessFinding> = None;
+    for device in facts.visible_render_devices() {
+        let finding = classify_device_access(facts, &device, &current_user);
+        if finding.failure_code == FailureCode::None {
+            device_finding = Some(finding);
+            break;
+        }
+        device_finding = Some(finding);
+    }
+    let devices = facts.visible_render_devices();
+
+    let mut receipt = blank(AccelStage::Decode, true);
+    receipt.attempted_backend = "gstreamer".to_string();
+
+    if devices.is_empty() {
+        receipt.probe_status = ProbeStatus::Fallback;
+        receipt.failure_code = FailureCode::NoDeviceVisible;
+        receipt.evidence_kind = Some(EvidenceKind::DevicePath);
+        receipt.action_kind = ActionKind::ManualActionRequired;
+        receipt.action_payload = Some(
+            "no render/video device is visible; check drivers, VM passthrough, or \
+             container device mapping"
+                .to_string(),
+        );
+        return receipt;
+    }
+    if let Some(finding) = device_finding
+        && finding.failure_code != FailureCode::None
+    {
+        receipt.probe_status = ProbeStatus::Fallback;
+        receipt.failure_code = finding.failure_code;
+        receipt.evidence_kind = Some(finding.evidence_kind);
+        receipt.evidence_fields = finding.evidence_fields;
+        receipt.action_kind = finding.action_kind;
+        receipt.action_payload = finding.action_payload;
+        return receipt;
+    }
+
+    // Device openable: run the same real decode probe the runtime uses, on a
+    // synthetic H.264 sample encoded in-process.
+    let sample = crate::decode_gstreamer::synthetic_h264_probe_sample();
+    match crate::decode_gstreamer::GstreamerDecodeBackend::probe_and_build(
+        StreamId::new("doctor-probe"),
+        VideoCodec::H264,
+        0,
+        &sample,
+    ) {
+        Ok(selection) => selection.receipt,
+        Err(fallback) => {
+            receipt.probe_status = ProbeStatus::Fallback;
+            receipt.failure_code = fallback.failure_code;
+            receipt.evidence_kind = Some(fallback.evidence_kind);
+            receipt.evidence_fields = fallback.evidence_fields;
+            receipt.action_kind = fallback.action_kind;
+            receipt.action_payload = fallback.action_payload;
+            receipt
+        }
+    }
 }
 
 /// Render the report in the fixed operator format (receipt blocks).
 pub fn render_report(report: &DoctorReport) -> String {
-    let _ = report;
-    unimplemented!("scaffold: doctor report rendering is not implemented yet")
+    let mut out = String::new();
+    out.push_str(&crate::acceleration::render_receipt_block(&report.decode));
+    out.push('\n');
+    out.push_str(&crate::acceleration::render_receipt_block(
+        &report.detection,
+    ));
+    for (check, note) in &report.notes {
+        out.push('\n');
+        out.push_str(&format!("[{check}]\n{note}\n"));
+    }
+    out
 }
 
 /// CLI entry point for `vigil doctor acceleration`.
 pub fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
-    let _ = args;
-    unimplemented!("scaffold: doctor CLI is not implemented yet")
+    let mut area: Option<String> = None;
+    let mut service_user_flag: Option<String> = None;
+    let mut passthrough: Vec<std::ffi::OsString> = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let text = arg.to_string_lossy().to_string();
+        match text.as_str() {
+            "--service-user" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--service-user requires a value".to_string())?;
+                service_user_flag = Some(value.to_string_lossy().to_string());
+            }
+            _ if area.is_none() && !text.starts_with('-') => area = Some(text),
+            _ => passthrough.push(arg),
+        }
+    }
+    match area.as_deref() {
+        Some("acceleration") => {}
+        _ => {
+            return Err(
+                "usage: vigil doctor acceleration [--service-user USER] [run options]".to_string(),
+            );
+        }
+    }
+
+    let config = crate::config::load(passthrough)?;
+    let request = DoctorRequest {
+        hardware_decoding: config.hardware_decoding,
+        accelerated_detection: config.accelerated_detection,
+        service_user_flag,
+        detector_model_path: config.detector_model_path.clone(),
+    };
+    let facts = RealHostFacts;
+    let report = acceleration_report(&request, &facts);
+    println!("{}", render_report(&report));
+    Ok(())
+}
+
+/// Live host facts for the real doctor run. Read-only by construction.
+struct RealHostFacts;
+
+impl HostFacts for RealHostFacts {
+    fn effective_uid(&self) -> u32 {
+        #[cfg(unix)]
+        unsafe {
+            libc::geteuid()
+        }
+        #[cfg(not(unix))]
+        0
+    }
+
+    fn effective_gids(&self) -> Vec<u32> {
+        #[cfg(unix)]
+        {
+            let mut gids = vec![0 as libc::gid_t; 64];
+            let count = unsafe { libc::getgroups(gids.len() as i32, gids.as_mut_ptr()) };
+            if count >= 0 {
+                gids.truncate(count as usize);
+                let mut all: Vec<u32> = gids.into_iter().collect();
+                let egid = unsafe { libc::getegid() } as u32;
+                if !all.contains(&egid) {
+                    all.push(egid);
+                }
+                return all;
+            }
+            Vec::new()
+        }
+        #[cfg(not(unix))]
+        Vec::new()
+    }
+
+    fn visible_render_devices(&self) -> Vec<PathBuf> {
+        let mut devices = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with("renderD") {
+                    devices.push(entry.path());
+                }
+            }
+        }
+        devices.sort();
+        devices
+    }
+
+    fn device_facts(&self, path: &std::path::Path) -> Option<DeviceFacts> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = std::fs::metadata(path).ok()?;
+            Some(DeviceFacts {
+                owner: lookup_user_name(metadata.uid())
+                    .unwrap_or_else(|| metadata.uid().to_string()),
+                group: lookup_group_name(metadata.gid())
+                    .unwrap_or_else(|| metadata.gid().to_string()),
+                mode: format_mode(metadata.mode()),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            None
+        }
+    }
+
+    fn open_device(&self, path: &std::path::Path) -> Result<(), DeviceOpenError> {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                Err(DeviceOpenError::PermissionDenied)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(DeviceOpenError::NotFound)
+            }
+            Err(error) => Err(DeviceOpenError::Other(error.to_string())),
+        }
+    }
+
+    fn env_var(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    fn systemd_service_user(&self) -> Option<String> {
+        for unit_path in [
+            "/etc/systemd/system/vigil.service",
+            "/lib/systemd/system/vigil.service",
+            "/usr/lib/systemd/system/vigil.service",
+        ] {
+            if let Ok(unit) = std::fs::read_to_string(unit_path) {
+                for line in unit.lines() {
+                    let line = line.trim();
+                    if let Some(user) = line.strip_prefix("User=") {
+                        let user = user.trim();
+                        if !user.is_empty() {
+                            return Some(user.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn user_groups(&self, user: &str) -> Option<Vec<String>> {
+        let group_file = std::fs::read_to_string("/etc/group").ok()?;
+        let mut groups = Vec::new();
+        for line in group_file.lines() {
+            let mut fields = line.split(':');
+            let group_name = fields.next()?;
+            let _password = fields.next();
+            let _gid = fields.next();
+            if let Some(members) = fields.next()
+                && members.split(',').any(|member| member.trim() == user)
+            {
+                groups.push(group_name.to_string());
+            }
+        }
+        Some(groups)
+    }
+}
+
+#[cfg(unix)]
+fn lookup_user_name(uid: u32) -> Option<String> {
+    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in passwd.lines() {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let _password = fields.next();
+        if let Some(entry_uid) = fields.next()
+            && entry_uid.parse::<u32>().ok() == Some(uid)
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn lookup_group_name(gid: u32) -> Option<String> {
+    let group_file = std::fs::read_to_string("/etc/group").ok()?;
+    for line in group_file.lines() {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let _password = fields.next();
+        if let Some(entry_gid) = fields.next()
+            && entry_gid.parse::<u32>().ok() == Some(gid)
+        {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+fn format_mode(mode: u32) -> String {
+    let file_type = if mode & libc::S_IFMT == libc::S_IFCHR {
+        'c'
+    } else {
+        '-'
+    };
+    let bits = [
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
+    ];
+    let mut out = String::new();
+    out.push(file_type);
+    for (bit, ch) in bits {
+        out.push(if mode & bit != 0 { ch } else { '-' });
+    }
+    out
 }

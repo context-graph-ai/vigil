@@ -174,8 +174,60 @@ pub struct AccelerationReceipt {
 ///   ...
 /// ```
 pub fn render_receipt_block(receipt: &AccelerationReceipt) -> String {
-    let _ = receipt;
-    unimplemented!("scaffold: receipt rendering is not implemented yet")
+    let mut block = String::new();
+    let header = match receipt.stage {
+        AccelStage::Decode => "[decode.hardware]",
+        AccelStage::Detection => "[detect.acceleration]",
+    };
+    block.push_str(header);
+    block.push('\n');
+    block.push_str(&format!("configured: {}\n", receipt.configured));
+    block.push_str(&format!("status: {}\n", receipt.probe_status.as_str()));
+    block.push_str(&format!(
+        "attempted_backend: {}\n",
+        receipt.attempted_backend
+    ));
+    block.push_str(&format!("active_backend: {}\n", receipt.active_backend));
+    block.push_str(&format!(
+        "hardware_accelerated: {}\n",
+        receipt.hardware_accelerated
+    ));
+    if let Some(device) = &receipt.selected_device {
+        block.push_str(&format!("selected_device: {device}\n"));
+    }
+    if let Some(codec) = &receipt.codec {
+        block.push_str(&format!("codec: {codec}\n"));
+    }
+    if let Some(model_id) = &receipt.model_id {
+        block.push_str(&format!("model_id: {model_id}\n"));
+    }
+    if let Some(model_version) = &receipt.model_version {
+        block.push_str(&format!("model_version: {model_version}\n"));
+    }
+    if let Some(input_shape) = &receipt.input_shape {
+        block.push_str(&format!("input_shape: {input_shape}\n"));
+    }
+    block.push_str(&format!(
+        "failure_code: {}\n",
+        receipt.failure_code.as_str()
+    ));
+    if let Some(evidence_kind) = receipt.evidence_kind {
+        block.push_str(&format!("evidence_kind: {}\n", evidence_kind.as_str()));
+    }
+    if !receipt.evidence_fields.is_empty() {
+        block.push_str("evidence_fields:\n");
+        for (key, value) in &receipt.evidence_fields {
+            block.push_str(&format!("  {key}: {value}\n"));
+        }
+    }
+    block.push_str(&format!("action_kind: {}\n", receipt.action_kind.as_str()));
+    if let Some(action_payload) = &receipt.action_payload {
+        block.push_str("action_payload:\n");
+        for line in action_payload.lines() {
+            block.push_str(&format!("  {line}\n"));
+        }
+    }
+    block
 }
 
 /// Health degradation derived from the latest receipts: configured-true but
@@ -193,8 +245,6 @@ pub struct AccelerationState {
     inner: Mutex<AccelerationStateInner>,
 }
 
-// Scaffold: fields are read once the state implementation lands.
-#[allow(dead_code)]
 #[derive(Default)]
 struct AccelerationStateInner {
     receipts: Vec<AccelerationReceipt>,
@@ -206,39 +256,101 @@ impl AccelerationState {
         Self::default()
     }
 
+    /// One slot per (stage, stream): the latest receipt wins.
+    fn slot_key(receipt: &AccelerationReceipt) -> String {
+        format!(
+            "{}::{}",
+            receipt.stage.as_str(),
+            receipt
+                .stream_id
+                .as_ref()
+                .map(StreamId::as_str)
+                .unwrap_or("")
+        )
+    }
+
+    /// What a log line for this receipt would deduplicate on: the slot plus
+    /// the observed outcome (status + failure + active backend).
+    fn log_key(receipt: &AccelerationReceipt) -> String {
+        format!(
+            "{}::{}::{}::{}",
+            Self::slot_key(receipt),
+            receipt.probe_status.as_str(),
+            receipt.failure_code.as_str(),
+            receipt.active_backend
+        )
+    }
+
     /// Record the latest receipt for its (stream, stage) slot.
     pub fn record(&self, receipt: AccelerationReceipt) {
-        let _ = receipt;
-        let _ = &self.inner;
-        unimplemented!("scaffold: acceleration state recording is not implemented yet")
+        let mut inner = self.inner.lock().expect("acceleration state lock");
+        let key = Self::slot_key(&receipt);
+        let log_key = Self::log_key(&receipt);
+        *inner.log_budget.entry(log_key).or_insert(0) += 1;
+        if let Some(existing) = inner
+            .receipts
+            .iter_mut()
+            .find(|existing| Self::slot_key(existing) == key)
+        {
+            *existing = receipt;
+        } else {
+            inner.receipts.push(receipt);
+        }
     }
 
     /// The active decoder backend for one stream, from observed receipts.
     pub fn active_decoder(&self, stream_id: &StreamId) -> Option<String> {
-        let _ = stream_id;
-        unimplemented!("scaffold: active decoder lookup is not implemented yet")
+        let inner = self.inner.lock().expect("acceleration state lock");
+        inner
+            .receipts
+            .iter()
+            .find(|receipt| {
+                receipt.stage == AccelStage::Decode && receipt.stream_id.as_ref() == Some(stream_id)
+            })
+            .map(|receipt| receipt.active_backend.clone())
     }
 
     /// The active detector backend, from observed receipts.
     pub fn active_detector_backend(&self) -> Option<String> {
-        unimplemented!("scaffold: active detector backend lookup is not implemented yet")
+        let inner = self.inner.lock().expect("acceleration state lock");
+        inner
+            .receipts
+            .iter()
+            .find(|receipt| receipt.stage == AccelStage::Detection)
+            .map(|receipt| receipt.active_backend.clone())
     }
 
     /// Degradations for the health surface: configured-but-fallback stages.
     pub fn health_degradations(&self) -> Vec<Degradation> {
-        unimplemented!("scaffold: health degradations are not implemented yet")
+        let inner = self.inner.lock().expect("acceleration state lock");
+        inner
+            .receipts
+            .iter()
+            .filter(|receipt| receipt.configured && receipt.probe_status == ProbeStatus::Fallback)
+            .map(|receipt| Degradation {
+                stage: receipt.stage,
+                reason: format!(
+                    "{} configured but {} active ({})",
+                    receipt.attempted_backend,
+                    receipt.active_backend,
+                    receipt.failure_code.as_str()
+                ),
+            })
+            .collect()
     }
 
     /// Bounded logging decision: one startup/backend-selection line per
     /// stream/codec plus bounded fallback lines per distinct reason — never
-    /// per-frame spam.
+    /// per-frame spam. Logs only when this exact outcome has not been
+    /// recorded for its slot before.
     pub fn should_log(&self, receipt: &AccelerationReceipt) -> bool {
-        let _ = receipt;
-        unimplemented!("scaffold: bounded log budgeting is not implemented yet")
+        let inner = self.inner.lock().expect("acceleration state lock");
+        !inner.log_budget.contains_key(&Self::log_key(receipt))
     }
 
     /// Latest receipts snapshot (doctor and stats rendering input).
     pub fn snapshot(&self) -> Vec<AccelerationReceipt> {
-        unimplemented!("scaffold: acceleration snapshot is not implemented yet")
+        let inner = self.inner.lock().expect("acceleration state lock");
+        inner.receipts.clone()
     }
 }

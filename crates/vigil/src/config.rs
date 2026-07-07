@@ -96,6 +96,8 @@ struct PartialConfig {
     recognition_space_id: Option<String>,
     recognition_threshold: Option<f64>,
     recognition_covered_classes: Option<Vec<String>>,
+    hardware_decoding: Option<bool>,
+    accelerated_detection: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -117,6 +119,8 @@ struct CliOverrides {
     detector_sample_frames: Option<usize>,
     detector_stationary_interval_secs: Option<u64>,
     recognition_weights_dir: Option<PathBuf>,
+    hardware_decoding: Option<bool>,
+    accelerated_detection: Option<bool>,
 }
 
 pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
@@ -162,6 +166,8 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             recognition_space_id: None,
             recognition_threshold: None,
             recognition_covered_classes: None,
+            hardware_decoding: cli.hardware_decoding,
+            accelerated_detection: cli.accelerated_detection,
         },
     );
     merge(&mut partial, env_overrides()?);
@@ -278,9 +284,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         mqtt,
         service_id,
         recognition,
-        // Scaffold state: intent parsing lands with the implementation.
-        hardware_decoding: false,
-        accelerated_detection: false,
+        // Intent booleans: absent means true (probe, use only on a
+        // passed probe, fall back visibly).
+        hardware_decoding: partial.hardware_decoding.unwrap_or(true),
+        accelerated_detection: partial.accelerated_detection.unwrap_or(true),
     })
 }
 
@@ -337,6 +344,12 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
                     format!("--detector-stationary-interval-secs must be an integer: {error}")
                 })?);
             }
+            "--hardware-decoding" => {
+                cli.hardware_decoding = Some(next_bool(&mut iter, "--hardware-decoding")?)
+            }
+            "--accelerated-detection" => {
+                cli.accelerated_detection = Some(next_bool(&mut iter, "--accelerated-detection")?)
+            }
             "--help" | "-h" => return Err(run_usage()),
             other => return Err(format!("{other} is not a supported run option")),
         }
@@ -371,6 +384,29 @@ fn next_port(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<u1
         .to_string_lossy()
         .parse::<u16>()
         .map_err(|error| format!("{flag} must be a TCP port: {error}"))
+}
+
+fn next_bool(iter: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<bool, String> {
+    let value = next_string(iter, flag)?;
+    parse_intent_bool(&value).ok_or_else(|| format!("{flag} must be true or false, got {value}"))
+}
+
+/// Intent booleans accept exactly true/false (case-insensitive).
+fn parse_intent_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn env_intent_bool(name: &str) -> Result<Option<bool>, String> {
+    match std::env::var(name) {
+        Ok(value) => parse_intent_bool(&value)
+            .map(Some)
+            .ok_or_else(|| format!("{name} must be true or false, got {value}")),
+        Err(_) => Ok(None),
+    }
 }
 
 fn validate_confidence_threshold(value: f64) -> Result<f64, String> {
@@ -481,6 +517,8 @@ fn env_overrides() -> Result<PartialConfig, String> {
             .or_else(|| std::env::var("MQTT_USERNAME").ok()),
         mqtt_password: std::env::var("MQTT_PASSWORD").ok(),
         service_id: std::env::var("VIGIL_SERVICE_ID").ok(),
+        hardware_decoding: env_intent_bool("VIGIL_HARDWARE_DECODING")?,
+        accelerated_detection: env_intent_bool("VIGIL_ACCELERATED_DETECTION")?,
         // Multi-camera list is not configurable via env vars; comes from config file only.
         cameras: None,
     })
@@ -562,6 +600,12 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.service_id.is_some() {
         target.service_id = source.service_id;
     }
+    if source.hardware_decoding.is_some() {
+        target.hardware_decoding = source.hardware_decoding;
+    }
+    if source.accelerated_detection.is_some() {
+        target.accelerated_detection = source.accelerated_detection;
+    }
 }
 
 /// Derive a stable lowercase slug from a human-readable string.
@@ -594,7 +638,7 @@ fn default_options_json_path() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL]"
         .to_string()
 }
 

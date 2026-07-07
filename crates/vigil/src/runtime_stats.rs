@@ -36,6 +36,35 @@ pub(crate) struct RuntimeStats {
     pub(crate) embed_latency_max_ms: f64,
     pub(crate) health: String,
     pub(crate) ingest_signal: String,
+    /// Active decode backend per stream, from observed receipts.
+    #[serde(default)]
+    pub(crate) active_decoder: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) active_detector_backend: String,
+    /// probe_status:failure_code from the latest decode receipt.
+    #[serde(default)]
+    pub(crate) decode_acceleration: String,
+    #[serde(default)]
+    pub(crate) detection_acceleration: String,
+    /// Detector stage queue: depth/capacity/queued/replaced counters.
+    #[serde(default)]
+    pub(crate) detector_queue: String,
+    /// Recent work-graph stage receipts (bounded, newest last).
+    #[serde(default)]
+    pub(crate) recent_work_receipts: Vec<String>,
+}
+
+/// Bounded push for the recent-receipts window.
+pub(crate) fn push_recent_receipt(stats: &mut RuntimeStats, line: String) {
+    const RECENT_WORK_RECEIPTS: usize = 16;
+    stats.recent_work_receipts.push(line);
+    let excess = stats
+        .recent_work_receipts
+        .len()
+        .saturating_sub(RECENT_WORK_RECEIPTS);
+    if excess > 0 {
+        stats.recent_work_receipts.drain(..excess);
+    }
 }
 
 impl Default for RuntimeStats {
@@ -65,6 +94,12 @@ impl Default for RuntimeStats {
             embed_latency_max_ms: 0.0,
             health: "ready".to_string(),
             ingest_signal: "ok".to_string(),
+            active_decoder: std::collections::BTreeMap::new(),
+            active_detector_backend: String::new(),
+            decode_acceleration: String::new(),
+            detection_acceleration: String::new(),
+            detector_queue: String::new(),
+            recent_work_receipts: Vec::new(),
         }
     }
 }
@@ -113,7 +148,7 @@ fn snapshot_path(data_dir: &Path) -> PathBuf {
 }
 
 pub(crate) fn format_stats(stats: &RuntimeStats) -> String {
-    format!(
+    let base = format!(
         "frames-received={}\n\
 detector-invocations={}\n\
 detections-emitted={}\n\
@@ -163,5 +198,34 @@ telemetry-sink=local\n",
         stats.embed_latency_max_ms,
         stats.health,
         stats.ingest_signal
-    )
+    );
+    let mut out = base;
+    for (stream, backend) in &stats.active_decoder {
+        out.push_str(&format!("active-decoder[{stream}]={backend}\n"));
+    }
+    if !stats.active_detector_backend.is_empty() {
+        out.push_str(&format!(
+            "active-detector-backend={}\n",
+            stats.active_detector_backend
+        ));
+    }
+    if !stats.decode_acceleration.is_empty() {
+        out.push_str(&format!(
+            "decode-acceleration={}\n",
+            stats.decode_acceleration
+        ));
+    }
+    if !stats.detection_acceleration.is_empty() {
+        out.push_str(&format!(
+            "detection-acceleration={}\n",
+            stats.detection_acceleration
+        ));
+    }
+    if !stats.detector_queue.is_empty() {
+        out.push_str(&format!("detector-queue={}\n", stats.detector_queue));
+    }
+    for receipt in &stats.recent_work_receipts {
+        out.push_str(&format!("work-receipt={receipt}\n"));
+    }
+    out
 }

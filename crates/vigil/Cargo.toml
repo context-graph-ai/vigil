@@ -47,9 +47,16 @@ toml.workspace = true
 url.workspace = true
 uuid.workspace = true
 yolox-burn.workspace = true
+gstreamer = { workspace = true, optional = true }
+gstreamer-app = { workspace = true, optional = true }
+gstreamer-video = { workspace = true, optional = true }
 
 [features]
 default = []
+# Hardware video decode through the system GStreamer stack. Compiled only
+# into native (dynamically linked) artifacts; the static-musl artifact stays
+# software-only and reports unsupported_by_this_artifact honestly.
+decode-gstreamer = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 # Slow deterministic camera/detector first-light acceptance. Keep this out of
 # the default workspace gate; run with `cargo test-first-light`.
 first-light-acceptance = []

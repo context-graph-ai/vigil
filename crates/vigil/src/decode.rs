@@ -50,6 +50,8 @@ pub struct AccessUnitAssembler {
     stream_id: StreamId,
     codec: VideoCodec,
     stream_epoch: u64,
+    next_sequence: u64,
+    previous_parameter_sets: Option<Vec<u8>>,
 }
 
 impl AccessUnitAssembler {
@@ -58,6 +60,8 @@ impl AccessUnitAssembler {
             stream_id,
             codec,
             stream_epoch,
+            next_sequence: 0,
+            previous_parameter_sets: None,
         }
     }
 
@@ -70,10 +74,99 @@ impl AccessUnitAssembler {
         discontinuity: bool,
         segment_sequence: u64,
     ) -> EncodedAccessUnit {
-        let _ = (data, media_timestamp, discontinuity, segment_sequence);
-        let _ = (&self.stream_id, self.codec, self.stream_epoch);
-        unimplemented!("scaffold: access-unit assembly is not implemented yet")
+        let codec_config = extract_parameter_sets(self.codec, &data);
+        let format_change = match (&codec_config, &self.previous_parameter_sets) {
+            (Some(current), Some(previous)) => current != previous,
+            _ => false,
+        };
+        if let Some(current) = &codec_config {
+            self.previous_parameter_sets = Some(current.clone());
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        EncodedAccessUnit {
+            stream_id: self.stream_id.clone(),
+            stream_epoch: self.stream_epoch,
+            codec: self.codec,
+            keyframe: unit_carries_keyframe(self.codec, &data),
+            codec_config,
+            media_timestamp,
+            sequence,
+            discontinuity,
+            format_change,
+            segment_sequence,
+            data,
+        }
     }
+}
+
+/// Concatenated parameter-set NAL bytes (SPS/PPS for H.264, VPS/SPS/PPS for
+/// H.265) when the unit carries codec configuration.
+fn extract_parameter_sets(codec: VideoCodec, unit: &[u8]) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    match codec {
+        VideoCodec::H264 => {
+            for nal in openh264::nal_units(unit) {
+                if let Some(header) = annex_b_nal_header(nal)
+                    && matches!(header & 0x1f, 7 | 8)
+                {
+                    bytes.extend_from_slice(nal);
+                }
+            }
+        }
+        VideoCodec::H265 => {
+            use rust_h265::NalUnitType;
+            for nal in rust_h265::parse_annex_b(unit) {
+                if matches!(
+                    nal.nal_unit_type,
+                    NalUnitType::Vps | NalUnitType::Sps | NalUnitType::Pps
+                ) {
+                    bytes.extend_from_slice(&[0, 0, 0, 1]);
+                    // rbsp: the parameter-set payload (EPB-stripped) —
+                    // deterministic identity for format-change detection.
+                    bytes.extend_from_slice(&nal.rbsp);
+                }
+            }
+        }
+    }
+    if bytes.is_empty() { None } else { Some(bytes) }
+}
+
+/// Whether the unit carries (part of) a random-access picture.
+fn unit_carries_keyframe(codec: VideoCodec, unit: &[u8]) -> bool {
+    match codec {
+        VideoCodec::H264 => openh264::nal_units(unit)
+            .filter_map(annex_b_nal_header)
+            .any(|header| header & 0x1f == 5),
+        VideoCodec::H265 => {
+            use rust_h265::NalUnitType;
+            rust_h265::parse_annex_b(unit).into_iter().any(|nal| {
+                matches!(
+                    nal.nal_unit_type,
+                    NalUnitType::BlaWLp
+                        | NalUnitType::BlaWRadl
+                        | NalUnitType::BlaNLp
+                        | NalUnitType::IdrWRadl
+                        | NalUnitType::IdrNLp
+                        | NalUnitType::Cra
+                )
+            })
+        }
+    }
+}
+
+/// The one-byte NAL header after an annex-B start code (or the first byte
+/// when the slice is already header-first).
+fn annex_b_nal_header(nal: &[u8]) -> Option<u8> {
+    let mut zeros = 0usize;
+    for (index, byte) in nal.iter().copied().enumerate() {
+        match byte {
+            0 => zeros += 1,
+            1 if zeros >= 2 => return nal.get(index + 1).copied(),
+            _ => zeros = 0,
+        }
+    }
+    nal.first().copied()
 }
 
 /// Explicit classification of the selected decoder path. `Unclassified`
@@ -125,8 +218,10 @@ pub enum DecodeBackendError {
 }
 
 /// A swappable decoder backend at the encoded-access-unit boundary.
-/// One instance per stream per epoch.
-pub trait DecodeBackend: Send {
+/// One instance per stream per epoch, OWNED by that stream's ingress
+/// thread: decoder state is stream-local and never crosses threads, so the
+/// trait is deliberately not `Send`.
+pub trait DecodeBackend {
     /// Stable backend identifier for receipts (e.g. software decoder id).
     fn id(&self) -> &'static str;
 
@@ -150,12 +245,30 @@ pub struct SoftwareDecodeBackend {
     stream_id: StreamId,
     stream_epoch: u64,
     codec: VideoCodec,
+    decoder: crate::media_pipeline::StreamingDecoder,
 }
 
 impl SoftwareDecodeBackend {
     pub fn new(stream_id: StreamId, codec: VideoCodec, stream_epoch: u64) -> Result<Self, String> {
-        let _ = (&stream_id, codec, stream_epoch);
-        unimplemented!("scaffold: software decode backend construction is not implemented yet")
+        Ok(Self {
+            stream_id,
+            stream_epoch,
+            codec,
+            decoder: crate::media_pipeline::StreamingDecoder::new(codec)?,
+        })
+    }
+
+    fn check_unit(&self, unit: &EncodedAccessUnit) -> Result<(), DecodeBackendError> {
+        if unit.stream_id != self.stream_id {
+            return Err(DecodeBackendError::StreamViolation);
+        }
+        if unit.stream_epoch != self.stream_epoch {
+            return Err(DecodeBackendError::EpochViolation {
+                expected: self.stream_epoch,
+                got: unit.stream_epoch,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -165,17 +278,37 @@ impl DecodeBackend for SoftwareDecodeBackend {
     }
 
     fn probe(&mut self, sample: &[EncodedAccessUnit]) -> ProbeOutcome {
-        let _ = sample;
-        unimplemented!("scaffold: software decode probe is not implemented yet")
+        let mut frames_decoded = 0u64;
+        for unit in sample {
+            match self.decode(unit) {
+                Ok(frames) => frames_decoded += frames.len() as u64,
+                Err(error) => {
+                    return ProbeOutcome::Failed {
+                        reason: format!("software decode probe failed: {error:?}"),
+                    };
+                }
+            }
+        }
+        if frames_decoded == 0 {
+            return ProbeOutcome::Failed {
+                reason: "software decode probe produced no frames".to_string(),
+            };
+        }
+        ProbeOutcome::Decoded {
+            classification: self.classification(),
+            frames_decoded,
+        }
     }
 
     fn decode(
         &mut self,
         unit: &EncodedAccessUnit,
     ) -> Result<Vec<DecodedRgbFrame>, DecodeBackendError> {
-        let _ = unit;
-        let _ = (&self.stream_id, self.stream_epoch, self.codec);
-        unimplemented!("scaffold: software decode is not implemented yet")
+        self.check_unit(unit)?;
+        let _ = self.codec;
+        self.decoder
+            .decode_unit(&unit.data)
+            .map_err(DecodeBackendError::Decode)
     }
 
     fn classification(&self) -> BackendClassification {
@@ -203,12 +336,139 @@ pub fn select_decode_backend(
     hardware_decoding: bool,
     probe_sample: &[EncodedAccessUnit],
 ) -> Result<DecoderSelection, String> {
-    let _ = (
-        stream_id,
-        codec,
-        stream_epoch,
-        hardware_decoding,
-        probe_sample,
-    );
-    unimplemented!("scaffold: decode backend selection is not implemented yet")
+    use crate::acceleration::{
+        AccelStage, AccelerationReceipt, ActionKind, FailureCode, ProbeStatus,
+    };
+    use std::collections::BTreeMap;
+
+    let codec_label = match codec {
+        VideoCodec::H264 => "H264",
+        VideoCodec::H265 => "H265",
+    };
+    let base_receipt = |attempted: &str| AccelerationReceipt {
+        stage: AccelStage::Decode,
+        work_id: None,
+        parent_work_id: None,
+        stream_id: Some(stream_id.clone()),
+        media_item: None,
+        configured: hardware_decoding,
+        attempted_backend: attempted.to_string(),
+        active_backend: "software".to_string(),
+        hardware_accelerated: false,
+        selected_device: None,
+        codec: Some(codec_label.to_string()),
+        model_id: None,
+        model_version: None,
+        input_shape: None,
+        probe_status: ProbeStatus::Fallback,
+        failure_code: FailureCode::None,
+        evidence_kind: None,
+        evidence_fields: BTreeMap::new(),
+        action_kind: ActionKind::NoAction,
+        action_payload: None,
+    };
+
+    if !hardware_decoding {
+        // Intent says software: no hardware probe is attempted at all.
+        let backend = SoftwareDecodeBackend::new(stream_id.clone(), codec, stream_epoch)?;
+        let mut receipt = base_receipt("software");
+        receipt.probe_status = ProbeStatus::Disabled;
+        return Ok(DecoderSelection {
+            backend: Box::new(backend),
+            receipt,
+        });
+    }
+
+    #[cfg(feature = "decode-gstreamer")]
+    {
+        match crate::decode_gstreamer::GstreamerDecodeBackend::probe_and_build(
+            stream_id.clone(),
+            codec,
+            stream_epoch,
+            probe_sample,
+        ) {
+            Ok(selection) => Ok(selection),
+            Err(fallback) => {
+                let backend = SoftwareDecodeBackend::new(stream_id.clone(), codec, stream_epoch)?;
+                let mut receipt = base_receipt("gstreamer");
+                receipt.probe_status = ProbeStatus::Fallback;
+                receipt.failure_code = fallback.failure_code;
+                receipt.evidence_kind = Some(fallback.evidence_kind);
+                receipt.evidence_fields = fallback.evidence_fields;
+                receipt.action_kind = fallback.action_kind;
+                receipt.action_payload = fallback.action_payload;
+                Ok(DecoderSelection {
+                    backend: Box::new(backend),
+                    receipt,
+                })
+            }
+        }
+    }
+
+    #[cfg(not(feature = "decode-gstreamer"))]
+    {
+        let _ = probe_sample;
+        // This artifact ships no hardware decode backend: honest fallback.
+        let backend = SoftwareDecodeBackend::new(stream_id.clone(), codec, stream_epoch)?;
+        let mut receipt = base_receipt("none");
+        receipt.probe_status = ProbeStatus::Fallback;
+        receipt.failure_code = FailureCode::UnsupportedByThisArtifact;
+        receipt.evidence_kind = Some(crate::acceleration::EvidenceKind::SelectedBackend);
+        receipt.evidence_fields.insert(
+            "compiled_decode_backends".to_string(),
+            "software".to_string(),
+        );
+        receipt.action_kind = ActionKind::InstallSupportedArtifact;
+        receipt.action_payload =
+            Some("install a hardware-enabled artifact, or keep software decode".to_string());
+        Ok(DecoderSelection {
+            backend: Box::new(backend),
+            receipt,
+        })
+    }
+}
+
+/// Receipt for a mid-stream hardware decode failure: the visible reason the
+/// runtime switched a live stream to the software path.
+pub fn mid_stream_fallback_receipt(
+    stream_id: &StreamId,
+    codec: VideoCodec,
+    error: &str,
+) -> crate::acceleration::AccelerationReceipt {
+    use crate::acceleration::{
+        AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
+    };
+    AccelerationReceipt {
+        stage: AccelStage::Decode,
+        work_id: None,
+        parent_work_id: None,
+        stream_id: Some(stream_id.clone()),
+        media_item: None,
+        configured: true,
+        attempted_backend: "gstreamer".to_string(),
+        active_backend: "software".to_string(),
+        hardware_accelerated: false,
+        selected_device: None,
+        codec: Some(
+            match codec {
+                VideoCodec::H264 => "H264",
+                VideoCodec::H265 => "H265",
+            }
+            .to_string(),
+        ),
+        model_id: None,
+        model_version: None,
+        input_shape: None,
+        probe_status: ProbeStatus::Fallback,
+        failure_code: FailureCode::ProbeFailed,
+        evidence_kind: Some(EvidenceKind::UpstreamError),
+        evidence_fields: std::collections::BTreeMap::from([(
+            "error".to_string(),
+            error.to_string(),
+        )]),
+        action_kind: ActionKind::ManualActionRequired,
+        action_payload: Some(
+            "hardware decode failed mid-stream; software decode is active".to_string(),
+        ),
+    }
 }

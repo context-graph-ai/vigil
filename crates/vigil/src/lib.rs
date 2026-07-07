@@ -3,6 +3,8 @@ mod config;
 mod control_socket;
 pub mod correction;
 pub mod decode;
+#[cfg(feature = "decode-gstreamer")]
+pub mod decode_gstreamer;
 mod detector;
 pub mod doctor;
 pub mod ha_discovery;

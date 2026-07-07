@@ -1,10 +1,10 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -63,7 +63,13 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let mut shutdown = shutdown::install()?;
     let shutdown_flag = shutdown.flag();
     let health = HealthState::new();
-    let server = HealthServer::listen(config.health_port, health.clone(), shutdown_flag.clone())?;
+    let accel = Arc::new(crate::acceleration::AccelerationState::new());
+    let server = HealthServer::listen(
+        config.health_port,
+        health.clone(),
+        shutdown_flag.clone(),
+        Some(accel.clone()),
+    )?;
     let stats = RuntimeStatsState::new(&config.data_dir);
     stats.update(|stats| {
         stats.health = "ready".to_string();
@@ -192,6 +198,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                         Arc::clone(&enabled),
                         detection_publisher.clone(),
                         recognition_embedder.clone(),
+                        accel.clone(),
                     );
                     camera_handles.push(handle);
                 }
@@ -516,6 +523,7 @@ fn start_rtsp_probe(
     enabled: Arc<AtomicBool>,
     detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>>,
     recognition_embedder: Option<Arc<dyn context_graph::Embedder>>,
+    accel: Arc<crate::acceleration::AccelerationState>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         // Wait until enabled (respects startup disable marker).
@@ -566,6 +574,27 @@ fn start_rtsp_probe(
                     config.detector_model_id,
                     crate::detector::Detector::model_sha256(&detector)
                 );
+                let receipt = detection_acceleration_receipt(
+                    config.accelerated_detection,
+                    &config.detector_model_id,
+                );
+                if accel.should_log(&receipt) {
+                    println!(
+                        "detector_backend_selected active={} status={} failure={}",
+                        receipt.active_backend,
+                        receipt.probe_status.as_str(),
+                        receipt.failure_code.as_str()
+                    );
+                }
+                stats.update(|stats| {
+                    stats.active_detector_backend = receipt.active_backend.clone();
+                    stats.detection_acceleration = format!(
+                        "{}:{}",
+                        receipt.probe_status.as_str(),
+                        receipt.failure_code.as_str()
+                    );
+                });
+                accel.record(receipt);
                 Some(Box::new(detector))
             }
             Err(error) => {
@@ -635,6 +664,21 @@ fn start_rtsp_probe(
                     match output {
                         Ok(output) => {
                             println!("detector_detections={}", output.detections.len());
+                            stats.update(|stats| {
+                                crate::runtime_stats::push_recent_receipt(
+                                    stats,
+                                    format!(
+                                        "stage=detection work_id={} parent_work_id={} stream={} epoch={} seq={} detections={} receipt_id={}",
+                                        crate::workgraph::WorkId::generate(),
+                                        segment.work_id,
+                                        config.camera_name,
+                                        segment.stream_generation,
+                                        segment.sequence,
+                                        output.detections.len(),
+                                        crate::workgraph::ReceiptId::generate()
+                                    ),
+                                );
+                            });
                             if let Err(error) = record_detected_events(
                                 &store,
                                 &config,
@@ -677,10 +721,48 @@ fn start_rtsp_probe(
                 continue;
             }
             let capture_frames = env_u64("VIGIL_CAPTURE_FRAMES").unwrap_or(48).max(1) as usize;
+            let receipt_stats = stats.clone();
+            let receipt_accel = accel.clone();
             let capture_result = media_pipeline::capture_rtsp_segments(
                 &rtsp_source,
                 capture_frames,
                 shutdown.clone(),
+                media_pipeline::CaptureDecodeOptions {
+                    stream_id: crate::workgraph::StreamId::new(config.camera_name.clone()),
+                    stream_epoch: stream_generation,
+                    hardware_decoding: config.hardware_decoding,
+                },
+                move |receipt| {
+                    if receipt_accel.should_log(&receipt) {
+                        println!(
+                            "decode_backend_selected stream={} attempted={} active={} hardware={} status={} failure={}",
+                            receipt
+                                .stream_id
+                                .as_ref()
+                                .map(crate::workgraph::StreamId::as_str)
+                                .unwrap_or(""),
+                            receipt.attempted_backend,
+                            receipt.active_backend,
+                            receipt.hardware_accelerated,
+                            receipt.probe_status.as_str(),
+                            receipt.failure_code.as_str()
+                        );
+                    }
+                    receipt_stats.update(|stats| {
+                        if let Some(stream) = receipt.stream_id.as_ref() {
+                            stats.active_decoder.insert(
+                                stream.as_str().to_string(),
+                                receipt.active_backend.clone(),
+                            );
+                        }
+                        stats.decode_acceleration = format!(
+                            "{}:{}",
+                            receipt.probe_status.as_str(),
+                            receipt.failure_code.as_str()
+                        );
+                    });
+                    receipt_accel.record(receipt);
+                },
                 || {
                     println!("rtsp opened url={rtsp_log_url}");
                     println!("rtsp play observed url={rtsp_log_url}");
@@ -711,6 +793,28 @@ fn start_rtsp_probe(
                     set_ready_unless_latched_fault(&health, "RTSP ingest active");
                     reconnect_pending = false;
                     retry_delay_ms = retry_initial_ms;
+                    stats.update(|stats| {
+                        crate::runtime_stats::push_recent_receipt(
+                            stats,
+                            format!(
+                                "stage=decoded_media work_id={} parent_work_id=- stream={} epoch={} seq={} frames={} receipt_id={}",
+                                segment.work_id,
+                                config.camera_name,
+                                stream_generation,
+                                segment.sequence,
+                                frames,
+                                segment.decode_receipt_id
+                            ),
+                        );
+                        let counters = detector_queue.counters();
+                        stats.detector_queue = format!(
+                            "depth={} capacity={} queued={} replaced={}",
+                            counters.current_depth,
+                            detector_queue.capacity(),
+                            counters.queued_total,
+                            counters.replaced_dropped_total
+                        );
+                    });
                     let decision = detector_segment_decision(
                         motion_positive,
                         stationary_detector_interval,
@@ -792,6 +896,57 @@ fn start_rtsp_probe(
     })
 }
 
+/// The detection acceleration receipt for this artifact: no accelerated
+/// Burn backend is compiled today, so accelerated_detection=true is an
+/// honest backend_not_compiled fallback and false is disabled-by-intent.
+fn detection_acceleration_receipt(
+    configured: bool,
+    model_id: &str,
+) -> crate::acceleration::AccelerationReceipt {
+    use crate::acceleration::{
+        AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
+    };
+    AccelerationReceipt {
+        stage: AccelStage::Detection,
+        work_id: None,
+        parent_work_id: None,
+        stream_id: None,
+        media_item: None,
+        configured,
+        attempted_backend: "none".to_string(),
+        active_backend: "burn-cpu".to_string(),
+        hardware_accelerated: false,
+        selected_device: None,
+        codec: None,
+        model_id: Some(model_id.to_string()),
+        model_version: None,
+        input_shape: None,
+        probe_status: if configured {
+            ProbeStatus::Fallback
+        } else {
+            ProbeStatus::Disabled
+        },
+        failure_code: if configured {
+            FailureCode::BackendNotCompiled
+        } else {
+            FailureCode::None
+        },
+        evidence_kind: configured.then_some(EvidenceKind::SelectedBackend),
+        evidence_fields: std::collections::BTreeMap::from([(
+            "compiled_backends".to_string(),
+            "burn-cpu".to_string(),
+        )]),
+        action_kind: if configured {
+            ActionKind::InstallSupportedArtifact
+        } else {
+            ActionKind::NoAction
+        },
+        action_payload: configured.then(|| {
+            "install a build with an accelerated detector backend, or keep CPU fallback".to_string()
+        }),
+    }
+}
+
 fn sleep_shutdown_aware(shutdown: &AtomicBool, duration: Duration) {
     let started = Instant::now();
     while !shutdown.load(Ordering::SeqCst) && started.elapsed() < duration {
@@ -835,6 +990,8 @@ fn build_captured_segment(
         ));
     }
     Ok(CapturedSegment {
+        work_id: crate::workgraph::WorkId::generate(),
+        decode_receipt_id: crate::workgraph::ReceiptId::generate(),
         path: staging_path,
         final_path,
         source_ref: format!("vigil-edge:clip/{file_name}"),
@@ -1048,15 +1205,10 @@ fn maybe_crash_after_startup_node(node: &str) {
     }
 }
 
+/// The detector stage queue: the work-graph bounded queue (keep-newest,
+/// visible counters) behind the runtime's historical name and API.
 struct LatestSegmentQueue<T> {
-    inner: Mutex<LatestSegmentQueueState<T>>,
-    available: Condvar,
-}
-
-struct LatestSegmentQueueState<T> {
-    pending: VecDeque<T>,
-    capacity: usize,
-    closed: bool,
+    inner: crate::workgraph::BoundedStageQueue<T>,
 }
 
 enum LatestSegmentRecv<T> {
@@ -1068,59 +1220,36 @@ enum LatestSegmentRecv<T> {
 impl<T> LatestSegmentQueue<T> {
     fn new(capacity: usize) -> Self {
         Self {
-            inner: Mutex::new(LatestSegmentQueueState {
-                pending: VecDeque::new(),
-                capacity: capacity.max(1),
-                closed: false,
-            }),
-            available: Condvar::new(),
+            inner: crate::workgraph::BoundedStageQueue::new(capacity),
         }
     }
 
     fn push_latest(&self, segment: T) -> Result<Option<T>, T> {
-        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
-        if inner.closed {
-            return Err(segment);
-        }
-        let dropped = if inner.pending.len() >= inner.capacity {
-            inner.pending.pop_front()
-        } else {
-            None
-        };
-        inner.pending.push_back(segment);
-        self.available.notify_one();
-        Ok(dropped)
+        self.inner.push_latest(segment)
     }
 
     fn recv_timeout(&self, timeout: Duration) -> LatestSegmentRecv<T> {
-        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
-        if inner.pending.is_empty() && !inner.closed {
-            let (next_inner, _) = self
-                .available
-                .wait_timeout_while(inner, timeout, |state| {
-                    state.pending.is_empty() && !state.closed
-                })
-                .expect("latest segment queue poisoned while waiting");
-            inner = next_inner;
+        match self.inner.recv_timeout(timeout) {
+            crate::workgraph::QueueRecv::Item(segment) => LatestSegmentRecv::Item(segment),
+            crate::workgraph::QueueRecv::Timeout => LatestSegmentRecv::Timeout,
+            crate::workgraph::QueueRecv::Closed => LatestSegmentRecv::Closed,
         }
-        if let Some(segment) = inner.pending.pop_front() {
-            LatestSegmentRecv::Item(segment)
-        } else if inner.closed {
-            LatestSegmentRecv::Closed
-        } else {
-            LatestSegmentRecv::Timeout
-        }
+    }
+
+    fn counters(&self) -> crate::workgraph::QueueCounters {
+        self.inner.counters()
+    }
+
+    fn capacity(&self) -> usize {
+        self.inner.capacity()
     }
 
     fn close(&self) {
-        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
-        inner.closed = true;
-        self.available.notify_all();
+        self.inner.close();
     }
 
     fn drain(&self) -> Vec<T> {
-        let mut inner = self.inner.lock().expect("latest segment queue poisoned");
-        inner.pending.drain(..).collect()
+        self.inner.drain()
     }
 }
 
@@ -1155,6 +1284,9 @@ fn detector_segment_decision(
 }
 
 struct CapturedSegment {
+    /// Work identity of the decoded_media stage item this segment is.
+    work_id: crate::workgraph::WorkId,
+    decode_receipt_id: crate::workgraph::ReceiptId,
     path: PathBuf,
     final_path: PathBuf,
     source_ref: String,

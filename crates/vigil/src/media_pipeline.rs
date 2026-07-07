@@ -229,16 +229,29 @@ impl DecodedVideoSegment {
     }
 }
 
-pub(crate) fn capture_rtsp_segments<OnSessionStarted, OnSegment>(
+/// How the capture session selects its decoder backend.
+pub(crate) struct CaptureDecodeOptions {
+    pub(crate) stream_id: crate::workgraph::StreamId,
+    pub(crate) stream_epoch: u64,
+    pub(crate) hardware_decoding: bool,
+}
+
+/// Real stream units collected before running the hardware decode probe.
+const HARDWARE_PROBE_UNIT_COUNT: usize = 12;
+
+pub(crate) fn capture_rtsp_segments<OnSessionStarted, OnSegment, OnDecodeReceipt>(
     rtsp_source: &RtspSource,
     max_frames: usize,
     shutdown: Arc<AtomicBool>,
+    decode_options: CaptureDecodeOptions,
+    mut on_decode_receipt: OnDecodeReceipt,
     mut on_session_started: OnSessionStarted,
     mut on_segment: OnSegment,
 ) -> Result<(), String>
 where
     OnSessionStarted: FnMut() -> Result<(), String>,
     OnSegment: FnMut(DecodedVideoSegment) -> Result<(), String>,
+    OnDecodeReceipt: FnMut(crate::acceleration::AccelerationReceipt),
 {
     let rt = Builder::new_current_thread()
         .enable_io()
@@ -249,21 +262,26 @@ where
         rtsp_source,
         max_frames.max(1),
         shutdown,
+        decode_options,
+        &mut on_decode_receipt,
         &mut on_session_started,
         &mut on_segment,
     ))
 }
 
-async fn capture_rtsp_segments_async<OnSessionStarted, OnSegment>(
+async fn capture_rtsp_segments_async<OnSessionStarted, OnSegment, OnDecodeReceipt>(
     rtsp_source: &RtspSource,
     max_frames: usize,
     shutdown: Arc<AtomicBool>,
+    decode_options: CaptureDecodeOptions,
+    on_decode_receipt: &mut OnDecodeReceipt,
     on_session_started: &mut OnSessionStarted,
     on_segment: &mut OnSegment,
 ) -> Result<(), String>
 where
     OnSessionStarted: FnMut() -> Result<(), String>,
     OnSegment: FnMut(DecodedVideoSegment) -> Result<(), String>,
+    OnDecodeReceipt: FnMut(crate::acceleration::AccelerationReceipt),
 {
     let mut session = Session::describe(
         rtsp_source.session_url.clone(),
@@ -295,7 +313,31 @@ where
         .demuxed()
         .map_err(|error| format!("RTSP demux setup failed: {error}"))?;
     on_session_started()?;
-    let mut decoder = StreamingDecoder::new(codec)?;
+    let mut assembler = crate::decode::AccessUnitAssembler::new(
+        decode_options.stream_id.clone(),
+        codec,
+        decode_options.stream_epoch,
+    );
+    // With no hardware probe to run (intent off, or a software-only
+    // artifact), the backend is selected immediately and behavior matches
+    // the pre-seam software path exactly. A hardware probe needs REAL
+    // stream units first, so selection waits for a probe buffer.
+    let needs_stream_probe = decode_options.hardware_decoding && cfg!(feature = "decode-gstreamer");
+    let mut backend: Option<Box<dyn crate::decode::DecodeBackend>> = None;
+    let mut probe_buffer: Vec<crate::decode::EncodedAccessUnit> = Vec::new();
+    if !needs_stream_probe {
+        let selection = crate::decode::select_decode_backend(
+            &decode_options.stream_id,
+            codec,
+            decode_options.stream_epoch,
+            decode_options.hardware_decoding,
+            &[],
+        )?;
+        on_decode_receipt(selection.receipt);
+        backend = Some(selection.backend);
+    }
+    let mut segment_counter = 0u64;
+    let mut first_unit_of_session = true;
     let mut encoded_units = Vec::new();
     let mut decoded_frames = Vec::new();
     let mut segment_started = false;
@@ -309,18 +351,75 @@ where
             Ok(Some(Ok(CodecItem::VideoFrame(frame)))) if frame.stream_id() == stream_i => {
                 let data = frame.into_data();
                 last_video_at = tokio::time::Instant::now();
-                let mut unit_frames = decoder.decode_unit(&data)?;
-                if !segment_started && h26x_contains_parameter_sets(codec, &data) {
+                let has_parameter_sets = h26x_contains_parameter_sets(codec, &data);
+                let unit = assembler.assemble(
+                    data,
+                    Some(Utc::now()),
+                    std::mem::take(&mut first_unit_of_session),
+                    segment_counter,
+                );
+                if backend.is_none() {
+                    // Collect real stream units (from the first parameter-set
+                    // boundary) and run the hardware decode probe on them.
+                    if probe_buffer.is_empty() && unit.codec_config.is_none() {
+                        continue;
+                    }
+                    probe_buffer.push(unit);
+                    if probe_buffer.len() >= HARDWARE_PROBE_UNIT_COUNT {
+                        let selection = crate::decode::select_decode_backend(
+                            &decode_options.stream_id,
+                            codec,
+                            decode_options.stream_epoch,
+                            decode_options.hardware_decoding,
+                            &probe_buffer,
+                        )?;
+                        on_decode_receipt(selection.receipt);
+                        backend = Some(selection.backend);
+                        probe_buffer.clear();
+                    }
+                    continue;
+                }
+                let active_backend = backend.as_mut().expect("decode backend selected");
+                let decoded = active_backend.decode(&unit);
+                let mut unit_frames = match decoded {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        if active_backend.id() == "software" {
+                            // The software path failing is a stream fault,
+                            // exactly as before the seam existed.
+                            return Err(format!("software decode failed: {error:?}"));
+                        }
+                        // Mid-stream hardware failure: visible software
+                        // fallback; the in-progress segment is abandoned and
+                        // assembly resumes at the next parameter-set boundary.
+                        on_decode_receipt(crate::decode::mid_stream_fallback_receipt(
+                            &decode_options.stream_id,
+                            codec,
+                            &format!("{error:?}"),
+                        ));
+                        *active_backend = Box::new(crate::decode::SoftwareDecodeBackend::new(
+                            decode_options.stream_id.clone(),
+                            codec,
+                            decode_options.stream_epoch,
+                        )?);
+                        encoded_units.clear();
+                        decoded_frames.clear();
+                        segment_started = false;
+                        continue;
+                    }
+                };
+                if !segment_started && has_parameter_sets {
                     encoded_units.clear();
                     decoded_frames.clear();
                     segment_started = true;
+                    segment_counter += 1;
                     segment_observed_at = Some(Utc::now());
                     segment_started_at = Some(last_video_at);
                 }
                 if !segment_started {
                     continue;
                 }
-                encoded_units.push(data);
+                encoded_units.push(unit.data);
                 if !unit_frames.is_empty() && decoded_frames.is_empty() {
                     segment_started_at.get_or_insert(last_video_at);
                 }
@@ -442,7 +541,7 @@ fn h264_nal_header(nal: &[u8]) -> Option<u8> {
     nal.first().copied()
 }
 
-enum StreamingDecoder {
+pub(crate) enum StreamingDecoder {
     H264 {
         decoder: H264Decoder,
         decode_options: DecodeOptions,
@@ -453,7 +552,7 @@ enum StreamingDecoder {
 }
 
 impl StreamingDecoder {
-    fn new(codec: VideoCodec) -> Result<Self, String> {
+    pub(crate) fn new(codec: VideoCodec) -> Result<Self, String> {
         match codec {
             VideoCodec::H264 => {
                 let config = H264DecoderConfig::new().flush_after_decode(Flush::NoFlush);
@@ -471,7 +570,7 @@ impl StreamingDecoder {
         }
     }
 
-    fn decode_unit(&mut self, unit: &[u8]) -> Result<Vec<DecodedRgbFrame>, String> {
+    pub(crate) fn decode_unit(&mut self, unit: &[u8]) -> Result<Vec<DecodedRgbFrame>, String> {
         match self {
             Self::H264 {
                 decoder,

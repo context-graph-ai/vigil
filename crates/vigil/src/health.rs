@@ -108,14 +108,16 @@ impl HealthServer {
         port: u16,
         state: HealthState,
         shutdown: Arc<AtomicBool>,
+        acceleration: Option<Arc<crate::acceleration::AccelerationState>>,
     ) -> Result<Self, String> {
-        Self::bind(port, state, shutdown)
+        Self::bind(port, state, shutdown, acceleration)
     }
 
     pub(crate) fn bind(
         port: u16,
         state: HealthState,
         shutdown: Arc<AtomicBool>,
+        acceleration: Option<Arc<crate::acceleration::AccelerationState>>,
     ) -> Result<Self, String> {
         let listener = TcpListener::bind(("0.0.0.0", port))
             .map_err(|error| format!("health port {port} bind failed: {error}"))?;
@@ -125,7 +127,7 @@ impl HealthServer {
         let handle = thread::spawn(move || {
             while !shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => handle_client(stream, &state),
+                    Ok((stream, _)) => handle_client(stream, &state, acceleration.as_deref()),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(20));
                     }
@@ -145,7 +147,11 @@ impl HealthServer {
     }
 }
 
-fn handle_client(mut stream: TcpStream, state: &HealthState) {
+fn handle_client(
+    mut stream: TcpStream,
+    state: &HealthState,
+    acceleration: Option<&crate::acceleration::AccelerationState>,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     let mut buffer = [0_u8; 1024];
     let read = stream.read(&mut buffer).unwrap_or(0);
@@ -171,11 +177,37 @@ fn handle_client(mut stream: TcpStream, state: &HealthState) {
         return;
     }
     let (status, detail) = state.snapshot();
+    // Degraded acceleration (configured-true but software/CPU active) is
+    // reported additively; it is degraded acceleration, never a fault.
+    let acceleration_field = acceleration
+        .map(|state| {
+            let degradations = state.health_degradations();
+            let degraded = |stage: crate::acceleration::AccelStage| {
+                degradations
+                    .iter()
+                    .any(|degradation| degradation.stage == stage)
+            };
+            format!(
+                r#","acceleration":{{"decode":"{}","detection":"{}"}}"#,
+                if degraded(crate::acceleration::AccelStage::Decode) {
+                    "degraded"
+                } else {
+                    "ok"
+                },
+                if degraded(crate::acceleration::AccelStage::Detection) {
+                    "degraded"
+                } else {
+                    "ok"
+                }
+            )
+        })
+        .unwrap_or_default();
     let body = format!(
-        r#"{{"status":"{}","version":"{}","detail":"{}"}}"#,
+        r#"{{"status":"{}","version":"{}","detail":"{}"{}}}"#,
         status.label(),
         env!("CARGO_PKG_VERSION"),
-        json_escape(&detail)
+        json_escape(&detail),
+        acceleration_field
     );
     write_response(&mut stream, status.http_code(), &body);
 }

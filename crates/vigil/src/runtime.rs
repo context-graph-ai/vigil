@@ -642,18 +642,14 @@ fn start_rtsp_probe(
                             "stale_stream_segment_suppressed=true sequence={}",
                             segment.sequence
                         );
-                        record_stage_receipt(
+                        record_stage_attempt(
                             &receipts,
                             &stats,
-                            stage_receipt_for(
-                                segment.detection_work.as_ref().unwrap_or(&segment.envelope),
-                                crate::workgraph::STAGE_DETECTION,
-                                None,
-                                chrono::Utc::now(),
-                                0,
-                                crate::workgraph::WorkDisposition::Dropped,
-                            ),
-                            segment.envelope.ordering,
+                            segment.detection_work.as_ref().unwrap_or(&segment.envelope),
+                            None,
+                            chrono::Utc::now(),
+                            0,
+                            crate::workgraph::WorkDisposition::Dropped,
                             "stale_stream=true",
                         );
                         let _ = fs::remove_file(&segment.path);
@@ -768,18 +764,14 @@ fn start_rtsp_probe(
                         }
                         Err(error) => {
                             println!("detector invocation failed error={error}");
-                            record_stage_receipt(
+                            record_stage_attempt(
                                 &receipts,
                                 &stats,
-                                stage_receipt_for(
-                                    &detection_work,
-                                    crate::workgraph::STAGE_DETECTION,
-                                    None,
-                                    detection_started_at,
-                                    0,
-                                    crate::workgraph::WorkDisposition::Rejected,
-                                ),
-                                detection_work.ordering,
+                                &detection_work,
+                                None,
+                                detection_started_at,
+                                0,
+                                crate::workgraph::WorkDisposition::Rejected,
                                 &format!("error={error}"),
                             );
                         }
@@ -898,31 +890,23 @@ fn start_rtsp_probe(
                     let decode_receipt = stage_receipt_for(
                         &segment.envelope,
                         crate::workgraph::STAGE_DECODED_MEDIA,
-                        decode_backend,
+                        decode_backend.clone(),
                         segment.envelope.received_at,
                         frames,
                         crate::workgraph::WorkDisposition::Completed,
                     );
                     segment.decode_receipt_id = Some(decode_receipt.receipt_id);
-                    record_stage_receipt(
+                    record_stage_attempt(
                         &receipts,
                         &stats,
-                        decode_receipt,
-                        segment.envelope.ordering,
+                        &segment.envelope,
+                        decode_backend,
+                        segment.envelope.received_at,
+                        frames,
+                        crate::workgraph::WorkDisposition::Completed,
                         "",
                     );
-                    stats.update(|stats| {
-                        let counters = detector_queue.counters();
-                        stats.detector_queue = format!(
-                            "depth={} capacity={} queued={} dropped={} coalesced={} degraded={}",
-                            counters.current_depth,
-                            detector_queue.capacity(),
-                            counters.queued_total,
-                            counters.replaced_dropped_total,
-                            counters.coalesced_total,
-                            counters.replaced_dropped_total > 0
-                        );
-                    });
+
                     let decision = detector_segment_decision(
                         motion_positive,
                         stationary_detector_interval,
@@ -932,36 +916,28 @@ fn start_rtsp_probe(
                         derived_work(&segment.envelope, crate::workgraph::STAGE_MOTION);
                     if decision == DetectorSegmentDecision::SuppressMotionGate {
                         println!("motion_gate_suppressed_segment=true");
-                        record_stage_receipt(
+                        record_stage_attempt(
                             &receipts,
                             &stats,
-                            stage_receipt_for(
-                                &motion_work,
-                                crate::workgraph::STAGE_MOTION,
-                                None,
-                                segment.observed_at,
-                                0,
-                                crate::workgraph::WorkDisposition::Coalesced,
-                            ),
-                            motion_work.ordering,
+                            &motion_work,
+                            None,
+                            segment.observed_at,
+                            0,
+                            crate::workgraph::WorkDisposition::Coalesced,
                             "suppressed=true",
                         );
                         let _ = fs::remove_file(&segment.path);
                     } else if detector_handle.is_some() {
                         // The motion stage emits ONE result: the gated
                         // segment, which detection consumes as its parent.
-                        record_stage_receipt(
+                        record_stage_attempt(
                             &receipts,
                             &stats,
-                            stage_receipt_for(
-                                &motion_work,
-                                crate::workgraph::STAGE_MOTION,
-                                None,
-                                segment.observed_at,
-                                1,
-                                crate::workgraph::WorkDisposition::Completed,
-                            ),
-                            motion_work.ordering,
+                            &motion_work,
+                            None,
+                            segment.observed_at,
+                            1,
+                            crate::workgraph::WorkDisposition::Completed,
                             &format!("motion_positive_frames={motion_positive}"),
                         );
                         segment.motion_work = Some(motion_work.clone());
@@ -982,21 +958,17 @@ fn start_rtsp_probe(
                             Ok(Some(dropped_segment)) => {
                                 // The replaced segment's detection never
                                 // runs: receipt it as Dropped, visibly.
-                                record_stage_receipt(
+                                record_stage_attempt(
                                     &receipts,
                                     &stats,
-                                    stage_receipt_for(
-                                        dropped_segment
-                                            .detection_work
-                                            .as_ref()
-                                            .unwrap_or(&dropped_segment.envelope),
-                                        crate::workgraph::STAGE_DETECTION,
-                                        None,
-                                        dropped_segment.observed_at,
-                                        0,
-                                        crate::workgraph::WorkDisposition::Dropped,
-                                    ),
-                                    dropped_segment.envelope.ordering,
+                                    dropped_segment
+                                        .detection_work
+                                        .as_ref()
+                                        .unwrap_or(&dropped_segment.envelope),
+                                    None,
+                                    dropped_segment.observed_at,
+                                    0,
+                                    crate::workgraph::WorkDisposition::Dropped,
                                     "replaced_by_newer=true",
                                 );
                                 let dropped = dropped_segment.motion_positive_frames.max(1);
@@ -1029,6 +1001,20 @@ fn start_rtsp_probe(
                         println!("detector_unavailable_dropped_segment=true");
                         let _ = fs::remove_file(&segment.path);
                     }
+                    // Rendered AFTER the enqueue/replace outcome so the
+                    // stats line reflects THIS segment's queue effect.
+                    stats.update(|stats| {
+                        let counters = detector_queue.counters();
+                        stats.detector_queue = format!(
+                            "depth={} capacity={} queued={} dropped={} coalesced={} degraded={}",
+                            counters.current_depth,
+                            detector_queue.capacity(),
+                            counters.queued_total,
+                            counters.replaced_dropped_total,
+                            counters.coalesced_total,
+                            counters.replaced_dropped_total > 0
+                        );
+                    });
                     println!("decoded_frames={decoded_total}");
                     Ok(())
                 },
@@ -1194,6 +1180,59 @@ fn derived_work(
         priority: parent.priority,
         deadline: parent.deadline,
         schema_version: parent.schema_version,
+    }
+}
+
+/// Record one stage attempt END TO END: build the stage receipt, mirror the
+/// result envelope, validate the join, and record — the same
+/// envelope→result+receipt flow for every stage. A join that fails (never
+/// expected in-process; falsifiable once results cross a machine boundary)
+/// is counted and receipted Rejected, never silently adopted.
+#[allow(clippy::too_many_arguments)]
+fn record_stage_attempt(
+    receipts: &crate::workgraph::StageReceiptLog,
+    stats: &RuntimeStatsState,
+    work: &crate::workgraph::WorkEnvelope,
+    active_backend: Option<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    output_count: u64,
+    disposition: crate::workgraph::WorkDisposition,
+    detail: &str,
+) {
+    let receipt = stage_receipt_for(
+        work,
+        work.stage.as_str(),
+        active_backend,
+        started_at,
+        output_count,
+        disposition,
+    );
+    let result = crate::workgraph::ResultEnvelope {
+        work_id: work.work_id,
+        parent_work_id: work.parent_work_id,
+        contributing_work_ids: work.contributing_work_ids.clone(),
+        stage: work.stage.clone(),
+        stream_id: work.stream_id.clone(),
+        media_item: work.media_item,
+        ordering: work.ordering,
+        observed_at: work.observed_at,
+        result_schema_version: work.schema_version,
+        receipt_id: receipt.receipt_id,
+    };
+    match crate::workgraph::validate_result_join(work, &result, Some(&receipt)) {
+        Ok(()) => record_stage_receipt(receipts, stats, receipt, work.ordering, detail),
+        Err(rejection) => {
+            receipts.count_rejected_join();
+            let mut rejected = receipt;
+            rejected.disposition = crate::workgraph::WorkDisposition::Rejected;
+            record_stage_receipt(
+                receipts,
+                stats,
+                rejected,
+                work.ordering,
+                &format!("rejected={rejection:?} {detail}"),
+            );
+        }
     }
 }
 
@@ -1653,35 +1692,27 @@ fn record_detected_events(
         stats.detections_emitted = stats.detections_emitted.saturating_add(1);
     });
     if let Err(error) = finalize_clip(segment, stats, health) {
-        record_stage_receipt(
+        record_stage_attempt(
             receipts,
             stats,
-            stage_receipt_for(
-                &derived_work(&segment.envelope, crate::workgraph::STAGE_CLIP_EVIDENCE),
-                crate::workgraph::STAGE_CLIP_EVIDENCE,
-                None,
-                segment.envelope.received_at,
-                0,
-                crate::workgraph::WorkDisposition::Rejected,
-            ),
-            segment.envelope.ordering,
+            &derived_work(&segment.envelope, crate::workgraph::STAGE_CLIP_EVIDENCE),
+            None,
+            segment.envelope.received_at,
+            0,
+            crate::workgraph::WorkDisposition::Rejected,
             &format!("error={error}"),
         );
         let _ = fs::remove_file(&segment.path);
         return Err(error);
     }
-    record_stage_receipt(
+    record_stage_attempt(
         receipts,
         stats,
-        stage_receipt_for(
-            &derived_work(&segment.envelope, crate::workgraph::STAGE_CLIP_EVIDENCE),
-            crate::workgraph::STAGE_CLIP_EVIDENCE,
-            None,
-            segment.observed_at,
-            1,
-            crate::workgraph::WorkDisposition::Completed,
-        ),
-        segment.envelope.ordering,
+        &derived_work(&segment.envelope, crate::workgraph::STAGE_CLIP_EVIDENCE),
+        None,
+        segment.observed_at,
+        1,
+        crate::workgraph::WorkDisposition::Completed,
         "",
     );
     let _ = fs::remove_file(&segment.path);
@@ -1714,18 +1745,14 @@ fn record_detected_events(
                 });
                 if recognition_embedder.is_some() {
                     let matched = recognition.is_some();
-                    record_stage_receipt(
+                    record_stage_attempt(
                         receipts,
                         stats,
-                        stage_receipt_for(
-                            &derived_work(detection_work, crate::workgraph::STAGE_RECOGNITION),
-                            crate::workgraph::STAGE_RECOGNITION,
-                            None,
-                            recognition_started_at,
-                            u64::from(matched),
-                            crate::workgraph::WorkDisposition::Completed,
-                        ),
-                        detection_work.ordering,
+                        &derived_work(detection_work, crate::workgraph::STAGE_RECOGNITION),
+                        None,
+                        recognition_started_at,
+                        u64::from(matched),
+                        crate::workgraph::WorkDisposition::Completed,
                         &format!("matched={matched}"),
                     );
                 }

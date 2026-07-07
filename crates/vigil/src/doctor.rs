@@ -59,6 +59,35 @@ pub enum ServiceUserResolution {
     Unresolved,
 }
 
+/// Whether a named user can open a device, judged from the device's real
+/// mode/owner/group: world-rw grants anyone; owner-rw grants the owning
+/// user; group-rw grants members (primary or supplemental) of the owning
+/// group. Group membership alone is NOT the access truth — a world-writable
+/// device (common in containers) is accessible to a user in no groups.
+pub(crate) fn user_can_access_device(
+    facts: &dyn HostFacts,
+    device: &std::path::Path,
+    user: &str,
+) -> bool {
+    let Some(device_facts) = facts.device_facts(device) else {
+        return false;
+    };
+    let mode: Vec<char> = device_facts.mode.chars().collect();
+    let rw_at =
+        |offset: usize| mode.get(offset) == Some(&'r') && mode.get(offset + 1) == Some(&'w');
+    if rw_at(7) {
+        return true; // world-rw
+    }
+    if device_facts.owner == user && rw_at(1) {
+        return true; // owner-rw
+    }
+    rw_at(4)
+        && facts
+            .user_groups(user)
+            .map(|groups| groups.iter().any(|group| group == &device_facts.group))
+            .unwrap_or(false)
+}
+
 /// Resolve the configured service user in the fixed order:
 /// `--service-user` flag, then `VIGIL_SERVICE_USER`, then the systemd unit.
 pub fn resolve_service_user(
@@ -309,11 +338,7 @@ pub fn acceleration_report(request: &DoctorRequest, facts: &dyn HostFacts) -> Do
                         .device_facts(&device)
                         .map(|facts| facts.group)
                         .unwrap_or_else(|| "render".to_string());
-                    let user_in_group = facts
-                        .user_groups(&user)
-                        .map(|groups| groups.iter().any(|group| group == &device_group))
-                        .unwrap_or(false);
-                    if !user_in_group {
+                    if !user_can_access_device(facts, &device, &user) {
                         notes.insert(
                             format!("service_user_access:{}", device.display()),
                             format!(
@@ -439,16 +464,10 @@ fn doctor_decode_receipt_with_hardware_backend(
                         ServiceUserResolution::Unresolved => None,
                     };
                 let service_user_has_access = service_user.as_deref().is_some_and(|user| {
-                    facts.visible_render_devices().iter().all(|device| {
-                        let group = facts
-                            .device_facts(device)
-                            .map(|facts| facts.group)
-                            .unwrap_or_else(|| "render".to_string());
-                        facts
-                            .user_groups(user)
-                            .map(|groups| groups.iter().any(|g| g == &group))
-                            .unwrap_or(false)
-                    })
+                    facts
+                        .visible_render_devices()
+                        .iter()
+                        .all(|device| user_can_access_device(facts, device, user))
                 });
                 if !service_user_has_access {
                     probe_receipt.probe_status = ProbeStatus::Fallback;

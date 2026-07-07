@@ -1,14 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub(crate) struct RuntimeStatsState {
     inner: Arc<Mutex<RuntimeStats>>,
-    last_write: Arc<Mutex<Option<std::time::Instant>>>,
     path: PathBuf,
 }
 
@@ -112,7 +110,6 @@ impl RuntimeStatsState {
         let stats = read_snapshot(data_dir).unwrap_or_default();
         Self {
             inner: Arc::new(Mutex::new(stats)),
-            last_write: Arc::new(Mutex::new(None)),
             path,
         }
     }
@@ -126,9 +123,12 @@ impl RuntimeStatsState {
 
     pub(crate) fn update(&self, update: impl FnOnce(&mut RuntimeStats)) {
         // Mutate in memory under the lock, but never hold the lock across
-        // disk IO (every camera and detector thread shares it), and
-        // coalesce disk writes: the receipt surfaces update many times per
-        // segment and the snapshot file only serves cross-process readers.
+        // disk IO (every camera and detector thread shares it). The disk
+        // write is SYNCHRONOUS per update on purpose: the live runtime
+        // serves stats from memory over the control socket, so the file's
+        // one job is being correct after an abrupt exit — a coalescing
+        // window here silently loses the final counters a crash-path
+        // acceptance (and a post-mortem operator) reads back.
         let snapshot = {
             let Ok(mut stats) = self.inner.lock() else {
                 return;
@@ -136,29 +136,7 @@ impl RuntimeStatsState {
             update(&mut stats);
             stats.clone()
         };
-        let now = std::time::Instant::now();
-        let should_write = {
-            let Ok(mut last) = self.last_write.lock() else {
-                return;
-            };
-            match *last {
-                Some(at) if now.duration_since(at) < Duration::from_millis(250) => false,
-                _ => {
-                    *last = Some(now);
-                    true
-                }
-            }
-        };
-        if should_write {
-            let _ = write_snapshot_path(&self.path, &snapshot);
-        }
-    }
-
-    /// Write the current state to disk unconditionally (shutdown/final).
-    pub(crate) fn flush(&self) {
-        if let Ok(stats) = self.inner.lock() {
-            let _ = write_snapshot_path(&self.path, &stats);
-        }
+        let _ = write_snapshot_path(&self.path, &snapshot);
     }
 }
 

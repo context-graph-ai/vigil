@@ -311,8 +311,6 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         handle.shutdown();
     }
     server.join();
-    // The debounced stats writer may hold the last updates in memory only.
-    stats.flush();
     drop(store);
     Ok(())
 }

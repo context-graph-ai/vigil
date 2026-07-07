@@ -580,6 +580,10 @@ fn start_rtsp_probe(
             // Person-only by default (baseline NVR, first-light contract); widen to
             // the covered COCO classes when recognition is on, so dog/vehicle
             // sightings reach the match path.
+            // Capture must not report Ready while no detector is running:
+            // load failure and detector-thread panic clear this flag, and
+            // the per-segment health refresh consults it.
+            let detector_alive = Arc::new(AtomicBool::new(false));
             let detector_load = if config.recognition.enabled {
                 yolox_detector::load_detector_with_classes(
                     config.detector_model_path.as_deref(),
@@ -616,6 +620,7 @@ fn start_rtsp_probe(
                         );
                     });
                     accel.record(receipt);
+                    detector_alive.store(true, Ordering::SeqCst);
                     Some(Box::new(detector))
                 }
                 Err(error) => {
@@ -647,6 +652,8 @@ fn start_rtsp_probe(
                 let detection_publisher = detection_publisher.clone();
                 let recognition_embedder = recognition_embedder.clone();
                 let receipts = receipts.clone();
+                let panic_alive = detector_alive.clone();
+                let panic_queue = detector_queue.clone();
                 thread::spawn(move || {
                     let panic_health = health.clone();
                     let panic_stats = stats.clone();
@@ -803,6 +810,8 @@ fn start_rtsp_probe(
                         }));
                     if unwind.is_err() {
                         println!("detector_thread_panicked=true");
+                        panic_alive.store(false, Ordering::SeqCst);
+                        panic_queue.close();
                         panic_stats.update(|stats| {
                             stats.ingest_signal = "panic".to_string();
                             mark_health_condition(&mut stats.health, "ingest_failed");
@@ -907,7 +916,17 @@ fn start_rtsp_probe(
                                 stats.stream_reconnects = stats.stream_reconnects.saturating_add(1);
                             }
                         });
-                        set_ready_unless_latched_fault(&health, "RTSP ingest active");
+                        if detector_alive.load(Ordering::SeqCst) {
+                            set_ready_unless_latched_fault(&health, "RTSP ingest active");
+                        } else {
+                            // Decode alone is not a working pipeline: a dead or
+                            // never-loaded detector keeps health failed instead of
+                            // being masked by capture activity.
+                            health.set(
+                                HealthStatus::IngestFailed,
+                                "detector unavailable (capture active)",
+                            );
+                        }
                         reconnect_pending = false;
                         retry_delay_ms = retry_initial_ms;
                         // Record the REAL decode stage attempt; the segment
@@ -1770,8 +1789,22 @@ fn record_detected_events(
                 });
                 // The clip was already finalized into the durable clips dir;
                 // with no observation referencing it, it would leak forever
-                // (nothing sweeps clips). Remove it with the failure.
+                // (nothing sweeps clips). Remove it with the failure, and
+                // receipt the evidence work as Rejected — the earlier
+                // Completed clip receipt described finalization, not the
+                // full evidence outcome.
                 let _ = fs::remove_file(&segment.final_path);
+                crate::workgraph::StageAttempt::derive(
+                    &segment.envelope,
+                    crate::workgraph::STAGE_CLIP_EVIDENCE,
+                )
+                .finish(
+                    receipts,
+                    crate::workgraph::WorkDisposition::Rejected,
+                    0,
+                    &format!("evidence_discarded=true error={error}"),
+                    &mut receipt_line_sink(stats),
+                );
                 return Err(error);
             }
         }
@@ -2116,9 +2149,17 @@ fn write_detector_evidence_image(
             config.camera_name
         )
     })?;
+    // A hash failure must not strand the just-written PNG on disk.
+    let sha256 = match media_pipeline::sha256_path(&path) {
+        Ok(sha256) => sha256,
+        Err(error) => {
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
+    };
     Ok(DetectorEvidenceImage {
         source_ref: format!("vigil-edge:clip/{file_name}"),
-        sha256: media_pipeline::sha256_path(&path)?,
+        sha256,
         path,
     })
 }

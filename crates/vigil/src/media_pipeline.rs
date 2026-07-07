@@ -241,7 +241,16 @@ const HARDWARE_PROBE_UNIT_COUNT: usize = 12;
 /// A low-fps camera cannot deliver the full probe buffer quickly; after
 /// this deadline the probe runs on whatever real units were collected so
 /// slow streams still select a backend instead of timing out forever.
+/// Advanced override: VIGIL_HARDWARE_PROBE_DEADLINE_SECS.
 const HARDWARE_PROBE_DEADLINE: Duration = Duration::from_secs(10);
+
+fn hardware_probe_deadline() -> Duration {
+    std::env::var("VIGIL_HARDWARE_PROBE_DEADLINE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs.max(1)))
+        .unwrap_or(HARDWARE_PROBE_DEADLINE)
+}
 
 pub(crate) fn capture_rtsp_segments<OnSessionStarted, OnSegment, OnDecodeReceipt>(
     rtsp_source: &RtspSource,
@@ -328,7 +337,10 @@ where
     // waiting for stream units, and behavior matches the pre-seam software
     // path exactly. Only a genuinely possible hardware probe waits for
     // REAL stream units.
-    let hardware_probe_possible = {
+    // hardware_decoding=false means NO hardware probing of any kind —
+    // including the device-access preflight, which opens /dev/dri nodes.
+    // Short-circuit on intent before any device is touched.
+    let hardware_probe_possible = decode_options.hardware_decoding && {
         #[cfg(feature = "decode-gstreamer")]
         {
             crate::doctor::live_device_access_finding().is_none()
@@ -338,7 +350,7 @@ where
             false
         }
     };
-    let needs_stream_probe = decode_options.hardware_decoding && hardware_probe_possible;
+    let needs_stream_probe = hardware_probe_possible;
     let mut backend: Option<Box<dyn crate::decode::DecodeBackend>> = None;
     let mut probe_buffer: Vec<crate::decode::EncodedAccessUnit> = Vec::new();
     if !needs_stream_probe {
@@ -398,7 +410,7 @@ where
                     }
                     probe_buffer.push(unit);
                     let probe_deadline_reached =
-                        !probe_buffer.is_empty() && started.elapsed() > HARDWARE_PROBE_DEADLINE;
+                        !probe_buffer.is_empty() && started.elapsed() > hardware_probe_deadline();
                     if probe_buffer.len() >= HARDWARE_PROBE_UNIT_COUNT || probe_deadline_reached {
                         let selection = crate::decode::select_decode_backend(
                             &decode_options.stream_id,

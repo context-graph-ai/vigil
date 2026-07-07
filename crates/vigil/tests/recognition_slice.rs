@@ -484,10 +484,7 @@ fn match_records_observation_against_the_matched_entity_with_vector_and_score() 
         })
         .expect("a match observation anchored to the sighting exists");
     let entities = world.store.list_entities(Default::default()).expect("list");
-    let person = entities
-        .iter()
-        .find(|e| e.name == "Arjun")
-        .expect("entity");
+    let person = entities.iter().find(|e| e.name == "Arjun").expect("entity");
     assert_eq!(
         match_obs.entity_id, person.id,
         "the match observation is recorded AGAINST the matched entity"

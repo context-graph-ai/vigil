@@ -338,6 +338,12 @@ where
     }
     let mut segment_counter = 0u64;
     let mut first_unit_of_session = true;
+    // Units awaiting normal processing. Probe units are REPLAYED through
+    // here after backend selection, so the stream's first parameter-set
+    // boundary is never lost — a camera that sends codec config only once
+    // still produces its first segment.
+    let mut pending_units: std::collections::VecDeque<crate::decode::EncodedAccessUnit> =
+        std::collections::VecDeque::new();
     let mut encoded_units = Vec::new();
     let mut decoded_frames = Vec::new();
     let mut segment_started = false;
@@ -351,7 +357,6 @@ where
             Ok(Some(Ok(CodecItem::VideoFrame(frame)))) if frame.stream_id() == stream_i => {
                 let data = frame.into_data();
                 last_video_at = tokio::time::Instant::now();
-                let has_parameter_sets = h26x_contains_parameter_sets(codec, &data);
                 let unit = assembler.assemble(
                     data,
                     Some(Utc::now()),
@@ -375,68 +380,81 @@ where
                         )?;
                         on_decode_receipt(selection.receipt);
                         backend = Some(selection.backend);
-                        probe_buffer.clear();
+                        // Replay the probe units into normal processing so
+                        // the stream start (and its codec config) is kept.
+                        pending_units.extend(probe_buffer.drain(..));
                     }
-                    continue;
+                } else {
+                    pending_units.push_back(unit);
                 }
-                let active_backend = backend.as_mut().expect("decode backend selected");
-                let decoded = active_backend.decode(&unit);
-                let mut unit_frames = match decoded {
-                    Ok(frames) => frames,
-                    Err(error) => {
-                        if active_backend.id() == "software" {
-                            // The software path failing is a stream fault,
-                            // exactly as before the seam existed.
-                            return Err(format!("software decode failed: {error:?}"));
+                while let Some(mut unit) = pending_units.pop_front() {
+                    let active_backend = backend.as_mut().expect("decode backend selected");
+                    // Boundary-first segment membership: the parameter-set
+                    // unit that STARTS segment N belongs to segment N.
+                    unit.segment_sequence = next_segment_membership(
+                        segment_started,
+                        unit.codec_config.is_some(),
+                        segment_counter,
+                    );
+                    let decoded = active_backend.decode(&unit);
+                    let mut unit_frames = match decoded {
+                        Ok(frames) => frames,
+                        Err(error) => {
+                            if active_backend.id() == "software" {
+                                // The software path failing is a stream fault,
+                                // exactly as before the seam existed.
+                                return Err(format!("software decode failed: {error:?}"));
+                            }
+                            // Mid-stream hardware failure: visible software
+                            // fallback; the in-progress segment is abandoned
+                            // and assembly resumes at the next parameter-set
+                            // boundary.
+                            on_decode_receipt(crate::decode::mid_stream_fallback_receipt(
+                                &decode_options.stream_id,
+                                codec,
+                                &format!("{error:?}"),
+                            ));
+                            *active_backend = Box::new(crate::decode::SoftwareDecodeBackend::new(
+                                decode_options.stream_id.clone(),
+                                codec,
+                                decode_options.stream_epoch,
+                            )?);
+                            encoded_units.clear();
+                            decoded_frames.clear();
+                            segment_started = false;
+                            continue;
                         }
-                        // Mid-stream hardware failure: visible software
-                        // fallback; the in-progress segment is abandoned and
-                        // assembly resumes at the next parameter-set boundary.
-                        on_decode_receipt(crate::decode::mid_stream_fallback_receipt(
-                            &decode_options.stream_id,
-                            codec,
-                            &format!("{error:?}"),
-                        ));
-                        *active_backend = Box::new(crate::decode::SoftwareDecodeBackend::new(
-                            decode_options.stream_id.clone(),
-                            codec,
-                            decode_options.stream_epoch,
-                        )?);
+                    };
+                    if !segment_started && unit.codec_config.is_some() {
                         encoded_units.clear();
                         decoded_frames.clear();
-                        segment_started = false;
+                        segment_started = true;
+                        segment_counter += 1;
+                        segment_observed_at = Some(Utc::now());
+                        segment_started_at = Some(last_video_at);
+                    }
+                    if !segment_started {
                         continue;
                     }
-                };
-                if !segment_started && has_parameter_sets {
-                    encoded_units.clear();
-                    decoded_frames.clear();
-                    segment_started = true;
-                    segment_counter += 1;
-                    segment_observed_at = Some(Utc::now());
-                    segment_started_at = Some(last_video_at);
-                }
-                if !segment_started {
-                    continue;
-                }
-                encoded_units.push(unit.data);
-                if !unit_frames.is_empty() && decoded_frames.is_empty() {
-                    segment_started_at.get_or_insert(last_video_at);
-                }
-                decoded_frames.append(&mut unit_frames);
-                any_frames_decoded = any_frames_decoded || !decoded_frames.is_empty();
-                if decoded_frames.len() >= max_frames {
-                    let units = std::mem::take(&mut encoded_units);
-                    let mut frames = std::mem::take(&mut decoded_frames);
-                    segment_started = false;
-                    reindex_frames(&mut frames);
-                    let segment_fps = segment_fps(fps, segment_started_at.take(), frames.len());
-                    on_segment(DecodedVideoSegment {
-                        frames,
-                        encoded_units: units,
-                        fps: segment_fps,
-                        observed_at: segment_observed_at.take(),
-                    })?;
+                    encoded_units.push(unit.data);
+                    if !unit_frames.is_empty() && decoded_frames.is_empty() {
+                        segment_started_at.get_or_insert(last_video_at);
+                    }
+                    decoded_frames.append(&mut unit_frames);
+                    any_frames_decoded = any_frames_decoded || !decoded_frames.is_empty();
+                    if decoded_frames.len() >= max_frames {
+                        let units = std::mem::take(&mut encoded_units);
+                        let mut frames = std::mem::take(&mut decoded_frames);
+                        segment_started = false;
+                        reindex_frames(&mut frames);
+                        let segment_fps = segment_fps(fps, segment_started_at.take(), frames.len());
+                        on_segment(DecodedVideoSegment {
+                            frames,
+                            encoded_units: units,
+                            fps: segment_fps,
+                            observed_at: segment_observed_at.take(),
+                        })?;
+                    }
                 }
             }
             Ok(Some(Ok(_))) => {}
@@ -479,6 +497,17 @@ where
         })?;
     }
     Ok(())
+}
+
+/// Boundary-first segment membership: a parameter-set-carrying unit that
+/// will START a new segment belongs to that NEW segment; every other unit
+/// belongs to the current one.
+fn next_segment_membership(segment_started: bool, carries_config: bool, counter: u64) -> u64 {
+    if !segment_started && carries_config {
+        counter + 1
+    } else {
+        counter
+    }
 }
 
 fn segment_fps(declared_fps: f64, started_at: Option<tokio::time::Instant>, frames: usize) -> f64 {
@@ -1345,6 +1374,29 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn boundary_unit_belongs_to_the_segment_it_starts() {
+        // The SPS/PPS unit that STARTS segment N carries segment N
+        // membership, never N-1.
+        let mut counter = 0u64;
+        // First boundary: no segment running, unit carries config → next segment.
+        let membership = super::next_segment_membership(false, true, counter);
+        assert_eq!(membership, 1);
+        counter += 1;
+        // Units inside the running segment keep its id.
+        assert_eq!(super::next_segment_membership(true, false, counter), 1);
+        assert_eq!(
+            super::next_segment_membership(true, true, counter),
+            1,
+            "a mid-segment parameter-set repeat stays in the current segment"
+        );
+        // After the segment flushes, the next boundary starts segment 2.
+        assert_eq!(super::next_segment_membership(false, true, counter), 2);
+        // A non-boundary unit between segments belongs to the old segment id
+        // (it is discarded by assembly, never emitted).
+        assert_eq!(super::next_segment_membership(false, false, counter), 1);
+    }
     use super::*;
 
     #[test]

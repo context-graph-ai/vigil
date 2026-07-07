@@ -269,6 +269,7 @@ pub fn acceleration_report(request: &DoctorRequest, facts: &dyn HostFacts) -> Do
         // No accelerated Burn backend is compiled into this artifact today;
         // when one exists this branch probes it with a real model forward.
         let mut receipt = blank(AccelStage::Detection, true);
+        receipt.input_shape = Some(crate::yolox_detector::MODEL_INPUT_SHAPE.to_string());
         receipt.probe_status = ProbeStatus::Fallback;
         receipt.failure_code = FailureCode::BackendNotCompiled;
         receipt.evidence_kind = Some(EvidenceKind::SelectedBackend);
@@ -399,6 +400,28 @@ fn doctor_decode_receipt_with_hardware_backend(
     ) {
         Ok(selection) => {
             let mut probe_receipt = selection.receipt;
+            if probe_receipt.selected_device.is_none() {
+                // Element metadata did not expose the device; the doctor
+                // KNOWS which device this process can open — say that one.
+                probe_receipt.selected_device = facts
+                    .visible_render_devices()
+                    .into_iter()
+                    .find(|device| facts.open_device(device).is_ok())
+                    .map(|device| device.display().to_string());
+            }
+            probe_receipt.evidence_fields.insert(
+                "effective_uid".to_string(),
+                facts.effective_uid().to_string(),
+            );
+            probe_receipt.evidence_fields.insert(
+                "effective_gids".to_string(),
+                facts
+                    .effective_gids()
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             if facts.effective_uid() == 0 {
                 // A root-run probe proves HOST capability only. Root-only
                 // access is never reported as runtime-active: the receipt
@@ -541,12 +564,21 @@ pub(crate) fn live_device_access_finding() -> Option<DeviceAccessFinding> {
         .env_var("USER")
         .unwrap_or_else(|| facts.effective_uid().to_string());
     if devices.is_empty() {
-        return Some(classify_device_access(
-            &facts,
-            std::path::Path::new("/dev/dri"),
-            &current_user,
-        ));
+        let mut evidence_fields = BTreeMap::new();
+        evidence_fields.insert("path".to_string(), "/dev/dri".to_string());
+        return Some(DeviceAccessFinding {
+            failure_code: crate::acceleration::FailureCode::NoDeviceVisible,
+            evidence_kind: crate::acceleration::EvidenceKind::DevicePath,
+            evidence_fields,
+            action_kind: crate::acceleration::ActionKind::ManualActionRequired,
+            action_payload: Some(
+                "no render/video device is visible to this process; check drivers, \
+                 VM passthrough, or container device mapping"
+                    .to_string(),
+            ),
+        });
     }
+    let _ = &current_user;
     let mut blocked = None;
     for device in devices {
         let finding = classify_device_access(&facts, &device, &current_user);
@@ -556,6 +588,18 @@ pub(crate) fn live_device_access_finding() -> Option<DeviceAccessFinding> {
         blocked = Some(finding);
     }
     blocked
+}
+
+/// The first render device the CURRENT process can actually open, for
+/// backfilling `selected_device` when decoder element metadata does not
+/// expose one.
+#[cfg(feature = "decode-gstreamer")]
+pub(crate) fn first_usable_render_device() -> Option<std::path::PathBuf> {
+    let facts = RealHostFacts;
+    facts
+        .visible_render_devices()
+        .into_iter()
+        .find(|device| facts.open_device(device).is_ok())
 }
 
 /// Live host facts for the real doctor run. Read-only by construction.

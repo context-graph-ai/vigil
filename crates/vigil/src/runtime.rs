@@ -642,6 +642,20 @@ fn start_rtsp_probe(
                             "stale_stream_segment_suppressed=true sequence={}",
                             segment.sequence
                         );
+                        record_stage_receipt(
+                            &receipts,
+                            &stats,
+                            stage_receipt_for(
+                                segment.motion_work.as_ref().unwrap_or(&segment.envelope),
+                                crate::workgraph::STAGE_DETECTION,
+                                None,
+                                chrono::Utc::now(),
+                                0,
+                                crate::workgraph::WorkDisposition::Dropped,
+                            ),
+                            segment.envelope.ordering,
+                            "stale_stream=true",
+                        );
                         let _ = fs::remove_file(&segment.path);
                         continue;
                     }
@@ -714,6 +728,7 @@ fn start_rtsp_probe(
                                         &receipts,
                                         &stats,
                                         detection_receipt,
+                                        detection_work.ordering,
                                         &format!(
                                             "detections={} decode_receipt_id={}",
                                             output.detections.len(),
@@ -747,6 +762,7 @@ fn start_rtsp_probe(
                                         &receipts,
                                         &stats,
                                         rejected,
+                                        detection_work.ordering,
                                         &format!("rejected={rejection:?}"),
                                     );
                                     println!("detection_result_rejected reason={rejection:?}");
@@ -756,6 +772,20 @@ fn start_rtsp_probe(
                         }
                         Err(error) => {
                             println!("detector invocation failed error={error}");
+                            record_stage_receipt(
+                                &receipts,
+                                &stats,
+                                stage_receipt_for(
+                                    &detection_work,
+                                    crate::workgraph::STAGE_DETECTION,
+                                    None,
+                                    detection_started_at,
+                                    0,
+                                    crate::workgraph::WorkDisposition::Rejected,
+                                ),
+                                detection_work.ordering,
+                                &format!("error={error}"),
+                            );
                         }
                     }
                 }
@@ -873,12 +903,18 @@ fn start_rtsp_probe(
                         &segment.envelope,
                         crate::workgraph::STAGE_DECODED_MEDIA,
                         decode_backend,
-                        segment.observed_at,
+                        segment.envelope.received_at,
                         frames,
                         crate::workgraph::WorkDisposition::Completed,
                     );
                     segment.decode_receipt_id = Some(decode_receipt.receipt_id);
-                    record_stage_receipt(&receipts, &stats, decode_receipt, "");
+                    record_stage_receipt(
+                        &receipts,
+                        &stats,
+                        decode_receipt,
+                        segment.envelope.ordering,
+                        "",
+                    );
                     stats.update(|stats| {
                         let counters = detector_queue.counters();
                         stats.detector_queue = format!(
@@ -911,6 +947,7 @@ fn start_rtsp_probe(
                                 0,
                                 crate::workgraph::WorkDisposition::Coalesced,
                             ),
+                            motion_work.ordering,
                             "suppressed=true",
                         );
                         let _ = fs::remove_file(&segment.path);
@@ -928,6 +965,7 @@ fn start_rtsp_probe(
                                 1,
                                 crate::workgraph::WorkDisposition::Completed,
                             ),
+                            motion_work.ordering,
                             &format!("motion_positive_frames={motion_positive}"),
                         );
                         segment.motion_work = Some(motion_work.clone());
@@ -956,6 +994,7 @@ fn start_rtsp_probe(
                                         0,
                                         crate::workgraph::WorkDisposition::Dropped,
                                     ),
+                                    dropped_segment.envelope.ordering,
                                     "replaced_by_newer=true",
                                 );
                                 let dropped = dropped_segment.motion_positive_frames.max(1);
@@ -1045,7 +1084,7 @@ fn detection_acceleration_receipt(
         codec: None,
         model_id: Some(model_id.to_string()),
         model_version: None,
-        input_shape: None,
+        input_shape: Some(crate::yolox_detector::MODEL_INPUT_SHAPE.to_string()),
         probe_status: if configured {
             ProbeStatus::Fallback
         } else {
@@ -1079,10 +1118,11 @@ fn record_stage_receipt(
     receipts: &crate::workgraph::StageReceiptLog,
     stats: &RuntimeStatsState,
     receipt: crate::workgraph::StageReceipt,
+    ordering: crate::workgraph::WorkOrdering,
     detail: &str,
 ) {
     let line = format!(
-        "stage={} work_id={} parent_work_id={} stream={} outputs={} disposition={:?} receipt_id={}{}{}",
+        "stage={} work_id={} parent_work_id={} stream={} ordering={}:{} outputs={} disposition={:?} receipt_id={}{}{}",
         receipt.stage,
         receipt.work_id,
         receipt
@@ -1090,6 +1130,8 @@ fn record_stage_receipt(
             .map(|id| id.to_string())
             .unwrap_or_else(|| "-".to_string()),
         receipt.stream_id.as_str(),
+        ordering.stream_epoch,
+        ordering.stream_sequence,
         receipt.output_count,
         receipt.disposition,
         receipt.receipt_id,
@@ -1604,6 +1646,20 @@ fn record_detected_events(
         stats.detections_emitted = stats.detections_emitted.saturating_add(1);
     });
     if let Err(error) = finalize_clip(segment, stats, health) {
+        record_stage_receipt(
+            receipts,
+            stats,
+            stage_receipt_for(
+                &derived_work(&segment.envelope, crate::workgraph::STAGE_CLIP_EVIDENCE),
+                crate::workgraph::STAGE_CLIP_EVIDENCE,
+                None,
+                segment.envelope.received_at,
+                0,
+                crate::workgraph::WorkDisposition::Rejected,
+            ),
+            segment.envelope.ordering,
+            &format!("error={error}"),
+        );
         let _ = fs::remove_file(&segment.path);
         return Err(error);
     }
@@ -1618,6 +1674,7 @@ fn record_detected_events(
             1,
             crate::workgraph::WorkDisposition::Completed,
         ),
+        segment.envelope.ordering,
         "",
     );
     let _ = fs::remove_file(&segment.path);
@@ -1661,6 +1718,7 @@ fn record_detected_events(
                             u64::from(matched),
                             crate::workgraph::WorkDisposition::Completed,
                         ),
+                        detection_work.ordering,
                         &format!("matched={matched}"),
                     );
                 }

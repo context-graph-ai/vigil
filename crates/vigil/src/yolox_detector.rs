@@ -16,6 +16,8 @@ use crate::media_pipeline::DecodedVideoSegment;
 
 const HEIGHT: usize = 640;
 const WIDTH: usize = 640;
+/// The detector model's input tensor shape, for acceleration receipts.
+pub(crate) const MODEL_INPUT_SHAPE: &str = "1x3x640x640";
 const PERSON_CLASS_INDEX: usize = 0;
 const BACKEND_ID: &str = "burn-yolox-tiny-cpu";
 const DETECTOR_FORWARD_PROBE_ENV: &str = "VIGIL_DETECTOR_FORWARD_PROBE_PATH";

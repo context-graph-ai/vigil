@@ -409,7 +409,15 @@ pub fn select_decode_backend(
             stream_epoch,
             probe_sample,
         ) {
-            Ok(selection) => Ok(selection),
+            Ok(mut selection) => {
+                if selection.receipt.selected_device.is_none() {
+                    // Element metadata did not expose the device path; the
+                    // runtime knows which device it can open — say that one.
+                    selection.receipt.selected_device = crate::doctor::first_usable_render_device()
+                        .map(|device| device.display().to_string());
+                }
+                Ok(selection)
+            }
             Err(fallback) => {
                 let backend = SoftwareDecodeBackend::new(stream_id.clone(), codec, stream_epoch)?;
                 let mut receipt = base_receipt("gstreamer");
@@ -417,6 +425,11 @@ pub fn select_decode_backend(
                 receipt.failure_code = fallback.failure_code;
                 receipt.evidence_kind = Some(fallback.evidence_kind);
                 receipt.evidence_fields = fallback.evidence_fields;
+                // The probe consumed real stream units even though it failed.
+                receipt.evidence_fields.insert(
+                    "probe_units_consumed".to_string(),
+                    probe_sample.len().to_string(),
+                );
                 receipt.action_kind = fallback.action_kind;
                 receipt.action_payload = fallback.action_payload;
                 Ok(DecoderSelection {

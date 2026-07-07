@@ -186,12 +186,10 @@ impl GstreamerDecodeBackend {
                 finding
                     .evidence_fields
                     .insert("selected_decoder".to_string(), element);
-                finding.action_kind = ActionKind::InstallPackageProfile;
-                finding.action_payload = Some(
-                    "GStreamer selected a software decoder: the hardware decoder plugin \
-                     for this platform is not installed or not usable"
-                        .to_string(),
-                );
+                let (action_kind, action_payload) =
+                    plugin_install_action("a hardware video decoder (VA plugin family)");
+                finding.action_kind = action_kind;
+                finding.action_payload = action_payload;
                 Err(Box::new(finding))
             }
             BackendClassification::Unclassified { element } => {
@@ -233,10 +231,9 @@ impl GstreamerDecodeBackend {
                 finding
                     .evidence_fields
                     .insert("dependency".to_string(), factory.to_string());
-                finding.action_kind = ActionKind::InstallPackageProfile;
-                finding.action_payload = Some(format!(
-                    "install the GStreamer plugin providing `{factory}`"
-                ));
+                let (action_kind, action_payload) = plugin_install_action(factory);
+                finding.action_kind = action_kind;
+                finding.action_payload = action_payload;
                 finding
             })
         };
@@ -505,6 +502,47 @@ fn classify_selected_decoder(pipeline: &gst::Pipeline) -> BackendClassification 
                 BackendClassification::Unclassified { element: name }
             }
         }
+    }
+}
+
+/// The paste-ready install action for a missing GStreamer plugin family,
+/// derived from /etc/os-release. Package names here are public platform
+/// knowledge (the distribution's GStreamer "bad" plugin set, which carries
+/// the VA video decoders and H.26x parsers), never deployment-specific.
+fn plugin_install_action(missing: &str) -> (ActionKind, Option<String>) {
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let os = os_release.to_ascii_lowercase();
+    let is = |needle: &str| {
+        os.lines().any(|line| {
+            (line.starts_with("id=") || line.starts_with("id_like=")) && line.contains(needle)
+        })
+    };
+    if is("debian") || is("ubuntu") {
+        (
+            ActionKind::RunCommand,
+            Some(format!(
+                "sudo apt install gstreamer1.0-plugins-bad  # provides {missing}"
+            )),
+        )
+    } else if is("alpine") {
+        (
+            ActionKind::RunCommand,
+            Some(format!("apk add gst-plugins-bad  # provides {missing}")),
+        )
+    } else if is("fedora") || is("rhel") {
+        (
+            ActionKind::RunCommand,
+            Some(format!(
+                "sudo dnf install gstreamer1-plugins-bad-free  # provides {missing}"
+            )),
+        )
+    } else {
+        (
+            ActionKind::InstallPackageProfile,
+            Some(format!(
+                "install the GStreamer plugin set providing {missing} for this platform"
+            )),
+        )
     }
 }
 

@@ -1851,7 +1851,7 @@ mod tests {
     #[test]
     fn generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url() {
         let camera = config::CameraEntry {
-            name: "top-gate-cam".to_string(),
+            name: "front-gate-cam".to_string(),
             rtsp_url: Some("rtsp://camera/detect".to_string()),
             live_rtsp_url: Some("rtsp://camera/live".to_string()),
             username: None,

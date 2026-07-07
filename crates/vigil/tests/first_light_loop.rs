@@ -5367,8 +5367,7 @@ fn detector_loads_and_runs_over_real_frames() {
         );
     }
     if !person_observations.iter().any(|observation| {
-        observation_property(observation, "detector_backend") == Some(PERSON_MODEL_BACKEND)
-            && observation_has_linked_detector_forward_event(observation, &forward_events)
+        observation_has_linked_detector_forward_event(observation, &forward_events)
     }) {
         failures.push(
             "landed detector result did not carry linked runtime model-execution proof metadata"

@@ -653,8 +653,17 @@ fn start_rtsp_probe(
                     sleep_shutdown_aware(&shutdown, detector_work_delay);
                     let detector_started = Instant::now();
                     let detection_started_at = chrono::Utc::now();
-                    let detection_work =
-                        derived_work(&segment.envelope, crate::workgraph::STAGE_DETECTION);
+                    let mut detection_work = derived_work(
+                        segment.motion_work.as_ref().unwrap_or(&segment.envelope),
+                        crate::workgraph::STAGE_DETECTION,
+                    );
+                    // The decoded media contributes even when motion is the
+                    // primary parent — full multi-parent provenance.
+                    if segment.motion_work.is_some() {
+                        detection_work
+                            .contributing_work_ids
+                            .push(segment.envelope.work_id);
+                    }
                     let output = detector.detect_segment(
                         &segment.media,
                         segment.clip_sha256.clone(),
@@ -873,11 +882,13 @@ fn start_rtsp_probe(
                     stats.update(|stats| {
                         let counters = detector_queue.counters();
                         stats.detector_queue = format!(
-                            "depth={} capacity={} queued={} replaced={}",
+                            "depth={} capacity={} queued={} dropped={} coalesced={} degraded={}",
                             counters.current_depth,
                             detector_queue.capacity(),
                             counters.queued_total,
-                            counters.replaced_dropped_total
+                            counters.replaced_dropped_total,
+                            counters.coalesced_total,
+                            counters.replaced_dropped_total > 0
                         );
                     });
                     let decision = detector_segment_decision(
@@ -904,6 +915,8 @@ fn start_rtsp_probe(
                         );
                         let _ = fs::remove_file(&segment.path);
                     } else if detector_handle.is_some() {
+                        // The motion stage emits ONE result: the gated
+                        // segment, which detection consumes as its parent.
                         record_stage_receipt(
                             &receipts,
                             &stats,
@@ -912,11 +925,12 @@ fn start_rtsp_probe(
                                 crate::workgraph::STAGE_MOTION,
                                 None,
                                 segment.observed_at,
-                                motion_positive,
+                                1,
                                 crate::workgraph::WorkDisposition::Completed,
                             ),
-                            "",
+                            &format!("motion_positive_frames={motion_positive}"),
                         );
+                        segment.motion_work = Some(motion_work.clone());
                         if let DetectorSegmentDecision::Enqueue {
                             stationary_scan: true,
                         } = decision
@@ -926,6 +940,24 @@ fn start_rtsp_probe(
                         }
                         match detector_queue.push_latest(segment) {
                             Ok(Some(dropped_segment)) => {
+                                // The replaced segment's detection never
+                                // runs: receipt it as Dropped, visibly.
+                                record_stage_receipt(
+                                    &receipts,
+                                    &stats,
+                                    stage_receipt_for(
+                                        dropped_segment
+                                            .motion_work
+                                            .as_ref()
+                                            .unwrap_or(&dropped_segment.envelope),
+                                        crate::workgraph::STAGE_DETECTION,
+                                        None,
+                                        dropped_segment.observed_at,
+                                        0,
+                                        crate::workgraph::WorkDisposition::Dropped,
+                                    ),
+                                    "replaced_by_newer=true",
+                                );
                                 let dropped = dropped_segment.motion_positive_frames.max(1);
                                 stats.update(|stats| {
                                     stats.dropped_motion_positive_frames = stats
@@ -1189,6 +1221,7 @@ fn build_captured_segment(
     Ok(CapturedSegment {
         envelope,
         decode_receipt_id: None,
+        motion_work: None,
         path: staging_path,
         final_path,
         source_ref: format!("vigil-edge:clip/{file_name}"),
@@ -1487,6 +1520,9 @@ struct CapturedSegment {
     /// Receipt id of the RECORDED decode stage attempt (set when the decode
     /// receipt is recorded, before the segment enters the graph).
     decode_receipt_id: Option<crate::workgraph::ReceiptId>,
+    /// The motion stage work this segment passed through before detection:
+    /// detection derives FROM motion, which derives from decoded media.
+    motion_work: Option<crate::workgraph::WorkEnvelope>,
     path: PathBuf,
     final_path: PathBuf,
     source_ref: String,
@@ -1877,10 +1913,9 @@ fn record_one_event(
         "baseline_intention_id".to_string(),
         Value::String(nodes.intention_id.to_string()),
     );
-    properties.insert(
-        "detector_backend".to_string(),
-        Value::String(output.detector_backend.clone()),
-    );
+    // Backend identity stays OUT of product-domain observations (receipts/
+    // stats/logs/doctor carry it); execution proof rides the session id +
+    // model/forward digests below.
     properties.insert(
         "detector_session_id".to_string(),
         Value::String(output.detector_session_id.clone()),

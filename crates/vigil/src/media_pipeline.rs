@@ -318,11 +318,23 @@ where
         codec,
         decode_options.stream_epoch,
     );
-    // With no hardware probe to run (intent off, or a software-only
-    // artifact), the backend is selected immediately and behavior matches
-    // the pre-seam software path exactly. A hardware probe needs REAL
-    // stream units first, so selection waits for a probe buffer.
-    let needs_stream_probe = decode_options.hardware_decoding && cfg!(feature = "decode-gstreamer");
+    // With no hardware probe to run (intent off, a software-only artifact,
+    // or a device the process cannot even open), the backend is selected
+    // immediately: a blocked device reports its classified receipt without
+    // waiting for stream units, and behavior matches the pre-seam software
+    // path exactly. Only a genuinely possible hardware probe waits for
+    // REAL stream units.
+    let hardware_probe_possible = {
+        #[cfg(feature = "decode-gstreamer")]
+        {
+            crate::doctor::live_device_access_finding().is_none()
+        }
+        #[cfg(not(feature = "decode-gstreamer"))]
+        {
+            false
+        }
+    };
+    let needs_stream_probe = decode_options.hardware_decoding && hardware_probe_possible;
     let mut backend: Option<Box<dyn crate::decode::DecodeBackend>> = None;
     let mut probe_buffer: Vec<crate::decode::EncodedAccessUnit> = Vec::new();
     if !needs_stream_probe {

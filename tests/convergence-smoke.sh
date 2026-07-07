@@ -70,7 +70,7 @@ build_artifacts() {
 run_owner_smoke_if_configured() {
   if [[ -z "${VIGIL_OWNER_SMOKE:-}" ]]; then
     log "owner live-camera smoke skipped"
-    printf 'Set VIGIL_OWNER_SMOKE to the owner smoke script path to run the live farm-camera leg.\n'
+    printf 'Set VIGIL_OWNER_SMOKE to the operator smoke script path to run the live-camera leg.\n'
     return 0
   fi
   log "owner live-camera smoke"

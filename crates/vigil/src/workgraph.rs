@@ -160,6 +160,29 @@ pub struct WorkEnvelope {
     pub schema_version: u32,
 }
 
+impl WorkEnvelope {
+    /// Derive one stage's work from its parent: the ONE derivation rule.
+    /// Identity (stream, media item, ordering, observed time, priority,
+    /// deadline, schema) is inherited; the parent becomes the provenance
+    /// link; contributing parents are added via [`StageAttempt::contributing`].
+    pub fn derive(&self, stage: &str) -> WorkEnvelope {
+        WorkEnvelope {
+            work_id: WorkId::generate(),
+            parent_work_id: Some(self.work_id),
+            contributing_work_ids: Vec::new(),
+            stage: StageId::new(stage),
+            stream_id: self.stream_id.clone(),
+            media_item: self.media_item,
+            ordering: self.ordering,
+            observed_at: self.observed_at,
+            received_at: Utc::now(),
+            priority: self.priority,
+            deadline: self.deadline,
+            schema_version: self.schema_version,
+        }
+    }
+}
+
 /// The result envelope mirrors the work identity so results join back
 /// without process-local state.
 #[derive(Debug, Clone)]
@@ -451,5 +474,141 @@ impl StageReceiptLog {
 
     pub fn rejected_joins(&self) -> u64 {
         self.rejected_joins.load(Ordering::SeqCst)
+    }
+}
+
+/// One stage attempt, begun before the work runs and finished exactly once.
+/// Owns the identity discipline end to end — derivation, attempt timing,
+/// result mirroring, join validation, receipt recording, and the rendered
+/// operator line — so every stage speaks identity the same way instead of
+/// hand-rolling it per call site.
+pub struct StageAttempt {
+    work: WorkEnvelope,
+    backend: Option<String>,
+    started_at: DateTime<Utc>,
+}
+
+/// What `finish` records: the receipt id actually recorded, and whether the
+/// mirrored result JOINED its work (a failed join is recorded Rejected and
+/// must gate any downstream apply).
+#[derive(Debug, Clone, Copy)]
+pub struct FinishedAttempt {
+    pub receipt_id: ReceiptId,
+    pub joined: bool,
+}
+
+impl StageAttempt {
+    /// Begin an attempt for an existing work envelope (a root item from
+    /// ingress, or derived work carried across a queue).
+    pub fn begin(work: WorkEnvelope) -> Self {
+        Self {
+            work,
+            backend: None,
+            started_at: Utc::now(),
+        }
+    }
+
+    /// Begin an attempt for work derived from a parent stage's work.
+    pub fn derive(parent: &WorkEnvelope, stage: &str) -> Self {
+        Self::begin(parent.derive(stage))
+    }
+
+    /// Name an additional contributing parent (aggregation provenance).
+    pub fn contributing(mut self, id: WorkId) -> Self {
+        self.work.contributing_work_ids.push(id);
+        self
+    }
+
+    /// Attribute the attempt to a backend, when one applies.
+    pub fn backend(mut self, backend: Option<String>) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Override the attempt start (e.g. media-received time for decode).
+    pub fn started_at(mut self, at: DateTime<Utc>) -> Self {
+        self.started_at = at;
+        self
+    }
+
+    pub fn work(&self) -> &WorkEnvelope {
+        &self.work
+    }
+
+    /// Finish the attempt: mirror the result envelope from the work,
+    /// validate the join, record the receipt (Rejected when the join
+    /// fails — counted, never silent), and emit ONE operator line rendered
+    /// from the RECORDED receipt. Returns the recorded receipt id and the
+    /// join verdict; callers applying results downstream must gate on it.
+    pub fn finish(
+        self,
+        log: &StageReceiptLog,
+        disposition: WorkDisposition,
+        output_count: u64,
+        detail: &str,
+        emit_line: &mut dyn FnMut(String),
+    ) -> FinishedAttempt {
+        let work = &self.work;
+        let receipt = StageReceipt {
+            receipt_id: ReceiptId::generate(),
+            work_id: work.work_id,
+            parent_work_id: work.parent_work_id,
+            stage: work.stage.clone(),
+            stream_id: work.stream_id.clone(),
+            configured_backend: None,
+            attempted_backend: self.backend.clone(),
+            active_backend: self.backend.clone(),
+            fallback_backend: None,
+            selected_device: None,
+            probe_result: None,
+            fallback_reason: None,
+            started_at: self.started_at,
+            ended_at: Utc::now(),
+            output_count,
+            disposition,
+        };
+        let result = ResultEnvelope {
+            work_id: work.work_id,
+            parent_work_id: work.parent_work_id,
+            contributing_work_ids: work.contributing_work_ids.clone(),
+            stage: work.stage.clone(),
+            stream_id: work.stream_id.clone(),
+            media_item: work.media_item,
+            ordering: work.ordering,
+            observed_at: work.observed_at,
+            result_schema_version: work.schema_version,
+            receipt_id: receipt.receipt_id,
+        };
+        let (receipt, joined, rendered_detail) =
+            match validate_result_join(work, &result, Some(&receipt)) {
+                Ok(()) => (receipt, true, detail.to_string()),
+                Err(rejection) => {
+                    log.count_rejected_join();
+                    let mut rejected = receipt;
+                    rejected.disposition = WorkDisposition::Rejected;
+                    (rejected, false, format!("rejected={rejection:?} {detail}"))
+                }
+            };
+        let line = format!(
+            "stage={} work_id={} parent_work_id={} stream={} ordering={}:{} outputs={} disposition={:?} receipt_id={}{}{}",
+            receipt.stage,
+            receipt.work_id,
+            receipt
+                .parent_work_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            receipt.stream_id.as_str(),
+            work.ordering.stream_epoch,
+            work.ordering.stream_sequence,
+            receipt.output_count,
+            receipt.disposition,
+            receipt.receipt_id,
+            if rendered_detail.is_empty() { "" } else { " " },
+            rendered_detail
+        );
+        let receipt_id = receipt.receipt_id;
+        log.record(receipt);
+        emit_line(line);
+        FinishedAttempt { receipt_id, joined }
     }
 }

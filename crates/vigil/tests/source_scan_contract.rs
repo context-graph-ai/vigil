@@ -429,7 +429,7 @@ fn addon_config_exposes_recognition_options_and_schema() {
         let expected = format!("- {class_name}");
         if !options.iter().any(|line| line.trim() == expected) {
             failures.push(format!(
-                "{} must default options.recognition_covered_classes to include {class_name} for the John + Max owner smoke",
+                "{} must default options.recognition_covered_classes to include {class_name} for the person-and-dog recognition owner smoke",
                 addon_config_path.display()
             ));
         }

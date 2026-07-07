@@ -100,6 +100,18 @@ impl GstreamerDecodeBackend {
             return Err(Box::new(finding));
         }
 
+        if probe_sample.is_empty() {
+            // Distinguish "the probe INPUT could not be produced" from a
+            // decoder that failed: blaming hardware for a missing sample
+            // sends the operator chasing the wrong problem.
+            let mut finding =
+                FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::UpstreamError);
+            finding.evidence_fields.insert(
+                "error".to_string(),
+                "no probe sample units were available (probe input generation failed)".to_string(),
+            );
+            return Err(Box::new(finding));
+        }
         let mut backend = match Self::build_pipeline(stream_id, codec, stream_epoch) {
             Ok(backend) => backend,
             Err(finding) => return Err(Box::new(finding)),
@@ -362,11 +374,13 @@ impl GstreamerDecodeBackend {
     /// capture loop.
     fn drain_available(&mut self) -> Result<Vec<DecodedRgbFrame>, DecodeBackendError> {
         let mut frames = Vec::new();
-        while let Some(sample) = self
-            .appsink
-            .try_pull_sample(gst::ClockTime::from_mseconds(20))
-        {
+        // One bounded wait for the first frame, then non-blocking pulls:
+        // the terminating pull must not tax the capture thread a fixed
+        // 20 ms per access unit (that is 60% of real time at 30 fps).
+        let mut budget = gst::ClockTime::from_mseconds(10);
+        while let Some(sample) = self.appsink.try_pull_sample(budget) {
             frames.push(self.sample_to_rgb(&sample)?);
+            budget = gst::ClockTime::ZERO;
         }
         Ok(frames)
     }
@@ -393,6 +407,18 @@ impl GstreamerDecodeBackend {
             .plane_data(0)
             .map_err(|_| DecodeBackendError::Decode("plane data unavailable".to_string()))?;
         let row_bytes = width as usize * 3;
+        // Never trust the plane length: a malformed buffer must be a decode
+        // error, not a panic that kills the capture thread.
+        let needed = (height as usize)
+            .checked_sub(1)
+            .and_then(|last| last.checked_mul(stride))
+            .and_then(|last_row| last_row.checked_add(row_bytes));
+        if needed.is_none_or(|needed| data.len() < needed) {
+            return Err(DecodeBackendError::Decode(format!(
+                "plane too short: len={} stride={stride} rows={height} row_bytes={row_bytes}",
+                data.len()
+            )));
+        }
         let mut rgb = Vec::with_capacity(row_bytes * height as usize);
         for row in 0..height as usize {
             let start = row * stride;

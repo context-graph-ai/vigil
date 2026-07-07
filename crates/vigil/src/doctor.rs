@@ -463,11 +463,15 @@ fn doctor_decode_receipt_with_hardware_backend(
                         | ServiceUserResolution::SystemdUnit(user) => Some(user),
                         ServiceUserResolution::Unresolved => None,
                     };
+                // The runtime needs ONE usable device (selection takes any
+                // openable node); demoting a working setup because a SECOND
+                // GPU is group-restricted would send the operator fixing a
+                // non-problem. Blocked extras surface as notes below.
                 let service_user_has_access = service_user.as_deref().is_some_and(|user| {
                     facts
                         .visible_render_devices()
                         .iter()
-                        .all(|device| user_can_access_device(facts, device, user))
+                        .any(|device| user_can_access_device(facts, device, user))
                 });
                 if !service_user_has_access {
                     probe_receipt.probe_status = ProbeStatus::Fallback;
@@ -477,9 +481,12 @@ fn doctor_decode_receipt_with_hardware_backend(
                     probe_receipt.evidence_kind = Some(EvidenceKind::ProcessCredentials);
                     match service_user {
                         Some(user) => {
+                            // Name the group of a device the user CANNOT
+                            // open — the actual gap, not the first device.
                             let group = facts
                                 .visible_render_devices()
-                                .first()
+                                .iter()
+                                .find(|device| !user_can_access_device(facts, device, &user))
                                 .and_then(|device| facts.device_facts(device))
                                 .map(|facts| facts.group)
                                 .unwrap_or_else(|| "render".to_string());
@@ -643,7 +650,11 @@ impl HostFacts for RealHostFacts {
     fn effective_gids(&self) -> Vec<u32> {
         #[cfg(unix)]
         {
-            let mut gids = vec![0 as libc::gid_t; 64];
+            // Size query first: a fixed buffer EINVALs on >64 groups and
+            // would blank the evidence field.
+            let needed = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+            let capacity = if needed > 0 { needed as usize } else { 64 };
+            let mut gids = vec![0 as libc::gid_t; capacity];
             let count = unsafe { libc::getgroups(gids.len() as i32, gids.as_mut_ptr()) };
             if count >= 0 {
                 gids.truncate(count as usize);

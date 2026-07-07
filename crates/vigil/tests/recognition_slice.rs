@@ -419,12 +419,12 @@ fn below_threshold_sighting_stays_unknown() {
 #[test]
 fn medium_confidence_single_person_gallery_match_stays_unknown() {
     let world = world("single-person-gallery-unknown");
-    let john_detection = seed_detection(&world, "person");
+    let person_detection = seed_detection(&world, "person");
     record_match_observation(
         &world.store,
         world.camera_id,
         world.context_id,
-        &john_detection.to_string(),
+        &person_detection.to_string(),
         &MatchOutcome {
             entity_id: None,
             name: None,
@@ -434,14 +434,14 @@ fn medium_confidence_single_person_gallery_match_stays_unknown() {
         },
         &axis_vector(0),
         "person",
-        &format!("vigil-edge:clip/{john_detection}-frame.png"),
+        &format!("vigil-edge:clip/{person_detection}-frame.png"),
     )
-    .expect("John reference sighting records");
-    record_enrollment(&world.store, &john_detection.to_string(), "John", SPACE)
-        .expect("enroll John");
+    .expect("reference sighting records");
+    record_enrollment(&world.store, &person_detection.to_string(), "Kiran", SPACE)
+        .expect("enroll the person");
 
-    // Live smoke: a different person/rider was named John at 0.8489186167
-    // because John was the only enrolled person. That score is useful
+    // Regression seed: a different person/rider matched the only enrolled
+    // person at 0.8489186167. That score is useful
     // provenance, but it is not decisive enough for automatic naming.
     let smoke_false_positive_score = 0.848_918_6f32;
     let probe = vector_with_cosine_to_axis(smoke_false_positive_score);
@@ -534,24 +534,24 @@ fn animal_class_enrolls_and_matches_as_an_animal_entity() {
 fn vehicle_sighting_cannot_match_a_person_identity_even_with_identical_vector() {
     let world = world("type-guard");
     let crop = png(41);
-    let john_detection = seed_detection(&world, "person");
-    embed_match_record(&world, john_detection, &crop);
+    let person_detection = seed_detection(&world, "person");
+    embed_match_record(&world, person_detection, &crop);
     record_correction(
         &world.store,
         CorrectionRequest {
-            detection_id: john_detection.to_string(),
-            label: Some("John".to_string()),
+            detection_id: person_detection.to_string(),
+            label: Some("Kiran".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     )
-    .expect("enroll John");
+    .expect("enroll the person");
 
     let vehicle_detection = seed_detection(&world, "bicycle");
     let outcome = embed_match_record(&world, vehicle_detection, &crop);
 
     assert!(
         outcome.name.is_none(),
-        "a bicycle crop must not resolve to a Person entity named John, even if its vector is identical; got {outcome:?}"
+        "a bicycle crop must not resolve to a Person entity named after the enrolled person, even if its vector is identical; got {outcome:?}"
     );
     assert!(
         outcome.score > 0.9,
@@ -565,7 +565,7 @@ fn vehicle_sighting_cannot_match_a_person_identity_even_with_identical_vector() 
         .expect("vehicle sighting row exists");
     assert!(
         row.entity_name.is_none(),
-        "the HA event row must not publish John for a vehicle detection"
+        "the HA event row must not publish the enrolled person's name for a vehicle detection"
     );
 }
 

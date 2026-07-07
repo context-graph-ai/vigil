@@ -228,26 +228,30 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     // If a `cameras` list is provided in config/JSON it supersedes the single
     // camera_name / rtsp_url fields.  Otherwise synthesize a one-element list
     // from the single-camera fields (backward compat).
-    let cameras: Vec<CameraEntry> = if let Some(cam_list) = partial.cameras {
-        cam_list
-            .into_iter()
-            .map(|c| CameraEntry {
-                name: c.name,
-                rtsp_url: c.rtsp_url,
-                live_rtsp_url: c.live_rtsp_url,
-                username: c.username,
-                password: c.password,
-            })
-            .collect()
-    } else {
-        vec![CameraEntry {
-            name: camera_name.clone(),
-            rtsp_url: partial.rtsp_url.clone(),
-            live_rtsp_url: partial.live_rtsp_url.clone(),
-            username: partial.rtsp_username.clone(),
-            password: partial.rtsp_password.clone(),
-        }]
-    };
+    // An empty cameras list would run a Ready, zero-camera runtime that
+    // looks healthy while doing nothing: treat it as absent so the
+    // single-camera synthesis (and its loud missing-URL behavior) applies.
+    let cameras: Vec<CameraEntry> =
+        if let Some(cam_list) = partial.cameras.filter(|list| !list.is_empty()) {
+            cam_list
+                .into_iter()
+                .map(|c| CameraEntry {
+                    name: c.name,
+                    rtsp_url: c.rtsp_url,
+                    live_rtsp_url: c.live_rtsp_url,
+                    username: c.username,
+                    password: c.password,
+                })
+                .collect()
+        } else {
+            vec![CameraEntry {
+                name: camera_name.clone(),
+                rtsp_url: partial.rtsp_url.clone(),
+                live_rtsp_url: partial.live_rtsp_url.clone(),
+                username: partial.rtsp_username.clone(),
+                password: partial.rtsp_password.clone(),
+            }]
+        };
 
     // Recognition switches on when a weights directory is configured.
     let mut recognition = crate::recognition::RecognitionConfig::default();

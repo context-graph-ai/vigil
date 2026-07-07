@@ -71,6 +71,17 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         shutdown_flag.clone(),
         Some(accel.clone()),
     )?;
+    // A crash between staging write and cleanup strands files; staging is
+    // ephemeral by definition, so sweep it every boot.
+    let staging_dir = config.data_dir.join("staging");
+    if staging_dir.exists()
+        && let Err(error) = fs::remove_dir_all(&staging_dir)
+    {
+        println!(
+            "staging_sweep_failed=true path={} error={error}",
+            staging_dir.display()
+        );
+    }
     let stats = RuntimeStatsState::new(&config.data_dir);
     stats.update(|stats| {
         stats.health = "ready".to_string();
@@ -300,6 +311,8 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         handle.shutdown();
     }
     server.join();
+    // The debounced stats writer may hold the last updates in memory only.
+    stats.flush();
     drop(store);
     Ok(())
 }
@@ -529,475 +542,531 @@ fn start_rtsp_probe(
     receipts: Arc<crate::workgraph::StageReceiptLog>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        // Wait until enabled (respects startup disable marker).
-        while !shutdown.load(Ordering::SeqCst) && !enabled.load(Ordering::SeqCst) {
-            thread::sleep(Duration::from_secs(5));
-        }
-        if shutdown.load(Ordering::SeqCst) {
-            return;
-        }
-        let rtsp_source = match media_pipeline::prepare_rtsp_source(
-            &rtsp_url,
-            config.rtsp_username.as_deref(),
-            config.rtsp_password.as_deref(),
-        ) {
-            Ok(source) => source,
-            Err(error) => {
-                println!(
-                    "rtsp probe failed url={} error={error}",
-                    media_pipeline::redact_rtsp_url(&rtsp_url)
-                );
-                stats.update(|stats| {
-                    stats.ingest_signal = "decode-error".to_string();
-                    mark_health_condition(&mut stats.health, "ingest_failed");
-                });
-                health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
+        // A panic on this thread must not kill a camera silently while
+        // /health keeps saying Ready: catch it, latch ingest-failed, log.
+        let panic_health = health.clone();
+        let panic_stats = stats.clone();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            // Wait until enabled (respects startup disable marker).
+            while !shutdown.load(Ordering::SeqCst) && !enabled.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_secs(5));
+            }
+            if shutdown.load(Ordering::SeqCst) {
                 return;
             }
-        };
-        let rtsp_log_url = rtsp_source.session_url().to_string();
-        println!("rtsp probe starting url={rtsp_log_url}");
-        // The detector sits behind the engine-neutral trait: the pipeline sees
-        // `dyn Detector`, the engine lives in the implementation.
-        // Person-only by default (baseline NVR, first-light contract); widen to
-        // the covered COCO classes when recognition is on, so dog/vehicle
-        // sightings reach the match path.
-        let detector_load = if config.recognition.enabled {
-            yolox_detector::load_detector_with_classes(
-                config.detector_model_path.as_deref(),
-                &crate::recognition::covered_class_indices(&config.recognition),
-            )
-        } else {
-            yolox_detector::load_detector(config.detector_model_path.as_deref())
-        };
-        let detector: Option<Box<dyn crate::detector::Detector>> = match detector_load {
-            Ok(detector) => {
-                println!(
-                    "detector model loaded id={} sha256={}",
-                    config.detector_model_id,
-                    crate::detector::Detector::model_sha256(&detector)
-                );
-                let receipt = detection_acceleration_receipt(
-                    config.accelerated_detection,
-                    &config.detector_model_id,
-                );
-                if accel.should_log(&receipt) {
+            let rtsp_source = match media_pipeline::prepare_rtsp_source(
+                &rtsp_url,
+                config.rtsp_username.as_deref(),
+                config.rtsp_password.as_deref(),
+            ) {
+                Ok(source) => source,
+                Err(error) => {
                     println!(
-                        "detector_backend_selected active={} status={} failure={}",
-                        receipt.active_backend,
-                        receipt.probe_status.as_str(),
-                        receipt.failure_code.as_str()
+                        "rtsp probe failed url={} error={error}",
+                        media_pipeline::redact_rtsp_url(&rtsp_url)
                     );
-                }
-                stats.update(|stats| {
-                    stats.active_detector_backend = receipt.active_backend.clone();
-                    stats.detection_acceleration = format!(
-                        "{}:{}",
-                        receipt.probe_status.as_str(),
-                        receipt.failure_code.as_str()
-                    );
-                });
-                accel.record(receipt);
-                Some(Box::new(detector))
-            }
-            Err(error) => {
-                println!("detector model load failed error={error}");
-                stats.update(|stats| {
-                    stats.ingest_signal = "detector-load-error".to_string();
-                    mark_health_condition(&mut stats.health, "ingest_failed");
-                });
-                health.set(HealthStatus::IngestFailed, "detector model load failed");
-                None
-            }
-        };
-        let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
-            .map(|capacity| capacity.max(1) as usize)
-            .unwrap_or(DETECTOR_QUEUE_CAPACITY);
-        let detector_work_delay =
-            Duration::from_millis(env_u64("VIGIL_DETECTOR_WORK_DELAY_MS").unwrap_or_default());
-        let detector_queue: Arc<LatestSegmentQueue<CapturedSegment>> =
-            Arc::new(LatestSegmentQueue::new(detector_queue_capacity));
-        let active_stream_generation = Arc::new(AtomicU64::new(0));
-        let detector_handle = detector.map(|detector| {
-            let config = config.clone();
-            let store = store.clone();
-            let stats = stats.clone();
-            let health = health.clone();
-            let shutdown = shutdown.clone();
-            let detector_queue = detector_queue.clone();
-            let active_stream_generation = active_stream_generation.clone();
-            let detection_publisher = detection_publisher.clone();
-            let recognition_embedder = recognition_embedder.clone();
-            let receipts = receipts.clone();
-            thread::spawn(move || {
-                let mut detector_total = 0_u64;
-                while !shutdown.load(Ordering::SeqCst) {
-                    let segment = match detector_queue.recv_timeout(Duration::from_millis(100)) {
-                        LatestSegmentRecv::Item(segment) => segment,
-                        LatestSegmentRecv::Timeout => continue,
-                        LatestSegmentRecv::Closed => break,
-                    };
-                    if segment.stream_generation < active_stream_generation.load(Ordering::SeqCst) {
-                        println!(
-                            "stale_stream_segment_suppressed=true sequence={}",
-                            segment.sequence
-                        );
-                        crate::workgraph::StageAttempt::begin(
-                            segment
-                                .detection_work
-                                .clone()
-                                .unwrap_or_else(|| segment.envelope.clone()),
-                        )
-                        .finish(
-                            &receipts,
-                            crate::workgraph::WorkDisposition::Dropped,
-                            0,
-                            "stale_stream=true",
-                            &mut receipt_line_sink(&stats),
-                        );
-                        let _ = fs::remove_file(&segment.path);
-                        continue;
-                    }
-                    detector_total = detector_total.saturating_add(1);
                     stats.update(|stats| {
-                        stats.detector_invocations = stats.detector_invocations.saturating_add(1);
+                        stats.ingest_signal = "decode-error".to_string();
+                        mark_health_condition(&mut stats.health, "ingest_failed");
                     });
-                    println!("detector_invocations={detector_total}");
-                    sleep_shutdown_aware(&shutdown, detector_work_delay);
-                    let detector_started = Instant::now();
-                    let detection_started_at = chrono::Utc::now();
-                    // The SAME detection work identity created at enqueue.
-                    let detection_work = segment.detection_work.clone().unwrap_or_else(|| {
-                        segment
-                            .motion_work
-                            .as_ref()
-                            .unwrap_or(&segment.envelope)
-                            .derive(crate::workgraph::STAGE_DETECTION)
-                    });
-                    let output = detector.detect_segment(
-                        &segment.media,
-                        segment.clip_sha256.clone(),
-                        config.detector_sample_frames,
-                        config.detector_confidence_threshold,
+                    health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
+                    return;
+                }
+            };
+            let rtsp_log_url = rtsp_source.session_url().to_string();
+            println!("rtsp probe starting url={rtsp_log_url}");
+            // The detector sits behind the engine-neutral trait: the pipeline sees
+            // `dyn Detector`, the engine lives in the implementation.
+            // Person-only by default (baseline NVR, first-light contract); widen to
+            // the covered COCO classes when recognition is on, so dog/vehicle
+            // sightings reach the match path.
+            let detector_load = if config.recognition.enabled {
+                yolox_detector::load_detector_with_classes(
+                    config.detector_model_path.as_deref(),
+                    &crate::recognition::covered_class_indices(&config.recognition),
+                )
+            } else {
+                yolox_detector::load_detector(config.detector_model_path.as_deref())
+            };
+            let detector: Option<Box<dyn crate::detector::Detector>> = match detector_load {
+                Ok(detector) => {
+                    println!(
+                        "detector model loaded id={} sha256={}",
+                        config.detector_model_id,
+                        crate::detector::Detector::model_sha256(&detector)
                     );
-                    let latency_ms = detector_started.elapsed().as_secs_f64() * 1000.0;
-                    stats.update(|stats| {
-                        stats.detector_latency_p50_ms = latency_ms;
-                        stats.detector_latency_p95_ms = latency_ms;
-                        stats.detector_latency_max_ms =
-                            stats.detector_latency_max_ms.max(latency_ms);
-                    });
-                    match output {
-                        Ok(output) => {
-                            println!("detector_detections={}", output.detections.len());
-                            // The detection result joins back to its exact
-                            // work + recorded backend attempt, or it is
-                            // rejected — never guessed.
-                            let detector_backend = stats.snapshot().active_detector_backend;
-                            let finished =
-                                crate::workgraph::StageAttempt::begin(detection_work.clone())
-                                    .backend(
-                                        (!detector_backend.is_empty()).then_some(detector_backend),
-                                    )
-                                    .started_at(detection_started_at)
-                                    .finish(
-                                        &receipts,
-                                        crate::workgraph::WorkDisposition::Completed,
-                                        output.detections.len() as u64,
-                                        &format!(
-                                            "detections={} decode_receipt_id={}",
-                                            output.detections.len(),
-                                            segment
-                                                .decode_receipt_id
-                                                .map(|id| id.to_string())
-                                                .unwrap_or_else(|| "-".to_string())
-                                        ),
-                                        &mut receipt_line_sink(&stats),
-                                    );
-                            // A result that failed its join never becomes
-                            // events — receipted Rejected above, gated here.
-                            if finished.joined {
-                                if let Err(error) = record_detected_events(
-                                    &store,
-                                    &config,
-                                    &segment,
-                                    &output,
-                                    &stats,
-                                    &health,
-                                    detection_publisher.as_deref(),
-                                    recognition_embedder.as_deref(),
-                                    &detection_work,
-                                    &receipts,
-                                ) {
-                                    println!("record_detection_failed error={error}");
-                                }
-                            } else {
-                                println!("detection_result_rejected=true");
-                                let _ = fs::remove_file(&segment.path);
-                            }
-                        }
-                        Err(error) => {
-                            println!("detector invocation failed error={error}");
-                            crate::workgraph::StageAttempt::begin(detection_work.clone())
-                                .started_at(detection_started_at)
-                                .finish(
-                                    &receipts,
-                                    crate::workgraph::WorkDisposition::Rejected,
-                                    0,
-                                    &format!("error={error}"),
-                                    &mut receipt_line_sink(&stats),
-                                );
-                        }
-                    }
-                }
-                for segment in detector_queue.drain() {
-                    let _ = fs::remove_file(&segment.path);
-                }
-            })
-        });
-        let mut decoded_total = 0_u64;
-        // The active decode backend for this stream, as observed from the
-        // latest selection/fallback receipt. Receipt attribution reads it.
-        let current_decode_backend: Arc<std::sync::Mutex<Option<String>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let mut reconnect_pending = false;
-        let mut stream_generation = active_stream_generation.load(Ordering::SeqCst);
-        let mut last_stationary_detector_scan: Option<Instant> = None;
-        let stationary_detector_interval =
-            Duration::from_secs(config.detector_stationary_interval_secs);
-        let retry_initial_ms = env_u64("VIGIL_RTSP_RETRY_INITIAL_MS").unwrap_or(2_000);
-        let retry_max_ms = env_u64("VIGIL_RTSP_RETRY_MAX_MS")
-            .unwrap_or(30_000)
-            .max(retry_initial_ms);
-        let mut retry_delay_ms = retry_initial_ms;
-        while !shutdown.load(Ordering::SeqCst) {
-            // Per-camera disable: gate on the enabled flag without exiting the
-            // thread so that a subsequent enable resumes ingest immediately.
-            if !enabled.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_secs(5));
-                continue;
-            }
-            let capture_frames = env_u64("VIGIL_CAPTURE_FRAMES").unwrap_or(48).max(1) as usize;
-            let receipt_stats = stats.clone();
-            let receipt_accel = accel.clone();
-            let receipt_backend = current_decode_backend.clone();
-            let capture_result = media_pipeline::capture_rtsp_segments(
-                &rtsp_source,
-                capture_frames,
-                shutdown.clone(),
-                media_pipeline::CaptureDecodeOptions {
-                    stream_id: crate::workgraph::StreamId::new(config.camera_name.clone()),
-                    stream_epoch: stream_generation,
-                    hardware_decoding: config.hardware_decoding,
-                },
-                move |receipt| {
-                    if receipt_accel.should_log(&receipt) {
+                    let receipt = detection_acceleration_receipt(
+                        config.accelerated_detection,
+                        &config.detector_model_id,
+                    );
+                    if accel.should_log(&receipt) {
                         println!(
-                            "decode_backend_selected stream={} attempted={} active={} hardware={} status={} failure={}",
-                            receipt
-                                .stream_id
-                                .as_ref()
-                                .map(crate::workgraph::StreamId::as_str)
-                                .unwrap_or(""),
-                            receipt.attempted_backend,
+                            "detector_backend_selected active={} status={} failure={}",
                             receipt.active_backend,
-                            receipt.hardware_accelerated,
                             receipt.probe_status.as_str(),
                             receipt.failure_code.as_str()
                         );
                     }
-                    if let Ok(mut backend) = receipt_backend.lock() {
-                        *backend = Some(receipt.active_backend.clone());
-                    }
-                    receipt_stats.update(|stats| {
-                        if let Some(stream) = receipt.stream_id.as_ref() {
-                            stats.active_decoder.insert(
-                                stream.as_str().to_string(),
-                                receipt.active_backend.clone(),
-                            );
-                        }
-                        stats.decode_acceleration = format!(
+                    stats.update(|stats| {
+                        stats.active_detector_backend = receipt.active_backend.clone();
+                        stats.detection_acceleration = format!(
                             "{}:{}",
                             receipt.probe_status.as_str(),
                             receipt.failure_code.as_str()
                         );
                     });
-                    receipt_accel.record(receipt);
-                },
-                || {
-                    println!("rtsp opened url={rtsp_log_url}");
-                    println!("rtsp play observed url={rtsp_log_url}");
-                    Ok(())
-                },
-                |media| {
-                    let mut segment = build_captured_segment(
-                        media,
-                        &config.data_dir,
-                        &config.camera_name,
-                        stream_generation,
-                    )?;
-                    let frames = segment.frames;
-                    let fps = segment.fps;
-                    let motion_positive = segment.motion_positive_frames;
-                    decoded_total = decoded_total.saturating_add(frames);
+                    accel.record(receipt);
+                    Some(Box::new(detector))
+                }
+                Err(error) => {
+                    println!("detector model load failed error={error}");
                     stats.update(|stats| {
-                        stats.frames_received = stats.frames_received.saturating_add(frames);
-                        stats.motion_positive_frames =
-                            stats.motion_positive_frames.saturating_add(motion_positive);
-                        stats.stream_fps = fps;
-                        stats.processing_lag_bound_ms = 1000.0_f64 / fps.max(1.0);
-                        stats.ingest_signal = "ok".to_string();
-                        if reconnect_pending {
-                            stats.stream_reconnects = stats.stream_reconnects.saturating_add(1);
-                        }
+                        stats.ingest_signal = "detector-load-error".to_string();
+                        mark_health_condition(&mut stats.health, "ingest_failed");
                     });
-                    set_ready_unless_latched_fault(&health, "RTSP ingest active");
-                    reconnect_pending = false;
-                    retry_delay_ms = retry_initial_ms;
-                    // Record the REAL decode stage attempt; the segment
-                    // carries its recorded receipt id into the graph.
-                    let decode_backend = current_decode_backend
-                        .lock()
-                        .ok()
-                        .and_then(|backend| backend.clone());
-                    let decode_finished =
-                        crate::workgraph::StageAttempt::begin(segment.envelope.clone())
-                            .backend(decode_backend)
-                            .started_at(segment.envelope.received_at)
-                            .finish(
-                                &receipts,
-                                crate::workgraph::WorkDisposition::Completed,
-                                frames,
-                                "",
-                                &mut receipt_line_sink(&stats),
-                            );
-                    segment.decode_receipt_id = Some(decode_finished.receipt_id);
-
-                    let decision = detector_segment_decision(
-                        motion_positive,
-                        stationary_detector_interval,
-                        last_stationary_detector_scan.map(|last| last.elapsed()),
-                    );
-                    let motion_work = segment.envelope.derive(crate::workgraph::STAGE_MOTION);
-                    if decision == DetectorSegmentDecision::SuppressMotionGate {
-                        println!("motion_gate_suppressed_segment=true");
-                        crate::workgraph::StageAttempt::begin(motion_work)
-                            .started_at(segment.observed_at)
-                            .finish(
-                                &receipts,
-                                crate::workgraph::WorkDisposition::Coalesced,
-                                0,
-                                "suppressed=true",
-                                &mut receipt_line_sink(&stats),
-                            );
-                        let _ = fs::remove_file(&segment.path);
-                    } else if detector_handle.is_some() {
-                        // The motion stage emits ONE result: the gated
-                        // segment, which detection consumes as its parent.
-                        crate::workgraph::StageAttempt::begin(motion_work.clone())
-                            .started_at(segment.observed_at)
-                            .finish(
-                                &receipts,
-                                crate::workgraph::WorkDisposition::Completed,
-                                1,
-                                &format!("motion_positive_frames={motion_positive}"),
-                                &mut receipt_line_sink(&stats),
-                            );
-                        // Detection work is minted HERE, once, and rides the
-                        // queue: every later receipt for it — completed,
-                        // rejected, failed, stale, replaced — shares this
-                        // identity. The decoded media is a contributing
-                        // parent (multi-parent provenance).
-                        let detection_attempt = crate::workgraph::StageAttempt::derive(
-                            &motion_work,
-                            crate::workgraph::STAGE_DETECTION,
-                        )
-                        .contributing(segment.envelope.work_id);
-                        segment.motion_work = Some(motion_work);
-                        segment.detection_work = Some(detection_attempt.work().clone());
-                        if let DetectorSegmentDecision::Enqueue {
-                            stationary_scan: true,
-                        } = decision
-                        {
-                            last_stationary_detector_scan = Some(Instant::now());
-                            println!("stationary_detector_scan=true");
-                        }
-                        match detector_queue.push_latest(segment) {
-                            Ok(Some(dropped_segment)) => {
-                                // The replaced segment's detection never
-                                // runs: receipt it as Dropped, visibly.
+                    health.set(HealthStatus::IngestFailed, "detector model load failed");
+                    None
+                }
+            };
+            let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
+                .map(|capacity| capacity.max(1) as usize)
+                .unwrap_or(DETECTOR_QUEUE_CAPACITY);
+            let detector_work_delay =
+                Duration::from_millis(env_u64("VIGIL_DETECTOR_WORK_DELAY_MS").unwrap_or_default());
+            let detector_queue: Arc<LatestSegmentQueue<CapturedSegment>> =
+                Arc::new(LatestSegmentQueue::new(detector_queue_capacity));
+            let active_stream_generation = Arc::new(AtomicU64::new(0));
+            let detector_handle = detector.map(|detector| {
+                let config = config.clone();
+                let store = store.clone();
+                let stats = stats.clone();
+                let health = health.clone();
+                let shutdown = shutdown.clone();
+                let detector_queue = detector_queue.clone();
+                let active_stream_generation = active_stream_generation.clone();
+                let detection_publisher = detection_publisher.clone();
+                let recognition_embedder = recognition_embedder.clone();
+                let receipts = receipts.clone();
+                thread::spawn(move || {
+                    let panic_health = health.clone();
+                    let panic_stats = stats.clone();
+                    let unwind =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                            let mut detector_total = 0_u64;
+                            while !shutdown.load(Ordering::SeqCst) {
+                                let segment =
+                                    match detector_queue.recv_timeout(Duration::from_millis(100)) {
+                                        LatestSegmentRecv::Item(segment) => segment,
+                                        LatestSegmentRecv::Timeout => continue,
+                                        LatestSegmentRecv::Closed => break,
+                                    };
+                                if segment.stream_generation
+                                    < active_stream_generation.load(Ordering::SeqCst)
+                                {
+                                    println!(
+                                        "stale_stream_segment_suppressed=true sequence={}",
+                                        segment.sequence
+                                    );
+                                    crate::workgraph::StageAttempt::begin(
+                                        segment
+                                            .detection_work
+                                            .clone()
+                                            .unwrap_or_else(|| segment.envelope.clone()),
+                                    )
+                                    .finish(
+                                        &receipts,
+                                        crate::workgraph::WorkDisposition::Dropped,
+                                        0,
+                                        "stale_stream=true",
+                                        &mut receipt_line_sink(&stats),
+                                    );
+                                    let _ = fs::remove_file(&segment.path);
+                                    continue;
+                                }
+                                detector_total = detector_total.saturating_add(1);
+                                stats.update(|stats| {
+                                    stats.detector_invocations =
+                                        stats.detector_invocations.saturating_add(1);
+                                });
+                                println!("detector_invocations={detector_total}");
+                                sleep_shutdown_aware(&shutdown, detector_work_delay);
+                                let detector_started = Instant::now();
+                                let detection_started_at = chrono::Utc::now();
+                                // The SAME detection work identity created at enqueue.
+                                let detection_work =
+                                    segment.detection_work.clone().unwrap_or_else(|| {
+                                        segment
+                                            .motion_work
+                                            .as_ref()
+                                            .unwrap_or(&segment.envelope)
+                                            .derive(crate::workgraph::STAGE_DETECTION)
+                                    });
+                                let output = detector.detect_segment(
+                                    &segment.media,
+                                    segment.clip_sha256.clone(),
+                                    config.detector_sample_frames,
+                                    config.detector_confidence_threshold,
+                                );
+                                let latency_ms = detector_started.elapsed().as_secs_f64() * 1000.0;
+                                stats.update(|stats| {
+                                    stats.detector_latency_p50_ms = latency_ms;
+                                    stats.detector_latency_p95_ms = latency_ms;
+                                    stats.detector_latency_max_ms =
+                                        stats.detector_latency_max_ms.max(latency_ms);
+                                });
+                                match output {
+                                    Ok(output) => {
+                                        println!("detector_detections={}", output.detections.len());
+                                        // The detection result joins back to its exact
+                                        // work + recorded backend attempt, or it is
+                                        // rejected — never guessed.
+                                        let detector_backend =
+                                            stats.snapshot().active_detector_backend;
+                                        let finished = crate::workgraph::StageAttempt::begin(
+                                            detection_work.clone(),
+                                        )
+                                        .backend(
+                                            (!detector_backend.is_empty())
+                                                .then_some(detector_backend),
+                                        )
+                                        .started_at(detection_started_at)
+                                        .finish(
+                                            &receipts,
+                                            crate::workgraph::WorkDisposition::Completed,
+                                            output.detections.len() as u64,
+                                            &format!(
+                                                "detections={} decode_receipt_id={}",
+                                                output.detections.len(),
+                                                segment
+                                                    .decode_receipt_id
+                                                    .map(|id| id.to_string())
+                                                    .unwrap_or_else(|| "-".to_string())
+                                            ),
+                                            &mut receipt_line_sink(&stats),
+                                        );
+                                        // A result that failed its join never becomes
+                                        // events — receipted Rejected above, gated here.
+                                        if finished.joined {
+                                            if let Err(error) = record_detected_events(
+                                                &store,
+                                                &config,
+                                                &segment,
+                                                &output,
+                                                &stats,
+                                                &health,
+                                                detection_publisher.as_deref(),
+                                                recognition_embedder.as_deref(),
+                                                &detection_work,
+                                                &receipts,
+                                            ) {
+                                                println!("record_detection_failed error={error}");
+                                            }
+                                        } else {
+                                            println!("detection_result_rejected=true");
+                                            let _ = fs::remove_file(&segment.path);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        println!("detector invocation failed error={error}");
+                                        crate::workgraph::StageAttempt::begin(
+                                            detection_work.clone(),
+                                        )
+                                        .started_at(detection_started_at)
+                                        .finish(
+                                            &receipts,
+                                            crate::workgraph::WorkDisposition::Rejected,
+                                            0,
+                                            &format!("error={error}"),
+                                            &mut receipt_line_sink(&stats),
+                                        );
+                                    }
+                                }
+                            }
+                            for segment in detector_queue.drain() {
+                                // Minted detection work never vanishes receipt-less,
+                                // even in the shutdown window.
                                 crate::workgraph::StageAttempt::begin(
-                                    dropped_segment
+                                    segment
                                         .detection_work
                                         .clone()
-                                        .unwrap_or_else(|| dropped_segment.envelope.clone()),
+                                        .unwrap_or_else(|| segment.envelope.clone()),
                                 )
-                                .started_at(dropped_segment.observed_at)
                                 .finish(
                                     &receipts,
                                     crate::workgraph::WorkDisposition::Dropped,
                                     0,
-                                    "replaced_by_newer=true",
+                                    "shutdown=true",
                                     &mut receipt_line_sink(&stats),
                                 );
-                                let dropped = dropped_segment.motion_positive_frames.max(1);
-                                stats.update(|stats| {
-                                    stats.dropped_motion_positive_frames = stats
-                                        .dropped_motion_positive_frames
-                                        .saturating_add(dropped);
-                                    stats.processing_lag_ms = stats
-                                        .processing_lag_ms
-                                        .max(stats.processing_lag_bound_ms + 1.0);
-                                    mark_health_condition(&mut stats.health, "keep-pace-failed");
-                                });
-                                health.set(
-                                    HealthStatus::KeepPaceFailed,
-                                    "detector queue fell behind",
-                                );
-                                println!(
-                                    "detector_queue_replaced_pending_segment=true dropped_sequence={}",
-                                    dropped_segment.sequence
-                                );
-                                let _ = fs::remove_file(&dropped_segment.path);
-                            }
-                            Ok(None) => {}
-                            Err(segment) => {
-                                println!("detector queue disconnected");
                                 let _ = fs::remove_file(&segment.path);
                             }
+                        }));
+                    if unwind.is_err() {
+                        println!("detector_thread_panicked=true");
+                        panic_stats.update(|stats| {
+                            stats.ingest_signal = "panic".to_string();
+                            mark_health_condition(&mut stats.health, "ingest_failed");
+                        });
+                        panic_health.set(HealthStatus::IngestFailed, "detector thread panicked");
+                    }
+                })
+            });
+            let mut decoded_total = 0_u64;
+            // The active decode backend for this stream, as observed from the
+            // latest selection/fallback receipt. Receipt attribution reads it.
+            let current_decode_backend: Arc<std::sync::Mutex<Option<String>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let mut reconnect_pending = false;
+            let mut stream_generation = active_stream_generation.load(Ordering::SeqCst);
+            let mut last_stationary_detector_scan: Option<Instant> = None;
+            let stationary_detector_interval =
+                Duration::from_secs(config.detector_stationary_interval_secs);
+            let retry_initial_ms = env_u64("VIGIL_RTSP_RETRY_INITIAL_MS").unwrap_or(2_000);
+            let retry_max_ms = env_u64("VIGIL_RTSP_RETRY_MAX_MS")
+                .unwrap_or(30_000)
+                .max(retry_initial_ms);
+            let mut retry_delay_ms = retry_initial_ms;
+            while !shutdown.load(Ordering::SeqCst) {
+                // Per-camera disable: gate on the enabled flag without exiting the
+                // thread so that a subsequent enable resumes ingest immediately.
+                if !enabled.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
+                let capture_frames = env_u64("VIGIL_CAPTURE_FRAMES").unwrap_or(48).max(1) as usize;
+                let receipt_stats = stats.clone();
+                let receipt_accel = accel.clone();
+                let receipt_backend = current_decode_backend.clone();
+                let capture_result = media_pipeline::capture_rtsp_segments(
+                    &rtsp_source,
+                    capture_frames,
+                    shutdown.clone(),
+                    media_pipeline::CaptureDecodeOptions {
+                        stream_id: crate::workgraph::StreamId::new(config.camera_name.clone()),
+                        stream_epoch: stream_generation,
+                        hardware_decoding: config.hardware_decoding,
+                    },
+                    move |receipt| {
+                        if receipt_accel.should_log(&receipt) {
+                            println!(
+                                "decode_backend_selected stream={} attempted={} active={} hardware={} status={} failure={}",
+                                receipt
+                                    .stream_id
+                                    .as_ref()
+                                    .map(crate::workgraph::StreamId::as_str)
+                                    .unwrap_or(""),
+                                receipt.attempted_backend,
+                                receipt.active_backend,
+                                receipt.hardware_accelerated,
+                                receipt.probe_status.as_str(),
+                                receipt.failure_code.as_str()
+                            );
                         }
-                    } else {
-                        // The motion gate DID run, and the detection this
-                        // segment deserved never will: both receipted, never
-                        // silent (latched ingest-failed health already marks
-                        // the pipeline degraded).
-                        println!("detector_unavailable_dropped_segment=true");
-                        let detection_attempt = crate::workgraph::StageAttempt::derive(
-                            &motion_work,
-                            crate::workgraph::STAGE_DETECTION,
-                        )
-                        .contributing(segment.envelope.work_id);
-                        crate::workgraph::StageAttempt::begin(motion_work)
-                            .started_at(segment.observed_at)
-                            .finish(
+                        if let Ok(mut backend) = receipt_backend.lock() {
+                            *backend = Some(receipt.active_backend.clone());
+                        }
+                        receipt_stats.update(|stats| {
+                            if let Some(stream) = receipt.stream_id.as_ref() {
+                                stats.active_decoder.insert(
+                                    stream.as_str().to_string(),
+                                    receipt.active_backend.clone(),
+                                );
+                            }
+                            stats.decode_acceleration = format!(
+                                "{}:{}",
+                                receipt.probe_status.as_str(),
+                                receipt.failure_code.as_str()
+                            );
+                        });
+                        receipt_accel.record(receipt);
+                    },
+                    || {
+                        println!("rtsp opened url={rtsp_log_url}");
+                        println!("rtsp play observed url={rtsp_log_url}");
+                        Ok(())
+                    },
+                    |media| {
+                        let mut segment = build_captured_segment(
+                            media,
+                            &config.data_dir,
+                            &config.camera_name,
+                            stream_generation,
+                        )?;
+                        let frames = segment.frames;
+                        let fps = segment.fps;
+                        let motion_positive = segment.motion_positive_frames;
+                        decoded_total = decoded_total.saturating_add(frames);
+                        stats.update(|stats| {
+                            stats.frames_received = stats.frames_received.saturating_add(frames);
+                            stats.motion_positive_frames =
+                                stats.motion_positive_frames.saturating_add(motion_positive);
+                            stats.stream_fps = fps;
+                            stats.processing_lag_bound_ms = 1000.0_f64 / fps.max(1.0);
+                            stats.ingest_signal = "ok".to_string();
+                            if reconnect_pending {
+                                stats.stream_reconnects = stats.stream_reconnects.saturating_add(1);
+                            }
+                        });
+                        set_ready_unless_latched_fault(&health, "RTSP ingest active");
+                        reconnect_pending = false;
+                        retry_delay_ms = retry_initial_ms;
+                        // Record the REAL decode stage attempt; the segment
+                        // carries its recorded receipt id into the graph.
+                        let decode_backend = current_decode_backend
+                            .lock()
+                            .ok()
+                            .and_then(|backend| backend.clone());
+                        let decode_finished =
+                            crate::workgraph::StageAttempt::begin(segment.envelope.clone())
+                                .backend(decode_backend)
+                                .started_at(segment.envelope.received_at)
+                                .finish(
+                                    &receipts,
+                                    crate::workgraph::WorkDisposition::Completed,
+                                    frames,
+                                    "",
+                                    &mut receipt_line_sink(&stats),
+                                );
+                        segment.decode_receipt_id = Some(decode_finished.receipt_id);
+
+                        let decision = detector_segment_decision(
+                            motion_positive,
+                            stationary_detector_interval,
+                            last_stationary_detector_scan.map(|last| last.elapsed()),
+                        );
+                        let motion_work = segment.envelope.derive(crate::workgraph::STAGE_MOTION);
+                        if decision == DetectorSegmentDecision::SuppressMotionGate {
+                            println!("motion_gate_suppressed_segment=true");
+                            crate::workgraph::StageAttempt::begin(motion_work)
+                                .started_at(segment.observed_at)
+                                .finish(
+                                    &receipts,
+                                    crate::workgraph::WorkDisposition::Coalesced,
+                                    0,
+                                    "suppressed=true",
+                                    &mut receipt_line_sink(&stats),
+                                );
+                            let _ = fs::remove_file(&segment.path);
+                        } else if detector_handle.is_some() {
+                            // The motion stage emits ONE result: the gated
+                            // segment, which detection consumes as its parent.
+                            crate::workgraph::StageAttempt::begin(motion_work.clone())
+                                .started_at(segment.observed_at)
+                                .finish(
+                                    &receipts,
+                                    crate::workgraph::WorkDisposition::Completed,
+                                    1,
+                                    &format!("motion_positive_frames={motion_positive}"),
+                                    &mut receipt_line_sink(&stats),
+                                );
+                            // Detection work is minted HERE, once, and rides the
+                            // queue: every later receipt for it — completed,
+                            // rejected, failed, stale, replaced — shares this
+                            // identity. The decoded media is a contributing
+                            // parent (multi-parent provenance).
+                            segment.detection_work = Some(motion_work.derive_with_contributor(
+                                crate::workgraph::STAGE_DETECTION,
+                                segment.envelope.work_id,
+                            ));
+                            segment.motion_work = Some(motion_work);
+                            if let DetectorSegmentDecision::Enqueue {
+                                stationary_scan: true,
+                            } = decision
+                            {
+                                last_stationary_detector_scan = Some(Instant::now());
+                                println!("stationary_detector_scan=true");
+                            }
+                            match detector_queue.push_latest(segment) {
+                                Ok(Some(dropped_segment)) => {
+                                    // The replaced segment's detection never
+                                    // runs: receipt it as Dropped, visibly.
+                                    crate::workgraph::StageAttempt::begin(
+                                        dropped_segment
+                                            .detection_work
+                                            .clone()
+                                            .unwrap_or_else(|| dropped_segment.envelope.clone()),
+                                    )
+                                    .started_at(dropped_segment.observed_at)
+                                    .finish(
+                                        &receipts,
+                                        crate::workgraph::WorkDisposition::Dropped,
+                                        0,
+                                        "replaced_by_newer=true",
+                                        &mut receipt_line_sink(&stats),
+                                    );
+                                    let dropped = dropped_segment.motion_positive_frames.max(1);
+                                    stats.update(|stats| {
+                                        stats.dropped_motion_positive_frames = stats
+                                            .dropped_motion_positive_frames
+                                            .saturating_add(dropped);
+                                        stats.processing_lag_ms = stats
+                                            .processing_lag_ms
+                                            .max(stats.processing_lag_bound_ms + 1.0);
+                                        mark_health_condition(
+                                            &mut stats.health,
+                                            "keep-pace-failed",
+                                        );
+                                    });
+                                    health.set(
+                                        HealthStatus::KeepPaceFailed,
+                                        "detector queue fell behind",
+                                    );
+                                    println!(
+                                        "detector_queue_replaced_pending_segment=true dropped_sequence={}",
+                                        dropped_segment.sequence
+                                    );
+                                    let _ = fs::remove_file(&dropped_segment.path);
+                                }
+                                Ok(None) => {}
+                                Err(segment) => {
+                                    println!("detector queue disconnected");
+                                    crate::workgraph::StageAttempt::begin(
+                                        segment
+                                            .detection_work
+                                            .clone()
+                                            .unwrap_or_else(|| segment.envelope.clone()),
+                                    )
+                                    .finish(
+                                        &receipts,
+                                        crate::workgraph::WorkDisposition::Dropped,
+                                        0,
+                                        "queue_closed=true",
+                                        &mut receipt_line_sink(&stats),
+                                    );
+                                    let _ = fs::remove_file(&segment.path);
+                                }
+                            }
+                        } else {
+                            // The motion gate DID run, and the detection this
+                            // segment deserved never will: both receipted, never
+                            // silent (latched ingest-failed health already marks
+                            // the pipeline degraded).
+                            println!("detector_unavailable_dropped_segment=true");
+                            let never_run_detection = motion_work.derive_with_contributor(
+                                crate::workgraph::STAGE_DETECTION,
+                                segment.envelope.work_id,
+                            );
+                            crate::workgraph::StageAttempt::begin(motion_work)
+                                .started_at(segment.observed_at)
+                                .finish(
+                                    &receipts,
+                                    crate::workgraph::WorkDisposition::Completed,
+                                    1,
+                                    &format!("motion_positive_frames={motion_positive}"),
+                                    &mut receipt_line_sink(&stats),
+                                );
+                            crate::workgraph::StageAttempt::begin(never_run_detection).finish(
                                 &receipts,
-                                crate::workgraph::WorkDisposition::Completed,
-                                1,
-                                &format!("motion_positive_frames={motion_positive}"),
+                                crate::workgraph::WorkDisposition::Dropped,
+                                0,
+                                "detector_unavailable=true",
                                 &mut receipt_line_sink(&stats),
                             );
-                        detection_attempt.finish(
-                            &receipts,
-                            crate::workgraph::WorkDisposition::Dropped,
-                            0,
-                            "detector_unavailable=true",
-                            &mut receipt_line_sink(&stats),
-                        );
-                        let _ = fs::remove_file(&segment.path);
-                    }
-                    // Rendered AFTER the enqueue/replace outcome so the
-                    // stats line reflects THIS segment's queue effect.
-                    stats.update(|stats| {
+                            let _ = fs::remove_file(&segment.path);
+                        }
+                        // Rendered AFTER the enqueue/replace outcome so the
+                        // stats line reflects THIS segment's queue effect.
+                        stats.update(|stats| {
                         let counters = detector_queue.counters();
                         stats.detector_queue = format!(
                             "depth={} capacity={} queued={} dropped={} coalesced={} degraded={}",
@@ -1009,35 +1078,45 @@ fn start_rtsp_probe(
                             counters.replaced_dropped_total > 0
                         );
                     });
-                    println!("decoded_frames={decoded_total}");
-                    Ok(())
-                },
-            );
-            match capture_result {
-                Ok(()) => {}
-                Err(error) => {
-                    if shutdown.load(Ordering::SeqCst) {
-                        break;
+                        println!("decoded_frames={decoded_total}");
+                        Ok(())
+                    },
+                );
+                match capture_result {
+                    Ok(()) => {}
+                    Err(error) => {
+                        if shutdown.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        println!("rtsp probe failed url={rtsp_log_url} error={error}");
+                        println!("decoded_frames={decoded_total}");
+                        stats.update(|stats| {
+                            stats.stream_drops = stats.stream_drops.saturating_add(1);
+                            stats.ingest_signal = "decode-error".to_string();
+                            mark_health_condition(&mut stats.health, "ingest_failed");
+                        });
+                        reconnect_pending = true;
+                        stream_generation =
+                            active_stream_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
+                        println!("rtsp_retry_after_ms={retry_delay_ms}");
+                        sleep_shutdown_aware(&shutdown, Duration::from_millis(retry_delay_ms));
+                        retry_delay_ms = retry_delay_ms.saturating_mul(2).min(retry_max_ms);
                     }
-                    println!("rtsp probe failed url={rtsp_log_url} error={error}");
-                    println!("decoded_frames={decoded_total}");
-                    stats.update(|stats| {
-                        stats.stream_drops = stats.stream_drops.saturating_add(1);
-                        stats.ingest_signal = "decode-error".to_string();
-                        mark_health_condition(&mut stats.health, "ingest_failed");
-                    });
-                    reconnect_pending = true;
-                    stream_generation = active_stream_generation.fetch_add(1, Ordering::SeqCst) + 1;
-                    health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
-                    println!("rtsp_retry_after_ms={retry_delay_ms}");
-                    sleep_shutdown_aware(&shutdown, Duration::from_millis(retry_delay_ms));
-                    retry_delay_ms = retry_delay_ms.saturating_mul(2).min(retry_max_ms);
                 }
             }
-        }
-        detector_queue.close();
-        if let Some(handle) = detector_handle {
-            let _ = handle.join();
+            detector_queue.close();
+            if let Some(handle) = detector_handle {
+                let _ = handle.join();
+            }
+        }));
+        if unwind.is_err() {
+            println!("camera_thread_panicked=true");
+            panic_stats.update(|stats| {
+                stats.ingest_signal = "panic".to_string();
+                mark_health_condition(&mut stats.health, "ingest_failed");
+            });
+            panic_health.set(HealthStatus::IngestFailed, "camera thread panicked");
         }
     })
 }
@@ -1689,6 +1768,10 @@ fn record_detected_events(
                     stats.observation_write_failures =
                         stats.observation_write_failures.saturating_add(1);
                 });
+                // The clip was already finalized into the durable clips dir;
+                // with no observation referencing it, it would leak forever
+                // (nothing sweeps clips). Remove it with the failure.
+                let _ = fs::remove_file(&segment.final_path);
                 return Err(error);
             }
         }

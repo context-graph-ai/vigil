@@ -1,12 +1,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub(crate) struct RuntimeStatsState {
     inner: Arc<Mutex<RuntimeStats>>,
+    last_write: Arc<Mutex<Option<std::time::Instant>>>,
     path: PathBuf,
 }
 
@@ -110,6 +112,7 @@ impl RuntimeStatsState {
         let stats = read_snapshot(data_dir).unwrap_or_default();
         Self {
             inner: Arc::new(Mutex::new(stats)),
+            last_write: Arc::new(Mutex::new(None)),
             path,
         }
     }
@@ -122,8 +125,38 @@ impl RuntimeStatsState {
     }
 
     pub(crate) fn update(&self, update: impl FnOnce(&mut RuntimeStats)) {
-        if let Ok(mut stats) = self.inner.lock() {
+        // Mutate in memory under the lock, but never hold the lock across
+        // disk IO (every camera and detector thread shares it), and
+        // coalesce disk writes: the receipt surfaces update many times per
+        // segment and the snapshot file only serves cross-process readers.
+        let snapshot = {
+            let Ok(mut stats) = self.inner.lock() else {
+                return;
+            };
             update(&mut stats);
+            stats.clone()
+        };
+        let now = std::time::Instant::now();
+        let should_write = {
+            let Ok(mut last) = self.last_write.lock() else {
+                return;
+            };
+            match *last {
+                Some(at) if now.duration_since(at) < Duration::from_millis(250) => false,
+                _ => {
+                    *last = Some(now);
+                    true
+                }
+            }
+        };
+        if should_write {
+            let _ = write_snapshot_path(&self.path, &snapshot);
+        }
+    }
+
+    /// Write the current state to disk unconditionally (shutdown/final).
+    pub(crate) fn flush(&self) {
+        if let Ok(stats) = self.inner.lock() {
             let _ = write_snapshot_path(&self.path, &stats);
         }
     }
@@ -140,7 +173,11 @@ fn write_snapshot_path(path: &Path, stats: &RuntimeStats) -> Result<(), String> 
             .map_err(|error| format!("create stats directory {}: {error}", parent.display()))?;
     }
     let text = serde_json::to_string_pretty(stats).map_err(|error| error.to_string())?;
-    fs::write(path, text).map_err(|error| format!("write stats {}: {error}", path.display()))
+    // Atomic replace: a reader never sees a torn file and a crash mid-write
+    // never resets counters on the next boot.
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, text).map_err(|error| format!("write stats {}: {error}", temp.display()))?;
+    fs::rename(&temp, path).map_err(|error| format!("commit stats {}: {error}", path.display()))
 }
 
 fn snapshot_path(data_dir: &Path) -> PathBuf {

@@ -238,6 +238,10 @@ pub(crate) struct CaptureDecodeOptions {
 
 /// Real stream units collected before running the hardware decode probe.
 const HARDWARE_PROBE_UNIT_COUNT: usize = 12;
+/// A low-fps camera cannot deliver the full probe buffer quickly; after
+/// this deadline the probe runs on whatever real units were collected so
+/// slow streams still select a backend instead of timing out forever.
+const HARDWARE_PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
 pub(crate) fn capture_rtsp_segments<OnSessionStarted, OnSegment, OnDecodeReceipt>(
     rtsp_source: &RtspSource,
@@ -370,6 +374,12 @@ where
     let mut segment_started_at = None;
     let mut any_frames_decoded = false;
     while !shutdown.load(Ordering::SeqCst) {
+        // The decodable-frames watchdog runs on EVERY iteration: a stream
+        // that keeps sending undecodable units (no complete codec config)
+        // never pauses long enough for the poll-timeout branch to see it.
+        if !any_frames_decoded && started.elapsed() > Duration::from_secs(30) {
+            return Err("RTSP capture timed out waiting for decodable video frames".to_string());
+        }
         match tokio::time::timeout(Duration::from_millis(500), demuxed.next()).await {
             Ok(Some(Ok(CodecItem::VideoFrame(frame)))) if frame.stream_id() == stream_i => {
                 let data = frame.into_data();
@@ -387,7 +397,9 @@ where
                         continue;
                     }
                     probe_buffer.push(unit);
-                    if probe_buffer.len() >= HARDWARE_PROBE_UNIT_COUNT {
+                    let probe_deadline_reached =
+                        !probe_buffer.is_empty() && started.elapsed() > HARDWARE_PROBE_DEADLINE;
+                    if probe_buffer.len() >= HARDWARE_PROBE_UNIT_COUNT || probe_deadline_reached {
                         let selection = crate::decode::select_decode_backend(
                             &decode_options.stream_id,
                             codec,

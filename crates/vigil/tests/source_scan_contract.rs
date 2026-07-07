@@ -438,7 +438,7 @@ fn addon_config_exposes_recognition_options_and_schema() {
         let forbidden = format!("- {class_name}");
         if options.iter().any(|line| line.trim() == forbidden) {
             failures.push(format!(
-                "{} must not default options.recognition_covered_classes to include traffic class {class_name}; traffic was auto-labeled as John during the owner smoke",
+                "{} must not default options.recognition_covered_classes to include traffic class {class_name}; traffic classes auto-matched the only enrolled person before the class guard existed",
                 addon_config_path.display()
             ));
         }

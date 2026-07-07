@@ -164,7 +164,7 @@ impl WorkEnvelope {
     /// Derive one stage's work from its parent: the ONE derivation rule.
     /// Identity (stream, media item, ordering, observed time, priority,
     /// deadline, schema) is inherited; the parent becomes the provenance
-    /// link; contributing parents are added via [`StageAttempt::contributing`].
+    /// link.
     pub fn derive(&self, stage: &str) -> WorkEnvelope {
         WorkEnvelope {
             work_id: WorkId::generate(),
@@ -180,6 +180,16 @@ impl WorkEnvelope {
             deadline: self.deadline,
             schema_version: self.schema_version,
         }
+    }
+
+    /// Derive with an additional contributing parent (aggregation
+    /// provenance) — for minting work that is carried elsewhere (e.g.
+    /// across a queue) before its attempt begins. Work that is attempted
+    /// immediately uses [`StageAttempt::derive`] + [`StageAttempt::contributing`].
+    pub fn derive_with_contributor(&self, stage: &str, contributor: WorkId) -> WorkEnvelope {
+        let mut work = self.derive(stage);
+        work.contributing_work_ids.push(contributor);
+        work
     }
 }
 
@@ -540,6 +550,13 @@ impl StageAttempt {
     /// fails — counted, never silent), and emit ONE operator line rendered
     /// from the RECORDED receipt. Returns the recorded receipt id and the
     /// join verdict; callers applying results downstream must gate on it.
+    ///
+    /// HONESTY NOTE: in-process the result is mirrored from its own work,
+    /// so rejection is structurally unreachable here — the gate becomes
+    /// falsifiable only when results arrive from OUTSIDE (a queue whose
+    /// producer is another process, or a machine boundary in the detector
+    /// work-class plan). Do not read a never-firing reject path as proof
+    /// of validation coverage.
     pub fn finish(
         self,
         log: &StageReceiptLog,

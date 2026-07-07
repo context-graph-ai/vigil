@@ -35,6 +35,13 @@ pub fn privilege_drop_plan(
                      got {entry:?}: {error}"
                 )
             })?;
+            if parsed == 0 {
+                return Err(
+                    "VIGIL_RUN_SUPPLEMENTAL_GIDS must not contain gid 0: keeping the root \
+                     group across a privilege drop defeats the drop"
+                        .to_string(),
+                );
+            }
             gids.push(parsed);
         }
     }
@@ -134,14 +141,16 @@ fn execute_privilege_step(step: PrivilegeStep) -> Result<(), String> {
 
 #[cfg(unix)]
 fn chown_if_exists(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
-    if !path.exists() {
+    // symlink_metadata + lchown: root must never follow a symlink a less
+    // privileged writer planted at the store path.
+    if std::fs::symlink_metadata(path).is_err() {
         return Ok(());
     }
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
     let c_path = std::ffi::CString::new(bytes)
         .map_err(|_| format!("path contains an interior NUL byte: {}", path.display()))?;
-    let result = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    let result = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
     if result == 0 {
         Ok(())
     } else {

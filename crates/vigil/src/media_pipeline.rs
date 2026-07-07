@@ -344,6 +344,11 @@ where
     // still produces its first segment.
     let mut pending_units: std::collections::VecDeque<crate::decode::EncodedAccessUnit> =
         std::collections::VecDeque::new();
+    // The most recent COMPLETE codec-config unit. A camera may send SPS/PPS
+    // only once at stream start; a mid-stream fallback decoder replays this
+    // so decode (and segment assembly) resumes without waiting for a repeat
+    // that may never come.
+    let mut last_codec_config_unit: Option<crate::decode::EncodedAccessUnit> = None;
     let mut encoded_units = Vec::new();
     let mut decoded_frames = Vec::new();
     let mut segment_started = false;
@@ -388,6 +393,9 @@ where
                     pending_units.push_back(unit);
                 }
                 while let Some(mut unit) = pending_units.pop_front() {
+                    if unit.codec_config.is_some() {
+                        last_codec_config_unit = Some(unit.clone());
+                    }
                     let active_backend = backend.as_mut().expect("decode backend selected");
                     // Boundary-first segment membership: the parameter-set
                     // unit that STARTS segment N belongs to segment N.
@@ -422,6 +430,14 @@ where
                             encoded_units.clear();
                             decoded_frames.clear();
                             segment_started = false;
+                            // Replay the cached codec config so the fresh
+                            // software decoder is seeded and assembly can
+                            // restart even when the camera never repeats
+                            // SPS/PPS. (Recovery replay: its sequence
+                            // number is historical by design.)
+                            if let Some(config_unit) = last_codec_config_unit.clone() {
+                                pending_units.push_front(config_unit);
+                            }
                             continue;
                         }
                     };

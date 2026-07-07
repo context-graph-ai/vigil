@@ -887,16 +887,7 @@ fn start_rtsp_probe(
                         .lock()
                         .ok()
                         .and_then(|backend| backend.clone());
-                    let decode_receipt = stage_receipt_for(
-                        &segment.envelope,
-                        crate::workgraph::STAGE_DECODED_MEDIA,
-                        decode_backend.clone(),
-                        segment.envelope.received_at,
-                        frames,
-                        crate::workgraph::WorkDisposition::Completed,
-                    );
-                    segment.decode_receipt_id = Some(decode_receipt.receipt_id);
-                    record_stage_attempt(
+                    let decode_receipt_id = record_stage_attempt(
                         &receipts,
                         &stats,
                         &segment.envelope,
@@ -906,6 +897,7 @@ fn start_rtsp_probe(
                         crate::workgraph::WorkDisposition::Completed,
                         "",
                     );
+                    segment.decode_receipt_id = Some(decode_receipt_id);
 
                     let decision = detector_segment_decision(
                         motion_positive,
@@ -1198,7 +1190,7 @@ fn record_stage_attempt(
     output_count: u64,
     disposition: crate::workgraph::WorkDisposition,
     detail: &str,
-) {
+) -> crate::workgraph::ReceiptId {
     let receipt = stage_receipt_for(
         work,
         work.stage.as_str(),
@@ -1219,6 +1211,7 @@ fn record_stage_attempt(
         result_schema_version: work.schema_version,
         receipt_id: receipt.receipt_id,
     };
+    let recorded_receipt_id = receipt.receipt_id;
     match crate::workgraph::validate_result_join(work, &result, Some(&receipt)) {
         Ok(()) => record_stage_receipt(receipts, stats, receipt, work.ordering, detail),
         Err(rejection) => {
@@ -1234,6 +1227,7 @@ fn record_stage_attempt(
             );
         }
     }
+    recorded_receipt_id
 }
 
 fn sleep_shutdown_aware(shutdown: &AtomicBool, duration: Duration) {

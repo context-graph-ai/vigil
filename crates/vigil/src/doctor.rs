@@ -564,7 +564,13 @@ pub fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
         detector_model_path: config.detector_model_path.clone(),
     };
     let facts = RealHostFacts;
-    let report = acceleration_report(&request, &facts);
+    let mut report = acceleration_report(&request, &facts);
+    // The detection receipt names the configured model identity. Stamped
+    // here on the CLI surface: DoctorRequest's shape is pinned by frozen
+    // contract tests, so the id rides the report rather than the request.
+    if report.detection.model_id.is_none() {
+        report.detection.model_id = Some(config.detector_model_id.clone());
+    }
     println!("{}", render_report(&report));
     Ok(())
 }

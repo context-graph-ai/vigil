@@ -773,7 +773,7 @@ fn correction_command_on_broker_lands_in_cg() {
 
     thread::sleep(Duration::from_millis(300));
     let cmd_payload = format!(
-        r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"that's Roshan"}}"#
+        r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"that's Arjun"}}"#
     );
     mosquitto_pub_n(broker.port, "vigil/commands/correct", &cmd_payload, 1);
     thread::sleep(Duration::from_secs(2));
@@ -793,8 +793,8 @@ fn correction_command_on_broker_lands_in_cg() {
     let correction = &why.corrections[0];
     assert_eq!(
         correction.label.as_deref(),
-        Some("that's Roshan"),
-        "correction label must value-equal the broker command label 'that\\'s Roshan'; \
+        Some("that's Arjun"),
+        "correction label must value-equal the broker command label 'that\\'s Arjun'; \
          wrong stub writes nothing so label is absent"
     );
     assert_eq!(
@@ -890,7 +890,7 @@ fn two_distinct_corrections_on_same_detection_both_land() {
     thread::sleep(Duration::from_millis(300));
 
     let identity_payload = format!(
-        r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"that's Roshan"}}"#
+        r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"that's Arjun"}}"#
     );
     let wrong_class_payload = format!(
         r#"{{"detection_id":"{detection_id}","correction_type":"wrong_class","label":"actually the neighbour"}}"#
@@ -918,8 +918,8 @@ fn two_distinct_corrections_on_same_detection_both_land() {
     // label value-equality for both corrections.
     let labels: Vec<Option<&str>> = why.corrections.iter().map(|c| c.label.as_deref()).collect();
     assert!(
-        labels.contains(&Some("that's Roshan")),
-        "identity correction label 'that\\'s Roshan' must be present; \
+        labels.contains(&Some("that's Arjun")),
+        "identity correction label 'that\\'s Arjun' must be present; \
          wrong stub writes nothing so no labels exist — got {labels:?}"
     );
     assert!(
@@ -1123,7 +1123,7 @@ fn operator_action_command_effects_action() {
     // ── Sub-check (b): ack (Identity) via subscriber → cg ─────────────────────
     // Wrong stub: subscriber never calls record_correction → corrections empty → FAILS.
     let ack_payload = format!(
-        r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"confirmed: Roshan"}}"#
+        r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"confirmed: Arjun"}}"#
     );
     mosquitto_pub_n(broker.port, "vigil/commands/correct", &ack_payload, 1);
     thread::sleep(Duration::from_secs(2));

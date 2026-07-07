@@ -337,13 +337,13 @@ fn enroll_correction_creates_named_entity_and_later_sightings_match() {
         "before enrollment the sighting is unknown, got {first:?}"
     );
 
-    // The owner marks the detection "Roshan" through the correction seam —
+    // The owner marks the detection "Arjun" through the correction seam —
     // the same door the card and HTTP plane drive.
     let receipt = record_correction(
         &world.store,
         CorrectionRequest {
             detection_id: detection.to_string(),
-            label: Some("Roshan".to_string()),
+            label: Some("Arjun".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     )
@@ -353,7 +353,7 @@ fn enroll_correction_creates_named_entity_and_later_sightings_match() {
     let entities = world.store.list_entities(Default::default()).expect("list");
     let person = entities
         .iter()
-        .find(|e| e.name == "Roshan")
+        .find(|e| e.name == "Arjun")
         .expect("first enroll creates the named entity");
     assert_eq!(person.entity_type, EntityType::Person);
 
@@ -361,7 +361,7 @@ fn enroll_correction_creates_named_entity_and_later_sightings_match() {
     // the content-faithful double) matches on ANY camera in the site.
     let second_detection = seed_detection(&world, "person");
     let outcome = embed_match_record(&world, second_detection, &crop);
-    assert_eq!(outcome.name.as_deref(), Some("Roshan"));
+    assert_eq!(outcome.name.as_deref(), Some("Arjun"));
     assert!(
         outcome.score > 0.9,
         "same-subject probe scores high, got {}",
@@ -373,12 +373,12 @@ fn enroll_correction_creates_named_entity_and_later_sightings_match() {
 fn enroll_wire_shape_parses_from_the_command_topic() {
     let request = parse_command_topic(&vigil::CommandTopicMessage {
         detection_id: "det-1".to_string(),
-        label: Some("Roshan".to_string()),
+        label: Some("Arjun".to_string()),
         correction_type: "enroll".to_string(),
     })
     .expect("enroll parses");
     assert_eq!(request.correction_type, CorrectionType::Enroll);
-    assert_eq!(request.label.as_deref(), Some("Roshan"));
+    assert_eq!(request.label.as_deref(), Some("Arjun"));
 }
 
 #[test]
@@ -404,7 +404,7 @@ fn below_threshold_sighting_stays_unknown() {
     let world = world("unknown");
     let detection = seed_detection(&world, "person");
     embed_match_record(&world, detection, &png(1));
-    record_enrollment(&world.store, &detection.to_string(), "Roshan", SPACE).expect("enroll");
+    record_enrollment(&world.store, &detection.to_string(), "Arjun", SPACE).expect("enroll");
 
     // A different subject: different bytes, near-orthogonal vector.
     let visitor_detection = seed_detection(&world, "person");
@@ -468,7 +468,7 @@ fn match_records_observation_against_the_matched_entity_with_vector_and_score() 
     let crop = png(3);
     let detection = seed_detection(&world, "person");
     embed_match_record(&world, detection, &crop);
-    record_enrollment(&world.store, &detection.to_string(), "Roshan", SPACE).expect("enroll");
+    record_enrollment(&world.store, &detection.to_string(), "Arjun", SPACE).expect("enroll");
 
     let sighting = seed_detection(&world, "person");
     embed_match_record(&world, sighting, &crop);
@@ -486,7 +486,7 @@ fn match_records_observation_against_the_matched_entity_with_vector_and_score() 
     let entities = world.store.list_entities(Default::default()).expect("list");
     let person = entities
         .iter()
-        .find(|e| e.name == "Roshan")
+        .find(|e| e.name == "Arjun")
         .expect("entity");
     assert_eq!(
         match_obs.entity_id, person.id,
@@ -580,10 +580,10 @@ fn forget_removes_references_and_the_subject_reverts_to_unknown() {
     let crop = png(11);
     let detection = seed_detection(&world, "person");
     embed_match_record(&world, detection, &crop);
-    record_enrollment(&world.store, &detection.to_string(), "Roshan", SPACE).expect("enroll");
+    record_enrollment(&world.store, &detection.to_string(), "Arjun", SPACE).expect("enroll");
 
     let removed =
-        forget_named_entity(&world.store, "Roshan", Some(world.context_id)).expect("forget runs");
+        forget_named_entity(&world.store, "Arjun", Some(world.context_id)).expect("forget runs");
     assert!(removed >= 1, "at least one reference removed");
 
     let sighting = seed_detection(&world, "person");
@@ -607,12 +607,12 @@ fn event_payload_carries_the_entity_name_when_matched() {
         evidence_ref: "vigil-edge:clip/x".to_string(),
         snapshot_ref: "vigil-edge:clip/y".to_string(),
         zone: None,
-        entity_name: Some("Roshan".to_string()),
+        entity_name: Some("Arjun".to_string()),
         match_score: Some(0.93),
     });
-    assert_eq!(payload.entity_name.as_deref(), Some("Roshan"));
+    assert_eq!(payload.entity_name.as_deref(), Some("Arjun"));
     let json = serde_json::to_value(&payload).expect("serialize");
-    assert_eq!(json["entity_name"], serde_json::json!("Roshan"));
+    assert_eq!(json["entity_name"], serde_json::json!("Arjun"));
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn review_events_row_carries_the_entity_name() {
     let crop = png(13);
     let detection = seed_detection(&world, "person");
     embed_match_record(&world, detection, &crop);
-    record_enrollment(&world.store, &detection.to_string(), "Roshan", SPACE).expect("enroll");
+    record_enrollment(&world.store, &detection.to_string(), "Arjun", SPACE).expect("enroll");
     let sighting = seed_detection(&world, "person");
     embed_match_record(&world, sighting, &crop);
 
@@ -633,7 +633,7 @@ fn review_events_row_carries_the_entity_name() {
         .expect("the sighting row exists");
     assert_eq!(
         row.entity_name.as_deref(),
-        Some("Roshan"),
+        Some("Arjun"),
         "the HTTP event row is the durable authority the card reloads against"
     );
 }
@@ -648,7 +648,7 @@ fn review_events_enroll_row_carries_server_authoritative_name() {
         &world.store,
         CorrectionRequest {
             detection_id: detection.to_string(),
-            label: Some("Roshan".to_string()),
+            label: Some("Arjun".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     )
@@ -676,7 +676,7 @@ fn review_events_enroll_row_carries_server_authoritative_name() {
     );
     assert_eq!(
         row.entity_name.as_deref(),
-        Some("Roshan"),
+        Some("Arjun"),
         "the HA card must reload the server-authoritative enrolled name for the source detection, not a local-only saved state"
     );
 }
@@ -691,7 +691,7 @@ fn why_view_shows_match_provenance_reference_score_and_enrolling_correction() {
         &world.store,
         CorrectionRequest {
             detection_id: detection.to_string(),
-            label: Some("Roshan".to_string()),
+            label: Some("Arjun".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     )
@@ -703,7 +703,7 @@ fn why_view_shows_match_provenance_reference_score_and_enrolling_correction() {
     let recognition = why
         .recognition
         .expect("a matched sighting's why view carries recognition provenance");
-    assert_eq!(recognition.name, "Roshan");
+    assert_eq!(recognition.name, "Arjun");
     assert!(recognition.score > 0.9);
     assert!(
         !recognition.reference_label.is_empty(),
@@ -728,11 +728,11 @@ fn recognition_provenance_joins_enroll_correction_by_matched_reference_label() {
         &world.store,
         CorrectionRequest {
             detection_id: first_detection_id,
-            label: Some("Roshan".to_string()),
+            label: Some("Arjun".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     )
-    .expect("first Roshan enrollment succeeds");
+    .expect("first Arjun enrollment succeeds");
 
     let second_detection = seed_detection(&world, "person");
     let second_detection_id = second_detection.to_string();
@@ -741,11 +741,11 @@ fn recognition_provenance_joins_enroll_correction_by_matched_reference_label() {
         &world.store,
         CorrectionRequest {
             detection_id: second_detection_id.clone(),
-            label: Some("Roshan".to_string()),
+            label: Some("Arjun".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     )
-    .expect("second Roshan reference enrollment succeeds");
+    .expect("second Arjun reference enrollment succeeds");
     assert_ne!(
         first_receipt.correction_id, second_receipt.correction_id,
         "two distinct source detections must keep distinct Enroll correction records"
@@ -753,7 +753,7 @@ fn recognition_provenance_joins_enroll_correction_by_matched_reference_label() {
 
     let later_sighting = seed_detection(&world, "person");
     let outcome = embed_match_record(&world, later_sighting, &second_crop);
-    assert_eq!(outcome.name.as_deref(), Some("Roshan"));
+    assert_eq!(outcome.name.as_deref(), Some("Arjun"));
     assert_eq!(
         outcome.reference_label.as_deref(),
         Some(second_detection_id.as_str()),
@@ -763,7 +763,7 @@ fn recognition_provenance_joins_enroll_correction_by_matched_reference_label() {
     let direct =
         vigil::recognition::recognition_provenance(&world.store, &later_sighting.to_string())
             .expect("matched sighting carries direct recognition provenance");
-    assert_eq!(direct.name, "Roshan");
+    assert_eq!(direct.name, "Arjun");
     assert_eq!(
         direct.reference_label, second_detection_id,
         "recognition provenance must preserve the matched reference label"
@@ -778,7 +778,7 @@ fn recognition_provenance_joins_enroll_correction_by_matched_reference_label() {
     let recognition = why
         .recognition
         .expect("why view carries recognition provenance");
-    assert_eq!(recognition.name, "Roshan");
+    assert_eq!(recognition.name, "Arjun");
     assert_eq!(
         recognition.reference_label, second_detection_id,
         "review_why must report the matched enrolled reference"
@@ -804,7 +804,7 @@ fn enroll_failure_writes_no_correction_row() {
         &world.store,
         CorrectionRequest {
             detection_id: detection.to_string(),
-            label: Some("Roshan".to_string()),
+            label: Some("Arjun".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     );
@@ -837,7 +837,7 @@ fn http_event_rows_and_why_carry_recognition_for_the_card() {
         &world.store,
         CorrectionRequest {
             detection_id: detection.to_string(),
-            label: Some("Roshan".to_string()),
+            label: Some("Arjun".to_string()),
             correction_type: CorrectionType::Enroll,
         },
     )
@@ -868,13 +868,13 @@ fn http_event_rows_and_why_carry_recognition_for_the_card() {
         .clone();
     assert_eq!(
         row["entity_name"],
-        serde_json::json!("Roshan"),
+        serde_json::json!("Arjun"),
         "the HTTP event row the card renders must carry the name, got {row}"
     );
 
     let why = fetch(&format!("/why/{sighting}"));
     let recognition = &why["recognition"];
-    assert_eq!(recognition["name"], serde_json::json!("Roshan"));
+    assert_eq!(recognition["name"], serde_json::json!("Arjun"));
     assert!(
         recognition["score"].as_f64().unwrap_or(0.0) > 0.9,
         "why JSON carries the match score, got {why}"

@@ -1002,7 +1002,7 @@ mod tests {
     fn command_topic_parses_to_channel_agnostic_request() {
         let msg = CommandTopicMessage {
             detection_id: "aabbccdd-1234-5678-9abc-ddeeff001122".to_string(),
-            label: Some("that's Roshan".to_string()),
+            label: Some("that's Arjun".to_string()),
             correction_type: "identity".to_string(),
         };
 

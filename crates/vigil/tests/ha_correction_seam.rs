@@ -103,7 +103,7 @@ fn correction_writes_durably_through_cg_record_path() {
 
     let request = CorrectionRequest {
         detection_id: detection_id.clone(),
-        label: Some("that's Roshan".to_string()),
+        label: Some("that's Arjun".to_string()),
         correction_type: CorrectionType::Identity,
     };
 
@@ -176,8 +176,8 @@ fn correction_writes_durably_through_cg_record_path() {
         .and_then(|v| v.as_str());
     assert_eq!(
         label_after_reopen,
-        Some("that's Roshan"),
-        "correction observation label must be 'that\\'s Roshan' after reopen via cg public read; \
+        Some("that's Arjun"),
+        "correction observation label must be 'that\\'s Arjun' after reopen via cg public read; \
          wrong stub writes nothing so label is absent"
     );
     let correction_type_after_reopen = reopen_obs

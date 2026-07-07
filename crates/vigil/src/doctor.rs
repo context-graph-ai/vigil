@@ -533,6 +533,7 @@ pub fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
 /// no_device_visible / …) so the runtime's decode receipts tell the same
 /// truth doctor does — a permission problem is never misreported as a
 /// missing plugin.
+#[cfg(feature = "decode-gstreamer")]
 pub(crate) fn live_device_access_finding() -> Option<DeviceAccessFinding> {
     let facts = RealHostFacts;
     let devices = facts.visible_render_devices();

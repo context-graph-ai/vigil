@@ -167,9 +167,10 @@ impl GstreamerDecodeBackend {
                     evidence_kind: Some(EvidenceKind::SelectedBackend),
                     evidence_fields: BTreeMap::from([
                         ("selected_decoder".to_string(), element.clone()),
-                        // Startup-probe cost: these real stream units were
-                        // consumed by the probe; the first segment starts at
-                        // the next parameter-set boundary (~one GOP).
+                        // Startup-probe cost: the probe ran on these real
+                        // stream units; the capture loop replays them, so
+                        // the first segment still starts at the stream's
+                        // first parameter-set boundary.
                         (
                             "probe_units_consumed".to_string(),
                             probe_sample.len().to_string(),

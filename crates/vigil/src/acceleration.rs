@@ -273,8 +273,9 @@ impl AccelerationState {
     /// the observed outcome (status + failure + active backend).
     fn log_key(receipt: &AccelerationReceipt) -> String {
         format!(
-            "{}::{}::{}::{}",
+            "{}::{}::{}::{}::{}",
             Self::slot_key(receipt),
+            receipt.codec.as_deref().unwrap_or(""),
             receipt.probe_status.as_str(),
             receipt.failure_code.as_str(),
             receipt.active_backend

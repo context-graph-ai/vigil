@@ -1,7 +1,10 @@
+pub mod acceleration;
 mod config;
 mod control_socket;
 pub mod correction;
+pub mod decode;
 mod detector;
+pub mod doctor;
 pub mod ha_discovery;
 pub mod ha_mqtt_tasks;
 mod health;
@@ -15,6 +18,7 @@ mod runtime_stats;
 mod shutdown;
 mod store;
 mod supervisor;
+pub mod workgraph;
 mod yolox_detector;
 
 pub use correction::{
@@ -33,6 +37,25 @@ pub use ha_mqtt_tasks::{
 };
 pub use health::{HealthState, HealthStatus};
 pub use http_data_plane::{ReviewDataPlaneHandle, spawn_review_data_plane};
+pub use media_pipeline::{DecodedRgbFrame, VideoCodec};
+pub use privilege::{PrivilegeStep, privilege_drop_plan};
+
+/// The operator-facing acceleration intent, resolved from every config
+/// entry point with absent-means-true semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccelerationIntent {
+    pub hardware_decoding: bool,
+    pub accelerated_detection: bool,
+}
+
+/// Resolve the acceleration intent exactly as `vigil run` would from the
+/// same arguments (config file, environment, CLI overrides).
+pub fn acceleration_intent_from_args(args: Vec<OsString>) -> Result<AccelerationIntent, String> {
+    config::load(args).map(|config| AccelerationIntent {
+        hardware_decoding: config.hardware_decoding,
+        accelerated_detection: config.accelerated_detection,
+    })
+}
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -87,6 +110,13 @@ where
                 }
             }
         }
+        Some(command) if command == "doctor" => match doctor::run(args.collect()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(2)
+            }
+        },
         Some(command) if command == "detector-probe" => runtime::run_detector_probe(args.collect()),
         Some(command) if command == "run" => runtime::run(args.collect()),
         _ => {

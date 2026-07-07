@@ -202,17 +202,17 @@ fn hex_value(value: u8) -> Option<u8> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum VideoCodec {
+pub enum VideoCodec {
     H264,
     H265,
 }
 
-#[derive(Clone)]
-pub(crate) struct DecodedRgbFrame {
-    pub(crate) index: u64,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) rgb: Vec<u8>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedRgbFrame {
+    pub index: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
 }
 
 #[derive(Clone)]

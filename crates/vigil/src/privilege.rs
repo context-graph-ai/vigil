@@ -1,6 +1,29 @@
 use std::fs;
 use std::path::Path;
 
+/// One step of the privilege-drop sequence, in execution order. Supplemental
+/// groups are applied BEFORE setgid/setuid so a device-access group (e.g.
+/// render/video) survives the drop and the final process can open mapped
+/// hardware devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivilegeStep {
+    SetSupplementalGroups(Vec<u32>),
+    SetGid(u32),
+    SetUid(u32),
+}
+
+/// Build the ordered privilege-drop plan from the run uid/gid plus the
+/// `VIGIL_RUN_SUPPLEMENTAL_GIDS` value (comma-separated numeric gids).
+/// An unparseable list fails loud; it is never silently ignored.
+pub fn privilege_drop_plan(
+    uid: u32,
+    gid: u32,
+    supplemental_gids: Option<&str>,
+) -> Result<Vec<PrivilegeStep>, String> {
+    let _ = (uid, gid, supplemental_gids);
+    unimplemented!("scaffold: privilege drop plan is not implemented yet")
+}
+
 pub(crate) fn prepare_runtime_user(store_path: &Path) -> Result<(), String> {
     if std::env::var("VIGIL_DROP_PRIVILEGES").ok().as_deref() != Some("1") {
         return Ok(());

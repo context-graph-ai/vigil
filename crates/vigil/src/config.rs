@@ -48,6 +48,13 @@ pub(crate) struct RuntimeConfig {
     /// directory is configured; a configured-but-missing weights dir fails
     /// loud at startup, never silently.
     pub(crate) recognition: crate::recognition::RecognitionConfig,
+    /// Acceleration intent: probe and use hardware decode only when a real
+    /// startup probe succeeds; missing means true.
+    pub(crate) hardware_decoding: bool,
+    /// Acceleration intent: probe and use an accelerated detector backend
+    /// only when the artifact ships one and its probe succeeds; missing
+    /// means true.
+    pub(crate) accelerated_detection: bool,
 }
 
 /// Per-camera entry as it appears in TOML/JSON config files.
@@ -271,6 +278,9 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         mqtt,
         service_id,
         recognition,
+        // Scaffold state: intent parsing lands with the implementation.
+        hardware_decoding: false,
+        accelerated_detection: false,
     })
 }
 

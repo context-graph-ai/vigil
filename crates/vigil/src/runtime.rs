@@ -646,7 +646,7 @@ fn start_rtsp_probe(
                             &receipts,
                             &stats,
                             stage_receipt_for(
-                                segment.motion_work.as_ref().unwrap_or(&segment.envelope),
+                                segment.detection_work.as_ref().unwrap_or(&segment.envelope),
                                 crate::workgraph::STAGE_DETECTION,
                                 None,
                                 chrono::Utc::now(),
@@ -667,17 +667,13 @@ fn start_rtsp_probe(
                     sleep_shutdown_aware(&shutdown, detector_work_delay);
                     let detector_started = Instant::now();
                     let detection_started_at = chrono::Utc::now();
-                    let mut detection_work = derived_work(
-                        segment.motion_work.as_ref().unwrap_or(&segment.envelope),
-                        crate::workgraph::STAGE_DETECTION,
-                    );
-                    // The decoded media contributes even when motion is the
-                    // primary parent — full multi-parent provenance.
-                    if segment.motion_work.is_some() {
-                        detection_work
-                            .contributing_work_ids
-                            .push(segment.envelope.work_id);
-                    }
+                    // The SAME detection work identity created at enqueue.
+                    let detection_work = segment.detection_work.clone().unwrap_or_else(|| {
+                        derived_work(
+                            segment.motion_work.as_ref().unwrap_or(&segment.envelope),
+                            crate::workgraph::STAGE_DETECTION,
+                        )
+                    });
                     let output = detector.detect_segment(
                         &segment.media,
                         segment.clip_sha256.clone(),
@@ -969,6 +965,12 @@ fn start_rtsp_probe(
                             &format!("motion_positive_frames={motion_positive}"),
                         );
                         segment.motion_work = Some(motion_work.clone());
+                        let mut detection_work =
+                            derived_work(&motion_work, crate::workgraph::STAGE_DETECTION);
+                        detection_work
+                            .contributing_work_ids
+                            .push(segment.envelope.work_id);
+                        segment.detection_work = Some(detection_work);
                         if let DetectorSegmentDecision::Enqueue {
                             stationary_scan: true,
                         } = decision
@@ -985,7 +987,7 @@ fn start_rtsp_probe(
                                     &stats,
                                     stage_receipt_for(
                                         dropped_segment
-                                            .motion_work
+                                            .detection_work
                                             .as_ref()
                                             .unwrap_or(&dropped_segment.envelope),
                                         crate::workgraph::STAGE_DETECTION,
@@ -1264,6 +1266,7 @@ fn build_captured_segment(
         envelope,
         decode_receipt_id: None,
         motion_work: None,
+        detection_work: None,
         path: staging_path,
         final_path,
         source_ref: format!("vigil-edge:clip/{file_name}"),
@@ -1565,6 +1568,10 @@ struct CapturedSegment {
     /// The motion stage work this segment passed through before detection:
     /// detection derives FROM motion, which derives from decoded media.
     motion_work: Option<crate::workgraph::WorkEnvelope>,
+    /// The detection work item this segment IS once enqueued — created
+    /// BEFORE enqueue so every detection receipt (completed, rejected,
+    /// failed, stale, replaced) carries the SAME work identity.
+    detection_work: Option<crate::workgraph::WorkEnvelope>,
     path: PathBuf,
     final_path: PathBuf,
     source_ref: String,

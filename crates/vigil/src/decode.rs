@@ -100,32 +100,56 @@ impl AccessUnitAssembler {
     }
 }
 
-/// Concatenated parameter-set NAL bytes (SPS/PPS for H.264, VPS/SPS/PPS for
-/// H.265) when the unit carries codec configuration.
+/// Concatenated parameter-set NAL bytes when — and only when — the unit
+/// carries the COMPLETE codec configuration (H.264: SPS and PPS; H.265:
+/// VPS, SPS, and PPS). An isolated parameter-set NAL is NOT codec
+/// configuration: starting a segment (or seeding a hardware decoder) on a
+/// partial set would hand the backend broken config, so partial sets
+/// return None — the pre-seam segment-boundary rule.
 fn extract_parameter_sets(codec: VideoCodec, unit: &[u8]) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     match codec {
         VideoCodec::H264 => {
+            let mut has_sps = false;
+            let mut has_pps = false;
             for nal in openh264::nal_units(unit) {
-                if let Some(header) = annex_b_nal_header(nal)
-                    && matches!(header & 0x1f, 7 | 8)
-                {
-                    bytes.extend_from_slice(nal);
+                if let Some(header) = annex_b_nal_header(nal) {
+                    match header & 0x1f {
+                        7 => {
+                            has_sps = true;
+                            bytes.extend_from_slice(nal);
+                        }
+                        8 => {
+                            has_pps = true;
+                            bytes.extend_from_slice(nal);
+                        }
+                        _ => {}
+                    }
                 }
+            }
+            if !(has_sps && has_pps) {
+                return None;
             }
         }
         VideoCodec::H265 => {
             use rust_h265::NalUnitType;
+            let mut has_vps = false;
+            let mut has_sps = false;
+            let mut has_pps = false;
             for nal in rust_h265::parse_annex_b(unit) {
-                if matches!(
-                    nal.nal_unit_type,
-                    NalUnitType::Vps | NalUnitType::Sps | NalUnitType::Pps
-                ) {
-                    bytes.extend_from_slice(&[0, 0, 0, 1]);
-                    // rbsp: the parameter-set payload (EPB-stripped) —
-                    // deterministic identity for format-change detection.
-                    bytes.extend_from_slice(&nal.rbsp);
+                match nal.nal_unit_type {
+                    NalUnitType::Vps => has_vps = true,
+                    NalUnitType::Sps => has_sps = true,
+                    NalUnitType::Pps => has_pps = true,
+                    _ => continue,
                 }
+                bytes.extend_from_slice(&[0, 0, 0, 1]);
+                // rbsp: the parameter-set payload (EPB-stripped) —
+                // deterministic identity for format-change detection.
+                bytes.extend_from_slice(&nal.rbsp);
+            }
+            if !(has_vps && has_sps && has_pps) {
+                return None;
             }
         }
     }
@@ -505,5 +529,50 @@ pub fn mid_stream_fallback_receipt(
         action_payload: Some(
             "hardware decode failed mid-stream; software decode is active".to_string(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn h264_unit(nal_types: &[u8]) -> Vec<u8> {
+        let mut unit = Vec::new();
+        for nal_type in nal_types {
+            unit.extend_from_slice(&[0, 0, 0, 1, nal_type & 0x1f | 0x60, 0xAC, 0x2B, 0x40]);
+        }
+        unit
+    }
+
+    fn h265_unit(nal_types: &[u8]) -> Vec<u8> {
+        let mut unit = Vec::new();
+        for nal_type in nal_types {
+            unit.extend_from_slice(&[0, 0, 0, 1, nal_type << 1, 0x01, 0x0C, 0x01, 0xFF]);
+        }
+        unit
+    }
+
+    #[test]
+    fn split_h264_parameter_sets_are_not_codec_config() {
+        // An isolated SPS (or PPS) is NOT complete codec configuration: a
+        // segment must not start on it and a hardware decoder must not be
+        // seeded with it.
+        assert!(extract_parameter_sets(VideoCodec::H264, &h264_unit(&[7])).is_none());
+        assert!(extract_parameter_sets(VideoCodec::H264, &h264_unit(&[8])).is_none());
+        assert!(
+            extract_parameter_sets(VideoCodec::H264, &h264_unit(&[7, 8])).is_some(),
+            "SPS and PPS together are complete codec configuration"
+        );
+    }
+
+    #[test]
+    fn split_h265_parameter_sets_are_not_codec_config() {
+        assert!(extract_parameter_sets(VideoCodec::H265, &h265_unit(&[32])).is_none());
+        assert!(extract_parameter_sets(VideoCodec::H265, &h265_unit(&[33])).is_none());
+        assert!(extract_parameter_sets(VideoCodec::H265, &h265_unit(&[32, 33])).is_none());
+        assert!(
+            extract_parameter_sets(VideoCodec::H265, &h265_unit(&[32, 33, 34])).is_some(),
+            "VPS+SPS+PPS together are complete codec configuration"
+        );
     }
 }

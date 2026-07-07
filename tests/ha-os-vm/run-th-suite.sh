@@ -1534,7 +1534,7 @@ wrong stub wires go2rtc at a host-only address that is unreachable from inside t
   # the OWNER opens exists as a streaming camera AND renders MOVING video: a
   # black/frozen tile (wrong stream_source host, or an image-only entity) yields
   # identical frames across time. Discovery is by scanning camera.* (robust to
-  # the Generic Camera's default entity_id naming). In the haos-test VM the only
+  # the Generic Camera's default entity_id naming). In the test VM the only
   # cameras are Vigil's, so "some camera.* streams moving video" == Vigil's works.
   # NOTE: this assertion is validated/tuned during HA-OS VM bring-up alongside the
   # config-flow registration (register_generic_camera) — it must NOT be removed to

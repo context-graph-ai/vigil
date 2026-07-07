@@ -527,6 +527,36 @@ pub fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     Ok(())
 }
 
+/// The live device-access finding for the CURRENT process, using the same
+/// classification doctor renders. `None` means at least one render device
+/// is usable; `Some` carries the classified reason (permission_denied /
+/// no_device_visible / …) so the runtime's decode receipts tell the same
+/// truth doctor does — a permission problem is never misreported as a
+/// missing plugin.
+pub(crate) fn live_device_access_finding() -> Option<DeviceAccessFinding> {
+    let facts = RealHostFacts;
+    let devices = facts.visible_render_devices();
+    let current_user = facts
+        .env_var("USER")
+        .unwrap_or_else(|| facts.effective_uid().to_string());
+    if devices.is_empty() {
+        return Some(classify_device_access(
+            &facts,
+            std::path::Path::new("/dev/dri"),
+            &current_user,
+        ));
+    }
+    let mut blocked = None;
+    for device in devices {
+        let finding = classify_device_access(&facts, &device, &current_user);
+        if finding.failure_code == crate::acceleration::FailureCode::None {
+            return None;
+        }
+        blocked = Some(finding);
+    }
+    blocked
+}
+
 /// Live host facts for the real doctor run. Read-only by construction.
 struct RealHostFacts;
 
@@ -638,15 +668,32 @@ impl HostFacts for RealHostFacts {
 
     fn user_groups(&self, user: &str) -> Option<Vec<String>> {
         let group_file = std::fs::read_to_string("/etc/group").ok()?;
+        // The user's PRIMARY group (from passwd) counts too — membership is
+        // not only the /etc/group member lists.
+        let primary_gid = std::fs::read_to_string("/etc/passwd")
+            .ok()
+            .and_then(|passwd| {
+                passwd.lines().find_map(|line| {
+                    let mut fields = line.split(':');
+                    (fields.next() == Some(user)).then(|| {
+                        let _password = fields.next();
+                        let _uid = fields.next();
+                        fields.next().and_then(|gid| gid.parse::<u32>().ok())
+                    })?
+                })
+            });
         let mut groups = Vec::new();
         for line in group_file.lines() {
             let mut fields = line.split(':');
-            let group_name = fields.next()?;
+            let Some(group_name) = fields.next() else {
+                continue;
+            };
             let _password = fields.next();
-            let _gid = fields.next();
-            if let Some(members) = fields.next()
-                && members.split(',').any(|member| member.trim() == user)
-            {
+            let gid = fields.next().and_then(|gid| gid.parse::<u32>().ok());
+            let members = fields.next().unwrap_or("");
+            let is_member = members.split(',').any(|member| member.trim() == user);
+            let is_primary = primary_gid.is_some() && gid == primary_gid;
+            if is_member || is_primary {
                 groups.push(group_name.to_string());
             }
         }

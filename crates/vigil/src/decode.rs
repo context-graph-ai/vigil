@@ -385,6 +385,24 @@ pub fn select_decode_backend(
 
     #[cfg(feature = "decode-gstreamer")]
     {
+        // Device access FIRST: probing GStreamer without device access would
+        // misclassify a permission problem as a missing plugin (the va
+        // elements silently fail to register). The runtime's receipt must
+        // tell the same classified truth doctor does.
+        if let Some(blocked) = crate::doctor::live_device_access_finding() {
+            let backend = SoftwareDecodeBackend::new(stream_id.clone(), codec, stream_epoch)?;
+            let mut receipt = base_receipt("gstreamer");
+            receipt.probe_status = ProbeStatus::Fallback;
+            receipt.failure_code = blocked.failure_code;
+            receipt.evidence_kind = Some(blocked.evidence_kind);
+            receipt.evidence_fields = blocked.evidence_fields;
+            receipt.action_kind = blocked.action_kind;
+            receipt.action_payload = blocked.action_payload;
+            return Ok(DecoderSelection {
+                backend: Box::new(backend),
+                receipt,
+            });
+        }
         match crate::decode_gstreamer::GstreamerDecodeBackend::probe_and_build(
             stream_id.clone(),
             codec,

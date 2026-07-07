@@ -705,7 +705,14 @@ fn start_rtsp_probe(
                                         &receipts,
                                         &stats,
                                         detection_receipt,
-                                        &format!("detections={}", output.detections.len()),
+                                        &format!(
+                                            "detections={} decode_receipt_id={}",
+                                            output.detections.len(),
+                                            segment
+                                                .decode_receipt_id
+                                                .map(|id| id.to_string())
+                                                .unwrap_or_else(|| "-".to_string())
+                                        ),
                                     );
                                     if let Err(error) = record_detected_events(
                                         &store,

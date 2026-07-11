@@ -38,14 +38,19 @@ impl HealthStatus {
         }
     }
 
-    fn http_code(self) -> u16 {
+    /// The watchdog-facing wire code: a LIVENESS signal, not a readiness one.
+    /// The Home Assistant Supervisor stops+restarts the add-on on any non-2xx
+    /// response, so this answers 2xx whenever the runtime is alive and its
+    /// pipeline is functioning — EVEN degraded (`KeepPaceFailed`: detection has
+    /// fallen behind on CPU fallback, which is slow, not dead). Non-2xx is
+    /// reserved for genuinely dead/wedged states a restart can help: still
+    /// `Starting`, the store never opened, ingest/detector failed, or the box
+    /// cannot write clips (`DiskFull` fails the NVR's primary recording
+    /// contract). The precise degraded state stays named in the `/health` body.
+    pub fn liveness_status_code(self) -> u16 {
         match self {
-            Self::Ready => 200,
-            Self::Starting
-            | Self::StoreOpenFailed
-            | Self::IngestFailed
-            | Self::DiskFull
-            | Self::KeepPaceFailed => 503,
+            Self::Ready | Self::KeepPaceFailed => 200,
+            Self::Starting | Self::StoreOpenFailed | Self::IngestFailed | Self::DiskFull => 503,
         }
     }
 
@@ -224,7 +229,7 @@ fn handle_client(
             body.push_str(&crate::acceleration::render_receipt_block(&receipt));
         }
     }
-    write_response(&mut stream, status.http_code(), &body);
+    write_response(&mut stream, status.liveness_status_code(), &body);
 }
 
 fn write_response(stream: &mut TcpStream, code: u16, body: &str) {

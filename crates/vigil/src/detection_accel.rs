@@ -102,13 +102,41 @@ fn registered_detector_model_path() -> Option<PathBuf> {
     DETECTOR_MODEL_PATH.get().cloned().flatten()
 }
 
-/// The honest fallback action for every CPU-detection surface (seam, doctor,
-/// runtime/health/stats): decode stays hardware-accelerated as configured,
+/// The honest fallback action when the accelerated detector is NOT compiled
+/// into this build: decode stays hardware-accelerated as configured,
 /// accelerated detection is not part of this build, and CPU detection is the
-/// supported path. Never points at a nonexistent accelerated-detector build.
+/// supported path. Only ever used on the software-only artifact; a build that
+/// carries the accelerated backend uses the probe-aware actions below.
+#[cfg(not(feature = "detect-burn-wgpu"))]
 fn cpu_detection_fallback_action() -> String {
     "accelerated detection is not in this build; hardware decode stays as configured, \
      and CPU detection is the supported path."
+        .to_string()
+}
+
+/// The honest fallback action when the accelerated detector IS compiled in but
+/// the startup forward probe failed (wedged, panicked, or ran past the
+/// deadline). The build carries the backend, so the action names the real
+/// next steps the operator can take — never claims the backend is missing.
+#[cfg(feature = "detect-burn-wgpu")]
+fn probe_failed_fallback_action() -> String {
+    "accelerated detection is compiled in but the GPU forward probe failed; \
+     raise VIGIL_DETECTION_PROBE_DEADLINE_SECS and restart to allow a slow GPU cold \
+     start (first shader compile, model load), and verify the GPU is usable by this \
+     container; CPU detection is the supported fallback until the probe passes."
+        .to_string()
+}
+
+/// The honest fallback action when the accelerated detector IS compiled in but
+/// no usable GPU was found (no device visible, or only a software Vulkan
+/// adapter). The build carries the backend, so the action points at the GPU,
+/// never at a missing build.
+#[cfg(feature = "detect-burn-wgpu")]
+fn no_usable_gpu_fallback_action() -> String {
+    "accelerated detection is compiled in but no usable GPU was found; verify the GPU \
+     is passed through to this container (for example /dev/dri mapped with render-group \
+     access) and usable; CPU detection is the supported fallback until a usable GPU is \
+     present."
         .to_string()
 }
 
@@ -276,14 +304,14 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
                         .insert("software_adapter".to_string(), adapter);
                 }
                 receipt.action_kind = ActionKind::RunHaosPrecheck;
-                receipt.action_payload = Some(cpu_detection_fallback_action());
+                receipt.action_payload = Some(no_usable_gpu_fallback_action());
                 CPU_DETECTION_BACKEND
             }
         }
         Ok(Ok(DetectionForwardProbeOutcome::NoDeviceVisible)) => {
             receipt.failure_code = FailureCode::NoDeviceVisible;
             receipt.action_kind = ActionKind::RunHaosPrecheck;
-            receipt.action_payload = Some(cpu_detection_fallback_action());
+            receipt.action_payload = Some(no_usable_gpu_fallback_action());
             CPU_DETECTION_BACKEND
         }
         Ok(Ok(DetectionForwardProbeOutcome::Failed { reason })) => {
@@ -293,7 +321,7 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
                 .evidence_fields
                 .insert("probe_error".to_string(), reason);
             receipt.action_kind = ActionKind::ManualActionRequired;
-            receipt.action_payload = Some(cpu_detection_fallback_action());
+            receipt.action_payload = Some(probe_failed_fallback_action());
             CPU_DETECTION_BACKEND
         }
         Ok(Err(_panic)) => {
@@ -304,7 +332,7 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
                 "forward probe panicked".to_string(),
             );
             receipt.action_kind = ActionKind::ManualActionRequired;
-            receipt.action_payload = Some(cpu_detection_fallback_action());
+            receipt.action_payload = Some(probe_failed_fallback_action());
             CPU_DETECTION_BACKEND
         }
         Err(_deadline_or_disconnect) => {
@@ -324,7 +352,7 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
                 ),
             );
             receipt.action_kind = ActionKind::ManualActionRequired;
-            receipt.action_payload = Some(cpu_detection_fallback_action());
+            receipt.action_payload = Some(probe_failed_fallback_action());
             CPU_DETECTION_BACKEND
         }
     };

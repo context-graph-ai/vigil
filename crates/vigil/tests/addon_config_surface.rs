@@ -277,14 +277,11 @@ fn addon_config_states_accelerated_detection_gpu_with_cpu_fallback_in_help() {
         "description must say accelerated detection defaults on: {description}"
     );
     assert!(
-        lower.contains("accelerat")
-            && (lower.contains("gpu") || lower.contains("graphics")),
+        lower.contains("accelerat") && (lower.contains("gpu") || lower.contains("graphics")),
         "description must say detection accelerates when a usable GPU is present: {description}"
     );
     assert!(
-        (lower.contains("fall back")
-            || lower.contains("falls back")
-            || lower.contains("fallback"))
+        (lower.contains("fall back") || lower.contains("falls back") || lower.contains("fallback"))
             && lower.contains("cpu"),
         "description must say detection falls back to CPU when no usable GPU is present: {description}"
     );

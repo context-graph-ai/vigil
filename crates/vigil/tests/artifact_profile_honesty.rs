@@ -2224,7 +2224,8 @@ fn release_notes_name_the_hardware_generic_docker_artifact() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(
-        normalized.contains("accelerated detection") || normalized.contains("accelerated object detection"),
+        normalized.contains("accelerated detection")
+            || normalized.contains("accelerated object detection"),
         "release notes must state the accelerated-detection capability the hardware artifacts now carry"
     );
     assert!(
@@ -2239,7 +2240,9 @@ fn release_notes_name_the_hardware_generic_docker_artifact() {
         "release notes must state detection falls back to CPU when no usable GPU is present"
     );
     assert!(
-        (normalized.contains("add-on") || normalized.contains("home assistant") || normalized.contains("haos"))
+        (normalized.contains("add-on")
+            || normalized.contains("home assistant")
+            || normalized.contains("haos"))
             && normalized.contains("test")
             && (normalized.contains("fell back")
                 || normalized.contains("fall back")

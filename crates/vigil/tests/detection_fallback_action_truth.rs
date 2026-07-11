@@ -10,12 +10,12 @@
 #[cfg(feature = "detect-burn-wgpu")]
 use vigil::acceleration::ActionKind;
 use vigil::acceleration::FailureCode;
+#[cfg(not(feature = "detect-burn-wgpu"))]
+use vigil::detection_accel::select_detection_acceleration;
 #[cfg(feature = "detect-burn-wgpu")]
 use vigil::detection_accel::{
     DetectionForwardProbe, DetectionForwardProbeOutcome, select_detection_acceleration_with_probe,
 };
-#[cfg(not(feature = "detect-burn-wgpu"))]
-use vigil::detection_accel::select_detection_acceleration;
 
 const MODEL_ID: &str = "detector-under-test";
 const INPUT_SHAPE: &str = "1x3x640x640";

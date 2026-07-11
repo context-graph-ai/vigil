@@ -55,6 +55,8 @@ schema:
       password: str?
   hardware_decoding: bool
   accelerated_detection: bool
+  decode_probe_deadline_secs: int?
+  detection_probe_deadline_secs: int?
 apparmor: true
 host_network: false
 host_pid: false

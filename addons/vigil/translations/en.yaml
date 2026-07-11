@@ -2,4 +2,8 @@ configuration:
   hardware_decoding:
     description: "Use the mapped graphics device for hardware video decode. Defaults on; falls back to software decode automatically if no device is mapped or reachable."
   accelerated_detection:
-    description: "Defaults on, but in this artifact it cannot accelerate detection yet: detection runs on CPU regardless of this switch. CPU detection is the supported path today; a future hardware image will change what this switch does."
+    description: "Defaults on. Accelerates object detection on a usable GPU, and falls back to CPU detection with a receipt naming why when no usable GPU is present."
+  decode_probe_deadline_secs:
+    description: "How long the startup hardware decode probe waits for the mapped graphics device before it falls back to software decode. Defaults to 5 seconds. Set this option to write the VIGIL_DECODE_PROBE_DEADLINE_SECS environment variable at add-on start, so it wins over a manually set environment variable; leave it unset to keep the 5 second default."
+  detection_probe_deadline_secs:
+    description: "How long the startup accelerated-detection probe waits for a usable GPU before it falls back to CPU detection. Defaults to 1.8 seconds. Set this option to write the VIGIL_DETECTION_PROBE_DEADLINE_SECS environment variable at add-on start, so it wins over a manually set environment variable; leave it unset to keep the 1.8 second default."

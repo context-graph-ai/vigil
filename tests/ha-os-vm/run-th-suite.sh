@@ -53,6 +53,7 @@ expected_addon_store_path="${VIGIL_EXPECTED_ADDON_STORE_PATH:-$addon_data_dir/st
 expected_health_port="${VIGIL_EXPECTED_HEALTH_PORT:-8099}"
 expected_review_port="${VIGIL_EXPECTED_REVIEW_PORT:-8098}"
 expected_run_uid="${VIGIL_EXPECTED_RUN_UID:-1000}"
+haos_render_device="${VIGIL_HAOS_RENDER_DEVICE:-/dev/dri/renderD128}"
 th02_dwell_seconds="$(bounded_int "${TH02_DWELL_SECONDS:-600}" 600 7200 600)"
 th04_sample_seconds="$(bounded_int "${TH04_SAMPLE_SECONDS:-30}" 30 3600 30)"
 th04_mqtt_sample_seconds="$(bounded_int "${TH04_MQTT_SAMPLE_SECONDS:-5}" 5 600 5)"
@@ -129,6 +130,208 @@ truthy() {
     1|true|yes|y|on) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+receipt_block_from_surface() {
+  local header="$1"
+  awk -v header="$header" '
+    index($0, header) > 0 {
+      if (in_block) {
+        exit
+      }
+      in_block = 1
+      found = 1
+      print
+      next
+    }
+    in_block && (index($0, "[decode.hardware]") > 0 || index($0, "[detect.acceleration]") > 0) {
+      exit
+    }
+    in_block {
+      print
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  '
+}
+
+receipt_field_value() {
+  local block="$1"
+  local field="$2"
+  printf '%s\n' "$block" | awk -v field="$field" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (index(line, field ":") == 1) {
+        sub(/^[^:]*:[[:space:]]*/, "", line)
+        print line
+        exit
+      }
+    }
+  '
+}
+
+assert_receipt_field_equals() {
+  local id="$1"
+  local label="$2"
+  local header="$3"
+  local block="$4"
+  local field="$5"
+  local expected="$6"
+  local actual
+  actual="$(receipt_field_value "$block" "$field")"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "$id" "$label $header must report $field: $expected, got ${actual:-<missing>}"
+    return 1
+  fi
+}
+
+assert_receipt_field_nonempty() {
+  local id="$1"
+  local label="$2"
+  local header="$3"
+  local block="$4"
+  local field="$5"
+  local actual
+  actual="$(receipt_field_value "$block" "$field")"
+  if [[ -z "$actual" ]]; then
+    fail "$id" "$label $header must report non-empty $field"
+    return 1
+  fi
+}
+
+assert_receipt_field_positive_int() {
+  local id="$1"
+  local label="$2"
+  local header="$3"
+  local block="$4"
+  local field="$5"
+  local actual
+  actual="$(receipt_field_value "$block" "$field")"
+  if ! [[ "$actual" =~ ^[0-9]+$ ]] || (( actual < 1 )); then
+    fail "$id" "$label $header must report positive integer $field, got ${actual:-<missing>}"
+    return 1
+  fi
+}
+
+assert_receipt_surfaces_match() {
+  local id="$1"
+  local header="$2"
+  local doctor_output="$3"
+  local runtime_surface="$4"
+  local field doctor_block runtime_block doctor_value runtime_value
+  doctor_block="$(printf '%s\n' "$doctor_output" | receipt_block_from_surface "$header")" || return 0
+  runtime_block="$(printf '%s\n' "$runtime_surface" | receipt_block_from_surface "$header")" || return 0
+  for field in "status" "active_backend" "failure_code" "action_kind"; do
+    doctor_value="$(receipt_field_value "$doctor_block" "$field")"
+    runtime_value="$(receipt_field_value "$runtime_block" "$field")"
+    if [[ "$doctor_value" != "$runtime_value" ]]; then
+      fail "$id" "doctor and health/log $header receipts disagree on $field: doctor=${doctor_value:-<missing>} runtime=${runtime_value:-<missing>}"
+      return 1
+    fi
+  done
+}
+
+assert_decode_receipt_has_probe_evidence() {
+  local id="$1"
+  local label="$2"
+  local header="$3"
+  local block="$4"
+  local selected_decoder
+  assert_receipt_field_nonempty "$id" "$label" "$header" "$block" "selected_device" || return 1
+  assert_receipt_field_equals "$id" "$label" "$header" "$block" "evidence_kind" "selected_backend" || return 1
+  assert_receipt_field_nonempty "$id" "$label" "$header" "$block" "selected_decoder" || return 1
+  assert_receipt_field_positive_int "$id" "$label" "$header" "$block" "probe_units_consumed" || return 1
+  selected_decoder="$(receipt_field_value "$block" "selected_decoder")"
+  case "${selected_decoder,,}" in
+    *software*|*openh264*|*avdec*|*libav*)
+      fail "$id" "$label $header selected_decoder must be a hardware decoder, got $selected_decoder"
+      return 1
+      ;;
+  esac
+}
+
+assert_runtime_surface_has_real_decode_activity() {
+  local id="$1"
+  local label="$2"
+  local surface="$3"
+  local frames whole
+  frames="$(printf '%s\n' "$surface" | awk -F= '/^frames-received=/ { print $2; exit }')"
+  if [[ -z "$frames" ]]; then
+    fail "$id" "$label must include frames-received from a real runtime stats pass"
+    return 1
+  fi
+  case "$frames" in
+    ''|*[!0-9.]*)
+      fail "$id" "$label frames-received is not numeric: $frames"
+      return 1
+      ;;
+  esac
+  whole="${frames%%.*}"
+  if [[ -z "$whole" || "$whole" -le 0 ]]; then
+    fail "$id" "$label must consume at least one frame before accepting acceleration receipts; frames-received=$frames"
+    return 1
+  fi
+}
+
+assert_acceleration_receipt_block() {
+  local id="$1"
+  local label="$2"
+  local surface="$3"
+  local header="$4"
+  local block expected
+  block="$(printf '%s\n' "$surface" | receipt_block_from_surface "$header")" || {
+    fail "$id" "$label is missing receipt block: $header"
+    return 1
+  }
+  for expected in "configured:" "status:" "active_backend:" "failure_code:" "action_kind:"; do
+    if [[ "$block" != *"$expected"* ]]; then
+      fail "$id" "$label $header block is missing fixed receipt row: $expected"
+      return 1
+    fi
+  done
+  assert_receipt_field_equals "$id" "$label" "$header" "$block" "configured" "true" || return 1
+  if [[ "$block" == *"failure_code: no_device_visible"* ]]; then
+    if [[ "$block" != *"action_kind: run_haos_precheck"* ]]; then
+      fail "$id" "$label $header no_device_visible receipt must carry a run_haos_precheck action"
+      return 1
+    fi
+    if [[ "$block" != *"action_payload:"* || "$block" != *"precheck"* ]]; then
+      fail "$id" "$label $header no_device_visible receipt must name the host-side precheck in action_payload"
+      return 1
+    fi
+  fi
+  if [[ "$header" == "[decode.hardware]" ]]; then
+    if [[ "${th27_render_device_openable:-0}" == "1" ]]; then
+      assert_receipt_field_equals "$id" "$label" "$header" "$block" "status" "active" || return 1
+      assert_receipt_field_equals "$id" "$label" "$header" "$block" "failure_code" "none" || return 1
+      assert_receipt_field_equals "$id" "$label" "$header" "$block" "hardware_accelerated" "true" || return 1
+      if [[ "$block" == *"active_backend: software"* || "$block" == *"unsupported_by_this_artifact"* ]]; then
+        fail "$id" "$label decode receipt must use the hardware decode backend when the mapped render device is openable"
+        return 1
+      fi
+      assert_decode_receipt_has_probe_evidence "$id" "$label" "$header" "$block" || return 1
+    else
+      fail "$id" "$label decode receipt was checked before the mapped render device was proven openable as the runtime user"
+      return 1
+    fi
+  fi
+  if [[ "$header" == "[detect.acceleration]" ]]; then
+    assert_receipt_field_equals "$id" "$label" "$header" "$block" "status" "fallback" || return 1
+    assert_receipt_field_equals "$id" "$label" "$header" "$block" "active_backend" "burn-cpu" || return 1
+    assert_receipt_field_equals "$id" "$label" "$header" "$block" "hardware_accelerated" "false" || return 1
+    if [[ "$block" == *"install a build with an accelerated detector backend"* ]]; then
+      fail "$id" "$label detection receipt still points at a nonexistent accelerated detector build"
+      return 1
+    fi
+    if [[ "$block" == *"status: fallback"* && "$block" != *"CPU"* && "$block" != *"cpu"* ]]; then
+      fail "$id" "$label fallback detection receipt must say CPU detection is the supported path"
+      return 1
+    fi
+  fi
 }
 
 valid_child_pid() {
@@ -861,6 +1064,22 @@ declares_privileged_resources() {
   ' "$addon_dir/config.yaml"
 }
 
+current_supervisor_options() {
+  # Supervisor validates a POSTed options object against the WHOLE add-on
+  # schema — required keys missing from a partial payload are a 400 even
+  # when they carry defaults. So the payload always starts from the add-on's
+  # current, schema-complete options and merges the suite's fields on top.
+  if [[ -n "$haos_ssh_target" ]]; then
+    local remote_script quoted_script
+    remote_script='curl -fsS -H "Authorization: Bearer $SUPERVISOR_TOKEN" http://supervisor/addons/'"$addon_slug"'/info'
+    printf -v quoted_script '%q' "$remote_script"
+    ssh -o BatchMode=yes "$haos_ssh_target" \
+      "sudo docker exec -i hassio_cli sh -c $quoted_script" | jq -ce '.data.options'
+  else
+    ha_cli_run addons info "$addon_slug" --raw-json | jq -ce '.data.options'
+  fi
+}
+
 supervisor_options_payload() {
   # store_path + health_port are always set. A camera is added only when
   # VIGIL_TEST_CAMERA_RTSP is exported — the detection/entity/correction/live-view
@@ -872,11 +1091,14 @@ supervisor_options_payload() {
     cams="$(jq -cn --arg url "$VIGIL_TEST_CAMERA_RTSP" --arg name "${VIGIL_TEST_CAMERA_NAME:-test-cam}" \
       '[{name: $name, rtsp_url: $url}]')"
   fi
-  jq -cn --arg store_path "$expected_runtime_store_path" \
+  local current
+  current="$(current_supervisor_options)" || return 1
+  jq -cn --argjson current "$current" \
+    --arg store_path "$expected_runtime_store_path" \
     --argjson health_port "$expected_health_port" \
     --argjson review_port "$expected_review_port" \
     --argjson cameras "$cams" \
-    '{store_path: $store_path, health_port: $health_port, review_port: $review_port, cameras: $cameras}'
+    '$current + {store_path: $store_path, health_port: $health_port, review_port: $review_port, cameras: $cameras}'
 }
 
 apply_supervisor_options() {
@@ -2201,6 +2423,118 @@ th26() {
   pass "$id" "browser cross-origin fetch renders snapshot, range-fetches clip transport, and posts correction"
 }
 
+th27() {
+  local id="TH-27"
+  if [[ -z "$haos_ssh_target" ]]; then
+    pass "$id" "skipped; set HAOS_SSH_TARGET to run the live add-on acceleration check"
+    return
+  fi
+  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
+  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for add-on acceleration audit"; return; }
+  have_cmd jq || { fail "$id" "jq is required to inspect add-on options"; return; }
+  ensure_addon_installed "$id" || return
+  apply_supervisor_options "$id" || return
+  start_addon "$id" "for acceleration receipt audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 before acceleration receipt audit"; return; }
+
+  local container_id doctor_output options health_body logs stats_output th27_render_device_openable render_device_evidence
+  container_id="$(addon_container_id)" || { fail "$id" "could not identify Vigil add-on container"; return; }
+  [[ -n "$container_id" ]] || { fail "$id" "could not identify Vigil add-on container"; return; }
+
+  th27_render_device_openable=0
+  render_device_evidence="$(docker_cli_run exec --user "$expected_run_uid" "$container_id" sh -c '
+    set -eu
+    device="$1"
+    test -c "$device"
+    test -r "$device"
+    test -w "$device"
+    exec 9<>"$device"
+    base="$(basename "$device")"
+    case "$base" in
+      renderD[0-9]*|card[0-9]*) ;;
+      *) echo "not a DRM render/card node: $base" >&2; exit 1 ;;
+    esac
+    major_hex="$(stat -c "%t" "$device")"
+    minor_hex="$(stat -c "%T" "$device")"
+    major_dec="$(printf "%d" "0x$major_hex")"
+    minor_dec="$(printf "%d" "0x$minor_hex")"
+    test "$major_dec" -eq 226
+    if [ ! -e "/sys/class/drm/$base" ] && [ ! -e "/sys/dev/char/${major_dec}:${minor_dec}" ]; then
+      echo "missing DRM sysfs backing for $base (${major_dec}:${minor_dec})" >&2
+      exit 1
+    fi
+    exec 9>&-
+    printf "%s|%s|%s|%s:%s\n" "$device" "$(stat -c "%F" "$device")" "$base" "$major_dec" "$minor_dec"
+  ' sh "$haos_render_device" 2>&1)" || {
+    fail "$id" "mapped render device $haos_render_device is not a readable/writable DRM character device inside the add-on as runtime uid $expected_run_uid: ${render_device_evidence:0:500}"
+    return
+  }
+  th27_render_device_openable=1
+
+  # docker exec defaults to root; the proof the smoke needs is what the
+  # DROPPED service user can reach, so the doctor is asked about that user
+  # explicitly rather than reporting root capability.
+  doctor_output="$(docker_cli_run exec "$container_id" vigil doctor acceleration --service-user "$expected_run_uid" 2>&1)" || {
+    fail "$id" "in-container acceleration doctor failed: ${doctor_output:0:700}"
+    return
+  }
+  assert_acceleration_receipt_block "$id" "doctor acceleration output" "$doctor_output" "[decode.hardware]" || return
+  assert_acceleration_receipt_block "$id" "doctor acceleration output" "$doctor_output" "[detect.acceleration]" || return
+
+  options="$(addon_options_snapshot)" || { fail "$id" "could not snapshot Supervisor options"; return; }
+  for option in "hardware_decoding" "accelerated_detection"; do
+    if [[ "$options" != *"$option"* ]]; then
+      fail "$id" "Supervisor options surface is missing $option"
+      return
+    fi
+  done
+
+  # A 200 from /health precedes the first decode receipt: the receipt lands
+  # only after the runtime has actually consumed stream frames, so the proof
+  # WAITS (bounded, read-only) for real decode activity plus both receipt
+  # blocks on both surfaces before judging — a single early snapshot would
+  # fail a correctly-working add-on on startup timing. On timeout the last
+  # surfaces are printed verbatim so the failure is diagnosable, and the
+  # assertions below still render the specific failure.
+  local receipt_wait_secs="${VIGIL_TH27_RECEIPT_WAIT_SECS:-120}"
+  local waited=0 frames_seen
+  while :; do
+    health_body="$(curl_run -fsS --max-time 5 "$health_url" 2>/dev/null || true)"
+    stats_output="$(docker_cli_run exec "$container_id" vigil stats 2>/dev/null || true)"
+    frames_seen="$(printf '%s\n' "$stats_output" \
+      | awk -F= '/^frames-received=/ { print $2; exit }')"
+    frames_seen="${frames_seen%%.*}"
+    if [[ -n "$frames_seen" && "$frames_seen" != *[!0-9]* && "${frames_seen:-0}" -gt 0 ]] \
+      && [[ "$health_body" == *"[decode.hardware]"* ]] \
+      && [[ "$health_body" == *"[detect.acceleration]"* ]] \
+      && [[ "$stats_output" == *"[decode.hardware]"* ]] \
+      && [[ "$stats_output" == *"[detect.acceleration]"* ]]; then
+      break
+    fi
+    if (( waited >= receipt_wait_secs )); then
+      echo "th27: acceleration receipts did not appear on health/stats within ${receipt_wait_secs}s; last surfaces follow" >&2
+      printf 'th27 last health body:\n%s\n' "$health_body" >&2
+      printf 'th27 last stats output:\n%s\n' "$stats_output" >&2
+      ha_cli_run apps logs "$addon_slug" 2>/dev/null | tail -40 >&2 || true
+      break
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  logs="$(ha_cli_run apps logs "$addon_slug" 2>/dev/null || true)"
+  assert_runtime_surface_has_real_decode_activity "$id" "stats acceleration surface" "$stats_output" || return
+  assert_acceleration_receipt_block "$id" "health acceleration surface" "$health_body" "[decode.hardware]" || return
+  assert_acceleration_receipt_block "$id" "health acceleration surface" "$health_body" "[detect.acceleration]" || return
+  assert_acceleration_receipt_block "$id" "stats acceleration surface" "$stats_output" "[decode.hardware]" || return
+  assert_acceleration_receipt_block "$id" "stats acceleration surface" "$stats_output" "[detect.acceleration]" || return
+  assert_receipt_surfaces_match "$id" "[decode.hardware]" "$doctor_output" "$health_body" || return
+  assert_receipt_surfaces_match "$id" "[detect.acceleration]" "$doctor_output" "$health_body" || return
+  assert_receipt_surfaces_match "$id" "[decode.hardware]" "$doctor_output" "$stats_output" || return
+  assert_receipt_surfaces_match "$id" "[detect.acceleration]" "$doctor_output" "$stats_output" || return
+
+  pass "$id" "add-on acceleration receipts, options, and mapped device are visible"
+}
+
 run_th() {
   local name
   name="$(tr '[:upper:]' '[:lower:]' <<< "$1")"
@@ -2235,6 +2569,7 @@ run_th() {
     24|th24|th-24) th24 ;;
     25|th25|th-25) th25 ;;
     26|th26|th-26|browser_cross_origin_fetch_renders_media_and_posts_correction) th26 ;;
+    27|th27|th-27) th27 ;;
     *) fail "TH-RUN" "unknown TH_RUN_LIST entry: $1" ;;
   esac
 }
@@ -2252,7 +2587,7 @@ th_requires_destructive_opt_in() {
 }
 
 if [[ -z "$th_run_list" ]]; then
-  th_run_list="TH-01 TH-02 TH-03 TH-04 TH-26"
+  th_run_list="TH-01 TH-02 TH-03 TH-04 TH-26 TH-27"
 fi
 
 for th_name in $th_run_list; do

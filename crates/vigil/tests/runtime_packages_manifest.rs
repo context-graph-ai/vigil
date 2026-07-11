@@ -1494,7 +1494,7 @@ fn assert_start_path_execs_vigil_directly(relative: &str, commands: &[String]) {
     }
     let tokens = start_commands
         .iter()
-        .flat_map(|command| shell_tokens(command))
+        .flat_map(|command| shell_tokens(start_command_args_only(command)))
         .map(|token| token.to_ascii_lowercase())
         .collect::<Vec<_>>();
     for forbidden in ["sh", "bash", "ash", "entrypoint"] {
@@ -1513,6 +1513,25 @@ fn assert_start_path_execs_vigil_directly(relative: &str, commands: &[String]) {
         !tokens.iter().any(|token| token.ends_with(".sh")),
         "{relative} start path must not execute a shell script that can hide runtime package downloads: {start_commands:?}"
     );
+}
+
+/// Drop the leading Docker instruction keyword (`ENTRYPOINT`/`CMD`) from a raw
+/// start command before the forbidden-wrapper token scan, so the keyword itself
+/// cannot collide with a forbidden token (e.g. the `ENTRYPOINT` keyword reading
+/// as the `entrypoint` wrapper token). Only the instruction NAME is stripped;
+/// the instruction's ARGUMENTS — where a real `entrypoint.sh` / `/entrypoint` /
+/// `sh`/`bash`/`ash` / `*.sh` launcher would appear — are left intact to scan.
+fn start_command_args_only(command: &str) -> &str {
+    let trimmed = command.trim_start();
+    let keyword_end = trimmed
+        .find(|ch: char| ch.is_whitespace() || ch == '[')
+        .unwrap_or(trimmed.len());
+    let keyword = trimmed[..keyword_end].to_ascii_lowercase();
+    if keyword == "entrypoint" || keyword == "cmd" {
+        &trimmed[keyword_end..]
+    } else {
+        trimmed
+    }
 }
 
 fn dockerfile_final_stage_commands(dockerfile: &str) -> Result<Vec<String>, String> {

@@ -819,13 +819,26 @@ fn assert_runtime_detection_receipt_uses_selection_seam() {
         "runtime detector startup must not build a private detection receipt after the selector seam exists"
     );
     let compact = compact_source(&start_body);
-    let direct_receipt = compact.contains("letreceipt=select_detection_acceleration(")
+    // The public selector seam is either the plain selector or the
+    // late-recording variant the runtime now routes through
+    // (`select_detection_acceleration_recording`, which keeps the probe alive
+    // past the deadline and records the late outcome). Both derive the receipt
+    // from the public selector — neither is a private receipt builder.
+    let selector_call_forms = [
+        "select_detection_acceleration(",
+        "select_detection_acceleration_recording(",
+    ];
+    let direct_receipt = selector_call_forms
+        .iter()
+        .any(|form| compact.contains(&format!("letreceipt={form}")))
         && compact.contains(".receipt");
-    let selection_receipt = compact.contains("letselection=select_detection_acceleration(")
+    let selection_receipt = selector_call_forms
+        .iter()
+        .any(|form| compact.contains(&format!("letselection={form}")))
         && compact.contains("letreceipt=selection.receipt");
     assert!(
         direct_receipt || selection_receipt,
-        "runtime detector startup must derive its detection receipt from select_detection_acceleration, not from a dead selector call plus private receipt builder: {start_body}"
+        "runtime detector startup must derive its detection receipt from the public select_detection_acceleration(_recording) seam, not from a dead selector call plus private receipt builder: {start_body}"
     );
     for required in [
         "stats.active_detector_backend=receipt.active_backend.clone()",

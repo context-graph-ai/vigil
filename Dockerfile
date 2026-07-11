@@ -104,4 +104,8 @@ ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
 EXPOSE 8099
 HEALTHCHECK --interval=5s --timeout=3s --start-period=1s --retries=3 CMD ["/bin/busybox", "wget", "-q", "-O", "-", "http://127.0.0.1:8099/health"]
-CMD ["/usr/local/bin/vigil", "run"]
+# Split entrypoint/command so a plain `docker run` still runs `vigil run`, while
+# `docker run <image> <subcommand>` execs `vigil <subcommand>` instead of a
+# literal binary named after the argument.
+ENTRYPOINT ["/usr/local/bin/vigil"]
+CMD ["run"]

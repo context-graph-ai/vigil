@@ -161,21 +161,49 @@ fn no_sudo_reports_current_process_truth_only() {
         report.decode.active_backend, "software",
         "the working software path is the active backend"
     );
-    // Default test build compiles no hardware decode backend: the primary
-    // truth is the artifact's.
+    // Both build directions land on the honest software fallback; the
+    // classified reason differs. Without the hardware decode backend the
+    // primary truth is the artifact's; with it compiled in, this fixture's
+    // device is visible but not openable, so the honest classification is
+    // the permission problem — probing GStreamer without device access would
+    // misattribute a permission failure to a missing plugin.
+    #[cfg(not(feature = "decode-gstreamer"))]
+    {
+        assert_eq!(
+            report.decode.failure_code,
+            FailureCode::UnsupportedByThisArtifact,
+            "an artifact that cannot load native hardware runtimes says so"
+        );
+        assert_eq!(
+            report.decode.action_kind,
+            ActionKind::InstallSupportedArtifact
+        );
+    }
+    #[cfg(feature = "decode-gstreamer")]
     assert_eq!(
         report.decode.failure_code,
-        FailureCode::UnsupportedByThisArtifact,
-        "an artifact that cannot load native hardware runtimes says so"
-    );
-    assert_eq!(
-        report.decode.action_kind,
-        ActionKind::InstallSupportedArtifact
+        FailureCode::PermissionDenied,
+        "a visible-but-unopenable device is a permission problem, not a missing runtime"
     );
 
+    // Both build directions must land on the honest CPU fallback; the
+    // classified reason differs. Without the accelerated detector backend the
+    // artifact reports it was never compiled in; with it compiled in, a box
+    // with no usable graphics device (or a failing probe) reports that
+    // observed classification instead — never a fabricated active claim.
+    #[cfg(not(feature = "detect-burn-wgpu"))]
     assert_eq!(
         report.detection.failure_code,
         FailureCode::BackendNotCompiled
+    );
+    #[cfg(feature = "detect-burn-wgpu")]
+    assert!(
+        matches!(
+            report.detection.failure_code,
+            FailureCode::NoDeviceVisible | FailureCode::ProbeFailed
+        ),
+        "accel-enabled doctor on a box without a usable device must classify the observed fallback, got {:?}",
+        report.detection.failure_code
     );
     assert_eq!(report.detection.active_backend, "burn-cpu");
     assert_eq!(report.detection.probe_status, ProbeStatus::Fallback);

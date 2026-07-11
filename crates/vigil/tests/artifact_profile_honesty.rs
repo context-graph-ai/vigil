@@ -53,6 +53,54 @@ fn strip_package_version(package: &str) -> String {
         .to_string()
 }
 
+/// A real, hardware-backed Vulkan ICD (installable-conditional client
+/// driver). The software rasterizer (`mesa-vulkan-swrast` / lavapipe) is
+/// deliberately excluded: the detection receipt downgrades a software Vulkan
+/// adapter to the honest CPU fallback, so shipping only swrast would advertise
+/// acceleration a box can never actually get. Names verified resolvable on the
+/// real Alpine 3.22 base images (amd64: intel/ati; aarch64: ati/broadcom/
+/// panfrost/freedreno — Intel has no aarch64 driver) via `apk add --simulate`.
+fn is_hardware_vulkan_icd(package: &str) -> bool {
+    matches!(
+        package,
+        "mesa-vulkan-intel"
+            | "mesa-vulkan-ati"
+            | "mesa-vulkan-broadcom"
+            | "mesa-vulkan-panfrost"
+            | "mesa-vulkan-freedreno"
+    )
+}
+
+/// Every hardware artifact that now ships the accelerated (wgpu → Vulkan)
+/// detector must carry the Vulkan runtime: the loader `wgpu` dlopens at
+/// startup, plus at least one real GPU ICD so a capable box can accelerate
+/// (and fall back to CPU honestly otherwise). amd64 ships BOTH the Intel and
+/// AMD ICDs so a single image accelerates on either vendor's iGPU/GPU.
+fn assert_profile_ships_vulkan_runtime(profile: &RuntimeProfile) {
+    assert!(
+        profile.packages.iter().any(|pkg| pkg == "vulkan-loader"),
+        "hardware profile {} must ship the Vulkan loader (vulkan-loader) so the wgpu accelerated detector can dlopen libvulkan at runtime",
+        profile.name
+    );
+    assert!(
+        profile
+            .packages
+            .iter()
+            .any(|pkg| is_hardware_vulkan_icd(pkg)),
+        "hardware profile {} must ship at least one real GPU Vulkan ICD (not just the software rasterizer) so accelerated detection can actually run on a capable box",
+        profile.name
+    );
+    if profile.arch == "amd64" {
+        for icd in ["mesa-vulkan-intel", "mesa-vulkan-ati"] {
+            assert!(
+                profile.packages.iter().any(|pkg| pkg == icd),
+                "amd64 hardware profile {} must ship the {icd} Vulkan driver so both an Intel and an AMD box accelerate from the one image",
+                profile.name
+            );
+        }
+    }
+}
+
 fn set_profile_field(profile: &mut RuntimeProfile, key: &str, value: &str) -> Result<(), String> {
     let value = strip_yaml_quotes(value);
     match key {
@@ -987,7 +1035,7 @@ fn assert_accelerated_detection_is_not_a_default_cargo_feature() {
     let defaults = cargo_default_features(&text);
     assert!(
         !defaults.contains("detect-burn-wgpu"),
-        "detect-burn-wgpu must not be a default Cargo feature while the shipped manifest/help truth says detection is CPU-backed"
+        "detect-burn-wgpu must stay opt-in: a plain `cargo build`/`docker build .` still produces the software-only static artifact, so accelerated detection must never be a default Cargo feature even though the hardware artifacts now enable it explicitly"
     );
 }
 
@@ -1023,10 +1071,10 @@ fn assert_cargo_feature_parser_covers_comma_forms() {
     }
 }
 
-fn cargo_command_builds_vigil_with_decode_gstreamer(tokens: &[String]) -> bool {
+fn cargo_command_builds_vigil_hardware_binary(tokens: &[String]) -> bool {
     cargo_command_builds_or_installs_vigil(tokens)
         && cargo_feature_args_include_decode_gstreamer(tokens)
-        && !cargo_feature_args_include(tokens, "detect-burn-wgpu")
+        && cargo_feature_args_include(tokens, "detect-burn-wgpu")
         && !tokens
             .iter()
             .any(|token| token.contains("unknown-linux-musl"))
@@ -1098,7 +1146,7 @@ fn assert_cargo_vigil_target_guard_rejects_other_outputs() {
     );
 }
 
-fn assert_cargo_shipped_binary_feature_guard_rejects_accelerated_detection() {
+fn assert_cargo_shipped_binary_feature_guard_requires_accelerated_detection() {
     assert_accelerated_detection_is_not_a_default_cargo_feature();
     for command in [
         "cargo build -p vigil --bin vigil --features decode-gstreamer,detect-burn-wgpu",
@@ -1107,16 +1155,16 @@ fn assert_cargo_shipped_binary_feature_guard_rejects_accelerated_detection() {
         "cargo build -p vigil --bin vigil --features decode-gstreamer --all-features",
     ] {
         assert!(
-            !cargo_command_builds_vigil_with_decode_gstreamer(&shell_tokens(command)),
-            "cargo provenance guard must reject shipped hardware-artifact Vigil builds that enable accelerated detection while the manifest/help say detection is CPU-backed: {command}"
+            cargo_command_builds_vigil_hardware_binary(&shell_tokens(command)),
+            "cargo provenance guard must accept shipped hardware-artifact Vigil builds that enable accelerated detection, now that the hardware artifacts ship the accelerated detector: {command}"
         );
     }
 
     assert!(
-        cargo_command_builds_vigil_with_decode_gstreamer(&shell_tokens(
+        !cargo_command_builds_vigil_hardware_binary(&shell_tokens(
             "cargo build -p vigil --bin vigil --features decode-gstreamer"
         )),
-        "cargo provenance guard must still accept a decode-gstreamer Vigil build that leaves accelerated detection disabled"
+        "cargo provenance guard must reject a decode-only Vigil build for a hardware artifact: without detect-burn-wgpu the shipped binary cannot accelerate detection"
     );
 }
 
@@ -1192,7 +1240,7 @@ fn cargo_install_root_is_usr_local(tokens: &[String]) -> bool {
 
 fn cargo_command_installs_vigil_to_start_binary(tokens: &[String]) -> bool {
     cargo_subcommand(tokens) == Some("install")
-        && cargo_command_builds_vigil_with_decode_gstreamer(tokens)
+        && cargo_command_builds_vigil_hardware_binary(tokens)
         && cargo_install_root_is_usr_local(tokens)
 }
 
@@ -1377,7 +1425,7 @@ fn assert_stage_cargo_builds_are_decode_gstreamer(
     assert_post_build_copy_guard_catches_root_destination();
     assert_start_binary_destination_guard_catches_workdir_relative_copy();
     assert_default_cargo_target_dir_is_tied_to_workdir();
-    assert_cargo_shipped_binary_feature_guard_rejects_accelerated_detection();
+    assert_cargo_shipped_binary_feature_guard_requires_accelerated_detection();
     let mut saw_build = false;
     let mut workdir = String::new();
     for command in &stage.commands {
@@ -1416,8 +1464,8 @@ fn assert_stage_cargo_builds_are_decode_gstreamer(
             if cargo_command_builds_or_installs_vigil(&tokens) {
                 saw_build = true;
                 assert!(
-                    cargo_command_builds_vigil_with_decode_gstreamer(&tokens),
-                    "{label} every cargo build/install in the hardware source stage must use --features decode-gstreamer so a later software build cannot overwrite the binary: {tokens:?}"
+                    cargo_command_builds_vigil_hardware_binary(&tokens),
+                    "{label} every cargo build/install in the hardware source stage must use --features decode-gstreamer,detect-burn-wgpu so the shipped binary carries hardware decode AND the accelerated detector: {tokens:?}"
                 );
                 if let Some(source) = source {
                     assert!(
@@ -1524,7 +1572,7 @@ fn assert_stage_does_not_overwrite_start_binary_after_copy(stage: &DockerStage, 
 }
 
 fn assert_stage_cargo_installs_decode_gstreamer_to_start_binary(stage: &DockerStage, label: &str) {
-    assert_cargo_shipped_binary_feature_guard_rejects_accelerated_detection();
+    assert_cargo_shipped_binary_feature_guard_requires_accelerated_detection();
     let mut saw_install = false;
     for command in &stage.commands {
         let lower = command.trim_start().to_ascii_lowercase();
@@ -1979,10 +2027,11 @@ fn assert_generic_dockerfile_binds_hardware_profile(
         "generic Docker final hardware image packages for {} must exactly match the manifest profile, including inherited local stages",
         profile.name
     );
-    assert!(
-        !commands_enable_cargo_feature(&target.commands, "detect-burn-wgpu"),
-        "generic Docker hardware artifact must not enable accelerated detection while the release-noted profile says burn-cpu"
-    );
+    // The runtime stage COPYs the binary from a named builder stage; the
+    // accelerated-detection feature requirement is enforced against that
+    // builder lineage by `assert_stage_uses_decode_gstreamer_binary` below,
+    // which now requires BOTH decode-gstreamer AND detect-burn-wgpu.
+    assert_profile_ships_vulkan_runtime(profile);
     assert_stage_uses_decode_gstreamer_binary(
         stages,
         target,
@@ -2090,24 +2139,27 @@ fn hardware_addon_image_carries_manifest_hardware_profile() {
             profile.decode_backend
         );
         assert_eq!(
-            profile.detector_backend, "burn-cpu",
-            "add-on hardware profile must not advertise accelerated detection until the add-on build actually enables it and the option help says so"
+            profile.detector_backend, "burn-wgpu",
+            "add-on hardware profile must now record the accelerated detection backend (burn-wgpu) the shipped add-on binary carries"
         );
         assert!(
-            !commands_enable_cargo_feature(&final_stage.commands, "detect-burn-wgpu"),
-            "final add-on Dockerfile stage must not enable accelerated detection while the add-on profile and help promise CPU detection"
+            stage_records_backend_truth(&final_stage.commands, profile.detector_backend.as_str()),
+            "final add-on Dockerfile stage must record the manifest detector backend {} so the image label matches the shipped binary",
+            profile.detector_backend
         );
+        assert_profile_ships_vulkan_runtime(profile);
         // Home Assistant Supervisor builds an add-on from the add-on's own
         // folder, so the shipped binary arrives STAGED by the release
         // pipeline (`COPY vigil /usr/local/bin/vigil`) — a build recipe that
         // compiles from source can never run there (the HA-OS harness's
         // add-on guard also rejects any cargo/rustc use in this Dockerfile).
-        // For that staged shape the binary's feature set is proven where it
-        // is observable — the owner smoke's feature-gate record and the
-        // in-container decode-goes-active run — while this test still pins
-        // the manifest packages, the recorded backend truth, and the
-        // CPU-detection promise above. A final stage that instead builds or
-        // copies from a build stage must carry the full provenance battery.
+        // For that staged shape the binary's accelerated-detector feature set
+        // is proven where it is observable — the owner smoke's feature-gate
+        // record and the in-container probe run — while this test pins the
+        // manifest packages (now including the Vulkan runtime), the recorded
+        // detector-backend truth, and the label above. A final stage that
+        // instead builds or copies from a build stage must carry the full
+        // provenance battery (which now requires detect-burn-wgpu).
         if !final_stage_copies_external_staged_binary(final_stage) {
             assert_stage_uses_decode_gstreamer_binary(
                 &stages,
@@ -2160,6 +2212,58 @@ fn release_notes_name_the_hardware_generic_docker_artifact() {
     let Ok(text) = text else {
         return;
     };
+    // C10 — the release notes must tell the accelerated-detection truth per
+    // artifact: the hardware artifacts now ship the accelerated detector, it
+    // falls back to CPU honestly, the HA-OS add-on's VM-measured verdict was
+    // the CPU fallback on that test VM while a capable GPU accelerates, and
+    // the Vulkan packages cost image size. `normalized` collapses line wraps
+    // so multi-line prose still matches.
+    let normalized = text
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        normalized.contains("accelerated detection") || normalized.contains("accelerated object detection"),
+        "release notes must state the accelerated-detection capability the hardware artifacts now carry"
+    );
+    assert!(
+        normalized.contains("burn-wgpu"),
+        "release notes must name the accelerated detection backend (burn-wgpu) the hardware artifacts now build with"
+    );
+    assert!(
+        normalized.contains("fall back to cpu")
+            || normalized.contains("falls back to cpu")
+            || normalized.contains("fall back to burn-cpu")
+            || normalized.contains("cpu fallback"),
+        "release notes must state detection falls back to CPU when no usable GPU is present"
+    );
+    assert!(
+        (normalized.contains("add-on") || normalized.contains("home assistant") || normalized.contains("haos"))
+            && normalized.contains("test")
+            && (normalized.contains("fell back")
+                || normalized.contains("fall back")
+                || normalized.contains("falls back")
+                || normalized.contains("fallback")),
+        "release notes must record the add-on's VM-measured verdict: detection classified the CPU fallback on the test VM"
+    );
+    assert!(
+        normalized.contains("capable gpu")
+            || normalized.contains("capable gpus")
+            || normalized.contains("real gpu")
+            || (normalized.contains("gpu") && normalized.contains("accelerat")),
+        "release notes must state a capable GPU accelerates detection even though the test VM fell back to CPU"
+    );
+    assert!(
+        normalized.contains("50 mb") || normalized.contains("50mb") || normalized.contains("+50"),
+        "release notes must record the Vulkan runtime packages' image size cost (~+50 MB)"
+    );
+    assert!(
+        !normalized.contains("stays on the cpu")
+            && !normalized.contains("detection runs on cpu in this artifact")
+            && !normalized.contains("cpu (`burn-cpu`) in every shipped shape"),
+        "release notes must drop the pre-promotion claim that detection stays on CPU in every shipped shape"
+    );
     let hardware_identifiers = release_note_identifiers(&text, "generic_docker_hardware_artifact");
     let software = release_note_identifier(&text, "static_musl_artifact");
     assert!(
@@ -2224,8 +2328,8 @@ fn release_notes_name_the_hardware_generic_docker_artifact() {
             profile.name
         );
         assert_eq!(
-            profile.detector_backend, "burn-cpu",
-            "generic Docker hardware profile {} must say detection remains CPU-backed in this run",
+            profile.detector_backend, "burn-wgpu",
+            "generic Docker hardware profile {} must now record the accelerated detection backend (burn-wgpu) it ships",
             profile.name
         );
         assert!(

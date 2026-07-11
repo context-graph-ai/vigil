@@ -66,6 +66,26 @@ fn wait_for_detection_receipt(
     }
 }
 
+/// Every base-10 number (integer or decimal) appearing in `text`, in order.
+fn base_ten_numbers(text: &str) -> Vec<f64> {
+    let mut numbers = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() || (ch == '.' && !current.is_empty()) {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if let Ok(value) = current.trim_end_matches('.').parse::<f64>() {
+                numbers.push(value);
+            }
+            current.clear();
+        }
+    }
+    if let Ok(value) = current.trim_end_matches('.').parse::<f64>() {
+        numbers.push(value);
+    }
+    numbers
+}
+
 #[test]
 fn deadline_returns_fallback_now_but_probe_runs_to_completion_and_records_late_pass() {
     // Pin a 1 s deadline; the probe takes ~1.5 s, so it must miss the deadline
@@ -121,15 +141,45 @@ fn deadline_returns_fallback_now_but_probe_runs_to_completion_and_records_late_p
         "a late PASS must record a hardware-accelerated detection receipt"
     );
     let action = late.action_payload.unwrap_or_default().to_ascii_lowercase();
+
+    // Measured truth, not an unconditional promise. On a box whose warm start
+    // still exceeds the default deadline, "active on the next start" is a lie;
+    // the action must report the probe's ACTUAL completion time and name the
+    // deadline option with a number derived from it (>= the measured time).
+    for false_promise in ["next start", "next boot", "on next start", "next restart"] {
+        assert!(
+            !action.contains(false_promise),
+            "a late PASS action must not unconditionally promise activation (`{false_promise}`) — it is false where even a warm start exceeds the default deadline: {action}"
+        );
+    }
     assert!(
-        (action.contains("verified") || action.contains("usable"))
-            && (action.contains("next start")
-                || action.contains("next boot")
-                || action.contains("restart")),
-        "a late PASS action must tell the operator the GPU is verified usable and accelerated detection comes on the next start, not merely raise-the-deadline: {action}"
+        action.contains("verified") || action.contains("usable"),
+        "a late PASS action must still tell the operator the GPU is verified/usable: {action}"
     );
     assert!(
-        !action.contains("raise vigil_detection_probe_deadline_secs"),
-        "a late PASS must stop telling the operator to raise the deadline once the probe has actually succeeded: {action}"
+        action.contains("complet"),
+        "a late PASS action must state the probe completed (its measured outcome): {action}"
+    );
+    assert!(
+        action.contains("detection_probe_deadline_secs")
+            || action.contains("vigil_detection_probe_deadline_secs"),
+        "a late PASS action must name the detection probe deadline option/env so the operator can raise it to the measured time: {action}"
+    );
+    let numbers = base_ten_numbers(&action);
+    let measured = *numbers.first().expect(
+        "a late PASS action must report the probe's measured completion time as a number of seconds",
+    );
+    assert!(
+        measured >= 1.0,
+        "the reported measured completion time must reflect the real >1s probe run, got {measured}: {action}"
+    );
+    assert!(
+        action.contains("at least"),
+        "a late PASS action must recommend a deadline of at least the measured completion time: {action}"
+    );
+    let recommended = numbers.iter().copied().fold(measured, f64::max);
+    assert!(
+        recommended >= measured,
+        "the recommended deadline threshold must be >= the measured completion time ({measured}s): {action}"
     );
 }

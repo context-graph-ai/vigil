@@ -8,7 +8,8 @@
 //! never echoed from the `accelerated_detection` intent boolean.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::OnceLock;
 #[cfg(feature = "detect-burn-wgpu")]
 use std::sync::{Mutex, mpsc};
@@ -18,11 +19,33 @@ use std::thread;
 use std::time::Duration;
 
 use crate::acceleration::{
-    AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
+    AccelStage, AccelerationReceipt, AccelerationState, ActionKind, EvidenceKind, FailureCode,
+    ProbeStatus,
 };
 
 pub const CPU_DETECTION_BACKEND: &str = "burn-cpu";
 pub const ACCELERATED_DETECTION_BACKEND: &str = "burn-wgpu";
+
+/// Places the Mesa/wgpu on-disk shader cache under the add-on's PERSISTENT data
+/// root and exports `MESA_SHADER_CACHE_DIR` to it, so the cold Vulkan/SPIR-V
+/// shader compile the accelerated detector pays on first boot is kept across
+/// restarts instead of being re-paid every start. The accelerated detector runs
+/// in-process via wgpu, so the env must be set in vigil's OWN process before
+/// wgpu initialises — this is called at startup (before the camera-thread probe)
+/// and from `vigil doctor acceleration`, so a compile completed by either warms
+/// the other and every later boot. The directory is created if absent so the
+/// detector never races an uncreated path.
+pub fn configure_persistent_shader_cache(data_dir: &Path) -> std::io::Result<PathBuf> {
+    let cache_dir = data_dir.join("shader-cache");
+    std::fs::create_dir_all(&cache_dir)?;
+    // SAFETY: called once at process start (runtime startup / doctor entry),
+    // before any wgpu/Vulkan initialisation or camera thread, so no concurrent
+    // env access races this write.
+    unsafe {
+        std::env::set_var("MESA_SHADER_CACHE_DIR", &cache_dir);
+    }
+    Ok(cache_dir)
+}
 
 /// The startup probe is a one-time, once-per-process attempt; a wall-clock
 /// deadline bounds it so a wedged forward pass never blocks camera startup
@@ -200,6 +223,35 @@ pub fn select_detection_acceleration(
     )
 }
 
+/// Production startup entry: builds the real forward probe for this build and,
+/// under the accelerated feature, runs it through the late-recording spawn
+/// variant so a cold compile that outlives the receipt deadline still records
+/// its true outcome into `accel` (which `/health`, `vigil stats`, and the
+/// doctor render). A software-only build has no accelerated backend and nothing
+/// to record late, so it returns the honest not-compiled selection.
+pub fn select_detection_acceleration_recording(
+    accelerated_detection: bool,
+    model_id: &str,
+    input_shape: &str,
+    accel: Arc<AccelerationState>,
+) -> DetectionAccelerationSelection {
+    #[cfg(feature = "detect-burn-wgpu")]
+    {
+        spawn_detection_probe_with_late_recording(
+            accelerated_detection,
+            model_id,
+            input_shape,
+            YoloxForwardProbe::new(model_id, input_shape),
+            accel,
+        )
+    }
+    #[cfg(not(feature = "detect-burn-wgpu"))]
+    {
+        let _ = accel;
+        select_detection_acceleration(accelerated_detection, model_id, input_shape)
+    }
+}
+
 pub fn select_detection_acceleration_with_probe<P: DetectionForwardProbe>(
     accelerated_detection: bool,
     model_id: &str,
@@ -353,6 +405,199 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
                     "timed out after {:.1}s; a slow GPU cold start (first shader compile, model load) can exceed the probe window - raise VIGIL_DETECTION_PROBE_DEADLINE_SECS and restart to retry",
                     probe_deadline.as_secs_f64()
                 ),
+            );
+            receipt.action_kind = ActionKind::ManualActionRequired;
+            receipt.action_payload = Some(probe_failed_fallback_action());
+            CPU_DETECTION_BACKEND
+        }
+    };
+    DetectionAccelerationSelection {
+        backend: classified.to_string(),
+        receipt,
+    }
+}
+
+/// Runs the forward probe under a deadline, but NEVER abandons a slow probe:
+/// when the deadline expires it returns the honest fallback-now selection
+/// immediately (so camera startup is never blocked on a cold shader compile),
+/// while the probe thread runs to its REAL outcome and records that outcome
+/// into `accel` — the receipt store `/health`, `vigil stats`, and the doctor
+/// render. A late PASS records an Active receipt whose action tells the operator
+/// the GPU is verified usable and accelerated detection arrives on the next
+/// start (never merely "raise the deadline"); a late FAIL records its real
+/// classification. Hot-swapping the already-running CPU detector is a ledgered
+/// follow-up and is deliberately not done here.
+#[cfg(feature = "detect-burn-wgpu")]
+pub fn spawn_detection_probe_with_late_recording<P: DetectionForwardProbe>(
+    accelerated_detection: bool,
+    model_id: &str,
+    input_shape: &str,
+    probe: P,
+    accel: Arc<AccelerationState>,
+) -> DetectionAccelerationSelection {
+    if !accelerated_detection {
+        let mut receipt = base_detection_receipt(model_id, input_shape, false);
+        receipt.probe_status = ProbeStatus::Disabled;
+        return DetectionAccelerationSelection {
+            backend: CPU_DETECTION_BACKEND.to_string(),
+            receipt,
+        };
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let mut probe = probe;
+    thread::spawn(move || {
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe.run_forward_probe()));
+        let _ = tx.send(outcome);
+    });
+
+    let probe_deadline = detection_probe_deadline();
+    match rx.recv_timeout(probe_deadline) {
+        Ok(outcome) => classify_forward_probe_selection(outcome, model_id, input_shape, false),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // The probe is still running its cold compile. Return the honest
+            // fallback-now so startup proceeds, and hand the live channel to a
+            // late recorder that awaits the probe's true outcome and records it.
+            let accel_for_late = Arc::clone(&accel);
+            let model_id_owned = model_id.to_string();
+            let input_shape_owned = input_shape.to_string();
+            thread::spawn(move || {
+                if let Ok(outcome) = rx.recv() {
+                    let late = classify_forward_probe_selection(
+                        outcome,
+                        &model_id_owned,
+                        &input_shape_owned,
+                        true,
+                    );
+                    accel_for_late.record(late.receipt);
+                }
+            });
+            timeout_fallback_selection(model_id, input_shape, probe_deadline)
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            // The probe thread vanished without sending (should not happen —
+            // the panic is caught and still sent). No late outcome is coming.
+            timeout_fallback_selection(model_id, input_shape, probe_deadline)
+        }
+    }
+}
+
+/// The immediate "fallback for now" selection the late-recording probe returns
+/// when the deadline expires while the probe keeps running: an honest probe
+/// timeout that classifies fallback but tells the operator the probe is still
+/// working and acceleration will arrive on the next start if it succeeds.
+#[cfg(feature = "detect-burn-wgpu")]
+fn timeout_fallback_selection(
+    model_id: &str,
+    input_shape: &str,
+    probe_deadline: Duration,
+) -> DetectionAccelerationSelection {
+    let mut receipt = base_detection_receipt(model_id, input_shape, true);
+    receipt.failure_code = FailureCode::ProbeFailed;
+    receipt.evidence_kind = Some(EvidenceKind::UpstreamError);
+    receipt.evidence_fields.insert(
+        "probe_error".to_string(),
+        format!(
+            "timed out after {:.1}s; a slow GPU cold start (first shader compile, model load) can exceed the probe window - the probe keeps running and accelerated detection will be active on the next start if it succeeds",
+            probe_deadline.as_secs_f64()
+        ),
+    );
+    receipt.action_kind = ActionKind::ManualActionRequired;
+    receipt.action_payload = Some(probe_failed_fallback_action());
+    DetectionAccelerationSelection {
+        backend: CPU_DETECTION_BACKEND.to_string(),
+        receipt,
+    }
+}
+
+/// The honest action for a probe that PASSED after the startup deadline: the
+/// GPU is verified usable and accelerated detection arrives on the next start.
+/// Never tells the operator to raise the deadline — the probe already succeeded.
+#[cfg(feature = "detect-burn-wgpu")]
+fn late_pass_action() -> String {
+    "the GPU forward probe passed after the startup deadline: the GPU is verified usable, and \
+     accelerated detection will be active on the next start. No action is required."
+        .to_string()
+}
+
+/// Classifies a completed forward-probe outcome into a detection selection,
+/// shared by the in-time and the late-recording paths. `late` marks a PASS that
+/// landed after the startup deadline: its Active receipt carries the
+/// verified-usable / next-start action instead of the in-time no-action.
+#[cfg(feature = "detect-burn-wgpu")]
+fn classify_forward_probe_selection(
+    outcome: std::thread::Result<DetectionForwardProbeOutcome>,
+    model_id: &str,
+    input_shape: &str,
+    late: bool,
+) -> DetectionAccelerationSelection {
+    let mut receipt = base_detection_receipt(model_id, input_shape, true);
+    let classified = match outcome {
+        Ok(DetectionForwardProbeOutcome::Passed {
+            selected_device,
+            evidence_fields,
+        }) => {
+            receipt.active_backend = ACCELERATED_DETECTION_BACKEND.to_string();
+            receipt.hardware_accelerated = true;
+            receipt.selected_device = Some(selected_device);
+            receipt.probe_status = ProbeStatus::Active;
+            receipt.failure_code = FailureCode::None;
+            receipt.evidence_kind = Some(EvidenceKind::BackendProbe);
+            receipt.evidence_fields = evidence_fields;
+            receipt
+                .evidence_fields
+                .insert("forward_probe".to_string(), "passed".to_string());
+            if detection_hardware_claim_is_valid(&receipt) {
+                if late {
+                    // A late PASS is an informational note, not a required
+                    // action: the GPU is verified and acceleration comes next
+                    // start (no hot-swap of the already-running CPU detector).
+                    receipt.action_payload = Some(late_pass_action());
+                }
+                ACCELERATED_DETECTION_BACKEND
+            } else {
+                // A software Vulkan adapter (llvmpipe/lavapipe): not hardware
+                // acceleration, downgraded to the honest no-usable-GPU fallback.
+                let software_adapter = receipt.selected_device.take();
+                receipt.active_backend = CPU_DETECTION_BACKEND.to_string();
+                receipt.hardware_accelerated = false;
+                receipt.probe_status = ProbeStatus::Fallback;
+                receipt.failure_code = FailureCode::NoDeviceVisible;
+                receipt.evidence_kind = Some(EvidenceKind::SelectedBackend);
+                receipt.evidence_fields.remove("forward_probe");
+                if let Some(adapter) = software_adapter {
+                    receipt
+                        .evidence_fields
+                        .insert("software_adapter".to_string(), adapter);
+                }
+                receipt.action_kind = ActionKind::RunHaosPrecheck;
+                receipt.action_payload = Some(no_usable_gpu_fallback_action());
+                CPU_DETECTION_BACKEND
+            }
+        }
+        Ok(DetectionForwardProbeOutcome::NoDeviceVisible) => {
+            receipt.failure_code = FailureCode::NoDeviceVisible;
+            receipt.action_kind = ActionKind::RunHaosPrecheck;
+            receipt.action_payload = Some(no_usable_gpu_fallback_action());
+            CPU_DETECTION_BACKEND
+        }
+        Ok(DetectionForwardProbeOutcome::Failed { reason }) => {
+            receipt.failure_code = FailureCode::ProbeFailed;
+            receipt.evidence_kind = Some(EvidenceKind::UpstreamError);
+            receipt
+                .evidence_fields
+                .insert("probe_error".to_string(), reason);
+            receipt.action_kind = ActionKind::ManualActionRequired;
+            receipt.action_payload = Some(probe_failed_fallback_action());
+            CPU_DETECTION_BACKEND
+        }
+        Err(_panic) => {
+            receipt.failure_code = FailureCode::ProbeFailed;
+            receipt.evidence_kind = Some(EvidenceKind::UpstreamError);
+            receipt.evidence_fields.insert(
+                "probe_error".to_string(),
+                "forward probe panicked".to_string(),
             );
             receipt.action_kind = ActionKind::ManualActionRequired;
             receipt.action_payload = Some(probe_failed_fallback_action());

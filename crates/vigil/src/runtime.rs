@@ -19,7 +19,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config;
+#[cfg(test)]
 use crate::detection_accel::select_detection_acceleration;
+use crate::detection_accel::select_detection_acceleration_recording;
 use crate::health::{HealthServer, HealthState, HealthStatus};
 use crate::live_read;
 use crate::media_pipeline;
@@ -71,6 +73,17 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     // decode seam's host-facts-free shape) reads the same checkpoint the
     // live per-camera detector loads through this slot.
     crate::detection_accel::register_detector_model_path(config.detector_model_path.clone());
+    // Persist the wgpu/Vulkan shader cache under the data root once, before any
+    // camera-thread detection probe compiles shaders, so a first boot's cold
+    // compile survives restarts instead of being re-paid every start.
+    #[cfg(feature = "detect-burn-wgpu")]
+    if let Err(error) = crate::detection_accel::configure_persistent_shader_cache(&config.data_dir)
+    {
+        println!(
+            "shader_cache_setup_failed=true path={} error={error}",
+            config.data_dir.display()
+        );
+    }
     let server = HealthServer::listen(
         config.health_port,
         health.clone(),
@@ -594,10 +607,11 @@ pub fn start_rtsp_probe(
             // always means an accelerated detector actually runs, and any
             // fallback selection always means the CPU detector runs, even
             // with the accel feature compiled in.
-            let selection = select_detection_acceleration(
+            let selection = select_detection_acceleration_recording(
                 config.accelerated_detection,
                 &config.detector_model_id,
                 yolox_detector::MODEL_INPUT_SHAPE,
+                Arc::clone(&accel),
             );
             let receipt = selection.receipt;
             let accelerated_selected =

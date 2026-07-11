@@ -585,6 +585,18 @@ pub fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
         service_user_flag,
         detector_model_path: config.detector_model_path.clone(),
     };
+    // Persist the wgpu/Vulkan shader cache under the data root before the
+    // doctor's own forward probe compiles shaders, so a doctor run warms the
+    // box for the runtime (and vice versa) instead of each re-paying the cold
+    // compile.
+    #[cfg(feature = "detect-burn-wgpu")]
+    if let Err(error) = crate::detection_accel::configure_persistent_shader_cache(&config.data_dir)
+    {
+        eprintln!(
+            "shader_cache_setup_failed=true path={} error={error}",
+            config.data_dir.display()
+        );
+    }
     let facts = RealHostFacts;
     let mut report = acceleration_report(&request, &facts);
     // The detection receipt names the configured model identity. Stamped

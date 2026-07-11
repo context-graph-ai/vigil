@@ -12,10 +12,13 @@ const DECODE_OPTION: &str = "decode_probe_deadline_secs";
 const DETECTION_OPTION: &str = "detection_probe_deadline_secs";
 const DECODE_ENV_VAR: &str = "VIGIL_DECODE_PROBE_DEADLINE_SECS";
 const DETECTION_ENV_VAR: &str = "VIGIL_DETECTION_PROBE_DEADLINE_SECS";
-// Effective defaults read from source: Duration::from_secs(5) and
-// Duration::from_millis(1800) => 5 seconds and 1.8 seconds.
+// Effective defaults the shipped source must document: decode stays
+// Duration::from_secs(5) => 5 seconds; the detection default rises to
+// Duration::from_secs(60) => 60 seconds so a real GPU's cold shader compile
+// (measured ~44.5 s) can reach ACTIVE at the default instead of being
+// misclassified as a failed probe.
 const DECODE_DEFAULT_SECS: &str = "5";
-const DETECTION_DEFAULT_SECS: &str = "1.8";
+const DETECTION_DEFAULT_SECS: &str = "60";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

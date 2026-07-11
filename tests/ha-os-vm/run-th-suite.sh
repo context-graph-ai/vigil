@@ -2513,7 +2513,12 @@ th27() {
   # fail a correctly-working add-on on startup timing. On timeout the last
   # surfaces are printed verbatim so the failure is diagnosable, and the
   # assertions below still render the specific failure.
-  local receipt_wait_secs="${VIGIL_TH27_RECEIPT_WAIT_SECS:-120}"
+  # The detection startup probe now admits a real GPU's cold shader compile
+  # (default deadline 60 s), so on a device-present-but-compute-dead VM the
+  # first [detect.acceleration] receipt only lands after that bounded probe
+  # times out; the wait budget must clear the probe deadline plus startup and
+  # decode warm-up, so it is sized above 60 s (still bounded, overridable).
+  local receipt_wait_secs="${VIGIL_TH27_RECEIPT_WAIT_SECS:-180}"
   local waited=0 frames_seen
   while :; do
     health_body="$(curl_run -fsS --max-time 5 "$health_url" 2>/dev/null || true)"

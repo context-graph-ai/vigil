@@ -25,23 +25,26 @@ pub const CPU_DETECTION_BACKEND: &str = "burn-cpu";
 pub const ACCELERATED_DETECTION_BACKEND: &str = "burn-wgpu";
 
 /// The startup probe is a one-time, once-per-process attempt; a wall-clock
-/// deadline bounds it so a wedged or slow forward pass never blocks camera
-/// startup. The classification contract (`detection_probe_timeout_and_panic_
-/// classify_probe_failed_without_hang`) requires the whole bounded call to
-/// return in under 2 wall-clock seconds even when the probe itself is
-/// wedged; this is set as high as that ceiling safely allows — leaving
-/// headroom for thread-spawn/scheduling jitter, not for the probe's own
-/// work — so a real cold Vulkan/SPIR-V shader compile plus a tiny-model
-/// forward pass gets as much of that budget as the contract can spare.
+/// deadline bounds it so a wedged forward pass never blocks camera startup
+/// forever. The default is sized to admit a real GPU's cold first-shader
+/// compile: on the reference AMD 680M (RADV) an in-container cold Vulkan/SPIR-V
+/// compile plus a tiny-model forward pass measured ~44.5 s, so a shorter
+/// deadline would misclassify a capable-but-cold GPU as a failed probe and
+/// never reach the accelerated backend. 60 s gives that cold start margin. A
+/// GPU-less box never pays this wait — it classifies `no_device_visible`
+/// before any compile begins (see `YoloxForwardProbe::run_forward_probe`, which
+/// returns early on `find_hardware_adapter() == None`); only a box that HAS a
+/// device but whose compute hangs waits out the full deadline, which is
+/// bounded and acceptable for a once-per-process probe.
 #[cfg(feature = "detect-burn-wgpu")]
-const PROBE_DEADLINE: Duration = Duration::from_millis(1800);
+const PROBE_DEADLINE: Duration = Duration::from_secs(60);
 
-/// The effective forward-probe deadline. The default stays under the bounded
-/// classification contract's two-second ceiling, but a box whose GPU needs a
-/// long cold start (first-time shader compile, model load) can raise it via
-/// `VIGIL_DETECTION_PROBE_DEADLINE_SECS` so a slow-but-working adapter is not
-/// misclassified as a failed probe. An unparseable value falls back to the
-/// default; the timeout evidence records the effective deadline either way.
+/// The effective forward-probe deadline. The default admits a real GPU's cold
+/// start (first-time shader compile, model load); a box that needs even longer,
+/// or a test that wants a short deterministic timeout, sets
+/// `VIGIL_DETECTION_PROBE_DEADLINE_SECS` to override it. An unparseable value
+/// falls back to the default; the timeout evidence records the effective
+/// deadline either way.
 #[cfg(feature = "detect-burn-wgpu")]
 fn detection_probe_deadline() -> Duration {
     std::env::var("VIGIL_DETECTION_PROBE_DEADLINE_SECS")

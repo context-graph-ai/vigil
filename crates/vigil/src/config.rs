@@ -438,6 +438,59 @@ fn read_toml_config(path: &Path) -> Result<PartialConfig, String> {
         .map_err(|error| format!("could not parse config {}: {error}", path.display()))
 }
 
+/// Add-on start path for the two startup-probe deadline knobs. A Home
+/// Assistant user sets `decode_probe_deadline_secs` /
+/// `detection_probe_deadline_secs` as add-on options; this writes them to the
+/// `VIGIL_DECODE_PROBE_DEADLINE_SECS` / `VIGIL_DETECTION_PROBE_DEADLINE_SECS`
+/// environment variables the decode and detection startup probes read, so the
+/// option value wins over a manually set environment variable and an unset
+/// option keeps the source default. The add-on's entry point is the vigil
+/// binary itself (it reads `/data/options.json`), so this export lives here
+/// instead of a separate shell run script; it is a no-op when no options file
+/// is present (a non-add-on deployment).
+pub(crate) fn apply_addon_probe_deadline_env() {
+    let options_path = default_options_json_path();
+    if !options_path.exists() {
+        return;
+    }
+    let Ok(text) = fs::read_to_string(&options_path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    for (option, env_var) in [
+        (
+            "decode_probe_deadline_secs",
+            "VIGIL_DECODE_PROBE_DEADLINE_SECS",
+        ),
+        (
+            "detection_probe_deadline_secs",
+            "VIGIL_DETECTION_PROBE_DEADLINE_SECS",
+        ),
+    ] {
+        if let Some(secs) = value.get(option).and_then(option_deadline_secs_string) {
+            // SAFETY: called once at process start (top of `run_cli`), before
+            // any camera or acceleration-probe thread is spawned, so no
+            // concurrent env access races this write.
+            unsafe {
+                std::env::set_var(env_var, secs);
+            }
+        }
+    }
+}
+
+fn option_deadline_secs_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        _ => None,
+    }
+}
+
 fn read_options_json(path: &Path) -> Result<PartialConfig, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("could not read options {}: {error}", path.display()))?;

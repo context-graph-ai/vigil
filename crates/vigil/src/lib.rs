@@ -78,6 +78,10 @@ where
     let mut args = args.into_iter();
     let _program = args.next();
 
+    // Add-on start path: write the probe-deadline options into the environment
+    // the decode/detection startup probes read, before any command dispatches.
+    config::apply_addon_probe_deadline_env();
+
     match args.next().and_then(|arg| arg.into_string().ok()) {
         Some(flag) if flag == "--version" => {
             println!("vigil {}", env!("CARGO_PKG_VERSION"));

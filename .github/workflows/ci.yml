@@ -72,6 +72,55 @@ jobs:
         working-directory: vigil
         run: cargo build --workspace
 
+  feature-lanes:
+    name: Feature lane ${{ matrix.features }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - decode-gstreamer
+          - detect-burn-wgpu
+          - decode-gstreamer,detect-burn-wgpu
+    steps:
+      - name: Checkout vigil
+        uses: actions/checkout@v4
+        with:
+          path: vigil
+
+      - name: Checkout context-graph
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: dev
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Checkout contextdb
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: dev
+          path: contextdb
+          token: ${{ secrets.CG_CI_TOKEN || github.token }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install MQTT test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto mosquitto-clients
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+
+      - name: Feature-shape tests
+        working-directory: vigil
+        run: cargo nextest run --profile pr -p vigil --features ${{ matrix.features }}
+
   full-tests:
     name: Full slow lane shard ${{ matrix.shard }}
     runs-on: ubuntu-latest

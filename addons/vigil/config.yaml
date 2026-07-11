@@ -34,6 +34,8 @@ options:
     - person
     - dog
   cameras: []
+  hardware_decoding: true
+  accelerated_detection: true
 schema:
   store_path: str
   health_port: int
@@ -51,9 +53,15 @@ schema:
       live_rtsp_url: str?
       username: str?
       password: str?
+  hardware_decoding: bool
+  accelerated_detection: bool
 apparmor: true
 host_network: false
 host_pid: false
+# Narrow DRM render-node mapping for hardware video decode (hardware_decoding).
+# Never full_access and never the whole /dev/dri tree — only the render node.
+devices:
+  - /dev/dri/renderD128:/dev/dri/renderD128:rwm
 # Required for Supervisor REST API access to MQTT credentials and Generic Camera
 # config-flow registration, and for SUPERVISOR_TOKEN injection.
 homeassistant_api: true

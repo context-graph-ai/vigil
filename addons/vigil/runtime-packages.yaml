@@ -1,0 +1,97 @@
+# Single-source runtime package manifest for every installable Vigil
+# artifact shape. The add-on Dockerfile's shipped image stage expands its
+# `apk add` package list from this file (selected by the Home Assistant
+# `BUILD_ARCH` value); the top-level generic Dockerfile's hardware runtime
+# stages install the matching literal package set; the release notes name
+# the resulting artifact identifiers. Nothing here is fetched at container
+# start — every package bakes into the image at build time.
+#
+# RUNTIME packages only — toolchain/build packages (rust, cargo, pkgconf,
+# build-base, gstreamer-dev, gst-plugins-base-dev, ...) are a builder-stage
+# concern and never ship in the final image, so they are deliberately absent
+# here: the manifest is the single source for what the SHIPPED image
+# actually carries, not for how it was compiled.
+#
+# Backend vocabulary: decode_backend in {software, gstreamer}; detector_backend
+# in {burn-cpu, burn-wgpu}. Every shipped shape in this manifest keeps
+# detector_backend burn-cpu — accelerated detection is a dev-box-only,
+# feature-gated build, never a shipped artifact this run.
+#
+# Package sets were verified against the real base images with:
+#   docker run --rm <base> sh -c 'apk update; apk search -e <name>'
+# amd64 uses Intel VA-API (libva-intel-driver / intel-media-driver +
+# mesa-va-gallium); aarch64 uses the generic Mesa/V4L2 GStreamer stack
+# (no Intel-only VA driver exists for aarch64).
+profiles:
+- name: vigil-addon-hw-amd64
+  base: ghcr.io/home-assistant/base:3.22
+  arch: amd64
+  artifact: addon
+  hardware_enabled: true
+  decode_backend: gstreamer
+  detector_backend: burn-cpu
+  packages:
+    - gstreamer
+    - gst-plugins-base
+    - gst-plugins-good
+    - gst-plugins-bad
+    - gst-vaapi
+    - libva
+    - libva-intel-driver
+    - intel-media-driver
+    - mesa-va-gallium
+- name: vigil-addon-hw-aarch64
+  base: ghcr.io/home-assistant/base:3.22
+  arch: aarch64
+  artifact: addon
+  hardware_enabled: true
+  decode_backend: gstreamer
+  detector_backend: burn-cpu
+  packages:
+    - gstreamer
+    - gst-plugins-base
+    - gst-plugins-good
+    - gst-plugins-bad
+    - libva
+    - mesa-va-gallium
+    - mesa-dri-gallium
+- name: vigil-generic-docker-hw-amd64
+  base: alpine:3.22
+  arch: amd64
+  artifact: generic-docker
+  hardware_enabled: true
+  decode_backend: gstreamer
+  detector_backend: burn-cpu
+  packages:
+    - gstreamer
+    - gst-plugins-base
+    - gst-plugins-good
+    - gst-plugins-bad
+    - gst-vaapi
+    - libva
+    - libva-intel-driver
+    - intel-media-driver
+    - mesa-va-gallium
+- name: vigil-generic-docker-hw-arm64
+  base: alpine:3.22
+  arch: aarch64
+  artifact: generic-docker
+  hardware_enabled: true
+  decode_backend: gstreamer
+  detector_backend: burn-cpu
+  packages:
+    - gstreamer
+    - gst-plugins-base
+    - gst-plugins-good
+    - gst-plugins-bad
+    - libva
+    - mesa-va-gallium
+    - mesa-dri-gallium
+- name: vigil-static-musl
+  base: scratch
+  arch: amd64
+  artifact: static-musl
+  hardware_enabled: false
+  decode_backend: software
+  detector_backend: burn-cpu
+  packages: []

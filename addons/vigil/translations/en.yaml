@@ -1,0 +1,5 @@
+configuration:
+  hardware_decoding:
+    description: "Use the mapped graphics device for hardware video decode. Defaults on; falls back to software decode automatically if no device is mapped or reachable."
+  accelerated_detection:
+    description: "Defaults on, but in this artifact it cannot accelerate detection yet: detection runs on CPU regardless of this switch. CPU detection is the supported path today; a future hardware image will change what this switch does."

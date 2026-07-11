@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use burn::tensor::{Device, Tensor, TensorData, backend::Backend};
-use burn_flex::Flex;
 use burn_store::{ModuleSnapshot, PytorchStore};
 use sha2::{Digest, Sha256};
 use yolox_burn::model::{BoundingBox, boxes::nms, yolox::Yolox};
@@ -14,12 +13,37 @@ use yolox_burn::model::{BoundingBox, boxes::nms, yolox::Yolox};
 use crate::media_pipeline;
 use crate::media_pipeline::DecodedVideoSegment;
 
+/// The compute backends available below the `Detector` trait. `YoloxDetector`
+/// is generic over `Backend` so BOTH can be constructed in the same binary
+/// under the accel feature: detector construction picks the concrete backend
+/// at RUNTIME from the same selection that produced the acceleration receipt
+/// (see `runtime::start_rtsp_probe`), so the receipt and the constructed
+/// detector always agree — never a probe that claims hardware while the live
+/// detector independently runs CPU. `CpuBackend` is unconditional (the
+/// fallback every build can reach); `AccelBackend` exists only when the
+/// dev-box-only `detect-burn-wgpu` feature is compiled in.
+pub(crate) type CpuBackend = burn_flex::Flex;
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) type AccelBackend = burn_wgpu::Wgpu<f32, i32, u32>;
+/// The feature's preferred backend, for the standalone `vigil detector-probe`
+/// diagnostic CLI only (outside the acceleration-selection seam).
+#[cfg(not(feature = "detect-burn-wgpu"))]
+type DetectorBackend = CpuBackend;
+#[cfg(feature = "detect-burn-wgpu")]
+type DetectorBackend = AccelBackend;
+
 const HEIGHT: usize = 640;
 const WIDTH: usize = 640;
 /// The detector model's input tensor shape, for acceleration receipts.
 pub(crate) const MODEL_INPUT_SHAPE: &str = "1x3x640x640";
 const PERSON_CLASS_INDEX: usize = 0;
-const BACKEND_ID: &str = "burn-yolox-tiny-cpu";
+const CPU_BACKEND_ID: &str = "burn-yolox-tiny-cpu";
+#[cfg(feature = "detect-burn-wgpu")]
+const ACCEL_BACKEND_ID: &str = "burn-yolox-tiny-wgpu";
+#[cfg(not(feature = "detect-burn-wgpu"))]
+const BACKEND_ID: &str = CPU_BACKEND_ID;
+#[cfg(feature = "detect-burn-wgpu")]
+const BACKEND_ID: &str = ACCEL_BACKEND_ID;
 const DETECTOR_FORWARD_PROBE_ENV: &str = "VIGIL_DETECTOR_FORWARD_PROBE_PATH";
 const DETECTOR_FORWARD_PROBE_NONCE_ENV: &str = "VIGIL_DETECTOR_FORWARD_PROBE_NONCE";
 
@@ -44,9 +68,9 @@ pub(crate) struct DetectorForwardProbe {
     nonce: Option<String>,
 }
 
-pub(crate) struct YoloxDetector {
-    model: Yolox<Flex>,
-    device: Device<Flex>,
+pub(crate) struct YoloxDetector<B: Backend> {
+    model: Yolox<B>,
+    device: Device<B>,
     pub(crate) model_sha256: String,
     pub(crate) session_id: String,
     observer: Option<DetectorForwardProbe>,
@@ -54,6 +78,10 @@ pub(crate) struct YoloxDetector {
     /// baseline NVR behavior first-light depends on); recognition widens it to
     /// the covered classes so a dog/vehicle sighting reaches the match path.
     allowed_class_indices: Vec<usize>,
+    /// The backend identity this instance was actually constructed with —
+    /// carried into the forward-event record so it can never drift from the
+    /// concrete backend that ran.
+    backend_id: &'static str,
 }
 
 pub(crate) struct DetectorOutput {
@@ -97,7 +125,7 @@ impl DetectorOutput {
 
 pub(crate) fn run_detector_probe(args: Vec<OsString>) -> Result<(), String> {
     let probe = parse_detector_probe_args(args)?;
-    let detector = load_detector(Some(&probe.model))?;
+    let detector: YoloxDetector<DetectorBackend> = load_detector(Some(&probe.model), BACKEND_ID)?;
     let output = detect_frame(
         &detector,
         &probe.clip,
@@ -128,18 +156,54 @@ pub(crate) fn run_detector_probe(args: Vec<OsString>) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn load_detector(model: Option<&Path>) -> Result<YoloxDetector, String> {
-    load_detector_with_classes(model, &[PERSON_CLASS_INDEX])
+/// Always the plain CPU backend, regardless of the accel feature — the
+/// fallback path `runtime::start_rtsp_probe` constructs whenever the
+/// detection-acceleration selection did not report `Active`.
+pub(crate) fn load_cpu_detector(model: Option<&Path>) -> Result<YoloxDetector<CpuBackend>, String> {
+    load_detector(model, CPU_BACKEND_ID)
 }
 
-pub(crate) fn load_detector_with_classes(
+pub(crate) fn load_cpu_detector_with_classes(
     model: Option<&Path>,
     allowed_class_indices: &[usize],
-) -> Result<YoloxDetector, String> {
+) -> Result<YoloxDetector<CpuBackend>, String> {
+    load_detector_with_classes(model, allowed_class_indices, CPU_BACKEND_ID)
+}
+
+/// Constructed only when the detection-acceleration selection reported
+/// `Active` on the accel backend — the receipt and the live detector are
+/// derived from the SAME selection, never independently.
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) fn load_accelerated_detector(
+    model: Option<&Path>,
+) -> Result<YoloxDetector<AccelBackend>, String> {
+    load_detector(model, ACCEL_BACKEND_ID)
+}
+
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) fn load_accelerated_detector_with_classes(
+    model: Option<&Path>,
+    allowed_class_indices: &[usize],
+) -> Result<YoloxDetector<AccelBackend>, String> {
+    load_detector_with_classes(model, allowed_class_indices, ACCEL_BACKEND_ID)
+}
+
+pub(crate) fn load_detector<B: Backend>(
+    model: Option<&Path>,
+    backend_id: &'static str,
+) -> Result<YoloxDetector<B>, String> {
+    load_detector_with_classes(model, &[PERSON_CLASS_INDEX], backend_id)
+}
+
+pub(crate) fn load_detector_with_classes<B: Backend>(
+    model: Option<&Path>,
+    allowed_class_indices: &[usize],
+    backend_id: &'static str,
+) -> Result<YoloxDetector<B>, String> {
     let model = model.ok_or_else(|| "detector model path is not configured".to_string())?;
     let model_sha256 = load_record(model)?;
-    let device = Default::default();
-    let model = load_yolox_tiny_from_checkpoint(model, &device)?;
+    let device: Device<B> = Default::default();
+    let model = load_yolox_tiny_from_checkpoint::<B>(model, &device)?;
     let allowed = if allowed_class_indices.is_empty() {
         vec![PERSON_CLASS_INDEX]
     } else {
@@ -152,11 +216,12 @@ pub(crate) fn load_detector_with_classes(
         session_id: format!("detector-session-{}", event_seq()),
         observer: DetectorForwardProbe::from_env(),
         allowed_class_indices: allowed,
+        backend_id,
     })
 }
 
-pub(crate) fn detect_frame(
-    detector: &YoloxDetector,
+pub(crate) fn detect_frame<B: Backend>(
+    detector: &YoloxDetector<B>,
     clip: &Path,
     sample_frames: usize,
     confidence_threshold: f64,
@@ -172,8 +237,8 @@ pub(crate) fn detect_frame(
     )
 }
 
-pub(crate) fn detect_segment(
-    detector: &YoloxDetector,
+pub(crate) fn detect_segment<B: Backend>(
+    detector: &YoloxDetector<B>,
     segment: &DecodedVideoSegment,
     clip_sha256: String,
     sample_frames: usize,
@@ -188,8 +253,8 @@ pub(crate) fn detect_segment(
     )
 }
 
-fn detect_decoded_segment(
-    detector: &YoloxDetector,
+fn detect_decoded_segment<B: Backend>(
+    detector: &YoloxDetector<B>,
     segment: &DecodedVideoSegment,
     clip_sha256: String,
     sample_frames: usize,
@@ -198,9 +263,9 @@ fn detect_decoded_segment(
     let confidence_threshold = validate_confidence_threshold(confidence_threshold)?;
     let sample_frame_indices =
         media_pipeline::sampled_frame_indices(segment.frames.len(), sample_frames.max(1));
-    let tensor: Tensor<Flex, 4> =
-        decode_frames_to_tensor::<Flex>(segment, sample_frames.max(1), &detector.device)?;
-    let model_output: Tensor<Flex, 3> = detector.model.forward(tensor);
+    let tensor: Tensor<B, 4> =
+        decode_frames_to_tensor::<B>(segment, sample_frames.max(1), &detector.device)?;
+    let model_output: Tensor<B, 3> = detector.model.forward(tensor);
     let model_forward_sha256 = tensor_digest(model_output.clone());
     let detector_nms_sha256 = tensor_digest(model_output.clone());
     let detections = run_nms(
@@ -216,7 +281,7 @@ fn detect_decoded_segment(
             .observer
             .as_ref()
             .and_then(|observer| observer.nonce.clone()),
-        detector_backend: BACKEND_ID.to_string(),
+        detector_backend: detector.backend_id.to_string(),
         detector_session_id: detector.session_id.clone(),
         model_sha256: detector.model_sha256.clone(),
         clip_sha256,
@@ -333,10 +398,10 @@ fn load_record(model: &Path) -> Result<String, String> {
     Ok(sha256_hex(&bytes))
 }
 
-fn load_yolox_tiny_from_checkpoint(
+fn load_yolox_tiny_from_checkpoint<B: Backend>(
     model_path: &Path,
-    device: &Device<Flex>,
-) -> Result<Yolox<Flex>, String> {
+    device: &Device<B>,
+) -> Result<Yolox<B>, String> {
     let mut model = Yolox::yolox_tiny(80, device);
     let mut store = PytorchStore::from_file(model_path)
         .with_top_level_key("model")
@@ -383,8 +448,8 @@ struct BackendDetection {
     bbox: BoundingBox,
 }
 
-fn run_nms(
-    model_output: Tensor<Flex, 3>,
+fn run_nms<B: Backend>(
+    model_output: Tensor<B, 3>,
     confidence_threshold: f32,
     allowed_class_indices: &[usize],
 ) -> Vec<BackendDetection> {
@@ -436,7 +501,7 @@ fn validate_confidence_threshold(value: f64) -> Result<f64, String> {
     }
 }
 
-fn tensor_digest(tensor: Tensor<Flex, 3>) -> String {
+fn tensor_digest<B: Backend>(tensor: Tensor<B, 3>) -> String {
     let mut bytes = Vec::new();
     for value in tensor.into_data().iter::<f32>() {
         bytes.extend_from_slice(&value.to_le_bytes());
@@ -603,4 +668,73 @@ fn event_seq() -> u64 {
                 .saturating_add(u64::from(duration.subsec_nanos()))
         })
         .unwrap_or_default()
+}
+
+/// The real Vulkan adapter a passing forward probe selected: name only, the
+/// same identity the receipt carries as `selected_device`.
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) struct WgpuAdapterProbe {
+    pub(crate) name: String,
+}
+
+/// Enumerates Vulkan adapters directly — never `force_fallback_adapter` —
+/// and returns the first one that is not a `DeviceType::Cpu` software
+/// rasterizer (llvmpipe/lavapipe). A software Vulkan adapter is treated as
+/// no usable device, never as hardware; enumeration happens after the
+/// supplemental-group privilege drop (the probe runs at detector
+/// construction, which is already past that point in the startup order).
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) fn find_hardware_adapter() -> Option<WgpuAdapterProbe> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::VULKAN));
+    adapters
+        .into_iter()
+        .find(|adapter| !matches!(adapter.get_info().device_type, wgpu::DeviceType::Cpu))
+        .map(|adapter| WgpuAdapterProbe {
+            name: adapter.get_info().name,
+        })
+}
+
+/// A tiny local, synthetic (one blank frame) probe clip: the startup forward
+/// probe needs a real file to decode and nothing is fetched or bundled to
+/// get one, so one is synthesized on the spot. Deleted on drop.
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) struct ProbeClip {
+    path: PathBuf,
+}
+
+#[cfg(feature = "detect-burn-wgpu")]
+impl ProbeClip {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(feature = "detect-burn-wgpu")]
+impl Drop for ProbeClip {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) fn synthetic_probe_clip() -> Result<ProbeClip, String> {
+    let frame = media_pipeline::DecodedRgbFrame {
+        index: 0,
+        width: WIDTH as u32,
+        height: HEIGHT as u32,
+        rgb: vec![0u8; WIDTH * HEIGHT * 3],
+    };
+    let segment = DecodedVideoSegment {
+        frames: vec![frame],
+        encoded_units: Vec::new(),
+        fps: 1.0,
+        observed_at: None,
+    };
+    let path = env::temp_dir().join(format!("vigil-detector-probe-{}.mp4", event_seq()));
+    media_pipeline::write_browser_playable_mp4_clip(&segment, &path)?;
+    Ok(ProbeClip { path })
 }

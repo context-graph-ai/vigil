@@ -182,33 +182,48 @@ fn handle_client(
     let acceleration_field = acceleration
         .map(|state| {
             let degradations = state.health_degradations();
-            let degraded = |stage: crate::acceleration::AccelStage| {
-                degradations
+            let receipts = state.snapshot();
+            // "ok" is an achieved state, never a default: a stage with no
+            // recorded receipt yet (no stream configured, nothing decoded)
+            // reports "pending", so this surface cannot claim working
+            // acceleration before a real receipt exists.
+            let stage_value = |stage: crate::acceleration::AccelStage| {
+                let degraded = degradations
                     .iter()
-                    .any(|degradation| degradation.stage == stage)
+                    .any(|degradation| degradation.stage == stage);
+                let has_receipt = receipts.iter().any(|receipt| receipt.stage == stage);
+                if degraded {
+                    "degraded"
+                } else if has_receipt {
+                    "ok"
+                } else {
+                    "pending"
+                }
             };
             format!(
                 r#","acceleration":{{"decode":"{}","detection":"{}"}}"#,
-                if degraded(crate::acceleration::AccelStage::Decode) {
-                    "degraded"
-                } else {
-                    "ok"
-                },
-                if degraded(crate::acceleration::AccelStage::Detection) {
-                    "degraded"
-                } else {
-                    "ok"
-                }
+                stage_value(crate::acceleration::AccelStage::Decode),
+                stage_value(crate::acceleration::AccelStage::Detection)
             )
         })
         .unwrap_or_default();
-    let body = format!(
+    let mut body = format!(
         r#"{{"status":"{}","version":"{}","detail":"{}"{}}}"#,
         status.label(),
         env!("CARGO_PKG_VERSION"),
         json_escape(&detail),
         acceleration_field
     );
+    // A Home Assistant user reading /health gets the same honest,
+    // fixed-format acceleration block doctor renders — not just the
+    // degraded/ok JSON summary above — so the plain hardware-or-CPU verdict
+    // is visible on this surface too, not only the CLI.
+    if let Some(acceleration) = acceleration {
+        for receipt in acceleration.snapshot() {
+            body.push('\n');
+            body.push_str(&crate::acceleration::render_receipt_block(&receipt));
+        }
+    }
     write_response(&mut stream, status.http_code(), &body);
 }
 

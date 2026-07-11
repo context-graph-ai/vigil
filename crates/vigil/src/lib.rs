@@ -1,3 +1,8 @@
+// The dev-box-only `detect-burn-wgpu` feature pulls in Burn's cubecl/wgpu
+// backend, whose deeply generic tensor/kernel types need more headroom than
+// the default recursive-type-checking limit.
+#![cfg_attr(feature = "detect-burn-wgpu", recursion_limit = "256")]
+
 pub mod acceleration;
 mod config;
 mod control_socket;
@@ -5,6 +10,7 @@ pub mod correction;
 pub mod decode;
 #[cfg(feature = "decode-gstreamer")]
 pub mod decode_gstreamer;
+pub mod detection_accel;
 mod detector;
 pub mod doctor;
 pub mod ha_discovery;

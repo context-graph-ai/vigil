@@ -28,6 +28,12 @@ cg-vision-embedder = { path = "../context-graph/crates/cg-vision-embedder" }
 burn = { version = "0.21.0", default-features = false }
 burn-flex = { version = "0.21.0" }
 burn-store = { version = "0.21.0", default-features = false, features = ["std", "pytorch"] }
+# Accelerated detection backend (feature-gated; native artifacts only — the
+# default static-musl build never compiles these). `vulkan` pulls in the
+# SPIR-V compute-kernel compiler cubecl needs to actually run on Vulkan.
+burn-wgpu = { version = "0.21.0", features = ["vulkan"] }
+wgpu = "29"
+pollster = "0.4"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures-util = "0.3"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

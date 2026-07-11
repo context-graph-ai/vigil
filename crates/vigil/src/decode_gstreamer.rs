@@ -13,6 +13,7 @@
 //! `unsupported_by_this_artifact` instead.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -47,6 +48,33 @@ impl FallbackFinding {
             action_payload: None,
         }
     }
+}
+
+/// How the bounded probe drain (`GstreamerDecodeBackend::drain_probe`)
+/// finished: a genuine decoder failure (end-of-stream with nothing
+/// produced) is a DISTINCT outcome from a probe window that simply wasn't
+/// long enough for a slow cold start — a timeout must never be reported the
+/// same way as "hardware decode unavailable".
+enum ProbeDrainOutcome {
+    Decoded,
+    EndOfStreamNoFrames,
+    TimedOut,
+}
+
+/// The effective probe-drain deadline. The default is long enough for a
+/// cold hardware decoder's first-frame latency (VA-API/NVDEC init inside a
+/// container, in particular — the documented failure this bound exists to
+/// fix) without hanging startup indefinitely; a box whose decoder needs
+/// even longer can raise it via `VIGIL_DECODE_PROBE_DEADLINE_SECS`. An
+/// unparseable or non-positive value falls back to the default.
+fn decode_probe_deadline() -> Duration {
+    const DEFAULT: Duration = Duration::from_secs(5);
+    std::env::var("VIGIL_DECODE_PROBE_DEADLINE_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
+        .map(Duration::from_secs_f64)
+        .unwrap_or(DEFAULT)
 }
 
 /// Decoder factories that are known CPU/software implementations. Anything
@@ -112,52 +140,99 @@ impl GstreamerDecodeBackend {
             );
             return Err(Box::new(finding));
         }
-        let mut backend = match Self::build_pipeline(stream_id, codec, stream_epoch) {
+        // The probe pipeline is disposable: it exists only to push the
+        // finite probe sample, flush it with EOS, and let the classifier
+        // read whichever decoder decodebin3 auto-plugged. It is torn down
+        // below either way; live capture always gets a FRESH pipeline built
+        // right before use, never this consumed one.
+        let mut probe_backend = match Self::build_pipeline(stream_id.clone(), codec, stream_epoch) {
             Ok(backend) => backend,
             Err(finding) => return Err(Box::new(finding)),
         };
 
-        // Real startup decode probe on the actual stream codec path.
-        let mut frames_decoded = 0u64;
+        // Push the whole finite probe sample directly — bypassing
+        // `decode()`'s per-unit live-capture drain, which exists for the
+        // low-latency capture loop, not a bounded startup probe — then end
+        // the stream so a cold-start hardware decoder still flushes its
+        // pending output instead of racing a short first-frame window.
         for unit in probe_sample {
-            match backend.decode(unit) {
-                Ok(frames) => frames_decoded += frames.len() as u64,
-                Err(error) => {
-                    backend.teardown();
-                    let mut finding =
-                        FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::BackendProbe);
-                    finding
-                        .evidence_fields
-                        .insert("error".to_string(), format!("{error:?}"));
-                    return Err(Box::new(finding));
-                }
+            if let Err(error) = probe_backend.check_unit(unit) {
+                probe_backend.teardown();
+                let mut finding =
+                    FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::BackendProbe);
+                finding
+                    .evidence_fields
+                    .insert("error".to_string(), format!("{error:?}"));
+                return Err(Box::new(finding));
+            }
+            let buffer = gst::Buffer::from_slice(unit.data.clone());
+            if let Err(error) = probe_backend.appsrc.push_buffer(buffer) {
+                probe_backend.teardown();
+                let mut finding =
+                    FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::BackendProbe);
+                finding
+                    .evidence_fields
+                    .insert("error".to_string(), format!("appsrc push: {error}"));
+                return Err(Box::new(finding));
             }
         }
-        frames_decoded += backend
-            .drain_available()
-            .map(|frames| frames.len() as u64)
-            .unwrap_or(0);
-        if frames_decoded == 0 {
-            backend.teardown();
-            let mut finding =
-                FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::BackendProbe);
-            finding.evidence_fields.insert(
-                "error".to_string(),
-                "decode probe produced no frames".to_string(),
-            );
-            return Err(Box::new(finding));
-        }
+        let _ = probe_backend.appsrc.end_of_stream();
 
-        // Classify the decoder decodebin3 actually selected.
-        let classification = classify_selected_decoder(&backend.pipeline);
-        backend.classification = classification.clone();
+        let deadline = decode_probe_deadline();
+        let (frames_decoded, outcome) = match probe_backend.drain_probe(deadline) {
+            Ok(result) => result,
+            Err(error) => {
+                probe_backend.teardown();
+                let mut finding =
+                    FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::BackendProbe);
+                finding
+                    .evidence_fields
+                    .insert("error".to_string(), format!("{error:?}"));
+                return Err(Box::new(finding));
+            }
+        };
+        match outcome {
+            ProbeDrainOutcome::TimedOut => {
+                probe_backend.teardown();
+                let mut finding =
+                    FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::BackendProbe);
+                finding.evidence_fields.insert(
+                    "error".to_string(),
+                    format!(
+                        "no decoded frame within {:.1}s probe window; a slow decoder cold \
+                         start can exceed it - raise VIGIL_DECODE_PROBE_DEADLINE_SECS and \
+                         restart to retry",
+                        deadline.as_secs_f64()
+                    ),
+                );
+                return Err(Box::new(finding));
+            }
+            ProbeDrainOutcome::EndOfStreamNoFrames => {
+                probe_backend.teardown();
+                let mut finding =
+                    FallbackFinding::new(FailureCode::ProbeFailed, EvidenceKind::BackendProbe);
+                finding.evidence_fields.insert(
+                    "error".to_string(),
+                    "decoder reached end of stream without producing a frame".to_string(),
+                );
+                return Err(Box::new(finding));
+            }
+            ProbeDrainOutcome::Decoded => {}
+        }
+        debug_assert!(frames_decoded > 0);
+
+        // Classify the decoder decodebin3 actually selected — read from the
+        // PROBE pipeline before it is torn down.
+        let classification = classify_selected_decoder(&probe_backend.pipeline);
+        probe_backend.teardown();
+
         match &classification {
             BackendClassification::Hardware { element, device } => {
                 let receipt = crate::acceleration::AccelerationReceipt {
                     stage: crate::acceleration::AccelStage::Decode,
                     work_id: None,
                     parent_work_id: None,
-                    stream_id: Some(backend.stream_id.clone()),
+                    stream_id: Some(stream_id.clone()),
                     media_item: None,
                     configured: true,
                     attempted_backend: "gstreamer".to_string(),
@@ -187,18 +262,32 @@ impl GstreamerDecodeBackend {
                             "probe_units_consumed".to_string(),
                             probe_sample.len().to_string(),
                         ),
+                        (
+                            "probe_frames_decoded".to_string(),
+                            frames_decoded.to_string(),
+                        ),
                     ]),
                     action_kind: ActionKind::NoAction,
                     action_payload: None,
                 };
+                // Live capture gets a FRESH pipeline, never the probe's
+                // consumed one (its appsrc already reached end-of-stream and
+                // cannot accept more buffers): the receipt's classification
+                // and the fresh backend's classification are the SAME
+                // observed fact, just applied to two different pipeline
+                // instances of the identical decoder selection.
+                let mut live_backend = match Self::build_pipeline(stream_id, codec, stream_epoch) {
+                    Ok(backend) => backend,
+                    Err(finding) => return Err(Box::new(finding)),
+                };
+                live_backend.classification = classification.clone();
                 Ok(DecoderSelection {
-                    backend: Box::new(backend),
+                    backend: Box::new(live_backend),
                     receipt,
                 })
             }
             BackendClassification::Software { element } => {
                 let element = element.clone();
-                backend.teardown();
                 let mut finding = FallbackFinding::new(
                     FailureCode::MissingRuntimeDependency,
                     EvidenceKind::SelectedBackend,
@@ -214,7 +303,6 @@ impl GstreamerDecodeBackend {
             }
             BackendClassification::Unclassified { element } => {
                 let element = element.clone();
-                backend.teardown();
                 let mut finding = FallbackFinding::new(
                     FailureCode::UnclassifiedSelectedDecoder,
                     EvidenceKind::SelectedBackend,
@@ -228,6 +316,41 @@ impl GstreamerDecodeBackend {
                         .to_string(),
                 );
                 Err(Box::new(finding))
+            }
+        }
+    }
+
+    /// Drain the disposable probe pipeline under a bounded wall-clock
+    /// deadline (never the live capture loop's 10ms budget — see
+    /// `drain_available`). Loops `try_pull_sample` with a short per-pull
+    /// budget, accumulating every frame the finite probe produces, until:
+    /// at least one frame has arrived and the sink has nothing more ready
+    /// right now (`Decoded`); the sink reaches end-of-stream with zero
+    /// frames, a genuine decode failure (`EndOfStreamNoFrames`); or the
+    /// deadline elapses with zero frames, a cold-start-too-slow timeout
+    /// that must never be reported as hardware-unavailable (`TimedOut`).
+    fn drain_probe(
+        &mut self,
+        deadline: Duration,
+    ) -> Result<(u64, ProbeDrainOutcome), DecodeBackendError> {
+        let started = Instant::now();
+        let per_pull_budget = gst::ClockTime::from_mseconds(100);
+        let mut frames_decoded = 0u64;
+        loop {
+            if let Some(sample) = self.appsink.try_pull_sample(per_pull_budget) {
+                self.sample_to_rgb(&sample)?;
+                frames_decoded += 1;
+                continue;
+            }
+            // Nothing ready right now: the sink is momentarily drained.
+            if frames_decoded > 0 {
+                return Ok((frames_decoded, ProbeDrainOutcome::Decoded));
+            }
+            if self.appsink.is_eos() {
+                return Ok((frames_decoded, ProbeDrainOutcome::EndOfStreamNoFrames));
+            }
+            if started.elapsed() >= deadline {
+                return Ok((frames_decoded, ProbeDrainOutcome::TimedOut));
             }
         }
     }

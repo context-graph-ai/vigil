@@ -46,6 +46,17 @@ pub(crate) struct RuntimeStats {
     pub(crate) decode_acceleration: String,
     #[serde(default)]
     pub(crate) detection_acceleration: String,
+    /// The fixed-format `[detect.acceleration]` receipt block (same render
+    /// doctor uses), so `vigil stats` and `/health` carry the full honest
+    /// receipt, not just the summary line above.
+    #[serde(default)]
+    pub(crate) detection_receipt_block: String,
+    /// The fixed-format `[decode.hardware]` receipt block per stream (same
+    /// render doctor uses) — decode receipts are per-stream, so each stream's
+    /// latest block is kept, keeping `vigil stats` at receipt parity with
+    /// `/health` and the doctor.
+    #[serde(default)]
+    pub(crate) decode_receipt_blocks: std::collections::BTreeMap<String, String>,
     /// Detector stage queue: depth/capacity/queued/replaced counters.
     #[serde(default)]
     pub(crate) detector_queue: String,
@@ -98,6 +109,8 @@ impl Default for RuntimeStats {
             active_detector_backend: String::new(),
             decode_acceleration: String::new(),
             detection_acceleration: String::new(),
+            detection_receipt_block: String::new(),
+            decode_receipt_blocks: std::collections::BTreeMap::new(),
             detector_queue: String::new(),
             recent_work_receipts: Vec::new(),
         }
@@ -235,6 +248,12 @@ telemetry-sink=local\n",
             "detection-acceleration={}\n",
             stats.detection_acceleration
         ));
+    }
+    for block in stats.decode_receipt_blocks.values() {
+        out.push_str(block);
+    }
+    if !stats.detection_receipt_block.is_empty() {
+        out.push_str(&stats.detection_receipt_block);
     }
     if !stats.detector_queue.is_empty() {
         out.push_str(&format!("detector-queue={}\n", stats.detector_queue));

@@ -50,6 +50,9 @@ yolox-burn.workspace = true
 gstreamer = { workspace = true, optional = true }
 gstreamer-app = { workspace = true, optional = true }
 gstreamer-video = { workspace = true, optional = true }
+burn-wgpu = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -57,6 +60,11 @@ default = []
 # into native (dynamically linked) artifacts; the static-musl artifact stays
 # software-only and reports unsupported_by_this_artifact honestly.
 decode-gstreamer = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+# Experimental accelerated object detection backend: a Burn wgpu/Vulkan
+# backend below the `Detector` trait, native artifacts only. The CPU-only
+# artifact (every shipped shape) keeps this feature disabled and stays on
+# burn-cpu.
+detect-burn-wgpu = ["dep:burn-wgpu", "dep:wgpu", "dep:pollster"]
 # Slow deterministic camera/detector first-light acceptance. Keep this out of
 # the default workspace gate; run with `cargo test-first-light`.
 first-light-acceptance = []

@@ -81,11 +81,31 @@ pub(crate) fn user_can_access_device(
     if device_facts.owner == user && rw_at(1) {
         return true; // owner-rw
     }
-    rw_at(4)
-        && facts
-            .user_groups(user)
-            .map(|groups| groups.iter().any(|group| group == &device_facts.group))
-            .unwrap_or(false)
+    if !rw_at(4) {
+        return false;
+    }
+    if facts
+        .user_groups(user)
+        .map(|groups| groups.iter().any(|group| group == &device_facts.group))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // The runtime grants supplemental groups at the privilege drop from
+    // VIGIL_RUN_SUPPLEMENTAL_GIDS — the standard containerized shape, where
+    // the service user has no group-file membership at all. The doctor must
+    // count what the runtime actually applies, or it tells the operator to
+    // "fix" an access path that is already effective. Numeric comparison
+    // only: a container's device group commonly has no resolvable name.
+    facts
+        .env_var("VIGIL_RUN_SUPPLEMENTAL_GIDS")
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|gid| !gid.is_empty())
+                .any(|gid| gid == device_facts.group)
+        })
+        .unwrap_or(false)
 }
 
 /// Resolve the configured service user in the fixed order:
@@ -233,8 +253,10 @@ pub struct DoctorRequest {
 /// Build the acceleration report from host facts + real probes. Pure with
 /// respect to `facts`; performs no host mutation ever.
 pub fn acceleration_report(request: &DoctorRequest, facts: &dyn HostFacts) -> DoctorReport {
+    #[cfg(not(feature = "decode-gstreamer"))]
+    use crate::acceleration::EvidenceKind;
     use crate::acceleration::{
-        AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
+        AccelStage, AccelerationReceipt, ActionKind, FailureCode, ProbeStatus,
     };
 
     let blank = |stage: AccelStage, configured: bool| AccelerationReceipt {
@@ -292,26 +314,19 @@ pub fn acceleration_report(request: &DoctorRequest, facts: &dyn HostFacts) -> Do
     };
 
     // ── detection ──
-    let detection = if !request.accelerated_detection {
-        blank(AccelStage::Detection, false)
-    } else {
-        // No accelerated Burn backend is compiled into this artifact today;
-        // when one exists this branch probes it with a real model forward.
-        let mut receipt = blank(AccelStage::Detection, true);
-        receipt.input_shape = Some(crate::yolox_detector::MODEL_INPUT_SHAPE.to_string());
-        receipt.probe_status = ProbeStatus::Fallback;
-        receipt.failure_code = FailureCode::BackendNotCompiled;
-        receipt.evidence_kind = Some(EvidenceKind::SelectedBackend);
-        receipt
-            .evidence_fields
-            .insert("compiled_backends".to_string(), "burn-cpu".to_string());
-        receipt.action_kind = ActionKind::InstallSupportedArtifact;
-        receipt.action_payload = Some(
-            "install a build with an accelerated detector backend, or keep CPU fallback"
-                .to_string(),
-        );
-        receipt
-    };
+    // The doctor probe reads the same operator-configured model path the
+    // live runtime does, so an on-demand `vigil doctor acceleration` run
+    // exercises the real forward probe under the accel feature.
+    crate::detection_accel::register_detector_model_path(request.detector_model_path.clone());
+    let mut detection = crate::detection_accel::select_detection_acceleration(
+        request.accelerated_detection,
+        "",
+        crate::yolox_detector::MODEL_INPUT_SHAPE,
+    )
+    .receipt;
+    // The model identity is stamped by the caller from the resolved runtime
+    // config (see `run` below), never guessed here.
+    detection.model_id = None;
 
     // ── sudo-mode extras ──
     let mut notes = BTreeMap::new();

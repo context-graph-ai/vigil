@@ -7,6 +7,8 @@
 //! pipeline rework. The vision embedder follows the same pattern through the
 //! memory library's embedder trait.
 
+use burn::tensor::backend::Backend;
+
 use crate::media_pipeline::DecodedVideoSegment;
 use crate::yolox_detector::DetectorOutput;
 
@@ -25,7 +27,11 @@ pub(crate) trait Detector: Send + Sync {
     ) -> Result<DetectorOutput, String>;
 }
 
-impl Detector for crate::yolox_detector::YoloxDetector {
+// Generic over every backend `YoloxDetector` can be constructed with: the
+// concrete backend is picked below the trait, at detector construction, from
+// the same acceleration selection that produced the receipt — this impl
+// itself names no engine.
+impl<B: Backend> Detector for crate::yolox_detector::YoloxDetector<B> {
     fn model_sha256(&self) -> &str {
         &self.model_sha256
     }

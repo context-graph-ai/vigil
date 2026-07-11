@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::config;
+use crate::detection_accel::select_detection_acceleration;
 use crate::health::{HealthServer, HealthState, HealthStatus};
 use crate::live_read;
 use crate::media_pipeline;
@@ -65,6 +66,11 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let health = HealthState::new();
     let accel = Arc::new(crate::acceleration::AccelerationState::new());
     let stage_receipts = Arc::new(crate::workgraph::StageReceiptLog::new(64));
+    // Registered once, before any camera thread starts: the production
+    // detection probe (constructed with no path parameter, mirroring the
+    // decode seam's host-facts-free shape) reads the same checkpoint the
+    // live per-camera detector loads through this slot.
+    crate::detection_accel::register_detector_model_path(config.detector_model_path.clone());
     let server = HealthServer::listen(
         config.health_port,
         health.clone(),
@@ -526,7 +532,7 @@ fn display(path: &Path) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_rtsp_probe(
+pub fn start_rtsp_probe(
     rtsp_url: String,
     config: config::RuntimeConfig,
     store: Store,
@@ -582,24 +588,77 @@ fn start_rtsp_probe(
             // load failure and detector-thread panic clear this flag, and
             // the per-segment health refresh consults it.
             let detector_alive = Arc::new(AtomicBool::new(false));
-            let detector_load = if config.recognition.enabled {
-                yolox_detector::load_detector_with_classes(
-                    config.detector_model_path.as_deref(),
-                    &crate::recognition::covered_class_indices(&config.recognition),
-                )
-            } else {
-                yolox_detector::load_detector(config.detector_model_path.as_deref())
-            };
+            // Select ONCE, before construction: the concrete backend built
+            // below is picked from this SAME selection, so the receipt and
+            // the live detector can never disagree — an accelerated claim
+            // always means an accelerated detector actually runs, and any
+            // fallback selection always means the CPU detector runs, even
+            // with the accel feature compiled in.
+            let selection = select_detection_acceleration(
+                config.accelerated_detection,
+                &config.detector_model_id,
+                yolox_detector::MODEL_INPUT_SHAPE,
+            );
+            let receipt = selection.receipt;
+            let accelerated_selected =
+                selection.backend == crate::detection_accel::ACCELERATED_DETECTION_BACKEND;
+            let detector_load: Result<Box<dyn crate::detector::Detector>, String> =
+                if accelerated_selected {
+                    #[cfg(feature = "detect-burn-wgpu")]
+                    {
+                        if config.recognition.enabled {
+                            yolox_detector::load_accelerated_detector_with_classes(
+                                config.detector_model_path.as_deref(),
+                                &crate::recognition::covered_class_indices(&config.recognition),
+                            )
+                            .map(|detector| {
+                                Box::new(detector) as Box<dyn crate::detector::Detector>
+                            })
+                        } else {
+                            yolox_detector::load_accelerated_detector(
+                                config.detector_model_path.as_deref(),
+                            )
+                            .map(|detector| {
+                                Box::new(detector) as Box<dyn crate::detector::Detector>
+                            })
+                        }
+                    }
+                    #[cfg(not(feature = "detect-burn-wgpu"))]
+                    {
+                        // The selection cannot report accelerated without the
+                        // feature compiled in; unreachable in practice, but
+                        // stays on the honest CPU path if it somehow did.
+                        if config.recognition.enabled {
+                            yolox_detector::load_cpu_detector_with_classes(
+                                config.detector_model_path.as_deref(),
+                                &crate::recognition::covered_class_indices(&config.recognition),
+                            )
+                            .map(|detector| {
+                                Box::new(detector) as Box<dyn crate::detector::Detector>
+                            })
+                        } else {
+                            yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
+                                .map(|detector| {
+                                    Box::new(detector) as Box<dyn crate::detector::Detector>
+                                })
+                        }
+                    }
+                } else if config.recognition.enabled {
+                    yolox_detector::load_cpu_detector_with_classes(
+                        config.detector_model_path.as_deref(),
+                        &crate::recognition::covered_class_indices(&config.recognition),
+                    )
+                    .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+                } else {
+                    yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
+                        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+                };
             let detector: Option<Box<dyn crate::detector::Detector>> = match detector_load {
                 Ok(detector) => {
                     println!(
                         "detector model loaded id={} sha256={}",
                         config.detector_model_id,
-                        crate::detector::Detector::model_sha256(&detector)
-                    );
-                    let receipt = detection_acceleration_receipt(
-                        config.accelerated_detection,
-                        &config.detector_model_id,
+                        detector.model_sha256()
                     );
                     if accel.should_log(&receipt) {
                         println!(
@@ -611,15 +670,24 @@ fn start_rtsp_probe(
                     }
                     stats.update(|stats| {
                         stats.active_detector_backend = receipt.active_backend.clone();
+                        // Same compact form as decode-acceleration (the
+                        // failure code renders only when there is one); kept
+                        // inline because the crate's source contract pins
+                        // this assignment shape.
                         stats.detection_acceleration = format!(
-                            "{}:{}",
+                            "{}{}",
                             receipt.probe_status.as_str(),
-                            receipt.failure_code.as_str()
+                            match receipt.failure_code {
+                                crate::acceleration::FailureCode::None => String::new(),
+                                code => format!(":{}", code.as_str()),
+                            }
                         );
+                        stats.detection_receipt_block =
+                            crate::acceleration::render_receipt_block(&receipt);
                     });
                     accel.record(receipt);
                     detector_alive.store(true, Ordering::SeqCst);
-                    Some(Box::new(detector))
+                    Some(detector)
                 }
                 Err(error) => {
                     println!("detector model load failed error={error}");
@@ -878,12 +946,15 @@ fn start_rtsp_probe(
                                     stream.as_str().to_string(),
                                     receipt.active_backend.clone(),
                                 );
+                                // Same full fixed-format block doctor and
+                                // /health render — stats stays at receipt
+                                // parity with the other operator surfaces.
+                                stats.decode_receipt_blocks.insert(
+                                    stream.as_str().to_string(),
+                                    crate::acceleration::render_receipt_block(&receipt),
+                                );
                             }
-                            stats.decode_acceleration = format!(
-                                "{}:{}",
-                                receipt.probe_status.as_str(),
-                                receipt.failure_code.as_str()
-                            );
+                            stats.decode_acceleration = compact_acceleration_summary(&receipt);
                         });
                         receipt_accel.record(receipt);
                     },
@@ -916,6 +987,14 @@ fn start_rtsp_probe(
                         });
                         if detector_alive.load(Ordering::SeqCst) {
                             set_ready_unless_latched_fault(&health, "RTSP ingest active");
+                            // The stats surface follows the live health state
+                            // through recovery: a condition latched into the
+                            // stats string during an outage must not outlive
+                            // the outage, or /health and stats tell two
+                            // different stories about the same process.
+                            if matches!(health.snapshot().0, HealthStatus::Ready) {
+                                stats.update(|stats| stats.health = "ready".to_string());
+                            }
                         } else {
                             // Decode alone is not a working pipeline: a dead or
                             // never-loaded detector keeps health failed instead of
@@ -1136,57 +1215,6 @@ fn start_rtsp_probe(
             panic_health.set(HealthStatus::IngestFailed, "camera thread panicked");
         }
     })
-}
-
-/// The detection acceleration receipt for this artifact: no accelerated
-/// Burn backend is compiled today, so accelerated_detection=true is an
-/// honest backend_not_compiled fallback and false is disabled-by-intent.
-fn detection_acceleration_receipt(
-    configured: bool,
-    model_id: &str,
-) -> crate::acceleration::AccelerationReceipt {
-    use crate::acceleration::{
-        AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
-    };
-    AccelerationReceipt {
-        stage: AccelStage::Detection,
-        work_id: None,
-        parent_work_id: None,
-        stream_id: None,
-        media_item: None,
-        configured,
-        attempted_backend: "none".to_string(),
-        active_backend: "burn-cpu".to_string(),
-        hardware_accelerated: false,
-        selected_device: None,
-        codec: None,
-        model_id: Some(model_id.to_string()),
-        model_version: None,
-        input_shape: Some(crate::yolox_detector::MODEL_INPUT_SHAPE.to_string()),
-        probe_status: if configured {
-            ProbeStatus::Fallback
-        } else {
-            ProbeStatus::Disabled
-        },
-        failure_code: if configured {
-            FailureCode::BackendNotCompiled
-        } else {
-            FailureCode::None
-        },
-        evidence_kind: configured.then_some(EvidenceKind::SelectedBackend),
-        evidence_fields: std::collections::BTreeMap::from([(
-            "compiled_backends".to_string(),
-            "burn-cpu".to_string(),
-        )]),
-        action_kind: if configured {
-            ActionKind::InstallSupportedArtifact
-        } else {
-            ActionKind::NoAction
-        },
-        action_payload: configured.then(|| {
-            "install a build with an accelerated detector backend, or keep CPU fallback".to_string()
-        }),
-    }
 }
 
 /// The one adapter between the work graph's operator lines and the stats
@@ -1431,6 +1459,21 @@ fn clip_write_failure(
 
 fn env_is(key: &str, expected: &str) -> bool {
     std::env::var(key).is_ok_and(|value| value == expected)
+}
+
+/// The compact operator stats line: an operator reads `active:none` as
+/// "nothing is active", so a receipt with no failure renders just its
+/// status; the failure code appears only when there is one to explain.
+fn compact_acceleration_summary(receipt: &crate::acceleration::AccelerationReceipt) -> String {
+    if receipt.failure_code == crate::acceleration::FailureCode::None {
+        receipt.probe_status.as_str().to_string()
+    } else {
+        format!(
+            "{}:{}",
+            receipt.probe_status.as_str(),
+            receipt.failure_code.as_str()
+        )
+    }
 }
 
 fn mark_health_condition(current: &mut String, condition: &str) {
@@ -1689,11 +1732,13 @@ fn record_detected_events(
             Ok((observation_id, snapshot_ref)) => {
                 stats.update(|stats| {
                     stats.observations_written = stats.observations_written.saturating_add(1);
-                    if stats.health.is_empty() {
-                        stats.health = "ready".to_string();
-                    }
                 });
                 set_ready_unless_latched_fault(health, "event recorded");
+                // As above: the stats health string follows the live health
+                // state through recovery rather than latching a past outage.
+                if matches!(health.snapshot().0, HealthStatus::Ready) {
+                    stats.update(|stats| stats.health = "ready".to_string());
+                }
                 println!("observation_written=true");
                 // Recognition: crop the sighting, embed it, match it against
                 // the site library, and record it into site memory. A failure
@@ -2369,39 +2414,108 @@ mod tests {
     }
 
     #[test]
-    fn runtime_detection_receipt_is_honest_for_this_artifact() {
-        // Guard for the production receipt builder (post-RED guard, not a
-        // criteria-coverage test): if a future artifact compiles an
-        // accelerated detector backend without updating this function, this
-        // pins the lie down. accelerated_detection=true on the CPU-only
-        // artifact is a backend_not_compiled FALLBACK; false is DISABLED.
-        let configured = super::detection_acceleration_receipt(true, "model-under-test");
-        assert!(configured.configured);
-        assert_eq!(
-            configured.probe_status,
-            crate::acceleration::ProbeStatus::Fallback
+    fn runtime_detection_selection_seam_is_honest_for_this_artifact() {
+        // Guard for the single detection-selection seam runtime now calls
+        // (post-RED guard, not a criteria-coverage test): a future artifact
+        // that compiles an accelerated detector backend without keeping this
+        // seam as the one source would regress the fold. Under this CPU-only
+        // artifact, accelerated_detection=true is an honest
+        // backend_not_compiled FALLBACK; false is DISABLED and never touches
+        // the probe (the invocation-count contract itself is covered by the
+        // frozen detection_accel_backend suite via the injected probe).
+        let configured = super::select_detection_acceleration(
+            true,
+            "model-under-test",
+            crate::yolox_detector::MODEL_INPUT_SHAPE,
         );
+        let receipt = configured.receipt;
+        assert!(receipt.configured);
         assert_eq!(
-            configured.failure_code,
-            crate::acceleration::FailureCode::BackendNotCompiled
-        );
-        assert_eq!(configured.active_backend, "burn-cpu");
-        assert!(!configured.hardware_accelerated);
-        assert_eq!(
-            configured.model_id.as_deref(),
+            receipt.model_id.as_deref(),
             Some("model-under-test"),
             "the receipt names the model identity"
         );
 
-        let disabled = super::detection_acceleration_receipt(false, "model-under-test");
+        let disabled = crate::detection_accel::select_detection_acceleration_with_probe(
+            false,
+            "model-under-test",
+            crate::yolox_detector::MODEL_INPUT_SHAPE,
+            crate::detection_accel::NoopDetectionForwardProbe,
+        );
         assert_eq!(
-            disabled.probe_status,
+            disabled.receipt.probe_status,
             crate::acceleration::ProbeStatus::Disabled
         );
         assert_eq!(
-            disabled.failure_code,
+            disabled.receipt.failure_code,
             crate::acceleration::FailureCode::None
         );
+
+        #[cfg(not(feature = "detect-burn-wgpu"))]
+        {
+            assert_eq!(
+                receipt.probe_status,
+                crate::acceleration::ProbeStatus::Fallback
+            );
+            assert_eq!(
+                receipt.failure_code,
+                crate::acceleration::FailureCode::BackendNotCompiled
+            );
+            assert_eq!(
+                receipt.active_backend,
+                crate::detection_accel::CPU_DETECTION_BACKEND
+            );
+            assert!(!receipt.hardware_accelerated);
+        }
+
+        // Deterministic once-per-process proof (feature-gated: only the real
+        // probe path is deduplicated). A barrier maximizes simultaneity so
+        // concurrent callers actually race into the seam together; every
+        // caller must observe the identical outcome AND the underlying real
+        // computation must have run exactly once — this fails immediately
+        // if per-camera selection ever regresses into N independent probes
+        // instead of sharing one.
+        #[cfg(feature = "detect-burn-wgpu")]
+        {
+            let before = crate::detection_accel::process_probe_computation_count();
+            const CONCURRENT_CALLERS: usize = 8;
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(CONCURRENT_CALLERS));
+            let handles: Vec<_> = (0..CONCURRENT_CALLERS)
+                .map(|_| {
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        crate::detection_accel::select_detection_acceleration(
+                            true,
+                            "model-under-test-concurrency-probe",
+                            crate::yolox_detector::MODEL_INPUT_SHAPE,
+                        )
+                    })
+                })
+                .collect();
+            let selections: Vec<_> = handles
+                .into_iter()
+                .map(|handle| handle.join().expect("probe thread must not panic"))
+                .collect();
+            let first = &selections[0].receipt;
+            for selection in &selections[1..] {
+                assert_eq!(
+                    selection.receipt.failure_code, first.failure_code,
+                    "every concurrent caller for the same identity must observe the identical selection outcome"
+                );
+                assert_eq!(selection.receipt.selected_device, first.selected_device);
+                assert_eq!(
+                    selection.receipt.hardware_accelerated,
+                    first.hardware_accelerated
+                );
+            }
+            let after = crate::detection_accel::process_probe_computation_count();
+            assert_eq!(
+                after - before,
+                1,
+                "concurrent callers for the same identity must share exactly one real computation, not race N separate probes"
+            );
+        }
     }
 
     #[test]

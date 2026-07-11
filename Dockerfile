@@ -13,11 +13,13 @@ COPY target/aarch64-unknown-linux-musl/release/vigil /usr/local/bin/vigil
 
 # --- Hardware-enabled generic Docker images -------------------------------
 #
-# Builder stages compile vigil from source with --features decode-gstreamer
-# (native, dynamically linked; never the musl/scratch static build below);
-# the paired runtime stages install exactly the matching arch's
-# runtime-packages.yaml package set literally via apk (no toolchain/dev
-# packages ship). Detection stays burn-cpu in every shape shipped this run.
+# Builder stages compile vigil from source with
+# --features decode-gstreamer,detect-burn-wgpu (native, dynamically linked;
+# never the musl/scratch static build below); the paired runtime stages
+# install exactly the matching arch's runtime-packages.yaml package set
+# literally via apk (no toolchain/dev packages ship). These images carry the
+# accelerated (wgpu -> Vulkan) detector (burn-wgpu) and fall back to CPU
+# honestly on a box with no usable GPU.
 # These are named build targets the release pipeline publishes
 # (`docker build --target vigil-generic-docker-hw-amd64 .`) from an
 # ASSEMBLED context directory that carries this repo plus its sibling
@@ -42,17 +44,18 @@ WORKDIR /workspace/vigil-src
 # config moves aside and crt-static is disabled for this build stage.
 RUN mv .cargo/config.toml /tmp/vigil-cargo-cross-config.toml
 ENV RUSTFLAGS="-C target-feature=-crt-static"
-RUN cargo build --release --bin vigil --features decode-gstreamer --locked
+RUN cargo build --release --bin vigil --features decode-gstreamer,detect-burn-wgpu --locked
 
 FROM alpine:3.22 AS vigil-generic-docker-hw-amd64
 RUN apk add --no-cache \
     gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-vaapi \
-    libva libva-intel-driver intel-media-driver mesa-va-gallium
+    libva libva-intel-driver intel-media-driver mesa-va-gallium \
+    vulkan-loader mesa-vulkan-intel mesa-vulkan-ati
 COPY --from=vigil-hw-builder-amd64 /workspace/vigil-src/target/release/vigil /usr/local/bin/vigil
 LABEL vigil.artifact="vigil-generic-docker-hw-amd64" \
       vigil.arch="amd64" \
       vigil.decode_backend="gstreamer" \
-      vigil.detector_backend="burn-cpu"
+      vigil.detector_backend="burn-wgpu"
 ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
@@ -71,17 +74,18 @@ WORKDIR /workspace/vigil-src
 # config moves aside and crt-static is disabled for this build stage.
 RUN mv .cargo/config.toml /tmp/vigil-cargo-cross-config.toml
 ENV RUSTFLAGS="-C target-feature=-crt-static"
-RUN cargo build --release --bin vigil --features decode-gstreamer --locked
+RUN cargo build --release --bin vigil --features decode-gstreamer,detect-burn-wgpu --locked
 
 FROM alpine:3.22 AS vigil-generic-docker-hw-arm64
 RUN apk add --no-cache \
     gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
-    libva mesa-va-gallium mesa-dri-gallium
+    libva mesa-va-gallium mesa-dri-gallium \
+    vulkan-loader mesa-vulkan-ati mesa-vulkan-broadcom mesa-vulkan-panfrost mesa-vulkan-freedreno
 COPY --from=vigil-hw-builder-arm64 /workspace/vigil-src/target/release/vigil /usr/local/bin/vigil
 LABEL vigil.artifact="vigil-generic-docker-hw-arm64" \
       vigil.arch="aarch64" \
       vigil.decode_backend="gstreamer" \
-      vigil.detector_backend="burn-cpu"
+      vigil.detector_backend="burn-wgpu"
 ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000

@@ -13,15 +13,23 @@
 # actually carries, not for how it was compiled.
 #
 # Backend vocabulary: decode_backend in {software, gstreamer}; detector_backend
-# in {burn-cpu, burn-wgpu}. Every shipped shape in this manifest keeps
-# detector_backend burn-cpu — accelerated detection is a dev-box-only,
-# feature-gated build, never a shipped artifact this run.
+# in {burn-cpu, burn-wgpu}. The hardware artifacts now carry burn-wgpu — the
+# accelerated (wgpu -> Vulkan) object detector — and fall back to CPU
+# honestly on a box with no usable GPU. The static-musl artifact stays
+# software decode + burn-cpu.
 #
 # Package sets were verified against the real base images with:
 #   docker run --rm <base> sh -c 'apk update; apk search -e <name>'
 # amd64 uses Intel VA-API (libva-intel-driver / intel-media-driver +
 # mesa-va-gallium); aarch64 uses the generic Mesa/V4L2 GStreamer stack
-# (no Intel-only VA driver exists for aarch64).
+# (no Intel-only VA driver exists for aarch64). The Vulkan runtime is the
+# loader (dlopen'd by wgpu at startup) plus the real GPU ICDs for the arch:
+# amd64 ships the Intel (ANV) and AMD (RADV) drivers; aarch64 ships the AMD,
+# Broadcom, Panfrost, and Freedreno drivers (mesa-vulkan-intel has no aarch64
+# build). The software rasterizer (mesa-vulkan-swrast / lavapipe) is never
+# shipped — the detection receipt downgrades a software Vulkan adapter to the
+# honest CPU fallback, so shipping it would advertise acceleration a box can
+# never actually get.
 profiles:
 - name: vigil-addon-hw-amd64
   base: ghcr.io/home-assistant/base:3.22
@@ -29,7 +37,7 @@ profiles:
   artifact: addon
   hardware_enabled: true
   decode_backend: gstreamer
-  detector_backend: burn-cpu
+  detector_backend: burn-wgpu
   packages:
     - gstreamer
     - gst-plugins-base
@@ -40,13 +48,16 @@ profiles:
     - libva-intel-driver
     - intel-media-driver
     - mesa-va-gallium
+    - vulkan-loader
+    - mesa-vulkan-intel
+    - mesa-vulkan-ati
 - name: vigil-addon-hw-aarch64
   base: ghcr.io/home-assistant/base:3.22
   arch: aarch64
   artifact: addon
   hardware_enabled: true
   decode_backend: gstreamer
-  detector_backend: burn-cpu
+  detector_backend: burn-wgpu
   packages:
     - gstreamer
     - gst-plugins-base
@@ -55,13 +66,18 @@ profiles:
     - libva
     - mesa-va-gallium
     - mesa-dri-gallium
+    - vulkan-loader
+    - mesa-vulkan-ati
+    - mesa-vulkan-broadcom
+    - mesa-vulkan-panfrost
+    - mesa-vulkan-freedreno
 - name: vigil-generic-docker-hw-amd64
   base: alpine:3.22
   arch: amd64
   artifact: generic-docker
   hardware_enabled: true
   decode_backend: gstreamer
-  detector_backend: burn-cpu
+  detector_backend: burn-wgpu
   packages:
     - gstreamer
     - gst-plugins-base
@@ -72,13 +88,16 @@ profiles:
     - libva-intel-driver
     - intel-media-driver
     - mesa-va-gallium
+    - vulkan-loader
+    - mesa-vulkan-intel
+    - mesa-vulkan-ati
 - name: vigil-generic-docker-hw-arm64
   base: alpine:3.22
   arch: aarch64
   artifact: generic-docker
   hardware_enabled: true
   decode_backend: gstreamer
-  detector_backend: burn-cpu
+  detector_backend: burn-wgpu
   packages:
     - gstreamer
     - gst-plugins-base
@@ -87,6 +106,11 @@ profiles:
     - libva
     - mesa-va-gallium
     - mesa-dri-gallium
+    - vulkan-loader
+    - mesa-vulkan-ati
+    - mesa-vulkan-broadcom
+    - mesa-vulkan-panfrost
+    - mesa-vulkan-freedreno
 - name: vigil-static-musl
   base: scratch
   arch: amd64

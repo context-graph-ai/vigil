@@ -13,7 +13,7 @@ LABEL io.hass.arch="${BUILD_ARCH}" \
       io.hass.type="app" \
       io.hass.version="${BUILD_VERSION}" \
       vigil.decode_backend="gstreamer" \
-      vigil.detector_backend="burn-cpu"
+      vigil.detector_backend="burn-wgpu"
 WORKDIR /build
 COPY runtime-packages.yaml addons/vigil/runtime-packages.yaml
 # PACKAGES is expanded from the tracked runtime-packages.yaml manifest,

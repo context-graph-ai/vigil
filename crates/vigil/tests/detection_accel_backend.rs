@@ -1383,6 +1383,20 @@ fn runtime_detection_receipt_action_line_is_honest() {
 fn detection_probe_timeout_and_panic_classify_probe_failed_without_hang() {
     // Unfakeable because slow and panicking probes are injected deterministically
     // and must return as classified fallback, not hang or escape.
+    //
+    // This test pins its own 1 s deadline via VIGIL_DETECTION_PROBE_DEADLINE_SECS
+    // instead of inheriting the shipped default: the shipped default is set high
+    // enough to let a real GPU's cold shader compile reach ACTIVE, so the
+    // bounded-classification contract must own a short deadline to stay a
+    // deterministic test of the timeout path (an injected 3 s probe against a 1 s
+    // deadline must return bounded and classify ProbeFailed). The env is restored
+    // before any assertion can unwind.
+    const DEADLINE_ENV: &str = "VIGIL_DETECTION_PROBE_DEADLINE_SECS";
+    let previous_deadline = std::env::var_os(DEADLINE_ENV);
+    unsafe {
+        std::env::set_var(DEADLINE_ENV, "1");
+    }
+
     let slow_invocations = Arc::new(AtomicUsize::new(0));
     let slow_probe = SlowProbe {
         invocations: Arc::clone(&slow_invocations),
@@ -1391,8 +1405,26 @@ fn detection_probe_timeout_and_panic_classify_probe_failed_without_hang() {
     let started = std::time::Instant::now();
     let slow_selection =
         select_detection_acceleration_with_probe(true, MODEL_ID, INPUT_SHAPE, slow_probe);
+    let slow_elapsed = started.elapsed();
+
+    let panic_invocations = Arc::new(AtomicUsize::new(0));
+    let panic_probe = PanickingProbe {
+        invocations: Arc::clone(&panic_invocations),
+    };
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        select_detection_acceleration_with_probe(true, MODEL_ID, INPUT_SHAPE, panic_probe)
+    }));
+
+    // Restore the environment before any assertion can unwind out of the test.
+    unsafe {
+        match previous_deadline {
+            Some(value) => std::env::set_var(DEADLINE_ENV, value),
+            None => std::env::remove_var(DEADLINE_ENV),
+        }
+    }
+
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        slow_elapsed < Duration::from_secs(2),
         "slow injected probe must be deadline-bounded"
     );
     assert_eq!(slow_selection.receipt.probe_status, ProbeStatus::Fallback);
@@ -1406,13 +1438,6 @@ fn detection_probe_timeout_and_panic_classify_probe_failed_without_hang() {
         "the slow probe path must actually invoke the injected probe"
     );
 
-    let panic_invocations = Arc::new(AtomicUsize::new(0));
-    let panic_probe = PanickingProbe {
-        invocations: Arc::clone(&panic_invocations),
-    };
-    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        select_detection_acceleration_with_probe(true, MODEL_ID, INPUT_SHAPE, panic_probe)
-    }));
     assert!(
         caught.is_ok(),
         "panicking injected probe must be captured and classified"

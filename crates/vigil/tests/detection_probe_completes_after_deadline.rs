@@ -22,8 +22,7 @@ use std::time::{Duration, Instant};
 
 use vigil::acceleration::{AccelStage, AccelerationState, FailureCode, ProbeStatus};
 use vigil::detection_accel::{
-    DetectionForwardProbe, DetectionForwardProbeOutcome,
-    spawn_detection_probe_with_late_recording,
+    DetectionForwardProbe, DetectionForwardProbeOutcome, spawn_detection_probe_with_late_recording,
 };
 
 const MODEL_ID: &str = "detector-under-test";
@@ -124,7 +123,9 @@ fn deadline_returns_fallback_now_but_probe_runs_to_completion_and_records_late_p
     let action = late.action_payload.unwrap_or_default().to_ascii_lowercase();
     assert!(
         (action.contains("verified") || action.contains("usable"))
-            && (action.contains("next start") || action.contains("next boot") || action.contains("restart")),
+            && (action.contains("next start")
+                || action.contains("next boot")
+                || action.contains("restart")),
         "a late PASS action must tell the operator the GPU is verified usable and accelerated detection comes on the next start, not merely raise-the-deadline: {action}"
     );
     assert!(

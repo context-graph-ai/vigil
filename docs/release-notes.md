@@ -20,12 +20,16 @@ detection honestly — the receipt names why on `/health`, `vigil stats`, and
 `vigil doctor acceleration`. The two add-on switches (`hardware_decoding`,
 `accelerated_detection`) default on.
 
-Measured on the Home Assistant OS test VM, the add-on's detection classified
-the CPU fallback: that VM's virtualized Intel iGPU cannot complete a Vulkan
-compute probe, so detection fell back to CPU with a probe-failure receipt
-while hardware video decode stayed active. A capable GPU accelerates
-detection on the same image — the fallback is the honest outcome for that
-passthrough, not a limit of the artifact.
+Measured on the Home Assistant OS test VM, the add-on's detection fell back to
+CPU at default settings — but that is a cold-start timing effect, not a
+capability limit. The VM's virtualized Intel iGPU (ADL-N Intel Graphics) is
+Vulkan-capable: given a longer probe window it completed a verified GPU
+detection on `burn-wgpu` in about two and a half minutes. Its cold first shader
+compile simply exceeds the default 60-second startup probe window, so at default
+settings detection falls back to CPU with a receipt naming the measured time,
+while hardware video decode stays active. Raising the `detection_probe_deadline_secs`
+add-on option past that compile time activates accelerated detection on the same
+VM.
 
 Shipping the Vulkan runtime (the loader plus the arch's GPU ICDs) adds about
 50 MB to each hardware image. The amd64 images ship the Intel and AMD Vulkan

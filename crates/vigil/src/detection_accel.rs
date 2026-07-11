@@ -16,7 +16,7 @@ use std::sync::{Mutex, mpsc};
 #[cfg(feature = "detect-burn-wgpu")]
 use std::thread;
 #[cfg(feature = "detect-burn-wgpu")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::acceleration::{
     AccelStage, AccelerationReceipt, AccelerationState, ActionKind, EvidenceKind, FailureCode,
@@ -26,25 +26,38 @@ use crate::acceleration::{
 pub const CPU_DETECTION_BACKEND: &str = "burn-cpu";
 pub const ACCELERATED_DETECTION_BACKEND: &str = "burn-wgpu";
 
-/// Places the Mesa/wgpu on-disk shader cache under the add-on's PERSISTENT data
-/// root and exports `MESA_SHADER_CACHE_DIR` to it, so the cold Vulkan/SPIR-V
-/// shader compile the accelerated detector pays on first boot is kept across
-/// restarts instead of being re-paid every start. The accelerated detector runs
-/// in-process via wgpu, so the env must be set in vigil's OWN process before
-/// wgpu initialises — this is called at startup (before the camera-thread probe)
-/// and from `vigil doctor acceleration`, so a compile completed by either warms
-/// the other and every later boot. The directory is created if absent so the
-/// detector never races an uncreated path.
+/// Places the accelerated detector's GPU caches under the add-on's PERSISTENT
+/// data root and exports BOTH cache-location levers into vigil's OWN process
+/// before wgpu initialises, so the cold-start cost is kept across restarts
+/// instead of being re-paid every boot. A container has no durable HOME, so
+/// without these the caches land in a container-local path that a restart
+/// wipes. Two env vars are set:
+///
+/// - `MESA_SHADER_CACHE_DIR` → `<data>/shader-cache`: Mesa's Vulkan/SPIR-V
+///   shader cache.
+/// - `XDG_CACHE_HOME` → `<data>/xdg-cache`: the load-bearing lever — it holds
+///   the cubecl AUTOTUNE cache (`$XDG_CACHE_HOME/cubecl`, the real ~44s → ~21s
+///   warm speedup measured on the 680M; the Mesa cache alone gave none), plus
+///   the gstreamer registry and the Mesa fallback path.
+///
+/// Called at startup (before the camera-thread probe) and from
+/// `vigil doctor acceleration`, so a compile/autotune completed by either warms
+/// the other and every later boot. Both directories are created if absent so
+/// the detector never races an uncreated path. Returns the Mesa shader-cache
+/// directory.
 pub fn configure_persistent_shader_cache(data_dir: &Path) -> std::io::Result<PathBuf> {
-    let cache_dir = data_dir.join("shader-cache");
-    std::fs::create_dir_all(&cache_dir)?;
+    let shader_cache_dir = data_dir.join("shader-cache");
+    let xdg_cache_dir = data_dir.join("xdg-cache");
+    std::fs::create_dir_all(&shader_cache_dir)?;
+    std::fs::create_dir_all(&xdg_cache_dir)?;
     // SAFETY: called once at process start (runtime startup / doctor entry),
     // before any wgpu/Vulkan initialisation or camera thread, so no concurrent
-    // env access races this write.
+    // env access races these writes.
     unsafe {
-        std::env::set_var("MESA_SHADER_CACHE_DIR", &cache_dir);
+        std::env::set_var("MESA_SHADER_CACHE_DIR", &shader_cache_dir);
+        std::env::set_var("XDG_CACHE_HOME", &xdg_cache_dir);
     }
-    Ok(cache_dir)
+    Ok(shader_cache_dir)
 }
 
 /// The startup probe is a one-time, once-per-process attempt; a wall-clock
@@ -446,6 +459,7 @@ pub fn spawn_detection_probe_with_late_recording<P: DetectionForwardProbe>(
 
     let (tx, rx) = mpsc::channel();
     let mut probe = probe;
+    let probe_started = Instant::now();
     thread::spawn(move || {
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe.run_forward_probe()));
@@ -454,21 +468,23 @@ pub fn spawn_detection_probe_with_late_recording<P: DetectionForwardProbe>(
 
     let probe_deadline = detection_probe_deadline();
     match rx.recv_timeout(probe_deadline) {
-        Ok(outcome) => classify_forward_probe_selection(outcome, model_id, input_shape, false),
+        Ok(outcome) => classify_forward_probe_selection(outcome, model_id, input_shape, None),
         Err(mpsc::RecvTimeoutError::Timeout) => {
             // The probe is still running its cold compile. Return the honest
             // fallback-now so startup proceeds, and hand the live channel to a
-            // late recorder that awaits the probe's true outcome and records it.
+            // late recorder that awaits the probe's true outcome, times it from
+            // the probe's start, and records it with that measured truth.
             let accel_for_late = Arc::clone(&accel);
             let model_id_owned = model_id.to_string();
             let input_shape_owned = input_shape.to_string();
             thread::spawn(move || {
                 if let Ok(outcome) = rx.recv() {
+                    let elapsed = probe_started.elapsed();
                     let late = classify_forward_probe_selection(
                         outcome,
                         &model_id_owned,
                         &input_shape_owned,
-                        true,
+                        Some(elapsed),
                     );
                     accel_for_late.record(late.receipt);
                 }
@@ -511,26 +527,45 @@ fn timeout_fallback_selection(
     }
 }
 
-/// The honest action for a probe that PASSED after the startup deadline: the
-/// GPU is verified usable and accelerated detection arrives on the next start.
-/// Never tells the operator to raise the deadline — the probe already succeeded.
+/// The measured-truth action for a probe that PASSED after the startup
+/// deadline. It reports the probe's ACTUAL completion time and recommends
+/// raising the deadline option to at least a value derived from it — never the
+/// unconditional "active on the next start" promise, which is false on a box
+/// whose warm start still exceeds the default deadline. The GPU is verified
+/// usable either way.
 #[cfg(feature = "detect-burn-wgpu")]
-fn late_pass_action() -> String {
-    "the GPU forward probe passed after the startup deadline: the GPU is verified usable, and \
-     accelerated detection will be active on the next start. No action is required."
-        .to_string()
+fn late_pass_action(elapsed: Duration) -> String {
+    let measured = elapsed.as_secs_f64();
+    let recommended = recommended_deadline_secs(elapsed);
+    format!(
+        "the GPU forward probe completed in {measured:.1}s, past the startup deadline: the GPU is \
+         verified usable. To reach accelerated detection at startup, set the add-on option \
+         detection_probe_deadline_secs (env VIGIL_DETECTION_PROBE_DEADLINE_SECS) to at least \
+         {recommended}s and restart."
+    )
+}
+
+/// A sane deadline recommendation strictly above the measured completion time:
+/// the next multiple of 30 seconds beyond it, giving headroom for a still-cold
+/// restart. Always >= the measured time.
+#[cfg(feature = "detect-burn-wgpu")]
+fn recommended_deadline_secs(elapsed: Duration) -> u64 {
+    let secs = elapsed.as_secs_f64().ceil() as u64;
+    ((secs / 30) + 1) * 30
 }
 
 /// Classifies a completed forward-probe outcome into a detection selection,
-/// shared by the in-time and the late-recording paths. `late` marks a PASS that
-/// landed after the startup deadline: its Active receipt carries the
-/// verified-usable / next-start action instead of the in-time no-action.
+/// shared by the in-time and the late-recording paths. `late_elapsed` is
+/// `Some(duration)` for a PASS that landed after the startup deadline: its
+/// Active receipt then carries the measured-truth action (verified usable +
+/// measured completion time + a derived deadline recommendation) instead of the
+/// in-time no-action.
 #[cfg(feature = "detect-burn-wgpu")]
 fn classify_forward_probe_selection(
     outcome: std::thread::Result<DetectionForwardProbeOutcome>,
     model_id: &str,
     input_shape: &str,
-    late: bool,
+    late_elapsed: Option<Duration>,
 ) -> DetectionAccelerationSelection {
     let mut receipt = base_detection_receipt(model_id, input_shape, true);
     let classified = match outcome {
@@ -549,11 +584,12 @@ fn classify_forward_probe_selection(
                 .evidence_fields
                 .insert("forward_probe".to_string(), "passed".to_string());
             if detection_hardware_claim_is_valid(&receipt) {
-                if late {
-                    // A late PASS is an informational note, not a required
-                    // action: the GPU is verified and acceleration comes next
-                    // start (no hot-swap of the already-running CPU detector).
-                    receipt.action_payload = Some(late_pass_action());
+                if let Some(elapsed) = late_elapsed {
+                    // A late PASS reports measured truth: the GPU is verified,
+                    // the probe took this long, and the deadline must be raised
+                    // to at least a derived figure (no hot-swap of the
+                    // already-running CPU detector).
+                    receipt.action_payload = Some(late_pass_action(elapsed));
                 }
                 ACCELERATED_DETECTION_BACKEND
             } else {

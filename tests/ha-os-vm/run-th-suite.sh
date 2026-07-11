@@ -323,8 +323,25 @@ assert_acceleration_receipt_block() {
     assert_receipt_field_equals "$id" "$label" "$header" "$block" "status" "fallback" || return 1
     assert_receipt_field_equals "$id" "$label" "$header" "$block" "active_backend" "burn-cpu" || return 1
     assert_receipt_field_equals "$id" "$label" "$header" "$block" "hardware_accelerated" "false" || return 1
-    if [[ "$block" == *"install a build with an accelerated detector backend"* ]]; then
-      fail "$id" "$label detection receipt still points at a nonexistent accelerated detector build"
+    # The shipped add-on binary carries the accelerated detector, so this test
+    # VM's virtualized iGPU (which cannot complete a Vulkan compute probe)
+    # classifies as a probe failure, never a missing backend.
+    assert_receipt_field_equals "$id" "$label" "$header" "$block" "failure_code" "probe_failed" || return 1
+    for lie in \
+      "not in this build" \
+      "not part of this build" \
+      "not included in this build" \
+      "no accelerated detector backend" \
+      "install a build with an accelerated detector backend"; do
+      if [[ "$block" == *"$lie"* ]]; then
+        fail "$id" "$label detection fallback must not claim the accelerated backend is missing on a build that carries it: $lie"
+        return 1
+      fi
+    done
+    if [[ "$block" != *"VIGIL_DETECTION_PROBE_DEADLINE_SECS"* \
+          && "$block" != *"usable"* \
+          && "$block" != *"verify the GPU"* ]]; then
+      fail "$id" "$label detection probe-failure fallback must name the real next steps (raise VIGIL_DETECTION_PROBE_DEADLINE_SECS or verify the GPU is usable)"
       return 1
     fi
     if [[ "$block" == *"status: fallback"* && "$block" != *"CPU"* && "$block" != *"cpu"* ]]; then

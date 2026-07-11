@@ -245,7 +245,7 @@ fn addon_config_maps_video_device_and_forbids_full_access() {
 }
 
 #[test]
-fn addon_config_states_accelerated_detection_cpu_reality_in_help() {
+fn addon_config_states_accelerated_detection_gpu_with_cpu_fallback_in_help() {
     // Unfakeable because the assertion reads the Home Assistant option
     // description surface, not a separate prose file.
     let path = repo_root().join(ADDON_TRANSLATIONS_PATH);
@@ -277,31 +277,35 @@ fn addon_config_states_accelerated_detection_cpu_reality_in_help() {
         "description must say accelerated detection defaults on: {description}"
     );
     assert!(
-        lower.contains("detection runs on cpu")
-            || lower.contains("detect runs on cpu")
-            || lower.contains("uses cpu detection")
-            || lower.contains("cpu detection is the supported path"),
-        "description must plainly say detection runs on CPU in this artifact: {description}"
+        lower.contains("accelerat")
+            && (lower.contains("gpu") || lower.contains("graphics")),
+        "description must say detection accelerates when a usable GPU is present: {description}"
     );
     assert!(
-        lower.contains("cannot accelerate detection")
-            || lower.contains("does not accelerate detection")
-            || lower.contains("doesn't accelerate detection")
-            || lower.contains("accelerated detection is not available"),
-        "description must say the accelerated_detection switch cannot accelerate detection in this artifact: {description}"
+        (lower.contains("fall back")
+            || lower.contains("falls back")
+            || lower.contains("fallback"))
+            && lower.contains("cpu"),
+        "description must say detection falls back to CPU when no usable GPU is present: {description}"
+    );
+    assert!(
+        lower.contains("receipt")
+            || lower.contains("why")
+            || lower.contains("reason")
+            || lower.contains("names"),
+        "description must say the CPU fallback comes with a receipt naming why: {description}"
     );
     for forbidden in [
-        "cpu detection is not",
-        "detection is accelerated",
-        "accelerates detection in this artifact",
+        "cannot accelerate detection",
+        "does not accelerate detection",
+        "doesn't accelerate detection",
+        "accelerated detection is not available",
+        "runs on cpu regardless",
+        "cpu detection is the supported path",
     ] {
         assert!(
             !lower.contains(forbidden),
-            "description must not contradict the CPU detection reality with `{forbidden}`: {description}"
+            "description must not keep the pre-promotion CPU-only wording `{forbidden}`: {description}"
         );
     }
-    assert!(
-        lower.contains("this artifact") || lower.contains("this add-on") || lower.contains("yet"),
-        "description must scope the CPU detection reality to this artifact: {description}"
-    );
 }

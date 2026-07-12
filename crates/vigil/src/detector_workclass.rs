@@ -219,29 +219,93 @@ impl DetectorJobBuilder {
         self
     }
 
-    /// Assemble the job. Unimplemented pending the ledger-wiring
-    /// implementation pass.
+    /// Assemble the job. Every optional field must be set through the
+    /// builder before calling this — a missing field is a build-time bug
+    /// in the caller, not a runtime possibility this API needs to encode.
     pub fn build(self) -> DetectorJob {
-        todo!("assemble DetectorJob from builder fields, schema_version = DETECTOR_SCHEMA_VERSION")
+        DetectorJob {
+            schema_version: DETECTOR_SCHEMA_VERSION,
+            envelope: self.envelope,
+            codec: self
+                .codec
+                .expect("DetectorJobBuilder::codec must be set before build()"),
+            fps: OrderedF64(
+                self.fps
+                    .expect("DetectorJobBuilder::fps must be set before build()"),
+            ),
+            sample_frames: self
+                .sample_frames
+                .expect("DetectorJobBuilder::sample_frames must be set before build()"),
+            confidence_threshold: OrderedF64(self.confidence_threshold.expect(
+                "DetectorJobBuilder::confidence_threshold must be set before build()",
+            )),
+            clip_sha256: self
+                .clip_sha256
+                .expect("DetectorJobBuilder::clip_sha256 must be set before build()"),
+            decoded_frames_sha256: self
+                .decoded_frames_sha256
+                .expect("DetectorJobBuilder::decoded_frames_sha256 must be set before build()"),
+            model_id: self
+                .model_id
+                .expect("DetectorJobBuilder::model_id must be set before build()"),
+            frames_blob_ref: self.frames_blob_ref,
+        }
     }
 }
 
 /// The `JobSpec` fields a submitter would register this job under on the
-/// shared ledger. Unimplemented pending the ledger-wiring pass.
+/// shared ledger. `work_class`/`mode`/`requirement_tags` are this module's
+/// fixed vocabulary — every `DetectorJob` registers identically regardless
+/// of its own field values, so this deliberately ignores `job`'s contents.
 pub fn detector_job_spec_fields(_job: &DetectorJob) -> DetectorJobSpecFields {
-    todo!("derive work_class/mode/requirement_tags for JobSpec::builder from a DetectorJob")
+    DetectorJobSpecFields {
+        work_class: DETECTOR_WORK_CLASS.to_string(),
+        mode: DETECTOR_MODE.to_string(),
+        requirement_tags: vec![DETECTOR_CLASS_TAG.to_string()],
+    }
 }
 
 /// Encode a set of encoded (compressed) NAL units as one length-framed blob
-/// suitable for content-addressed blob storage (each unit prefixed with its
-/// length as a little-endian u32). Unimplemented pending the blob-movement
-/// implementation pass.
-pub fn encode_length_framed_units(_units: &[Vec<u8>]) -> Vec<u8> {
-    todo!("length-frame encoded_units for blob_ref content-addressing")
+/// suitable for content-addressed blob storage: each unit is prefixed with
+/// its length as a little-endian `u32`.
+pub fn encode_length_framed_units(units: &[Vec<u8>]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(units.iter().map(|unit| unit.len() + 4).sum());
+    for unit in units {
+        let len = u32::try_from(unit.len())
+            .expect("a single encoded unit must fit in a u32 length prefix");
+        framed.extend_from_slice(&len.to_le_bytes());
+        framed.extend_from_slice(unit);
+    }
+    framed
 }
 
-/// Inverse of [`encode_length_framed_units`]. Unimplemented pending the
-/// blob-movement implementation pass.
-pub fn decode_length_framed_units(_bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    todo!("decode a length-framed encoded_units blob back into NAL units")
+/// Inverse of [`encode_length_framed_units`]. Rejects truncated input (a
+/// header that runs past the end of the buffer, or a declared unit length
+/// longer than the bytes remaining) with a typed `Err`, never a panic —
+/// this decodes bytes that arrived over the wire from another node.
+pub fn decode_length_framed_units(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut units = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let remaining = bytes.len() - offset;
+        if remaining < 4 {
+            return Err(format!(
+                "truncated length-framed unit header at offset {offset}: need 4 bytes, have {remaining}"
+            ));
+        }
+        let mut len_bytes = [0u8; 4];
+        len_bytes.copy_from_slice(&bytes[offset..offset + 4]);
+        let len = u32::from_le_bytes(len_bytes) as usize;
+        offset += 4;
+
+        let remaining = bytes.len() - offset;
+        if len > remaining {
+            return Err(format!(
+                "truncated or oversized length-framed unit body at offset {offset}: declared length {len}, have {remaining}"
+            ));
+        }
+        units.push(bytes[offset..offset + len].to_vec());
+        offset += len;
+    }
+    Ok(units)
 }

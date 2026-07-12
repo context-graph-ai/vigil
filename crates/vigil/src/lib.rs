@@ -12,6 +12,7 @@ pub mod decode;
 pub mod decode_gstreamer;
 pub mod detection_accel;
 mod detector;
+pub mod detector_workclass;
 pub mod doctor;
 pub mod ha_discovery;
 pub mod ha_mqtt_tasks;

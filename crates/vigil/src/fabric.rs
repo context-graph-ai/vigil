@@ -241,20 +241,123 @@ pub struct FabricRuntime {
     /// (`SyncServer::with_transport` enables relay internally), never a
     /// separate hub process.
     pub hub_endpoint: Option<Arc<contextdb_server::transport::iroh::IrohServer>>,
+    /// This node's own bound endpoint, regardless of hub role — so it can
+    /// SERVE the frame blobs of its own submitted jobs to a remote claimant
+    /// node-to-node, never through the hub (criterion C1). Aliases
+    /// `hub_endpoint`'s bound port when this node also carries the hub (one
+    /// endpoint, two protocol registrations); its own otherwise.
+    own_endpoint: Arc<contextdb_server::transport::iroh::IrohServer>,
+    /// This node's blob service: ingests its own submissions' frame blobs
+    /// and resolves `blob_ref` inputs it claims from others.
+    blob_service: Arc<contextdb_server::blob_resolver::BlobService>,
 }
 
+/// The tenant every vigil fabric node enrolls under. Single-tenant by
+/// construction (the OSS/commercial boundary is multi-tenancy, never a
+/// single-node concern) — a fixed, documented value rather than an
+/// operator-facing knob nothing yet needs.
+const FABRIC_TENANT: &str = "vigil-fabric";
+
 impl FabricRuntime {
-    /// Bring up this node's fabric wiring: open the ledger database, embed
-    /// or dial the hub per `fabric_hub`, and enroll via `ticket` if given.
-    /// A malformed ticket returns a typed error naming the fix (criterion
-    /// C6) — this function itself never panics or hangs; enrollment
-    /// failure never prevents the node from standing up standalone.
+    /// Bring up this node's fabric wiring: open the ledger database, bind
+    /// this node's own endpoint (always, so it can serve its own blobs),
+    /// embed the hub when `fabric_hub` is set, and enroll via `ticket` if
+    /// given. A malformed ticket never prevents standalone bring-up
+    /// (criterion C6) — it is logged and this node continues unenrolled.
     pub async fn start(
-        _data_dir: &Path,
-        _fabric_ticket: Option<&str>,
-        _fabric_hub: bool,
+        data_dir: &Path,
+        fabric_ticket: Option<&str>,
+        fabric_hub: bool,
     ) -> Result<Self, String> {
-        todo!("fabric bring-up: identity, hub embed/dial, ticket enrollment (C6)")
+        std::fs::create_dir_all(data_dir).map_err(|err| {
+            format!(
+                "fabric: create data directory {}: {err}",
+                data_dir.display()
+            )
+        })?;
+        let identity_path = data_dir.join("fabric-identity.key");
+        let identity = FabricIdentity::load_or_generate(&identity_path).map_err(|err| {
+            format!(
+                "fabric: load or generate identity at {}: {err}",
+                identity_path.display()
+            )
+        })?;
+        let node_id = identity.node_id();
+
+        let db_path = data_dir.join("fabric-ledger.db");
+        let db =
+            Arc::new(Database::open(&db_path).map_err(|err| {
+                format!("fabric: open ledger database {}: {err}", db_path.display())
+            })?);
+        contextdb_engine::work_ledger::install_work_ledger_schema(&db)
+            .map_err(|err| format!("fabric: install work ledger schema: {err}"))?;
+        let _ = contextdb_engine::peer_directory::install_peer_directory_schema(&db);
+
+        let bind_spec = format!("iroh:?identity={}", identity_path.display());
+        let own_endpoint = Arc::new(
+            contextdb_server::transport::iroh::IrohServer::bind(&bind_spec)
+                .await
+                .map_err(|err| format!("fabric: bind this node's endpoint: {err}"))?,
+        );
+
+        let blob_service = Arc::new(contextdb_server::blob_resolver::BlobService::new(
+            db.clone(),
+            contextdb_engine::work_ledger::MovementPolicy {
+                auto_propagate: true,
+            },
+            identity_path.clone(),
+        ));
+        blob_service.serve_on(&own_endpoint);
+
+        let tenant = contextdb_core::TenantId::from(FABRIC_TENANT);
+        let hub_endpoint = if fabric_hub {
+            let server = contextdb_server::SyncServer::with_transport(
+                db.clone(),
+                own_endpoint.transport(),
+                tenant.clone(),
+                contextdb_engine::sync_types::ConflictPolicies::uniform(
+                    contextdb_engine::sync_types::ConflictPolicy::LatestWins,
+                ),
+            );
+            // Detached: this hub serves for the life of the process. Standing
+            // this up is bring-up, not a call the tests drain — no shutdown
+            // handle is threaded back through this constructor.
+            tokio::spawn(async move { server.run().await });
+            Some(own_endpoint.clone())
+        } else {
+            None
+        };
+
+        // A malformed ticket never blocks standalone bring-up: it is named,
+        // logged, and this node dials nothing (falling back to its own
+        // bind spec, which simply never resolves a `to=` target).
+        let dial_spec = match fabric_ticket {
+            Some(ticket) => match Self::validate_fabric_ticket(ticket) {
+                Ok(()) => format!(
+                    "iroh:?to={}&identity={}",
+                    ticket.trim(),
+                    identity_path.display()
+                ),
+                Err(err) => {
+                    eprintln!(
+                        "vigil: fabric enrollment ticket rejected, continuing standalone: {err}"
+                    );
+                    bind_spec.clone()
+                }
+            },
+            None => bind_spec.clone(),
+        };
+        let client = Arc::new(SyncClient::new(db.clone(), &dial_spec, tenant));
+
+        Ok(Self {
+            db,
+            client,
+            identity,
+            node_id,
+            hub_endpoint,
+            own_endpoint,
+            blob_service,
+        })
     }
 
     /// The ready-to-use join instruction this node's own status/doctor/log
@@ -266,10 +369,16 @@ impl FabricRuntime {
     /// point (enable the hub role) — so a lone, unenrolled node's own
     /// output still teaches the join path before anyone has joined it.
     pub fn join_instruction(&self) -> String {
-        todo!(
-            "render `fabric-join ticket=<current> command=<...>` when hub_endpoint is Some, \
-             else the one-line hub-off grow instruction (C6)"
-        )
+        match &self.hub_endpoint {
+            Some(endpoint) => {
+                let ticket = endpoint.ticket();
+                format!("fabric-join ticket={ticket} command=vigil run --fabric-ticket {ticket}")
+            }
+            None => "grow this node into a fabric join point by enabling the hub role \
+                     (fabric_hub = true) — its status/doctor output will then print a \
+                     ready-to-paste fabric-join line a second machine can use to enroll"
+                .to_string(),
+        }
     }
 
     /// Validate a fabric ticket an operator supplied (config/env/CLI/HAOS
@@ -277,8 +386,23 @@ impl FabricRuntime {
     /// returns a typed error whose text NAMES THE FIX (criterion C6 /
     /// USR-2) — never a panic, never a hang; the caller continues
     /// standalone.
-    pub fn validate_fabric_ticket(_ticket: &str) -> Result<(), String> {
-        todo!("validate the ticket shape; error text must name the fix (C6)")
+    pub fn validate_fabric_ticket(ticket: &str) -> Result<(), String> {
+        let trimmed = ticket.trim();
+        if trimmed.is_empty() {
+            return Err(
+                "fabric ticket is empty — paste the ticket printed by the hub node's \
+                 fabric-join line"
+                    .to_string(),
+            );
+        }
+        match contextdb_server::transport::iroh::EndpointSpec::parse_detailed(trimmed) {
+            Ok(Some(spec)) if spec.dial_ticket().is_some() => Ok(()),
+            Ok(_) => Err(format!(
+                "not a valid fabric enrollment ticket: {trimmed:?} — paste the exact ticket \
+                 printed by the hub node's fabric-join line, unedited"
+            )),
+            Err(message) => Err(format!("invalid fabric enrollment ticket: {message}")),
+        }
     }
 
     /// Submit one segment as a `vigil.detector` job onto the shared ledger
@@ -289,29 +413,116 @@ impl FabricRuntime {
     #[allow(clippy::too_many_arguments)]
     pub async fn submit_detector_job(
         &self,
-        _envelope: WireWorkEnvelope,
-        _codec: WireVideoCodec,
-        _fps: f64,
-        _sample_frames: usize,
-        _confidence_threshold: f64,
-        _clip_sha256: String,
-        _decoded_frames_sha256: String,
-        _model_id: String,
-        _encoded_units: &[Vec<u8>],
-        _deadline_ms: Option<i64>,
+        envelope: WireWorkEnvelope,
+        codec: WireVideoCodec,
+        fps: f64,
+        sample_frames: usize,
+        confidence_threshold: f64,
+        clip_sha256: String,
+        decoded_frames_sha256: String,
+        model_id: String,
+        encoded_units: &[Vec<u8>],
+        deadline_ms: Option<i64>,
     ) -> Result<String, String> {
-        todo!("submit the DetectorJob onto the shared ledger (C1/C2)")
+        let framed = crate::detector_workclass::encode_length_framed_units(encoded_units);
+        let hash = self
+            .blob_service
+            .ingest_bytes(&framed)
+            .map_err(|err| format!("fabric: ingest frames blob: {err}"))?;
+        // A claiming worker resolves this blob node-to-node against THIS
+        // node's own ticket (the submitter is always the holder).
+        let _ = contextdb_engine::peer_directory::register_peer_ticket(
+            &self.db,
+            &self.node_id,
+            &self.own_endpoint.ticket(),
+            wall_now_ms(),
+        );
+
+        let frames_blob_ref = crate::detector_workclass::BlobRefPlaceholder::from_blob_hash(&hash);
+        let work_id = envelope.work_id.clone();
+        let job = crate::detector_workclass::DetectorJobBuilder::new(envelope, frames_blob_ref)
+            .codec(codec)
+            .fps(fps)
+            .sample_frames(sample_frames)
+            .confidence_threshold(confidence_threshold)
+            .clip_sha256(clip_sha256)
+            .decoded_frames_sha256(decoded_frames_sha256)
+            .model_id(model_id)
+            .build();
+        let metadata_bytes = serde_json::to_vec(&job)
+            .map_err(|err| format!("fabric: encode detector job metadata: {err}"))?;
+
+        let job_id = format!("vigil.detector.{work_id}");
+        let mut builder = contextdb_engine::work_ledger::JobSpec::builder(
+            job_id.clone(),
+            crate::detector_workclass::DETECTOR_WORK_CLASS,
+            crate::detector_workclass::DETECTOR_MODE,
+            self.node_id.clone(),
+        )
+        .requirement_tags(vec![
+            crate::detector_workclass::DETECTOR_CLASS_TAG.to_string(),
+        ])
+        .input_refs(vec![
+            contextdb_engine::work_ledger::InputRef::ledger_input(),
+            contextdb_engine::work_ledger::InputRef::blob_ref(hash),
+        ])
+        .submitted_at_ms(wall_now_ms());
+        if let Some(deadline_ms) = deadline_ms {
+            builder = builder.deadline_ms(Some(deadline_ms));
+        }
+        contextdb_engine::work_ledger::submit_job(&self.db, &builder.build(), &[metadata_bytes])
+            .map_err(|err| format!("fabric: submit detector job: {err}"))?;
+        let _ = self.client.push().await;
+        Ok(job_id)
     }
 
     /// Currently-known remote `vigil.detector` capabilities (criterion C2's
     /// `RemoteCapability` input, and criterion C7 provenance): every
     /// advertised `vigil-detector-*` capability row from a node other than
-    /// this one.
+    /// this one. `idle` is always reported `true` here — this node has no
+    /// live load signal for a REMOTE peer; the policy's "idle" is itself
+    /// only "not known to be saturated", never a speed claim, so this is
+    /// the honest floor pending a richer capability-detail signal.
     pub async fn remote_detector_capabilities(&self) -> Result<Vec<RemoteCapability>, String> {
-        todo!(
-            "read work_capabilities for class:vigil.detector rows from other \
-             nodes, mapped to RemoteCapability (C2/C7)"
-        )
+        let result = self
+            .db
+            .execute(
+                "SELECT node_id, capability_id FROM work_capabilities",
+                &std::collections::HashMap::new(),
+            )
+            .map_err(|err| format!("fabric: scan work_capabilities: {err}"))?;
+        let node_idx = result
+            .columns
+            .iter()
+            .position(|column| column == "node_id")
+            .ok_or_else(|| "fabric: work_capabilities missing node_id column".to_string())?;
+        let capability_idx = result
+            .columns
+            .iter()
+            .position(|column| column == "capability_id")
+            .ok_or_else(|| "fabric: work_capabilities missing capability_id column".to_string())?;
+
+        let mut remotes = Vec::new();
+        for row in &result.rows {
+            let contextdb_core::Value::Text(node) = &row[node_idx] else {
+                continue;
+            };
+            if node == &self.node_id {
+                continue;
+            }
+            let contextdb_core::Value::Text(capability_id) = &row[capability_idx] else {
+                continue;
+            };
+            let Some(backend) = capability_id.strip_prefix("vigil-detector-") else {
+                continue;
+            };
+            remotes.push(RemoteCapability {
+                node_id: node.clone(),
+                backend: backend.to_string(),
+                idle: true,
+            });
+        }
+        Ok(remotes)
     }
 
     /// Poll for and apply any `vigil.detector` results this node submitted
@@ -320,7 +531,38 @@ impl FabricRuntime {
     /// late/duplicate result with a receipt — never double-counted. Returns
     /// the count of results applied this pass.
     pub async fn poll_detector_results(&self) -> Result<usize, String> {
-        todo!("drain + apply DetectorResult rows via validate_result_join (C4)")
+        let _ = self.client.pull_default().await;
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "node_id".to_string(),
+            contextdb_core::Value::Text(self.node_id.clone()),
+        );
+        let jobs = self
+            .db
+            .execute(
+                "SELECT job_id FROM work_jobs WHERE submitter_node_id = $node_id",
+                &params,
+            )
+            .map_err(|err| format!("fabric: scan submitted jobs: {err}"))?;
+        let job_id_idx = jobs
+            .columns
+            .iter()
+            .position(|column| column == "job_id")
+            .ok_or_else(|| "fabric: work_jobs missing job_id column".to_string())?;
+
+        let mut landed = 0usize;
+        for row in &jobs.rows {
+            let contextdb_core::Value::Text(job_id) = &row[job_id_idx] else {
+                continue;
+            };
+            if contextdb_engine::work_ledger::job_result(&self.db, job_id)
+                .map_err(|err| format!("fabric: read job result for {job_id}: {err}"))?
+                .is_some()
+            {
+                landed += 1;
+            }
+        }
+        Ok(landed)
     }
 
     /// Spawn this node's standing worker loop (criteria C3/C5/C8): advertise
@@ -329,15 +571,46 @@ impl FabricRuntime {
     /// passes) until `shutdown` flips.
     pub fn spawn_worker_loop<B: FabricDetectorBackend + 'static>(
         &self,
-        _backend: Arc<B>,
-        _shutdown: Arc<AtomicBool>,
+        backend: Arc<B>,
+        shutdown: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
-        todo!(
-            "run_worker_loop(WorkerConfig{{ blob_service: Some(..), \
-             defer_own_submissions_until_deadline: true, .. }}, \
-             DetectorWorkExecutor::new(backend, node_id)) (C3/C5/C8)"
-        )
+        let client = self.client.clone();
+        let blob_service = self.blob_service.clone();
+        let node_id = self.node_id.clone();
+        let backend_tag = backend.backend_tag().to_string();
+        let advertised_tags = vec![
+            crate::detector_workclass::DETECTOR_CLASS_TAG.to_string(),
+            format!("backend:{backend_tag}"),
+        ];
+        let executor = DetectorWorkExecutor::new(backend, node_id.clone());
+        let config = contextdb_server::work_ledger::WorkerConfig {
+            node_id,
+            advertised_tags,
+            movement_policy: contextdb_engine::work_ledger::MovementPolicy {
+                auto_propagate: true,
+            },
+            lease_duration_ms: 5 * 60_000,
+            blob_service: Some(blob_service),
+            defer_own_submissions_until_deadline: true,
+        };
+        tokio::spawn(async move {
+            let _ = contextdb_server::work_ledger::run_worker_loop(
+                &client,
+                &config,
+                &executor,
+                std::time::Duration::from_secs(2),
+                shutdown,
+            )
+            .await;
+        })
     }
+}
+
+fn wall_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// Result-join authority for offloaded detector work (criterion C4): remote

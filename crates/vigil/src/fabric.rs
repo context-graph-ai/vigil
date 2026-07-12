@@ -720,3 +720,82 @@ impl PendingOffloads {
         }
     }
 }
+
+/// The production `FabricDetectorBackend` over this crate's own detection
+/// seam (`crate::detector::PromotableDetector`/`Detector`): no RED test
+/// binds this adapter — it is the real path a worker's standing loop uses,
+/// covered by `cargo check`/clippy plus the owner smoke, mirroring the
+/// existing `Detector` trait's production/test-double split.
+///
+/// Not yet wired into `runtime.rs`'s worker spawn path in this batch (that
+/// wiring is production bring-up, tracked separately from this fabric
+/// integration slice) — kept `#[allow(dead_code)]` until that caller lands
+/// so it does not trip the crate's `-D warnings` gate in the meantime.
+#[allow(dead_code)]
+pub struct FabricProductionDetectorBackend {
+    detector: Arc<crate::detector::PromotableDetector>,
+    backend_tag: String,
+}
+
+#[allow(dead_code)]
+impl FabricProductionDetectorBackend {
+    pub(crate) fn new(
+        detector: Arc<crate::detector::PromotableDetector>,
+        backend_tag: String,
+    ) -> Self {
+        Self {
+            detector,
+            backend_tag,
+        }
+    }
+}
+
+impl FabricDetectorBackend for FabricProductionDetectorBackend {
+    fn backend_tag(&self) -> &str {
+        &self.backend_tag
+    }
+
+    fn model_sha256(&self) -> &str {
+        use crate::detector::Detector;
+        self.detector.model_sha256()
+    }
+
+    fn detect(
+        &self,
+        frames: &[DecodedRgbFrame],
+        clip_sha256: &str,
+        sample_frames: usize,
+        confidence_threshold: f64,
+    ) -> Result<Vec<DetectorDetection>, String> {
+        use crate::detector::Detector;
+
+        // The trait's real detection seam is keyed on the pipeline-internal
+        // `DecodedVideoSegment`; this adapter wraps the already-decoded
+        // frames this executor resolved (locally or via blob_ref) into the
+        // same shape a live capture session would produce. `encoded_units`
+        // stays empty and `fps`/`observed_at` are immaterial here — the
+        // detector only samples `frames`.
+        let segment = crate::media_pipeline::DecodedVideoSegment {
+            frames: frames.to_vec(),
+            encoded_units: Vec::new(),
+            fps: 0.0,
+            observed_at: None,
+        };
+        let output = self.detector.detect_segment(
+            &segment,
+            clip_sha256.to_string(),
+            sample_frames,
+            confidence_threshold,
+        )?;
+        Ok(output
+            .detections
+            .into_iter()
+            .map(|detection| DetectorDetection {
+                class_name: detection.class_name,
+                confidence: crate::detector_workclass::OrderedF64(detection.confidence),
+                bbox: detection.bbox,
+                frame_index: detection.frame_index,
+            })
+            .collect())
+    }
+}

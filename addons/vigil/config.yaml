@@ -36,6 +36,8 @@ options:
   cameras: []
   hardware_decoding: true
   accelerated_detection: true
+  fabric_ticket: ""
+  fabric_hub: false
 schema:
   store_path: str
   health_port: int
@@ -57,6 +59,8 @@ schema:
   accelerated_detection: bool
   decode_probe_deadline_secs: int?
   detection_probe_deadline_secs: int?
+  fabric_ticket: str?
+  fabric_hub: bool?
 apparmor: true
 host_network: false
 host_pid: false

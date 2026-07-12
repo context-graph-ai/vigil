@@ -236,9 +236,10 @@ impl DetectorJobBuilder {
             sample_frames: self
                 .sample_frames
                 .expect("DetectorJobBuilder::sample_frames must be set before build()"),
-            confidence_threshold: OrderedF64(self.confidence_threshold.expect(
-                "DetectorJobBuilder::confidence_threshold must be set before build()",
-            )),
+            confidence_threshold: OrderedF64(
+                self.confidence_threshold
+                    .expect("DetectorJobBuilder::confidence_threshold must be set before build()"),
+            ),
             clip_sha256: self
                 .clip_sha256
                 .expect("DetectorJobBuilder::clip_sha256 must be set before build()"),

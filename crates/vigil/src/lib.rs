@@ -67,6 +67,24 @@ pub fn acceleration_intent_from_args(args: Vec<OsString>) -> Result<Acceleration
     })
 }
 
+/// The operator-facing fabric enrollment intent (criterion C10): every
+/// knob has a sane default and resolves with nothing provided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricIntent {
+    pub fabric_ticket: Option<String>,
+    pub fabric_hub: bool,
+}
+
+/// Resolve the fabric enrollment intent exactly as `vigil run` would from
+/// the same arguments (config file, options.json, environment, CLI
+/// overrides).
+pub fn fabric_intent_from_args(args: Vec<OsString>) -> Result<FabricIntent, String> {
+    config::load(args).map(|config| FabricIntent {
+        fabric_ticket: config.fabric_ticket,
+        fabric_hub: config.fabric_hub,
+    })
+}
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;

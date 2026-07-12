@@ -55,6 +55,14 @@ pub(crate) struct RuntimeConfig {
     /// only when the artifact ships one and its probe succeeds; missing
     /// means true.
     pub(crate) accelerated_detection: bool,
+    /// Fabric enrollment ticket (criterion C6/C10). Inert scaffold: present
+    /// on the config surface with a sane default (absent) so every shape
+    /// shows the knob; not yet wired to any fabric client behavior.
+    pub(crate) fabric_ticket: Option<String>,
+    /// Whether this node embeds the fabric hub (criterion C10). Sane
+    /// default false — no silent new network surface on existing installs.
+    /// Inert scaffold: not yet wired to any hub behavior.
+    pub(crate) fabric_hub: bool,
 }
 
 /// Per-camera entry as it appears in TOML/JSON config files.
@@ -98,6 +106,8 @@ struct PartialConfig {
     recognition_covered_classes: Option<Vec<String>>,
     hardware_decoding: Option<bool>,
     accelerated_detection: Option<bool>,
+    fabric_ticket: Option<String>,
+    fabric_hub: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -168,6 +178,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             recognition_covered_classes: None,
             hardware_decoding: cli.hardware_decoding,
             accelerated_detection: cli.accelerated_detection,
+            // Fabric knobs are not exposed as CLI flags; they come from a
+            // config file, options.json, or env vars.
+            fabric_ticket: None,
+            fabric_hub: None,
         },
     );
     merge(&mut partial, env_overrides()?);
@@ -210,6 +224,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         "detector_sample_frames",
     )?;
     let detector_stationary_interval_secs = partial.detector_stationary_interval_secs.unwrap_or(0);
+    // Fabric knobs: absent ticket, hub embedding defaults off (criterion
+    // C10 — every knob has a sane default, works with nothing provided).
+    let fabric_ticket = partial.fabric_ticket;
+    let fabric_hub = partial.fabric_hub.unwrap_or(false);
 
     // MQTT broker: present when a host is configured.
     let mqtt = partial.mqtt_host.map(|host| MqttConfig {
@@ -292,6 +310,8 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         // passed probe, fall back visibly).
         hardware_decoding: partial.hardware_decoding.unwrap_or(true),
         accelerated_detection: partial.accelerated_detection.unwrap_or(true),
+        fabric_ticket,
+        fabric_hub,
     })
 }
 
@@ -576,6 +596,8 @@ fn env_overrides() -> Result<PartialConfig, String> {
         service_id: std::env::var("VIGIL_SERVICE_ID").ok(),
         hardware_decoding: env_intent_bool("VIGIL_HARDWARE_DECODING")?,
         accelerated_detection: env_intent_bool("VIGIL_ACCELERATED_DETECTION")?,
+        fabric_ticket: std::env::var("VIGIL_FABRIC_TICKET").ok(),
+        fabric_hub: env_intent_bool("VIGIL_FABRIC_HUB")?,
         // Multi-camera list is not configurable via env vars; comes from config file only.
         cameras: None,
     })
@@ -662,6 +684,12 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     }
     if source.accelerated_detection.is_some() {
         target.accelerated_detection = source.accelerated_detection;
+    }
+    if source.fabric_ticket.is_some() {
+        target.fabric_ticket = source.fabric_ticket;
+    }
+    if source.fabric_hub.is_some() {
+        target.fabric_hub = source.fabric_hub;
     }
 }
 

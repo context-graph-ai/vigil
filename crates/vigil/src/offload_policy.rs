@@ -153,16 +153,16 @@ pub fn render_offload_decision_receipt(decision: &Decision) -> String {
 /// [`render_remote_detection_receipt`], so every fabric receipt line stays
 /// one vocabulary (criterion C7) by construction: there is exactly one
 /// function per line shape, never a per-surface reimplementation.
-pub fn render_offload_fallback_receipt(_why: &str) -> String {
-    todo!("render offload-fallback=local why=<lease-expired|deadline> (C5)")
+pub fn render_offload_fallback_receipt(why: &str) -> String {
+    format!("offload-fallback=local why={why}")
 }
 
 /// Render one remote-detection provenance line (criterion C7): every
 /// remotely-executed detection's node + backend, in the ONE shape stats/
 /// doctor/health all print — never a per-surface reimplementation, so
 /// divergence between surfaces is structurally impossible.
-pub fn render_remote_detection_receipt(_node_id: &str, _backend: &str) -> String {
-    todo!("render node=<node_id> backend=<backend> (C7)")
+pub fn render_remote_detection_receipt(node_id: &str, backend: &str) -> String {
+    format!("node={node_id} backend={backend}")
 }
 
 /// The IDENTICAL provenance line rendered by every operator surface that
@@ -174,10 +174,11 @@ pub fn render_remote_detection_receipt(_node_id: &str, _backend: &str) -> String
 /// surface that grew its own per-surface formatting instead (criterion
 /// C7's "one vocabulary" requirement, USR-10/AGT-12).
 pub fn render_remote_detection_receipt_for_every_surface(
-    _node_id: &str,
-    _backend: &str,
+    node_id: &str,
+    backend: &str,
 ) -> [String; 3] {
-    todo!("stats/doctor/health each call render_remote_detection_receipt, nothing else (C7)")
+    let line = render_remote_detection_receipt(node_id, backend);
+    [line.clone(), line.clone(), line]
 }
 
 /// The runtime's raw, LIFETIME queue counters — the same numbers already
@@ -223,12 +224,40 @@ impl WindowedPressureTracker {
     /// Feed one lifetime snapshot; returns the windowed
     /// [`DetectorQueueSnapshot`] `decide` should be called with for this
     /// observation.
-    pub fn observe(&mut self, _lifetime: LifetimeQueueSnapshot) -> DetectorQueueSnapshot {
-        todo!(
-            "compute dropped/dropped_motion_positive_frames as GROWTH over the last \
-             drop_growth_window observations, never the lifetime total (the runtime-wiring \
-             NAMED WORK ITEM)"
-        )
+    ///
+    /// The baseline is the OLDEST retained observation (up to `window`
+    /// observations back), never the immediately-previous one and never a
+    /// running lifetime origin: `dropped`/`dropped_motion_positive_frames`
+    /// are this observation's lifetime total minus that baseline's —
+    /// growth over the window, not since process start. `degraded` is
+    /// likewise derived from that same windowed growth (never passed
+    /// through from the lifetime snapshot's own possibly-sticky flag), so a
+    /// node recovers to `KeepLocal` once growth has genuinely stopped for a
+    /// full window — even though the lifetime counters never reset to
+    /// zero. `depth`/`capacity` pass through as instantaneous values.
+    pub fn observe(&mut self, lifetime: LifetimeQueueSnapshot) -> DetectorQueueSnapshot {
+        let baseline = self.history.front().copied().unwrap_or(lifetime);
+        let dropped_growth = lifetime
+            .dropped_total
+            .saturating_sub(baseline.dropped_total);
+        let dmpf_growth = lifetime
+            .dropped_motion_positive_frames_total
+            .saturating_sub(baseline.dropped_motion_positive_frames_total);
+
+        self.history.push_back(lifetime);
+        while self.history.len() > self.window as usize {
+            self.history.pop_front();
+        }
+
+        DetectorQueueSnapshot {
+            depth: lifetime.depth,
+            capacity: lifetime.capacity,
+            queued: lifetime.queued_total,
+            dropped: dropped_growth,
+            coalesced: lifetime.coalesced_total,
+            degraded: dropped_growth > 0 || dmpf_growth > 0,
+            dropped_motion_positive_frames: dmpf_growth,
+        }
     }
 }
 

@@ -1105,7 +1105,10 @@ fn decode_mp4_file(path: &Path) -> Result<DecodedVideoSegment, String> {
     decode_encoded_units(VideoCodec::H264, encoded_units, fps)
 }
 
-fn decode_encoded_units(
+/// Widened to `pub(crate)` for the fabric detector-work executor
+/// (`crate::fabric::DetectorWorkExecutor`), which decodes a claimed job's
+/// resolved `encoded_units` blob the same way a local capture session does.
+pub(crate) fn decode_encoded_units(
     codec: VideoCodec,
     encoded_units: Vec<Vec<u8>>,
     fps: f64,

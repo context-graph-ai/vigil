@@ -179,3 +179,86 @@ pub fn render_remote_detection_receipt_for_every_surface(
 ) -> [String; 3] {
     todo!("stats/doctor/health each call render_remote_detection_receipt, nothing else (C7)")
 }
+
+/// The runtime's raw, LIFETIME queue counters — the same numbers already
+/// rendered on the `detector-queue=` stats line (`runtime.rs`) plus the
+/// separate lifetime `dropped-motion-positive-frames=` line
+/// (`detection_accel.rs`). These never feed [`decide`] directly: a single
+/// historical drop would make offload sticky forever (the runtime-wiring
+/// NAMED WORK ITEM — see the working doc). [`WindowedPressureTracker`]
+/// turns this into the WINDOWED [`DetectorQueueSnapshot`] `decide` actually
+/// consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifetimeQueueSnapshot {
+    pub depth: u64,
+    pub capacity: u64,
+    pub queued_total: u64,
+    pub dropped_total: u64,
+    pub coalesced_total: u64,
+    pub degraded: bool,
+    pub dropped_motion_positive_frames_total: u64,
+}
+
+/// Turns the runtime's lifetime counters into the WINDOWED
+/// [`DetectorQueueSnapshot`] the offload policy consumes: `dropped` and
+/// `dropped_motion_positive_frames` become growth over the configured
+/// `drop_growth_window` observations, never the raw lifetime total — so a
+/// node recovers to `KeepLocal` once pressure genuinely subsides, even
+/// though the lifetime totals stay nonzero forever. `depth`/`capacity`/
+/// `degraded` pass through as instantaneous values (already
+/// window-neutral).
+pub struct WindowedPressureTracker {
+    window: u32,
+    history: std::collections::VecDeque<LifetimeQueueSnapshot>,
+}
+
+impl WindowedPressureTracker {
+    pub fn new(window: u32) -> Self {
+        Self {
+            window: window.max(1),
+            history: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Feed one lifetime snapshot; returns the windowed
+    /// [`DetectorQueueSnapshot`] `decide` should be called with for this
+    /// observation.
+    pub fn observe(&mut self, _lifetime: LifetimeQueueSnapshot) -> DetectorQueueSnapshot {
+        todo!(
+            "compute dropped/dropped_motion_positive_frames as GROWTH over the last \
+             drop_growth_window observations, never the lifetime total (the runtime-wiring \
+             NAMED WORK ITEM)"
+        )
+    }
+}
+
+/// The runtime's per-segment offload decision point (criterion C2 wiring,
+/// `runtime.rs:879`): call this INSTEAD OF `detector.detect_segment`
+/// directly. When the decision is `KeepLocal`, the caller must still run
+/// its own local `detect_segment`; when `Offload`, the caller must submit
+/// instead and must NEVER also run local detection for that same segment.
+/// With `remotes` always empty (no fabric configured), this must behave
+/// byte-identically to today: always `KeepLocal`, no receipts, no decision
+/// lines.
+pub struct RuntimeOffloadSeam {
+    tracker: WindowedPressureTracker,
+    config: OffloadPolicyConfig,
+}
+
+impl RuntimeOffloadSeam {
+    pub fn new(config: OffloadPolicyConfig) -> Self {
+        Self {
+            tracker: WindowedPressureTracker::new(config.drop_growth_window),
+            config,
+        }
+    }
+
+    pub fn decide_for_segment(
+        &mut self,
+        lifetime: LifetimeQueueSnapshot,
+        remotes: &[RemoteCapability],
+    ) -> Decision {
+        let snapshot = self.tracker.observe(lifetime);
+        decide(snapshot, remotes, &self.config)
+    }
+}

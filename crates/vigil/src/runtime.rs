@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use crate::config;
 #[cfg(test)]
 use crate::detection_accel::select_detection_acceleration;
-use crate::detection_accel::select_detection_acceleration_recording;
+use crate::detector::Detector;
 use crate::health::{HealthServer, HealthState, HealthStatus};
 use crate::live_read;
 use crate::media_pipeline;
@@ -607,11 +607,64 @@ pub fn start_rtsp_probe(
             // always means an accelerated detector actually runs, and any
             // fallback selection always means the CPU detector runs, even
             // with the accel feature compiled in.
-            let selection = select_detection_acceleration_recording(
+            // C12 live promotion: a deferred handle the (late-fired) promote
+            // closure swaps once the worker's detector is built below. The
+            // closure loads the accelerated detector through the SAME load path
+            // used at initial construction and swaps the live handle, so a cold
+            // compile that finishes after the startup deadline upgrades the
+            // running detector without a restart.
+            #[cfg(feature = "detect-burn-wgpu")]
+            let promotable_slot: Arc<
+                std::sync::OnceLock<Arc<crate::detector::PromotableDetector>>,
+            > = Arc::new(std::sync::OnceLock::new());
+            #[cfg(feature = "detect-burn-wgpu")]
+            let selection = {
+                let slot = Arc::clone(&promotable_slot);
+                let promote_model_path = config.detector_model_path.clone();
+                let promote_recognition = config.recognition.clone();
+                let promote = move || -> Result<(), String> {
+                    let accelerated: Box<dyn crate::detector::Detector> = if promote_recognition
+                        .enabled
+                    {
+                        yolox_detector::load_accelerated_detector_with_classes(
+                            promote_model_path.as_deref(),
+                            &crate::recognition::covered_class_indices(&promote_recognition),
+                        )
+                        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)?
+                    } else {
+                        yolox_detector::load_accelerated_detector(promote_model_path.as_deref())
+                            .map(|detector| {
+                                Box::new(detector) as Box<dyn crate::detector::Detector>
+                            })?
+                    };
+                    let handle = slot.get().ok_or_else(|| {
+                        "promotable detector handle not initialised before late promotion"
+                            .to_string()
+                    })?;
+                    handle.promote(accelerated);
+                    println!(
+                        "detection_promoted_live backend={}",
+                        crate::detection_accel::ACCELERATED_DETECTION_BACKEND
+                    );
+                    Ok(())
+                };
+                crate::detection_accel::spawn_detection_probe_with_promotion(
+                    config.accelerated_detection,
+                    &config.detector_model_id,
+                    yolox_detector::MODEL_INPUT_SHAPE,
+                    crate::detection_accel::YoloxForwardProbe::new(
+                        &config.detector_model_id,
+                        yolox_detector::MODEL_INPUT_SHAPE,
+                    ),
+                    Arc::clone(&accel),
+                    promote,
+                )
+            };
+            #[cfg(not(feature = "detect-burn-wgpu"))]
+            let selection = crate::detection_accel::select_detection_acceleration(
                 config.accelerated_detection,
                 &config.detector_model_id,
                 yolox_detector::MODEL_INPUT_SHAPE,
-                Arc::clone(&accel),
             );
             let receipt = selection.receipt;
             let accelerated_selected =
@@ -713,6 +766,17 @@ pub fn start_rtsp_probe(
                     None
                 }
             };
+            // Wrap the worker's detector in the swappable handle so a late
+            // acceleration probe can promote it live; register it with the
+            // deferred slot the promote closure reads. The late recorder only
+            // fires after the startup deadline (>= 60 s), long after this set.
+            let detector: Option<Arc<crate::detector::PromotableDetector>> =
+                detector.map(|detector| {
+                    let handle = Arc::new(crate::detector::PromotableDetector::new(detector));
+                    #[cfg(feature = "detect-burn-wgpu")]
+                    let _ = promotable_slot.set(Arc::clone(&handle));
+                    handle
+                });
             let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
                 .map(|capacity| capacity.max(1) as usize)
                 .unwrap_or(DETECTOR_QUEUE_CAPACITY);

@@ -9,18 +9,18 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::OnceLock;
 #[cfg(feature = "detect-burn-wgpu")]
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 #[cfg(feature = "detect-burn-wgpu")]
 use std::thread;
 #[cfg(feature = "detect-burn-wgpu")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+#[cfg(feature = "detect-burn-wgpu")]
+use crate::acceleration::AccelerationState;
 use crate::acceleration::{
-    AccelStage, AccelerationReceipt, AccelerationState, ActionKind, EvidenceKind, FailureCode,
-    ProbeStatus,
+    AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
 };
 
 pub const CPU_DETECTION_BACKEND: &str = "burn-cpu";
@@ -236,35 +236,6 @@ pub fn select_detection_acceleration(
     )
 }
 
-/// Production startup entry: builds the real forward probe for this build and,
-/// under the accelerated feature, runs it through the late-recording spawn
-/// variant so a cold compile that outlives the receipt deadline still records
-/// its true outcome into `accel` (which `/health`, `vigil stats`, and the
-/// doctor render). A software-only build has no accelerated backend and nothing
-/// to record late, so it returns the honest not-compiled selection.
-pub fn select_detection_acceleration_recording(
-    accelerated_detection: bool,
-    model_id: &str,
-    input_shape: &str,
-    accel: Arc<AccelerationState>,
-) -> DetectionAccelerationSelection {
-    #[cfg(feature = "detect-burn-wgpu")]
-    {
-        spawn_detection_probe_with_late_recording(
-            accelerated_detection,
-            model_id,
-            input_shape,
-            YoloxForwardProbe::new(model_id, input_shape),
-            accel,
-        )
-    }
-    #[cfg(not(feature = "detect-burn-wgpu"))]
-    {
-        let _ = accel;
-        select_detection_acceleration(accelerated_detection, model_id, input_shape)
-    }
-}
-
 pub fn select_detection_acceleration_with_probe<P: DetectionForwardProbe>(
     accelerated_detection: bool,
     model_id: &str,
@@ -430,24 +401,30 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
     }
 }
 
-/// Runs the forward probe under a deadline, but NEVER abandons a slow probe:
-/// when the deadline expires it returns the honest fallback-now selection
-/// immediately (so camera startup is never blocked on a cold shader compile),
-/// while the probe thread runs to its REAL outcome and records that outcome
-/// into `accel` — the receipt store `/health`, `vigil stats`, and the doctor
-/// render. A late PASS records an Active receipt whose action tells the operator
-/// the GPU is verified usable and accelerated detection arrives on the next
-/// start (never merely "raise the deadline"); a late FAIL records its real
-/// classification. Hot-swapping the already-running CPU detector is a ledgered
-/// follow-up and is deliberately not done here.
+/// Runs the forward probe under a deadline, but NEVER abandons a slow probe,
+/// and PROMOTES the running detector live on a late PASS (C12). When the
+/// deadline expires it returns the honest fallback-now selection immediately
+/// (so camera startup is never blocked on a cold shader compile); the probe
+/// thread runs on to its REAL outcome, and on a valid late PASS the late
+/// recorder calls `promote` (the runtime's live detector swap) and, only if
+/// that swap succeeds, records an Active receipt into `accel` naming the
+/// accelerated backend the workers now run. A promotion that fails, or a late
+/// FAIL/timeout, leaves CPU standing with its honest classification — `promote`
+/// is never called on a non-PASS, and no Active receipt is ever recorded
+/// without the swap having succeeded. Doctor stays on the bounded variant.
 #[cfg(feature = "detect-burn-wgpu")]
-pub fn spawn_detection_probe_with_late_recording<P: DetectionForwardProbe>(
+pub fn spawn_detection_probe_with_promotion<P, F>(
     accelerated_detection: bool,
     model_id: &str,
     input_shape: &str,
     probe: P,
     accel: Arc<AccelerationState>,
-) -> DetectionAccelerationSelection {
+    promote: F,
+) -> DetectionAccelerationSelection
+where
+    P: DetectionForwardProbe,
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
     if !accelerated_detection {
         let mut receipt = base_detection_receipt(model_id, input_shape, false);
         receipt.probe_status = ProbeStatus::Disabled;
@@ -459,7 +436,6 @@ pub fn spawn_detection_probe_with_late_recording<P: DetectionForwardProbe>(
 
     let (tx, rx) = mpsc::channel();
     let mut probe = probe;
-    let probe_started = Instant::now();
     thread::spawn(move || {
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe.run_forward_probe()));
@@ -468,41 +444,86 @@ pub fn spawn_detection_probe_with_late_recording<P: DetectionForwardProbe>(
 
     let probe_deadline = detection_probe_deadline();
     match rx.recv_timeout(probe_deadline) {
-        Ok(outcome) => classify_forward_probe_selection(outcome, model_id, input_shape, None),
+        // In time: a valid PASS is Active NOW; the runtime loads the accelerated
+        // detector directly from this selection, so no live promotion is needed
+        // and `promote` is dropped unused.
+        Ok(outcome) => classify_forward_probe_selection(outcome, model_id, input_shape),
         Err(mpsc::RecvTimeoutError::Timeout) => {
             // The probe is still running its cold compile. Return the honest
             // fallback-now so startup proceeds, and hand the live channel to a
-            // late recorder that awaits the probe's true outcome, times it from
-            // the probe's start, and records it with that measured truth.
+            // late recorder that awaits the probe's true outcome, promotes on a
+            // valid PASS, and records the moved-together receipt.
             let accel_for_late = Arc::clone(&accel);
             let model_id_owned = model_id.to_string();
             let input_shape_owned = input_shape.to_string();
             thread::spawn(move || {
                 if let Ok(outcome) = rx.recv() {
-                    let elapsed = probe_started.elapsed();
-                    let late = classify_forward_probe_selection(
+                    let receipt = classify_late_outcome_and_promote(
                         outcome,
                         &model_id_owned,
                         &input_shape_owned,
-                        Some(elapsed),
+                        promote,
                     );
-                    accel_for_late.record(late.receipt);
+                    accel_for_late.record(receipt);
                 }
             });
             timeout_fallback_selection(model_id, input_shape, probe_deadline)
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             // The probe thread vanished without sending (should not happen —
-            // the panic is caught and still sent). No late outcome is coming.
+            // the panic is caught and still sent). No late outcome is coming;
+            // `promote` is dropped without being called.
             timeout_fallback_selection(model_id, input_shape, probe_deadline)
         }
     }
 }
 
-/// The immediate "fallback for now" selection the late-recording probe returns
-/// when the deadline expires while the probe keeps running: an honest probe
-/// timeout that classifies fallback but tells the operator the probe is still
-/// working and acceleration will arrive on the next start if it succeeds.
+/// Classifies a late probe outcome and, only for a valid-HW PASS, performs the
+/// live detector promotion. On a successful swap the Active receipt is stamped
+/// with the live-promotion action + evidence; a failed swap records the honest
+/// CPU-standing fallback (never an accelerated claim the workers do not run);
+/// every non-PASS outcome records its real classification and never promotes.
+#[cfg(feature = "detect-burn-wgpu")]
+fn classify_late_outcome_and_promote<F>(
+    outcome: std::thread::Result<DetectionForwardProbeOutcome>,
+    model_id: &str,
+    input_shape: &str,
+    promote: F,
+) -> AccelerationReceipt
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let mut receipt = classify_forward_probe_selection(outcome, model_id, input_shape).receipt;
+    // Only a valid-HW PASS (Active + hardware-accelerated) is promotable.
+    if receipt.probe_status == ProbeStatus::Active && receipt.hardware_accelerated {
+        match promote() {
+            Ok(()) => {
+                // The live swap succeeded: the workers now run the accelerated
+                // detector, so the Active receipt is honest — stamp the
+                // late-promotion action + evidence.
+                receipt.action_kind = ActionKind::NoAction;
+                receipt.action_payload = Some(promoted_pass_action());
+                receipt
+                    .evidence_fields
+                    .insert("promotion".to_string(), "late".to_string());
+                receipt
+            }
+            Err(error) => {
+                // The probe passed but the live swap failed: the workers still
+                // run CPU, so the receipt must NOT claim the accelerated
+                // backend. Record the honest CPU-standing fallback.
+                promotion_failed_receipt(model_id, input_shape, error)
+            }
+        }
+    } else {
+        receipt
+    }
+}
+
+/// The immediate "fallback for now" selection returned when the deadline
+/// expires while the probe keeps running: an honest probe timeout that
+/// classifies fallback while the live probe continues toward a possible
+/// promotion.
 #[cfg(feature = "detect-burn-wgpu")]
 fn timeout_fallback_selection(
     model_id: &str,
@@ -515,7 +536,7 @@ fn timeout_fallback_selection(
     receipt.evidence_fields.insert(
         "probe_error".to_string(),
         format!(
-            "timed out after {:.1}s; a slow GPU cold start (first shader compile, model load) can exceed the probe window - the probe keeps running and accelerated detection will be active on the next start if it succeeds",
+            "timed out after {:.1}s; a slow GPU cold start (first shader compile, model load) can exceed the probe window - the probe keeps running and detection is promoted live if it passes",
             probe_deadline.as_secs_f64()
         ),
     );
@@ -527,45 +548,49 @@ fn timeout_fallback_selection(
     }
 }
 
-/// The measured-truth action for a probe that PASSED after the startup
-/// deadline. It reports the probe's ACTUAL completion time and recommends
-/// raising the deadline option to at least a value derived from it — never the
-/// unconditional "active on the next start" promise, which is false on a box
-/// whose warm start still exceeds the default deadline. The GPU is verified
-/// usable either way.
+/// The action for a probe that PASSED after the startup deadline and was
+/// PROMOTED live: detection was promoted after the deadline and is now active
+/// with no restart and no knob to raise. Never the pre-promotion wording.
 #[cfg(feature = "detect-burn-wgpu")]
-fn late_pass_action(elapsed: Duration) -> String {
-    let measured = elapsed.as_secs_f64();
-    let recommended = recommended_deadline_secs(elapsed);
-    format!(
-        "the GPU forward probe completed in {measured:.1}s, past the startup deadline: the GPU is \
-         verified usable. To reach accelerated detection at startup, set the add-on option \
-         detection_probe_deadline_secs (env VIGIL_DETECTION_PROBE_DEADLINE_SECS) to at least \
-         {recommended}s and restart."
-    )
+fn promoted_pass_action() -> String {
+    "detection was promoted to the accelerated backend after the startup deadline; accelerated \
+     detection is now active. No action required."
+        .to_string()
 }
 
-/// A sane deadline recommendation strictly above the measured completion time:
-/// the next multiple of 30 seconds beyond it, giving headroom for a still-cold
-/// restart. Always >= the measured time.
+/// The honest CPU-standing receipt when the probe PASSED but the live detector
+/// swap failed: the workers still run CPU, so the receipt classifies fallback
+/// and names the swap error — never an accelerated claim the workers do not run.
 #[cfg(feature = "detect-burn-wgpu")]
-fn recommended_deadline_secs(elapsed: Duration) -> u64 {
-    let secs = elapsed.as_secs_f64().ceil() as u64;
-    ((secs / 30) + 1) * 30
+fn promotion_failed_receipt(
+    model_id: &str,
+    input_shape: &str,
+    error: String,
+) -> AccelerationReceipt {
+    let mut receipt = base_detection_receipt(model_id, input_shape, true);
+    receipt.failure_code = FailureCode::ProbeFailed;
+    receipt.evidence_kind = Some(EvidenceKind::UpstreamError);
+    receipt
+        .evidence_fields
+        .insert("promotion_error".to_string(), error);
+    receipt.action_kind = ActionKind::ManualActionRequired;
+    receipt.action_payload = Some(
+        "the accelerated detector passed its probe but could not be loaded for live promotion; \
+         CPU detection continues. Restart to retry accelerated detection."
+            .to_string(),
+    );
+    receipt
 }
 
 /// Classifies a completed forward-probe outcome into a detection selection,
-/// shared by the in-time and the late-recording paths. `late_elapsed` is
-/// `Some(duration)` for a PASS that landed after the startup deadline: its
-/// Active receipt then carries the measured-truth action (verified usable +
-/// measured completion time + a derived deadline recommendation) instead of the
-/// in-time no-action.
+/// shared by the in-time and the late-promotion paths. A valid-HW PASS yields
+/// an Active receipt with no action (the caller stamps the promotion action on
+/// the late path); every fallback outcome carries its honest classification.
 #[cfg(feature = "detect-burn-wgpu")]
 fn classify_forward_probe_selection(
     outcome: std::thread::Result<DetectionForwardProbeOutcome>,
     model_id: &str,
     input_shape: &str,
-    late_elapsed: Option<Duration>,
 ) -> DetectionAccelerationSelection {
     let mut receipt = base_detection_receipt(model_id, input_shape, true);
     let classified = match outcome {
@@ -584,13 +609,6 @@ fn classify_forward_probe_selection(
                 .evidence_fields
                 .insert("forward_probe".to_string(), "passed".to_string());
             if detection_hardware_claim_is_valid(&receipt) {
-                if let Some(elapsed) = late_elapsed {
-                    // A late PASS reports measured truth: the GPU is verified,
-                    // the probe took this long, and the deadline must be raised
-                    // to at least a derived figure (no hot-swap of the
-                    // already-running CPU detector).
-                    receipt.action_payload = Some(late_pass_action(elapsed));
-                }
                 ACCELERATED_DETECTION_BACKEND
             } else {
                 // A software Vulkan adapter (llvmpipe/lavapipe): not hardware

@@ -320,12 +320,20 @@ assert_acceleration_receipt_block() {
     fi
   fi
   if [[ "$header" == "[detect.acceleration]" ]]; then
+    # The shipped add-on carries the accelerated detector with live promotion:
+    # a Vulkan-capable box whose cold compile outlives the startup deadline
+    # boots on the honest CPU fallback and PROMOTES to Active once the probe
+    # passes. Both states are truthful; the receipt must be one of them.
+    if [[ "$block" == *"status: active"* ]]; then
+      assert_receipt_field_equals "$id" "$label" "$header" "$block" "active_backend" "burn-wgpu" || return 1
+      assert_receipt_field_equals "$id" "$label" "$header" "$block" "hardware_accelerated" "true" || return 1
+      assert_receipt_field_equals "$id" "$label" "$header" "$block" "failure_code" "none" || return 1
+      assert_receipt_field_nonempty "$id" "$label" "$header" "$block" "selected_device" || return 1
+      return 0
+    fi
     assert_receipt_field_equals "$id" "$label" "$header" "$block" "status" "fallback" || return 1
     assert_receipt_field_equals "$id" "$label" "$header" "$block" "active_backend" "burn-cpu" || return 1
     assert_receipt_field_equals "$id" "$label" "$header" "$block" "hardware_accelerated" "false" || return 1
-    # The shipped add-on binary carries the accelerated detector, so this test
-    # VM's virtualized iGPU (which cannot complete a Vulkan compute probe)
-    # classifies as a probe failure, never a missing backend.
     assert_receipt_field_equals "$id" "$label" "$header" "$block" "failure_code" "probe_failed" || return 1
     for lie in \
       "not in this build" \

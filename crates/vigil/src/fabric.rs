@@ -807,6 +807,9 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
             encoded_units: Vec::new(),
             fps: 0.0,
             observed_at: None,
+            // Immaterial here: `detect_segment` only samples `frames`; this
+            // adapter never re-decodes `encoded_units` (which stays empty).
+            codec: crate::VideoCodec::H264,
         };
         let output = self.detector.detect_segment(
             &segment,

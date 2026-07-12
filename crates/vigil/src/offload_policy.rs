@@ -261,6 +261,42 @@ impl WindowedPressureTracker {
     }
 }
 
+/// This node's fabric enrollment facts, for the ONE `fabric-status` receipt
+/// line every operator surface renders (criterion C7): whether fabric is
+/// running at all, this node's role (`hub`/`edge`), the remote detector
+/// capabilities currently known, and whether any are actually in use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FabricStatusFacts {
+    pub enrolled: bool,
+    pub role: &'static str,
+    pub remote_detectors: Vec<RemoteCapability>,
+    pub in_use: bool,
+}
+
+/// Render the `fabric-status=` line every surface (stats/doctor/health)
+/// prints — the ONE vocabulary (criterion C7): a surface that formatted its
+/// own fabric summary instead of calling this function would diverge, and a
+/// fresh-eyes review can diff this single renderer's callers to catch it.
+pub fn render_fabric_status_receipt(facts: &FabricStatusFacts) -> String {
+    let remotes = facts
+        .remote_detectors
+        .iter()
+        .map(|remote| format!("{}:{}", remote.node_id, remote.backend))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "fabric-status=enrolled={} role={} remote-detectors={} in-use={}",
+        facts.enrolled,
+        facts.role,
+        if remotes.is_empty() {
+            "-".to_string()
+        } else {
+            remotes
+        },
+        facts.in_use
+    )
+}
+
 /// The runtime's per-segment offload decision point (criterion C2 wiring,
 /// `runtime.rs:879`): call this INSTEAD OF `detector.detect_segment`
 /// directly. When the decision is `KeepLocal`, the caller must still run

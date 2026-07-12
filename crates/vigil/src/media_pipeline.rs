@@ -221,6 +221,17 @@ pub(crate) struct DecodedVideoSegment {
     pub(crate) encoded_units: Vec<Vec<u8>>,
     pub(crate) fps: f64,
     pub(crate) observed_at: Option<DateTime<Utc>>,
+    /// The codec `encoded_units` are framed in. Threaded so a fabric offload
+    /// submission (criterion C1) can name the codec a remote worker needs to
+    /// decode the moved `encoded_units` with — the worker's own
+    /// `decode_encoded_units` call is codec-typed, so a wrong tag here is a
+    /// decode failure, never silent misdetection. Only read by the fabric
+    /// offload path (`runtime.rs`, behind the `fabric` feature) — a
+    /// no-feature build never reads it, hence the blanket allow rather than
+    /// a cfg-gated one (the field itself is unconditional, so every build
+    /// carries the same wire/struct shape).
+    #[allow(dead_code)]
+    pub(crate) codec: VideoCodec,
 }
 
 impl DecodedVideoSegment {
@@ -505,6 +516,7 @@ where
                             encoded_units: units,
                             fps: segment_fps,
                             observed_at: segment_observed_at.take(),
+                            codec,
                         })?;
                     }
                 }
@@ -522,6 +534,7 @@ where
                         encoded_units: units,
                         fps: segment_fps,
                         observed_at: segment_observed_at.take(),
+                        codec,
                     })?;
                 }
                 return Err("RTSP stream ended".to_string());
@@ -546,6 +559,7 @@ where
             encoded_units,
             fps: segment_fps,
             observed_at: segment_observed_at.take(),
+            codec,
         })?;
     }
     Ok(())
@@ -1125,6 +1139,7 @@ pub(crate) fn decode_encoded_units(
         encoded_units,
         fps,
         observed_at: None,
+        codec,
     })
 }
 
@@ -1419,6 +1434,7 @@ mod tests {
             encoded_units: vec![b"raw-camera-evidence".to_vec()],
             fps: 6.0,
             observed_at: None,
+            codec: VideoCodec::H264,
         };
 
         write_browser_playable_mp4_clip(&segment, &path)

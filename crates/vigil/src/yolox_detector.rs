@@ -733,6 +733,7 @@ pub(crate) fn synthetic_probe_clip() -> Result<ProbeClip, String> {
         encoded_units: Vec::new(),
         fps: 1.0,
         observed_at: None,
+        codec: media_pipeline::VideoCodec::H264,
     };
     let path = env::temp_dir().join(format!("vigil-detector-probe-{}.mp4", event_seq()));
     media_pipeline::write_browser_playable_mp4_clip(&segment, &path)?;

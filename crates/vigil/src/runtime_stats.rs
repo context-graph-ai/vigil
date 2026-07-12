@@ -60,6 +60,14 @@ pub(crate) struct RuntimeStats {
     /// Detector stage queue: depth/capacity/queued/replaced counters.
     #[serde(default)]
     pub(crate) detector_queue: String,
+    /// Fabric enrollment status (criterion C7): empty when fabric is not
+    /// configured, so this line never appears on an unenrolled node.
+    #[serde(default)]
+    pub(crate) fabric_status: String,
+    /// The ready-to-use join instruction (or, when this node carries no
+    /// hub, the one-line grow instruction) — criterion C6.
+    #[serde(default)]
+    pub(crate) fabric_join: String,
     /// Recent work-graph stage receipts (bounded, newest last).
     #[serde(default)]
     pub(crate) recent_work_receipts: Vec<String>,
@@ -112,6 +120,8 @@ impl Default for RuntimeStats {
             detection_receipt_block: String::new(),
             decode_receipt_blocks: std::collections::BTreeMap::new(),
             detector_queue: String::new(),
+            fabric_status: String::new(),
+            fabric_join: String::new(),
             recent_work_receipts: Vec::new(),
         }
     }
@@ -257,6 +267,12 @@ telemetry-sink=local\n",
     }
     if !stats.detector_queue.is_empty() {
         out.push_str(&format!("detector-queue={}\n", stats.detector_queue));
+    }
+    if !stats.fabric_status.is_empty() {
+        out.push_str(&format!("{}\n", stats.fabric_status));
+    }
+    if !stats.fabric_join.is_empty() {
+        out.push_str(&format!("{}\n", stats.fabric_join));
     }
     for receipt in &stats.recent_work_receipts {
         out.push_str(&format!("work-receipt={receipt}\n"));

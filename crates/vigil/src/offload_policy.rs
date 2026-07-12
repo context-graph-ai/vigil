@@ -145,3 +145,22 @@ pub fn render_offload_decision_receipt(decision: &Decision) -> String {
         ),
     }
 }
+
+/// Render the degraded-never-dead local-fallback receipt (criterion C5):
+/// `offload-fallback=local why=<lease-expired|deadline>`. Named so status/
+/// doctor/stats never guess at the reason — the SAME renderer as
+/// [`render_offload_decision_receipt`] and
+/// [`render_remote_detection_receipt`], so every fabric receipt line stays
+/// one vocabulary (criterion C7) by construction: there is exactly one
+/// function per line shape, never a per-surface reimplementation.
+pub fn render_offload_fallback_receipt(_why: &str) -> String {
+    todo!("render offload-fallback=local why=<lease-expired|deadline> (C5)")
+}
+
+/// Render one remote-detection provenance line (criterion C7): every
+/// remotely-executed detection's node + backend, in the ONE shape stats/
+/// doctor/health all print — never a per-surface reimplementation, so
+/// divergence between surfaces is structurally impossible.
+pub fn render_remote_detection_receipt(_node_id: &str, _backend: &str) -> String {
+    todo!("render node=<node_id> backend=<backend> (C7)")
+}

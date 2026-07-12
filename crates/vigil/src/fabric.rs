@@ -402,8 +402,15 @@ impl PendingOffloads {
     /// Mark `job_id` resolved because a local fallback ran the detection
     /// itself (criterion C5) — any later-arriving remote result for the
     /// same job must discard as late, never double-count.
-    pub fn mark_resolved_by_fallback(&self, _job_id: &str) {
-        todo!("mark the pending offload resolved so a late remote result discards (C4/C5)")
+    pub fn mark_resolved_by_fallback(&self, job_id: &str) {
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .expect("pending offloads lock")
+            .get_mut(job_id)
+        {
+            entry.resolved = true;
+        }
     }
 
     /// Offer a remote `vigil.detector` result for `job_id`. Validates the
@@ -412,14 +419,31 @@ impl PendingOffloads {
     /// (criterion C4).
     pub fn apply_remote_result(
         &self,
-        _job_id: &str,
-        _result: &crate::workgraph::ResultEnvelope,
-        _receipt: &crate::workgraph::StageReceipt,
-        _log: &crate::workgraph::StageReceiptLog,
+        job_id: &str,
+        result: &crate::workgraph::ResultEnvelope,
+        receipt: &crate::workgraph::StageReceipt,
+        log: &crate::workgraph::StageReceiptLog,
     ) -> RemoteResultOutcome {
-        todo!(
-            "validate_result_join against the tracked pending work, apply exactly once, \
-             and discard a late/duplicate result as provenance=discarded-late (C4)"
-        )
+        let mut entries = self.entries.lock().expect("pending offloads lock");
+        let Some(entry) = entries.get_mut(job_id) else {
+            // No tracked pending offload for this job: already applied and
+            // forgotten, or never tracked here — either way, discard.
+            return RemoteResultOutcome::DiscardedLate;
+        };
+        if entry.resolved {
+            // Either a local fallback already ran this segment (C5), or an
+            // earlier remote result already landed — never double-count.
+            return RemoteResultOutcome::DiscardedLate;
+        }
+        match crate::workgraph::validate_result_join(&entry.work, result, Some(receipt)) {
+            Ok(()) => {
+                entry.resolved = true;
+                RemoteResultOutcome::Applied
+            }
+            Err(rejection) => {
+                log.count_rejected_join();
+                RemoteResultOutcome::RejectedJoin(rejection)
+            }
+        }
     }
 }

@@ -20,6 +20,7 @@ mod health;
 mod http_data_plane;
 mod live_read;
 mod media_pipeline;
+pub mod offload_policy;
 mod privilege;
 pub mod recognition;
 mod runtime;

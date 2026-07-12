@@ -60,6 +60,16 @@ gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
 yolox-burn = { git = "https://github.com/tracel-ai/models.git", rev = "ec1b9e42e6692ef2b95f85c4ba783e07cd3d19af", package = "yolox-burn" }
+# Fabric integration (vigil-distributed-compute): the shared contextdb work
+# ledger + iroh transport, consumed directly behind vigil's default-off
+# `fabric` feature (Design decision A — cg's own fabric.rs is work-class-#1
+# glue and would drag the understanding surface in for zero reuse; vigil
+# authors only its payloads/executor/policy, per the placement rule).
+contextdb-server = { path = "../contextdb/crates/contextdb-server", default-features = false, features = [
+  "iroh",
+] }
+contextdb-engine = { path = "../contextdb/crates/contextdb-engine" }
+contextdb-core = { path = "../contextdb/crates/contextdb-core" }
 
 [dependencies]
 context-graph.workspace = true

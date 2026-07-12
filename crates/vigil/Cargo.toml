@@ -53,6 +53,9 @@ gstreamer-video = { workspace = true, optional = true }
 burn-wgpu = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
+contextdb-server = { workspace = true, optional = true }
+contextdb-engine = { workspace = true, optional = true }
+contextdb-core = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -68,6 +71,12 @@ detect-burn-wgpu = ["dep:burn-wgpu", "dep:wgpu", "dep:pollster"]
 # Slow deterministic camera/detector first-light acceptance. Keep this out of
 # the default workspace gate; run with `cargo test-first-light`.
 first-light-acceptance = []
+# Distributed compute fabric (vigil-distributed-compute): embeds
+# contextdb-server's shared work ledger + iroh transport so this vigil node
+# can submit/claim/execute `vigil.detector` jobs with other enrolled nodes.
+# Default-off: a build without this feature links no sync/iroh/ledger code
+# at all (today's behavior, byte-identical).
+fabric = ["dep:contextdb-server", "dep:contextdb-engine", "dep:contextdb-core"]
 
 [dev-dependencies]
 tempfile.workspace = true

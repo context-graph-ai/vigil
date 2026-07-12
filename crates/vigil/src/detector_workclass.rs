@@ -35,6 +35,26 @@ pub const DETECTOR_CLASS_TAG: &str = "class:vigil.detector";
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlobRefPlaceholder(pub String);
 
+/// Fabric-only bridge to the real upstream content-addressed reference
+/// (`contextdb_engine::work_ledger::BlobHash`). Additive, not a type swap:
+/// `BlobRefPlaceholder`'s wire shape (and the pre-existing, unconditional
+/// C1 schema test that constructs/asserts on it directly) is untouched
+/// whether or not the `fabric` feature is enabled — only the fabric submit
+/// path (which actually talks to the ledger) needs the real type, reached
+/// through this conversion.
+#[cfg(feature = "fabric")]
+impl BlobRefPlaceholder {
+    /// This crate's own wire convention: `blake3:<64-hex-chars>`.
+    pub fn from_blob_hash(hash: &contextdb_engine::work_ledger::BlobHash) -> Self {
+        Self(format!("blake3:{}", hash.to_hex()))
+    }
+
+    pub fn to_blob_hash(&self) -> Result<contextdb_engine::work_ledger::BlobHash, String> {
+        let hex = self.0.strip_prefix("blake3:").unwrap_or(&self.0);
+        contextdb_engine::work_ledger::BlobHash::from_hex(hex).map_err(|err| err.to_string())
+    }
+}
+
 /// Wire mirror of [`crate::workgraph::WorkEnvelope`]. The work-graph type
 /// carries no serde derives (it is a process-local identity discipline);
 /// the fabric wire form is a distinct, versioned, serializable shape so a

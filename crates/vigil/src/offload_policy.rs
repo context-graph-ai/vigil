@@ -164,3 +164,18 @@ pub fn render_offload_fallback_receipt(_why: &str) -> String {
 pub fn render_remote_detection_receipt(_node_id: &str, _backend: &str) -> String {
     todo!("render node=<node_id> backend=<backend> (C7)")
 }
+
+/// The IDENTICAL provenance line rendered by every operator surface that
+/// reports a remote detection's node + backend today (`vigil stats`,
+/// `vigil doctor`, `/health`) — order is `[stats, doctor, health]`. Each
+/// surface must call [`render_remote_detection_receipt`] and NOTHING else
+/// for this line, so the three entries are always equal by construction;
+/// this function is the one seam a fresh-eyes review checks to catch a
+/// surface that grew its own per-surface formatting instead (criterion
+/// C7's "one vocabulary" requirement, USR-10/AGT-12).
+pub fn render_remote_detection_receipt_for_every_surface(
+    _node_id: &str,
+    _backend: &str,
+) -> [String; 3] {
+    todo!("stats/doctor/health each call render_remote_detection_receipt, nothing else (C7)")
+}

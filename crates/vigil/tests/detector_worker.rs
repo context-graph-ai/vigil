@@ -31,6 +31,7 @@ use contextdb_server::blob_resolver::BlobService;
 use contextdb_server::transport::iroh::IrohServer;
 use contextdb_server::work_ledger::{PollOutcome, WorkerConfig, poll_and_execute_once};
 use contextdb_server::{FabricIdentity, InProcessBroker, SyncClient, SyncServer};
+use sha2::{Digest, Sha256};
 
 use vigil::DecodedRgbFrame;
 use vigil::detector_workclass::{
@@ -121,6 +122,19 @@ fn encoded_h264_units(frames: usize) -> Vec<Vec<u8>> {
     units
 }
 
+/// The REAL sha256 over a set of encoded (compressed) units, computed the
+/// same way the production path computes it (`runtime.rs::encoded_clip_sha256`
+/// — hash each unit's raw bytes in order): the fixture's clip_sha256 must be
+/// content-faithful so the executor's clip-hash-mismatch guard is exercised
+/// honestly rather than trivially skipped.
+fn real_encoded_clip_sha256(units: &[Vec<u8>]) -> String {
+    let mut hasher = Sha256::new();
+    for unit in units {
+        hasher.update(unit);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 fn wire_envelope(work_id: &str) -> WireWorkEnvelope {
     WireWorkEnvelope {
         work_id: work_id.to_string(),
@@ -179,6 +193,7 @@ fn submit_detector_job(
     submitter: &str,
     blob_hash: Option<&BlobHash>,
     schema_version: u32,
+    clip_sha256: &str,
 ) {
     let placeholder_hash = blob_hash
         .cloned()
@@ -191,7 +206,7 @@ fn submit_detector_job(
     .fps(15.0)
     .sample_frames(4)
     .confidence_threshold(0.5)
-    .clip_sha256("a".repeat(64))
+    .clip_sha256(clip_sha256.to_string())
     .decoded_frames_sha256("b".repeat(64))
     .model_id("spy-backend".to_string())
     .build();
@@ -257,12 +272,14 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
         .expect("bind holder endpoint");
     holder_blob_service.serve_on(&holder_endpoint);
 
+    let real_clip_sha256 = real_encoded_clip_sha256(&encoded_units);
     submit_detector_job(
         &holder_db,
         "job-detect-01",
         &holder_node,
         Some(&hash),
         DETECTOR_SCHEMA_VERSION,
+        &real_clip_sha256,
     );
     within(holder_client.push()).await.expect("holder push");
 
@@ -372,6 +389,11 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
             .expect("output must be the DetectorResult wire payload");
     assert_eq!(wire_result.detector_backend, backend_tag);
     assert_eq!(wire_result.detections.len(), 1);
+    assert_eq!(
+        wire_result.clip_sha256, real_clip_sha256,
+        "the result must carry the same REAL clip hash the job was submitted with, proving the \
+         executor's integrity check accepted the matching content"
+    );
 
     // Exactly-once: a second identical record is a no-op (row count stays 1).
     record_result(
@@ -392,12 +414,17 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
 
     // Adversarial arm: an unknown schema_version fails the job typed, never
     // panics, and never touches blob resolution.
+    // This arm carries NO blob (`blob_hash: None`) — the unsupported
+    // schema_version must fail before the frames blob is ever touched, so
+    // clip_sha256 here names no real content and is never hashed against
+    // anything; the fixed placeholder is honest (there is nothing to fake).
     submit_detector_job(
         &worker_db,
         "job-detect-unsupported",
         &worker_node,
         None,
         DETECTOR_SCHEMA_VERSION + 1,
+        &"a".repeat(64),
     );
     let outcome = within(poll_and_execute_once(
         &worker_client,

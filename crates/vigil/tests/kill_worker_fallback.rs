@@ -145,6 +145,12 @@ fn submit_local_detector_job(
     .fps(15.0)
     .sample_frames(4)
     .confidence_threshold(0.5)
+    // This job carries NO blob_ref input at all (see the doc comment above):
+    // the local-fallback path never fetches or decodes a frames blob, so
+    // there is no real encoded content to hash against — the executor's
+    // clip-hash-mismatch guard is only reached when a blob is actually
+    // present (see detector_worker.rs), so this placeholder is inert by
+    // construction, not a fabricated value standing in for a real one.
     .clip_sha256("a".repeat(64))
     .decoded_frames_sha256("b".repeat(64))
     .model_id("spy-backend".to_string())

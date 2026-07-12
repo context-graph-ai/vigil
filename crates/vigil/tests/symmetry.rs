@@ -132,6 +132,12 @@ fn submit_local_detector_job(db: &Database, job_id: &str, submitter: &str, clip_
     .fps(15.0)
     .sample_frames(4)
     .confidence_threshold(0.5)
+    // This job carries NO blob_ref input (see the doc comment above): the
+    // claim/execute path under test never fetches or decodes a frames blob,
+    // so there is no real encoded content for `clip_sha256` to name — the
+    // executor's clip-hash-mismatch guard only activates when a blob is
+    // actually present (see detector_worker.rs), so the caller-supplied
+    // value here is inert by construction, not a fabricated stand-in.
     .clip_sha256(clip_sha256.to_string())
     .decoded_frames_sha256("b".repeat(64))
     .model_id("spy-backend".to_string())

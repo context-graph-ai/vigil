@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use context_graph::{Embedder, EmbedderConfig, Store, StoreConfig};
+use context_graph::{CgError, Embedder, EmbedderConfig, Store, StoreConfig};
 
 pub(crate) struct OpenStore {
     pub(crate) handle: Store,
@@ -55,6 +55,24 @@ pub(crate) fn open_with_recognition(
     ))
 }
 
+/// Render a store-open failure as a CLI string, classifying a locked store by
+/// the TYPED `CgError::StoreLocked` variant rather than by substring-matching
+/// context-graph's Debug text (which context-graph deliberately stopped
+/// carrying the engine's "database is locked … process" wording when it
+/// introduced the typed variant). The busy-read path (`lib.rs`
+/// `is_database_locked_error`) keys off "database is locked" + the holder pid,
+/// so a locked store must surface both — recovered here from the typed fields,
+/// never guessed from Debug shape.
+fn open_error_message(error: CgError) -> String {
+    match error {
+        CgError::StoreLocked { holder_pid, path } => format!(
+            "database is locked by another process (holder pid {holder_pid}) at {}",
+            path.display()
+        ),
+        other => format!("could not open store through context-graph: {other}"),
+    }
+}
+
 pub(crate) fn open(path: &Path) -> Result<OpenStore, String> {
     let created = !path.exists();
     if let Some(parent) = path.parent()
@@ -72,8 +90,7 @@ pub(crate) fn open(path: &Path) -> Result<OpenStore, String> {
         default_text_embedder: Some(EmbedderConfig::disabled()),
         ..StoreConfig::default()
     };
-    let handle = Store::open(config)
-        .map_err(|error| format!("could not open store through context-graph: {error}"))?;
+    let handle = Store::open(config).map_err(open_error_message)?;
     let trace = handle
         .last_query_trace()
         .map_err(|error| format!("could not read store trace: {error}"))?;

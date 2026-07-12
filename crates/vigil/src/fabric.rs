@@ -17,11 +17,14 @@ use std::sync::atomic::AtomicBool;
 
 use contextdb_engine::Database;
 use contextdb_engine::work_ledger::{ExecutionInputs, JobSnapshot};
-use contextdb_server::work_ledger::{ExecutionVerdict, WorkExecutor};
+use contextdb_server::work_ledger::{ExecutionOutput, ExecutionVerdict, WorkExecutor};
 use contextdb_server::{FabricIdentity, SyncClient};
 
 use crate::DecodedRgbFrame;
-use crate::detector_workclass::{DetectorDetection, WireVideoCodec, WireWorkEnvelope};
+use crate::detector_workclass::{
+    DETECTOR_SCHEMA_VERSION, DetectorDetection, DetectorJob, DetectorResult, WireResultEnvelope,
+    WireVideoCodec, WireWorkEnvelope, decode_length_framed_units,
+};
 use crate::offload_policy::RemoteCapability;
 
 /// The pluggable local-detection seam a fabric worker's job executor calls
@@ -94,14 +97,131 @@ impl<B: FabricDetectorBackend> WorkExecutor for DetectorWorkExecutor<B> {
     fn execute(
         &self,
         _job: &JobSnapshot,
-        _inputs: &ExecutionInputs,
+        inputs: &ExecutionInputs,
         _should_abandon: &dyn Fn() -> bool,
     ) -> ExecutionVerdict {
-        todo!(
-            "decode the ledger-carried metadata chunk + the resolved blob_ref \
-             encoded_units chunk, run backend.detect, and record a DetectorResult \
-             exactly once (criterion C3)"
-        )
+        let started = std::time::Instant::now();
+
+        // inputs arrive as (seq, bytes) pairs mirroring job.input_refs order:
+        // the ledger-carried metadata chunk is always seq 0; an optional
+        // blob_ref frames chunk (resolved by the worker loop's blob service
+        // before this executor ever runs) is seq 1 when the job carries one.
+        let mut ordered = inputs.clone();
+        ordered.sort_by_key(|(seq, _)| *seq);
+
+        let Some((_, metadata_bytes)) = ordered.first() else {
+            return ExecutionVerdict::Failed(
+                "vigil.detector job carries no ledger-carried metadata input".to_string(),
+            );
+        };
+        let metadata_value: serde_json::Value = match serde_json::from_slice(metadata_bytes) {
+            Ok(value) => value,
+            Err(err) => {
+                return ExecutionVerdict::Failed(format!(
+                    "vigil.detector payload metadata is not valid JSON: {err}"
+                ));
+            }
+        };
+
+        // Version-checked BEFORE any blob is touched: an unsupported schema
+        // fails the job typed without ever reaching the frames input.
+        let schema_version = metadata_value
+            .get("schema_version")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        if schema_version != u64::from(DETECTOR_SCHEMA_VERSION) {
+            return ExecutionVerdict::Failed(format!(
+                "unsupported vigil.detector payload schema_version {schema_version} \
+                 (expected {DETECTOR_SCHEMA_VERSION})"
+            ));
+        }
+
+        let job_payload: DetectorJob = match serde_json::from_value(metadata_value) {
+            Ok(payload) => payload,
+            Err(err) => {
+                return ExecutionVerdict::Failed(format!(
+                    "vigil.detector payload metadata malformed: {err}"
+                ));
+            }
+        };
+
+        // A job may carry no frames blob at all (this node's own submission,
+        // executed locally without ever moving bytes — the C5 fallback and
+        // C8 symmetry paths): treat that as zero frames rather than failing.
+        let frames: Vec<DecodedRgbFrame> = match ordered.get(1) {
+            Some((_, encoded_bytes)) => {
+                let units = match decode_length_framed_units(encoded_bytes) {
+                    Ok(units) => units,
+                    Err(err) => {
+                        return ExecutionVerdict::Failed(format!(
+                            "vigil.detector frames blob is malformed: {err}"
+                        ));
+                    }
+                };
+                let codec = match job_payload.codec {
+                    WireVideoCodec::H264 => crate::VideoCodec::H264,
+                    WireVideoCodec::H265 => crate::VideoCodec::H265,
+                };
+                match crate::media_pipeline::decode_encoded_units(codec, units, job_payload.fps.0) {
+                    Ok(segment) => segment.frames,
+                    Err(err) => {
+                        return ExecutionVerdict::Failed(format!(
+                            "vigil.detector frames decode failed: {err}"
+                        ));
+                    }
+                }
+            }
+            None => Vec::new(),
+        };
+
+        let detections = match self.backend.detect(
+            &frames,
+            &job_payload.clip_sha256,
+            job_payload.sample_frames,
+            job_payload.confidence_threshold.0,
+        ) {
+            Ok(detections) => detections,
+            Err(err) => {
+                return ExecutionVerdict::Failed(format!("vigil.detector backend failed: {err}"));
+            }
+        };
+
+        let wall_clock_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let result = DetectorResult {
+            schema_version: DETECTOR_SCHEMA_VERSION,
+            result_envelope: WireResultEnvelope {
+                work_id: job_payload.envelope.work_id.clone(),
+                parent_work_id: job_payload.envelope.parent_work_id.clone(),
+                contributing_work_ids: job_payload.envelope.contributing_work_ids.clone(),
+                stage: job_payload.envelope.stage.clone(),
+                stream_id: job_payload.envelope.stream_id.clone(),
+                result_schema_version: job_payload.envelope.schema_version,
+                receipt_id: uuid::Uuid::now_v7().to_string(),
+            },
+            detections: detections.clone(),
+            detector_backend: self.backend.backend_tag().to_string(),
+            detector_session_id: uuid::Uuid::now_v7().to_string(),
+            model_sha256: self.backend.model_sha256().to_string(),
+            model_forward_sha256: String::new(),
+            detector_nms_sha256: String::new(),
+            result_sha256: String::new(),
+            clip_sha256: job_payload.clip_sha256.clone(),
+        };
+        let output = match serde_json::to_vec(&result) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return ExecutionVerdict::Failed(format!(
+                    "vigil.detector result encode failed: {err}"
+                ));
+            }
+        };
+        let receipt = serde_json::json!({
+            "executor_node_id": self.node_id,
+            "backend": self.backend.backend_tag(),
+            "wall_clock_ms": wall_clock_ms,
+            "detections_count": detections.len(),
+        });
+        ExecutionVerdict::Completed(ExecutionOutput { output, receipt })
     }
 }
 

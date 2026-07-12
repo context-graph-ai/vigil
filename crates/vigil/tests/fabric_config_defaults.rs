@@ -113,8 +113,8 @@ fn all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset() {
         fabric_intent.fabric_ticket, None,
         "fabric_ticket must default absent, never a hardcoded value"
     );
-    assert_eq!(
-        fabric_intent.fabric_hub, false,
+    assert!(
+        !fabric_intent.fabric_hub,
         "fabric_hub must default false — no silent new network surface on existing installs"
     );
 

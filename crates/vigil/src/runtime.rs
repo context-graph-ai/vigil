@@ -91,11 +91,20 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             config.data_dir.display()
         );
     }
-    let server = HealthServer::listen(
+    // Created before the health server binds so `/health` can render the
+    // same fabric-status/fabric-join lines `vigil stats`/`vigil doctor` do
+    // (criterion C7).
+    let stats = RuntimeStatsState::new(&config.data_dir);
+    stats.update(|stats| {
+        stats.health = "ready".to_string();
+        stats.processing_lag_bound_ms = 1.0;
+    });
+    let server = HealthServer::bind(
         config.health_port,
         health.clone(),
         shutdown_flag.clone(),
         Some(accel.clone()),
+        Some(stats.clone()),
     )?;
     // A crash between staging write and cleanup strands files; staging is
     // ephemeral by definition, so sweep it every boot.
@@ -108,11 +117,6 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
             staging_dir.display()
         );
     }
-    let stats = RuntimeStatsState::new(&config.data_dir);
-    stats.update(|stats| {
-        stats.health = "ready".to_string();
-        stats.processing_lag_bound_ms = 1.0;
-    });
 
     // Fabric bring-up (criteria C1-C10): `None` unless fabric_ticket/
     // fabric_hub is configured — every downstream call site below is gated

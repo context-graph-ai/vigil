@@ -606,6 +606,20 @@ pub fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
         report.detection.model_id = Some(config.detector_model_id.clone());
     }
     println!("{}", render_report(&report));
+    // Fabric status/join (criteria C6/C7): read from the SAME persisted
+    // stats snapshot `vigil stats` reads, rendered through the one shared
+    // renderer (`crate::offload_policy::render_fabric_status_receipt`) at
+    // the live node — doctor never re-derives its own fabric summary, so it
+    // structurally cannot diverge from stats/health. Absent when fabric is
+    // not configured (nothing to print), never a guess.
+    if let Some(stats) = crate::runtime_stats::read_snapshot(&config.data_dir) {
+        if !stats.fabric_status.is_empty() {
+            println!("{}", stats.fabric_status);
+        }
+        if !stats.fabric_join.is_empty() {
+            println!("{}", stats.fabric_join);
+        }
+    }
     Ok(())
 }
 

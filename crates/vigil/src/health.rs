@@ -109,20 +109,16 @@ pub(crate) struct HealthServer {
 }
 
 impl HealthServer {
-    pub(crate) fn listen(
-        port: u16,
-        state: HealthState,
-        shutdown: Arc<AtomicBool>,
-        acceleration: Option<Arc<crate::acceleration::AccelerationState>>,
-    ) -> Result<Self, String> {
-        Self::bind(port, state, shutdown, acceleration)
-    }
-
+    /// `stats`, when given, lets `/health` render the SAME fabric-status /
+    /// fabric-join lines `vigil stats`/`vigil doctor` do (criterion C7) —
+    /// read from the live snapshot, never re-derived, so the three surfaces
+    /// structurally cannot disagree.
     pub(crate) fn bind(
         port: u16,
         state: HealthState,
         shutdown: Arc<AtomicBool>,
         acceleration: Option<Arc<crate::acceleration::AccelerationState>>,
+        stats: Option<crate::runtime_stats::RuntimeStatsState>,
     ) -> Result<Self, String> {
         let listener = TcpListener::bind(("0.0.0.0", port))
             .map_err(|error| format!("health port {port} bind failed: {error}"))?;
@@ -132,7 +128,9 @@ impl HealthServer {
         let handle = thread::spawn(move || {
             while !shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => handle_client(stream, &state, acceleration.as_deref()),
+                    Ok((stream, _)) => {
+                        handle_client(stream, &state, acceleration.as_deref(), stats.as_ref())
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(20));
                     }
@@ -156,6 +154,7 @@ fn handle_client(
     mut stream: TcpStream,
     state: &HealthState,
     acceleration: Option<&crate::acceleration::AccelerationState>,
+    stats: Option<&crate::runtime_stats::RuntimeStatsState>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     let mut buffer = [0_u8; 1024];
@@ -227,6 +226,19 @@ fn handle_client(
         for receipt in acceleration.snapshot() {
             body.push('\n');
             body.push_str(&crate::acceleration::render_receipt_block(&receipt));
+        }
+    }
+    // Same fabric-status/fabric-join lines `vigil stats`/`vigil doctor`
+    // print (criterion C7) — read from the live snapshot, never re-derived.
+    if let Some(stats) = stats {
+        let snapshot = stats.snapshot();
+        if !snapshot.fabric_status.is_empty() {
+            body.push('\n');
+            body.push_str(&snapshot.fabric_status);
+        }
+        if !snapshot.fabric_join.is_empty() {
+            body.push('\n');
+            body.push_str(&snapshot.fabric_join);
         }
     }
     write_response(&mut stream, status.liveness_status_code(), &body);

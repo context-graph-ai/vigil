@@ -36,6 +36,12 @@ use vigil::detection_accel::{
 const MODEL_ID: &str = "detector-under-test";
 const INPUT_SHAPE: &str = "1x3x640x640";
 const DEADLINE_ENV: &str = "VIGIL_DETECTION_PROBE_DEADLINE_SECS";
+// The bounded LATE window: how long the late recorder waits for a probe that
+// overran the initial deadline before it gives up and records a terminal
+// "probe did not complete" receipt. Default is generous (far above the VM's
+// ~156s cold compile) so C12's wait-out-the-cold-compile is preserved; the
+// tests set it short to prove the recorder is never silent on an overrun.
+const LATE_ENV: &str = "VIGIL_DETECTION_LATE_PROBE_DEADLINE_SECS";
 
 /// Outlives a short deadline, then passes — the injected stand-in for a real GPU
 /// whose cold shader compile finishes after the receipt deadline.
@@ -119,21 +125,22 @@ fn poll<T>(timeout: Duration, mut attempt: impl FnMut() -> Option<T>) -> Option<
 }
 
 struct EnvGuard {
+    key: &'static str,
     previous: Option<std::ffi::OsString>,
 }
 impl EnvGuard {
-    fn set(value: &str) -> Self {
-        let previous = std::env::var_os(DEADLINE_ENV);
-        unsafe { std::env::set_var(DEADLINE_ENV, value) };
-        Self { previous }
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
     }
 }
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         unsafe {
             match self.previous.take() {
-                Some(value) => std::env::set_var(DEADLINE_ENV, value),
-                None => std::env::remove_var(DEADLINE_ENV),
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -331,4 +338,128 @@ fn late_fail_leaves_cpu_standing_and_never_promotes() {
             "{surface}: a late FAIL must not claim a hardware-accelerated backend"
         );
     }
+}
+
+const LATE_WINDOW_ENV: &str = "VIGIL_DETECTION_LATE_WINDOW_SECS";
+
+struct WindowGuard {
+    previous: Option<std::ffi::OsString>,
+}
+impl WindowGuard {
+    fn set(value: &str) -> Self {
+        let previous = std::env::var_os(LATE_WINDOW_ENV);
+        unsafe { std::env::set_var(LATE_WINDOW_ENV, value) };
+        Self { previous }
+    }
+}
+impl Drop for WindowGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(LATE_WINDOW_ENV, value),
+                None => std::env::remove_var(LATE_WINDOW_ENV),
+            }
+        }
+    }
+}
+
+/// A probe that outlives even the late window — the stand-in for a hung or
+/// leaked GPU path that never reports. The late recorder must still deliver a
+/// terminal receipt to every surface; silence is never an outcome.
+#[test]
+fn overrunning_probe_yields_a_terminal_receipt_within_the_late_window_never_silence() {
+    let _deadline = EnvGuard::set("1");
+    let _window = WindowGuard::set("2");
+    let accel = Arc::new(AccelerationState::new());
+    let promoted = Arc::new(AtomicBool::new(false));
+    let stats_sink = new_sink();
+
+    let promote_flag = Arc::clone(&promoted);
+    let selection = spawn_detection_probe_with_promotion(
+        true,
+        MODEL_ID,
+        INPUT_SHAPE,
+        SlowThenPassProbe {
+            delay: Duration::from_secs(60),
+        },
+        Arc::clone(&accel),
+        move || {
+            promote_flag.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+        capture_into(&stats_sink),
+    );
+    assert_eq!(selection.receipt.probe_status, ProbeStatus::Fallback);
+
+    let health = wait_for_health_receipt(&accel, Duration::from_secs(8), |receipt| {
+        receipt.failure_code != FailureCode::None && receipt.probe_status == ProbeStatus::Fallback
+    })
+    .expect(
+        "an overrunning probe must yield a TERMINAL late receipt on the health surface within \
+         the late window — a silent late recorder leaves the operator staring at the boot \
+         receipt forever",
+    );
+    let stats = wait_for_stats_receipt(&stats_sink, Duration::from_secs(2), |receipt| {
+        receipt.failure_code != FailureCode::None
+    })
+    .expect("the same terminal receipt must reach the stats surface — never silence");
+
+    assert_eq!(health.active_backend, CPU_DETECTION_BACKEND);
+    assert_eq!(stats.active_backend, CPU_DETECTION_BACKEND);
+    assert!(
+        !promoted.load(Ordering::SeqCst),
+        "a probe that never completed must not promote"
+    );
+    let action = health
+        .action_payload
+        .clone()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(
+        action.contains("did not complete") || action.contains("window"),
+        "the terminal receipt must name the truth — the probe did not complete within the late \
+         window: {action}"
+    );
+}
+
+/// An in-time PASS must flow through the SAME single receipt path as a late
+/// outcome: one authority constructs, sinks, and records every detection
+/// receipt regardless of timing — a fast probe must not bypass the stats sink
+/// and become a second, divergent source of truth.
+#[test]
+fn in_time_pass_flows_through_the_single_receipt_path() {
+    let _deadline = EnvGuard::set("30");
+    let accel = Arc::new(AccelerationState::new());
+    let stats_sink = new_sink();
+
+    let selection = spawn_detection_probe_with_promotion(
+        true,
+        MODEL_ID,
+        INPUT_SHAPE,
+        SlowThenPassProbe {
+            delay: Duration::from_millis(50),
+        },
+        Arc::clone(&accel),
+        || Ok(()),
+        capture_into(&stats_sink),
+    );
+
+    assert_eq!(
+        selection.receipt.probe_status,
+        ProbeStatus::Active,
+        "a fast probe still classifies Active in time"
+    );
+    let stats = wait_for_stats_receipt(&stats_sink, Duration::from_secs(4), |receipt| {
+        receipt.probe_status == ProbeStatus::Active
+    })
+    .expect(
+        "the in-time Active receipt must reach the stats sink through the single receipt path — \
+         a bypassing in-time arm is a second authority whose surfaces diverge from the late flow",
+    );
+    assert_eq!(stats.active_backend, ACCELERATED_DETECTION_BACKEND);
+    let health = wait_for_health_receipt(&accel, Duration::from_secs(4), |receipt| {
+        receipt.probe_status == ProbeStatus::Active
+    })
+    .expect("the same in-time receipt must be recorded on the health surface by the single path");
+    assert_eq!(health.active_backend, stats.active_backend);
 }

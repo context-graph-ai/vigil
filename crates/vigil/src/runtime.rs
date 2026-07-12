@@ -918,12 +918,18 @@ pub fn start_rtsp_probe(
                                     });
 
                                 // Offload decision (criterion C2): only
-                                // consulted when fabric is configured; with
-                                // `fabric_for_detector` absent this block
-                                // never runs, so behavior stays byte-
-                                // identical to today (always local).
+                                // consulted when fabric is configured AND
+                                // this source has not opted out of frame
+                                // movement (`fabric_allow_frame_offload`,
+                                // default on — the addon privacy knob); with
+                                // either absent this block never runs, so
+                                // behavior stays byte-identical to today
+                                // (always local).
                                 #[cfg(feature = "fabric")]
-                                if let Some(fabric_state) = fabric_for_detector.as_ref() {
+                                if let Some(fabric_state) = fabric_for_detector
+                                    .as_ref()
+                                    .filter(|_| config.fabric_allow_frame_offload)
+                                {
                                     let counters = detector_queue.counters();
                                     let lifetime = crate::offload_policy::LifetimeQueueSnapshot {
                                         depth: counters.current_depth,

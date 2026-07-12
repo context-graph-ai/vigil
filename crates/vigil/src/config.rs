@@ -63,6 +63,20 @@ pub(crate) struct RuntimeConfig {
     /// default false — no silent new network surface on existing installs.
     /// Inert scaffold: not yet wired to any hub behavior.
     pub(crate) fabric_hub: bool,
+    /// Per-source opt-out (default ON) for moving an ephemeral compressed
+    /// clip of a motion event to a same-tenant fabric node under queue
+    /// pressure (criterion C10 / the addon privacy wording). The owner's
+    /// binding promise — offload becomes automatic on join — requires
+    /// default movement; this is the documented knob to turn it back off
+    /// for one node while keeping fabric enrollment (and claiming OTHER
+    /// nodes' work) otherwise unaffected. Only read by the fabric offload
+    /// path (`runtime.rs`, behind the `fabric` feature) — a no-feature
+    /// build never reads it, hence the blanket allow rather than a
+    /// cfg-gated one (the field itself is unconditional, so config
+    /// resolution/precedence/CLI/env/addon-surface behavior is identical
+    /// across builds).
+    #[allow(dead_code)]
+    pub(crate) fabric_allow_frame_offload: bool,
 }
 
 /// Per-camera entry as it appears in TOML/JSON config files.
@@ -108,6 +122,7 @@ struct PartialConfig {
     accelerated_detection: Option<bool>,
     fabric_ticket: Option<String>,
     fabric_hub: Option<bool>,
+    fabric_allow_frame_offload: Option<bool>,
 }
 
 #[derive(Debug, Default)]
@@ -133,6 +148,7 @@ struct CliOverrides {
     accelerated_detection: Option<bool>,
     fabric_ticket: Option<String>,
     fabric_hub: Option<bool>,
+    fabric_allow_frame_offload: Option<bool>,
 }
 
 /// `<data_root>/fabric.toml` — the fabric enrollment file surface (criterion
@@ -209,13 +225,17 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             recognition_covered_classes: None,
             hardware_decoding: cli.hardware_decoding,
             accelerated_detection: cli.accelerated_detection,
-            // Fabric knobs are deliberately left OUT of this merge (unlike
-            // every other CLI flag above): their precedence is CLI > env >
-            // options.json/fabric.toml, the REVERSE of this merge's
-            // CLI-before-env order — applied explicitly, below, once
-            // `data_dir` (needed for fabric.toml) is resolved.
+            // Fabric enrollment knobs are deliberately left OUT of this
+            // merge (unlike every other CLI flag above): their precedence
+            // is CLI > env > options.json/fabric.toml, the REVERSE of this
+            // merge's CLI-before-env order — applied explicitly, below,
+            // once `data_dir` (needed for fabric.toml) is resolved.
             fabric_ticket: None,
             fabric_hub: None,
+            // The per-source offload opt-out follows the SAME precedence as
+            // hardware_decoding/accelerated_detection above (CLI here, env
+            // last) — it is not a fabric.toml-eligible knob.
+            fabric_allow_frame_offload: cli.fabric_allow_frame_offload,
         },
     );
     merge(&mut partial, env_overrides()?);
@@ -276,6 +296,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         .or(partial.fabric_hub)
         .or(fabric_toml.fabric_hub)
         .unwrap_or(false);
+    // Default ON: the owner's binding promise (automatic offload on join)
+    // requires default movement; this is the documented per-source opt-out
+    // (criterion C10 / the addon privacy wording).
+    let fabric_allow_frame_offload = partial.fabric_allow_frame_offload.unwrap_or(true);
 
     // MQTT broker: present when a host is configured.
     let mqtt = partial.mqtt_host.map(|host| MqttConfig {
@@ -360,6 +384,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         accelerated_detection: partial.accelerated_detection.unwrap_or(true),
         fabric_ticket,
         fabric_hub,
+        fabric_allow_frame_offload,
     })
 }
 
@@ -426,6 +451,10 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
                 cli.fabric_ticket = Some(next_string(&mut iter, "--fabric-ticket")?)
             }
             "--fabric-hub" => cli.fabric_hub = Some(next_bool(&mut iter, "--fabric-hub")?),
+            "--fabric-allow-frame-offload" => {
+                cli.fabric_allow_frame_offload =
+                    Some(next_bool(&mut iter, "--fabric-allow-frame-offload")?)
+            }
             "--help" | "-h" => return Err(run_usage()),
             other => return Err(format!("{other} is not a supported run option")),
         }
@@ -650,6 +679,7 @@ fn env_overrides() -> Result<PartialConfig, String> {
         accelerated_detection: env_intent_bool("VIGIL_ACCELERATED_DETECTION")?,
         fabric_ticket: std::env::var("VIGIL_FABRIC_TICKET").ok(),
         fabric_hub: env_intent_bool("VIGIL_FABRIC_HUB")?,
+        fabric_allow_frame_offload: env_intent_bool("VIGIL_FABRIC_ALLOW_FRAME_OFFLOAD")?,
         // Multi-camera list is not configurable via env vars; comes from config file only.
         cameras: None,
     })
@@ -743,6 +773,9 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.fabric_hub.is_some() {
         target.fabric_hub = source.fabric_hub;
     }
+    if source.fabric_allow_frame_offload.is_some() {
+        target.fabric_allow_frame_offload = source.fabric_allow_frame_offload;
+    }
 }
 
 /// Derive a stable lowercase slug from a human-readable string.
@@ -775,7 +808,7 @@ fn default_options_json_path() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL] [--fabric-ticket TICKET] [--fabric-hub BOOL]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL] [--fabric-ticket TICKET] [--fabric-hub BOOL] [--fabric-allow-frame-offload BOOL]"
         .to_string()
 }
 

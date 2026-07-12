@@ -38,6 +38,7 @@ options:
   accelerated_detection: true
   fabric_ticket: ""
   fabric_hub: false
+  fabric_allow_frame_offload: true
 schema:
   store_path: str
   health_port: int
@@ -61,6 +62,7 @@ schema:
   detection_probe_deadline_secs: int?
   fabric_ticket: str?
   fabric_hub: bool?
+  fabric_allow_frame_offload: bool?
 apparmor: true
 host_network: false
 host_pid: false

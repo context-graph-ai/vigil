@@ -11,3 +11,5 @@ configuration:
     description: "Paste the join ticket printed by another Vigil node's status output here to join its distributed compute fabric, so this node can offload detection work to (or accept offloaded work from) that node under queue pressure. Leave blank to run standalone; a malformed ticket is reported with the fix and this node keeps running standalone."
   fabric_hub:
     description: "Turn this node into the fabric hub that other Vigil nodes join by pasting its ticket. Defaults off, so no new network listener opens on an existing install. Once enabled, this node's status and doctor output print the join ticket to share with other nodes."
+  fabric_allow_frame_offload:
+    description: "Once joined to a fabric, an ephemeral compressed clip of a motion event from THIS camera moves to same-tenant Vigil nodes by default when this node's detector queue is under pressure. Turn this off to keep this camera's clips on this node always, even while still joined (this node can still accept offloaded work from other nodes)."

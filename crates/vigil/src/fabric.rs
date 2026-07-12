@@ -6,11 +6,6 @@
 //! default-off `fabric` feature: a `vigil` build without it links no
 //! sync/iroh/ledger code at all (today's behavior, byte-identical).
 //!
-//! This module is SKELETON ONLY — every function body is `todo!()` pending
-//! the implementation pass. Signatures are fixed here so the RED tests in
-//! this same commit batch (a separate author, per the test wall) can
-//! compile and fail at runtime, never at the type checker.
-
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -19,6 +14,7 @@ use contextdb_engine::Database;
 use contextdb_engine::work_ledger::{ExecutionInputs, JobSnapshot};
 use contextdb_server::work_ledger::{ExecutionOutput, ExecutionVerdict, WorkExecutor};
 use contextdb_server::{FabricIdentity, SyncClient};
+use sha2::{Digest, Sha256};
 
 use crate::DecodedRgbFrame;
 use crate::detector_workclass::{
@@ -158,6 +154,24 @@ impl<B: FabricDetectorBackend> WorkExecutor for DetectorWorkExecutor<B> {
                         ));
                     }
                 };
+
+                // Integrity guard, BEFORE detection: the transport itself is
+                // already BLAKE3-covered upstream (blob_ref content
+                // addressing), so this catches a different class of bug — a
+                // SUBMITTER referencing the wrong blob for a job's metadata.
+                // Recompute the clip hash over the decoded units the same
+                // way the submitter did (`runtime.rs::encoded_clip_sha256`)
+                // and fail the job typed on divergence, never silently
+                // detect over mismatched content.
+                let recomputed_clip_sha256 = encoded_clip_sha256(&units);
+                if recomputed_clip_sha256 != job_payload.clip_sha256 {
+                    return ExecutionVerdict::Failed(format!(
+                        "clip hash mismatch: job metadata names clip_sha256={} but the resolved \
+                         frames blob hashes to {recomputed_clip_sha256}",
+                        job_payload.clip_sha256
+                    ));
+                }
+
                 let codec = match job_payload.codec {
                     WireVideoCodec::H264 => crate::VideoCodec::H264,
                     WireVideoCodec::H265 => crate::VideoCodec::H265,
@@ -604,6 +618,19 @@ impl FabricRuntime {
             .await;
         })
     }
+}
+
+/// The same clip-hash algorithm the submitter uses
+/// (`runtime.rs::encoded_clip_sha256`): hash each encoded unit's raw bytes in
+/// order. Kept as a free function so both the submit path (implicitly, via
+/// the caller-supplied `clip_sha256`) and this executor's integrity guard
+/// stay byte-identical by construction.
+fn encoded_clip_sha256(units: &[Vec<u8>]) -> String {
+    let mut hasher = Sha256::new();
+    for unit in units {
+        hasher.update(unit);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 fn wall_now_ms() -> i64 {

@@ -94,6 +94,9 @@ fn deadline_returns_fallback_now_but_probe_runs_to_completion_and_promotes_on_la
             promote_flag.store(true, Ordering::SeqCst);
             Ok(())
         },
+        // The all-surfaces late-receipt sink (stats + worker provenance); this
+        // test observes the /health surface via `accel`, so it is a no-op here.
+        |_receipt: &vigil::acceleration::AccelerationReceipt| {},
     );
 
     // The immediate receipt is the honest "fallback for now" — startup is never

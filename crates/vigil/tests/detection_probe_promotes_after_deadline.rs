@@ -41,7 +41,6 @@ const DEADLINE_ENV: &str = "VIGIL_DETECTION_PROBE_DEADLINE_SECS";
 // "probe did not complete" receipt. Default is generous (far above the VM's
 // ~156s cold compile) so C12's wait-out-the-cold-compile is preserved; the
 // tests set it short to prove the recorder is never silent on an overrun.
-const LATE_ENV: &str = "VIGIL_DETECTION_LATE_PROBE_DEADLINE_SECS";
 
 /// Outlives a short deadline, then passes — the injected stand-in for a real GPU
 /// whose cold shader compile finishes after the receipt deadline.

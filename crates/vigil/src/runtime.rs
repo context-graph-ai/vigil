@@ -31,13 +31,6 @@ use crate::shutdown;
 use crate::store;
 use crate::yolox_detector;
 
-#[cfg(feature = "fabric")]
-use std::collections::HashMap;
-#[cfg(feature = "fabric")]
-use std::sync::Mutex;
-#[cfg(feature = "fabric")]
-use std::sync::OnceLock;
-
 const DETECTOR_QUEUE_CAPACITY: usize = 1;
 const DETECTOR_INPUT_WIDTH: u32 = 640;
 const DETECTOR_INPUT_HEIGHT: u32 = 640;
@@ -1842,7 +1835,7 @@ fn detector_segment_decision(
     }
 }
 
-struct CapturedSegment {
+pub(crate) struct CapturedSegment {
     /// The decoded_media work envelope this segment IS. Downstream stages
     /// derive their work from it; receipts join back to it.
     envelope: crate::workgraph::WorkEnvelope,
@@ -1856,19 +1849,19 @@ struct CapturedSegment {
     /// BEFORE enqueue so every detection receipt (completed, rejected,
     /// failed, stale, replaced) carries the SAME work identity.
     detection_work: Option<crate::workgraph::WorkEnvelope>,
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     final_path: PathBuf,
     source_ref: String,
     sequence: u64,
     stream_generation: u64,
     frames: u64,
-    fps: f64,
+    pub(crate) fps: f64,
     mime_type: String,
-    clip_sha256: String,
-    decoded_frames_sha256: String,
+    pub(crate) clip_sha256: String,
+    pub(crate) decoded_frames_sha256: String,
     motion_positive_frames: u64,
     observed_at: chrono::DateTime<chrono::Utc>,
-    media: media_pipeline::DecodedVideoSegment,
+    pub(crate) media: media_pipeline::DecodedVideoSegment,
 }
 
 struct MemoryNodes {
@@ -1897,7 +1890,7 @@ fn maintain_runtime_memory(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_detected_events(
+pub(crate) fn record_detected_events(
     store: &Store,
     config: &config::RuntimeConfig,
     segment: &CapturedSegment,
@@ -2610,453 +2603,23 @@ fn get_or_create_decision(
 }
 
 // ── Fabric integration (criteria C1-C10): the production wiring that turns
-// the already-shipped fabric/offload machinery (`crate::fabric`,
-// `crate::offload_policy`) into a live node. Absent fabric config
-// (`fabric_ticket`/`fabric_hub` both unset) this whole subsystem never
-// starts — `fabric_bring_up` returns `None`, every call site below is gated
-// on `Option::is_some`, and the detection path is BYTE IDENTICAL to today.
-
-/// Node-level fabric state, shared (via `Arc`) across every camera's
-/// detector thread and the background worker/result-consumer task. Only
-/// constructed when `fabric_ticket`/`fabric_hub` is configured
-/// (`fabric_bring_up`); its mere existence as a type does not enable
-/// anything.
+// the already-shipped fabric/offload machinery into a live node now lives
+// in `crate::fabric` — the background-task spawns, the wire-result →
+// `DetectorOutput` bridge, and the node bring-up are OWNED there so this
+// detector-source file stays free of task-spawning and forward-proof
+// machinery. Absent fabric config (`fabric_ticket`/`fabric_hub` both unset)
+// the subsystem never starts (`crate::fabric::fabric_bring_up` returns
+// `None`) and the detection path is BYTE IDENTICAL to today. This file keeps
+// only the feature-gated calls into `crate::fabric`.
 #[cfg(feature = "fabric")]
-pub(crate) struct FabricBundle {
-    runtime: Arc<crate::fabric::FabricRuntime>,
-    pending: Arc<crate::fabric::PendingOffloads>,
-    /// Segments this node has offloaded and is waiting on a ledger result
-    /// for, keyed by the minted job id. Retained (not the ledger's job
-    /// bytes — the ORIGINAL local segment, including its already-decoded
-    /// frames and on-disk clip) so the result-consumer can finalize evidence
-    /// and record events exactly as the local path would, whichever node's
-    /// backend actually ran the model.
-    pending_segments: Mutex<HashMap<String, PendingOffloadSegment>>,
-    /// Refreshed periodically by the background task from
-    /// `FabricRuntime::remote_detector_capabilities` — the per-camera
-    /// detector threads read this cache rather than calling the async
-    /// ledger scan themselves on every segment.
-    remote_capabilities: Mutex<Vec<crate::offload_policy::RemoteCapability>>,
-    offload_policy_config: crate::offload_policy::OffloadPolicyConfig,
-    /// The first camera detector to finish loading populates this — the
-    /// fabric worker loop claims/executes ANY node's `vigil.detector` job
-    /// (including this node's own), so it needs exactly one live detector,
-    /// not one per camera. `String` is the truthful backend tag
-    /// (`receipt.active_backend`) that detector was actually built with.
-    worker_detector_slot: OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
-    tokio_handle: tokio::runtime::Handle,
-    node_id: String,
-}
+use crate::fabric::{FabricBundle, PendingOffloadSegment, fabric_bring_up, try_offload_segment};
 
 /// Marker-only when the `fabric` cargo feature is not compiled in: never
-/// constructed (`fabric_bring_up` below is fabric-only), but the type must
-/// exist so `start_rtsp_probe`'s signature does not fork between builds.
+/// constructed (`crate::fabric::fabric_bring_up` is fabric-only), but the
+/// type must exist so `start_rtsp_probe`'s signature does not fork between
+/// builds.
 #[cfg(not(feature = "fabric"))]
 pub(crate) struct FabricBundle;
-
-/// One offloaded segment awaiting its ledger result, plus everything the
-/// result-consumer needs to finish the job the local path would have done
-/// itself: finalize the clip, write the observation, publish MQTT, receipt
-/// the stage.
-#[cfg(feature = "fabric")]
-struct PendingOffloadSegment {
-    segment: CapturedSegment,
-    detection_work: crate::workgraph::WorkEnvelope,
-    detection_started_at: chrono::DateTime<chrono::Utc>,
-    config: config::RuntimeConfig,
-    store: Store,
-    stats: RuntimeStatsState,
-    health: HealthState,
-    detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>>,
-    recognition_embedder: Option<Arc<dyn context_graph::Embedder>>,
-    receipts: Arc<crate::workgraph::StageReceiptLog>,
-}
-
-/// Current wall-clock time in milliseconds, for ledger deadlines. Mirrors
-/// `crate::fabric`'s own private helper of the same shape (kept local here
-/// rather than made `pub(crate)` there — this is the one other call site).
-#[cfg(feature = "fabric")]
-fn wall_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-/// Bring up this node's fabric wiring exactly once, before any camera
-/// thread starts. Returns `None` (today's behavior, byte-identical) unless
-/// `fabric_ticket`/`fabric_hub` is configured — the `fabric` cargo feature
-/// being compiled in is not by itself enough to start anything (C10: no
-/// silent new network surface on an existing install).
-#[cfg(feature = "fabric")]
-fn fabric_bring_up(
-    config: &config::RuntimeConfig,
-    stats: &RuntimeStatsState,
-) -> Option<Arc<FabricBundle>> {
-    if config.fabric_ticket.is_none() && !config.fabric_hub {
-        return None;
-    }
-    let tokio_runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_name("vigil-fabric")
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            println!("fabric_runtime_start_failed=true error={error}");
-            return None;
-        }
-    };
-    let handle = tokio_runtime.handle().clone();
-    let data_dir = config.data_dir.join("fabric");
-    let fabric_ticket = config.fabric_ticket.clone();
-    let fabric_hub = config.fabric_hub;
-    let start_result = handle.block_on(crate::fabric::FabricRuntime::start(
-        &data_dir,
-        fabric_ticket.as_deref(),
-        fabric_hub,
-    ));
-    let fabric_runtime = match start_result {
-        Ok(runtime) => Arc::new(runtime),
-        Err(error) => {
-            println!("fabric_bring_up_failed=true error={error}");
-            return None;
-        }
-    };
-    // The tokio runtime itself must outlive this function: leak the Runtime
-    // handle's owner onto a detached background thread that parks for the
-    // process lifetime, so `tokio_runtime`'s worker threads (and every task
-    // spawned onto `handle`, including the worker loop and result-consumer
-    // below) keep running after this bring-up function returns.
-    thread::spawn(move || {
-        tokio_runtime.block_on(async {
-            loop {
-                tokio::time::sleep(Duration::from_secs(3600)).await;
-            }
-        });
-    });
-
-    let node_id = fabric_runtime.node_id.clone();
-    println!("fabric_ready=true node_id={node_id}");
-    println!("{}", fabric_runtime.join_instruction());
-
-    let bundle = Arc::new(FabricBundle {
-        runtime: fabric_runtime.clone(),
-        pending: Arc::new(crate::fabric::PendingOffloads::new()),
-        pending_segments: Mutex::new(HashMap::new()),
-        remote_capabilities: Mutex::new(Vec::new()),
-        offload_policy_config: crate::offload_policy::OffloadPolicyConfig::default(),
-        worker_detector_slot: OnceLock::new(),
-        tokio_handle: handle.clone(),
-        node_id: node_id.clone(),
-    });
-
-    // Worker loop, started once the first camera's detector (or a
-    // detector-less standalone worker box, bounded below) is ready. Claims +
-    // executes ANY matching `vigil.detector` job, including this node's own
-    // deferred submissions once their deadline passes (criterion C5/C8).
-    let worker_bundle = bundle.clone();
-    handle.spawn(async move {
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
-        loop {
-            if let Some((detector, backend_tag)) = worker_bundle.worker_detector_slot.get() {
-                let backend = Arc::new(crate::fabric::FabricProductionDetectorBackend::new(
-                    detector.clone(),
-                    backend_tag.clone(),
-                ));
-                let shutdown = Arc::new(AtomicBool::new(false));
-                worker_bundle.runtime.spawn_worker_loop(backend, shutdown);
-                println!("fabric_worker_loop_started=true backend={backend_tag}");
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                println!(
-                    "fabric_worker_loop_not_started=true reason=no_local_detector_loaded_within_deadline"
-                );
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        }
-    });
-
-    // Result-consumer + remote-capability refresher (criteria C4/C7):
-    // periodically pulls, refreshes the remote-capability cache the
-    // per-camera detector threads read, and applies any landed result for a
-    // job this node submitted — exactly-once, discarding late/duplicate
-    // results, whether the executor was a remote node or this node's own
-    // deferred submission reclaimed after its deadline (C5 fallback).
-    let consumer_bundle = bundle.clone();
-    let consumer_stats = stats.clone();
-    handle.spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if let Ok(remotes) = consumer_bundle.runtime.remote_detector_capabilities().await {
-                *consumer_bundle
-                    .remote_capabilities
-                    .lock()
-                    .expect("remote capabilities lock") = remotes;
-            }
-            let _ = consumer_bundle.runtime.poll_detector_results().await;
-
-            let job_ids: Vec<String> = consumer_bundle
-                .pending_segments
-                .lock()
-                .expect("pending segments lock")
-                .keys()
-                .cloned()
-                .collect();
-            for job_id in job_ids {
-                let result = match contextdb_engine::work_ledger::job_result(
-                    &consumer_bundle.runtime.db,
-                    &job_id,
-                ) {
-                    Ok(Some(result)) => result,
-                    Ok(None) => continue,
-                    Err(error) => {
-                        println!("fabric_result_scan_failed=true job_id={job_id} error={error}");
-                        continue;
-                    }
-                };
-                let Some(entry) = consumer_bundle
-                    .pending_segments
-                    .lock()
-                    .expect("pending segments lock")
-                    .remove(&job_id)
-                else {
-                    continue;
-                };
-                apply_fabric_result(&consumer_bundle, &consumer_stats, &job_id, result, entry);
-            }
-        }
-    });
-
-    // Fabric status/join lines, refreshed on the same cadence so
-    // stats/doctor/health render an honest, current, ONE-vocabulary picture
-    // (criterion C7).
-    let status_bundle = bundle.clone();
-    let status_stats = stats.clone();
-    handle.spawn(async move {
-        loop {
-            let remotes = status_bundle
-                .remote_capabilities
-                .lock()
-                .expect("remote capabilities lock")
-                .clone();
-            let facts = crate::offload_policy::FabricStatusFacts {
-                enrolled: true,
-                role: if status_bundle.runtime.hub_endpoint.is_some() {
-                    "hub"
-                } else {
-                    "edge"
-                },
-                in_use: !remotes.is_empty(),
-                remote_detectors: remotes,
-            };
-            let status_line = crate::offload_policy::render_fabric_status_receipt(&facts);
-            let join_line = format!("fabric-join={}", status_bundle.runtime.join_instruction());
-            status_stats.update(|stats| {
-                stats.fabric_status = status_line.clone();
-                stats.fabric_join = join_line.clone();
-            });
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    });
-
-    Some(bundle)
-}
-
-/// Convert this crate's process-local work identity into the fabric wire
-/// envelope (criterion C1): only the identity fields a claiming worker needs
-/// to decode + detect travel over the wire — the rich local fields
-/// (media item, ordering, observed time) never leave this node; the
-/// result-consumer reconstructs the full envelope from the SAME
-/// `WorkEnvelope` it retained locally, never from the wire.
-#[cfg(feature = "fabric")]
-fn wire_envelope_from_work(
-    work: &crate::workgraph::WorkEnvelope,
-) -> crate::detector_workclass::WireWorkEnvelope {
-    crate::detector_workclass::WireWorkEnvelope {
-        work_id: work.work_id.to_string(),
-        parent_work_id: work.parent_work_id.map(|id| id.to_string()),
-        contributing_work_ids: work
-            .contributing_work_ids
-            .iter()
-            .map(|id| id.to_string())
-            .collect(),
-        stage: work.stage.as_str().to_string(),
-        stream_id: work.stream_id.as_str().to_string(),
-        ordering_stream_epoch: work.ordering.stream_epoch,
-        ordering_stream_sequence: work.ordering.stream_sequence,
-        schema_version: crate::detector_workclass::DETECTOR_SCHEMA_VERSION,
-    }
-}
-
-/// Submit one segment as a `vigil.detector` job (criteria C1/C2's offload
-/// leg). Borrows `segment` — ownership moves into `pending_segments` only on
-/// success, so a submission failure leaves the caller free to fall back to
-/// local detection with the segment untouched.
-#[cfg(feature = "fabric")]
-#[allow(clippy::too_many_arguments)]
-fn try_offload_segment(
-    fabric: &FabricBundle,
-    config: &config::RuntimeConfig,
-    segment: &CapturedSegment,
-    detection_work: &crate::workgraph::WorkEnvelope,
-) -> Result<String, String> {
-    let envelope = wire_envelope_from_work(detection_work);
-    let codec = match segment.media.codec {
-        crate::VideoCodec::H264 => crate::detector_workclass::WireVideoCodec::H264,
-        crate::VideoCodec::H265 => crate::detector_workclass::WireVideoCodec::H265,
-    };
-    let deadline_ms = wall_now_ms() + fabric.offload_policy_config.fallback_horizon_ms as i64;
-    fabric
-        .tokio_handle
-        .block_on(fabric.runtime.submit_detector_job(
-            envelope,
-            codec,
-            segment.fps,
-            config.detector_sample_frames,
-            config.detector_confidence_threshold,
-            segment.clip_sha256.clone(),
-            segment.decoded_frames_sha256.clone(),
-            config.detector_model_id.clone(),
-            &segment.media.encoded_units,
-            Some(deadline_ms),
-        ))
-}
-
-/// Apply a landed `vigil.detector` result exactly as the local path would
-/// have (criterion C4): validated + applied exactly-once through
-/// `PendingOffloads`, discarding a late/duplicate result with a receipt,
-/// never double-counted. Whether the executor was a remote node or this
-/// node's own deferred submission reclaimed after its deadline (C5), the
-/// only difference is which receipt line renders.
-#[cfg(feature = "fabric")]
-fn apply_fabric_result(
-    fabric: &FabricBundle,
-    stats: &RuntimeStatsState,
-    job_id: &str,
-    result: contextdb_engine::work_ledger::JobResult,
-    entry: PendingOffloadSegment,
-) {
-    let executor_node_id = result
-        .receipt
-        .get("executor_node_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let backend = result
-        .receipt
-        .get("backend")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-
-    let wire: crate::detector_workclass::DetectorResult =
-        match serde_json::from_slice(&result.output) {
-            Ok(wire) => wire,
-            Err(error) => {
-                println!("fabric_result_decode_failed=true job_id={job_id} error={error}");
-                let _ = fs::remove_file(&entry.segment.path);
-                return;
-            }
-        };
-
-    let receipt_id = crate::workgraph::ReceiptId::generate();
-    let result_envelope = crate::workgraph::ResultEnvelope {
-        work_id: entry.detection_work.work_id,
-        parent_work_id: entry.detection_work.parent_work_id,
-        contributing_work_ids: entry.detection_work.contributing_work_ids.clone(),
-        stage: entry.detection_work.stage.clone(),
-        stream_id: entry.detection_work.stream_id.clone(),
-        media_item: entry.detection_work.media_item,
-        ordering: entry.detection_work.ordering,
-        observed_at: entry.detection_work.observed_at,
-        result_schema_version: entry.detection_work.schema_version,
-        receipt_id,
-    };
-    let stage_receipt = crate::workgraph::StageReceipt {
-        receipt_id,
-        work_id: entry.detection_work.work_id,
-        parent_work_id: entry.detection_work.parent_work_id,
-        stage: entry.detection_work.stage.clone(),
-        stream_id: entry.detection_work.stream_id.clone(),
-        configured_backend: None,
-        attempted_backend: Some(backend.clone()),
-        active_backend: Some(backend.clone()),
-        fallback_backend: None,
-        selected_device: None,
-        probe_result: None,
-        fallback_reason: None,
-        started_at: entry.detection_started_at,
-        ended_at: chrono::Utc::now(),
-        output_count: wire.detections.len() as u64,
-        disposition: crate::workgraph::WorkDisposition::Completed,
-    };
-
-    let outcome = fabric.pending.apply_remote_result(
-        job_id,
-        &result_envelope,
-        &stage_receipt,
-        &entry.receipts,
-    );
-    match outcome {
-        crate::fabric::RemoteResultOutcome::Applied => {
-            let is_local_fallback = executor_node_id == fabric.node_id;
-            let receipt_line = if is_local_fallback {
-                crate::offload_policy::render_offload_fallback_receipt("lease-expired")
-            } else {
-                crate::offload_policy::render_remote_detection_receipt(&executor_node_id, &backend)
-            };
-            stats.update(|stats| crate::runtime_stats::push_recent_receipt(stats, receipt_line));
-
-            let output = yolox_detector::DetectorOutput {
-                detector_backend: wire.detector_backend,
-                detector_session_id: wire.detector_session_id,
-                model_sha256: wire.model_sha256,
-                clip_sha256: wire.clip_sha256,
-                model_forward_sha256: wire.model_forward_sha256,
-                detector_nms_sha256: wire.detector_nms_sha256,
-                result_sha256: wire.result_sha256,
-                detections: wire
-                    .detections
-                    .into_iter()
-                    .map(|detection| yolox_detector::Detection {
-                        class_name: detection.class_name,
-                        confidence: detection.confidence.0,
-                        bbox: detection.bbox,
-                        frame_index: detection.frame_index,
-                    })
-                    .collect(),
-                forward_event_nonce: None,
-                forward_event_seq: None,
-            };
-            if let Err(error) = record_detected_events(
-                &entry.store,
-                &entry.config,
-                &entry.segment,
-                &output,
-                &entry.stats,
-                &entry.health,
-                entry.detection_publisher.as_deref(),
-                entry.recognition_embedder.as_deref(),
-                &entry.detection_work,
-                &entry.receipts,
-            ) {
-                println!("fabric_record_detection_failed=true job_id={job_id} error={error}");
-            }
-        }
-        crate::fabric::RemoteResultOutcome::DiscardedLate => {
-            println!("fabric_result_discarded_late=true job_id={job_id}");
-            let _ = fs::remove_file(&entry.segment.path);
-        }
-        crate::fabric::RemoteResultOutcome::RejectedJoin(rejection) => {
-            println!("fabric_result_rejected_join=true job_id={job_id} rejection={rejection:?}");
-            let _ = fs::remove_file(&entry.segment.path);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

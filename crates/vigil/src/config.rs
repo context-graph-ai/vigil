@@ -131,6 +131,37 @@ struct CliOverrides {
     recognition_weights_dir: Option<PathBuf>,
     hardware_decoding: Option<bool>,
     accelerated_detection: Option<bool>,
+    fabric_ticket: Option<String>,
+    fabric_hub: Option<bool>,
+}
+
+/// `<data_root>/fabric.toml` — the fabric enrollment file surface (criterion
+/// C6/C10), mirroring cg's `fabric.toml` file convention (a plain TOML file
+/// under the data root, read on every start). vigil's own knob vocabulary
+/// (`fabric_ticket`/`fabric_hub`, the SAME names the HAOS add-on options
+/// and env vars use) is kept rather than cg's `hub_endpoint`/`tenant` key
+/// names: vigil's tenant is a fixed, non-operator-facing value by design
+/// (`fabric.rs`'s `FABRIC_TENANT`), and a second key vocabulary for the
+/// same two knobs would violate the one-vocabulary obligation (C7/C10)
+/// this same run is chartered to uphold.
+#[derive(Debug, Default, Deserialize)]
+struct FabricFileConfig {
+    fabric_ticket: Option<String>,
+    fabric_hub: Option<bool>,
+}
+
+fn read_fabric_toml(data_dir: &Path) -> FabricFileConfig {
+    let path = data_dir.join("fabric.toml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return FabricFileConfig::default();
+    };
+    toml::from_str(&text).unwrap_or_else(|error| {
+        println!(
+            "fabric_toml_parse_failed=true path={} error={error}",
+            path.display()
+        );
+        FabricFileConfig::default()
+    })
 }
 
 pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
@@ -178,8 +209,11 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             recognition_covered_classes: None,
             hardware_decoding: cli.hardware_decoding,
             accelerated_detection: cli.accelerated_detection,
-            // Fabric knobs are not exposed as CLI flags; they come from a
-            // config file, options.json, or env vars.
+            // Fabric knobs are deliberately left OUT of this merge (unlike
+            // every other CLI flag above): their precedence is CLI > env >
+            // options.json/fabric.toml, the REVERSE of this merge's
+            // CLI-before-env order — applied explicitly, below, once
+            // `data_dir` (needed for fabric.toml) is resolved.
             fabric_ticket: None,
             fabric_hub: None,
         },
@@ -226,8 +260,22 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     let detector_stationary_interval_secs = partial.detector_stationary_interval_secs.unwrap_or(0);
     // Fabric knobs: absent ticket, hub embedding defaults off (criterion
     // C10 — every knob has a sane default, works with nothing provided).
-    let fabric_ticket = partial.fabric_ticket;
-    let fabric_hub = partial.fabric_hub.unwrap_or(false);
+    // Precedence CLI > env > options.json/fabric.toml — `partial.fabric_*`
+    // at this point already reflects env-over-(config-file/options.json)
+    // from the merges above; fabric.toml is consulted as one more
+    // lowest-priority source (data_dir-relative, so only readable once
+    // `data_dir` itself is resolved, just above), and the CLI flag —
+    // deliberately excluded from the earlier CLI merge — is applied last.
+    let fabric_toml = read_fabric_toml(&data_dir);
+    let fabric_ticket = cli
+        .fabric_ticket
+        .or(partial.fabric_ticket)
+        .or(fabric_toml.fabric_ticket);
+    let fabric_hub = cli
+        .fabric_hub
+        .or(partial.fabric_hub)
+        .or(fabric_toml.fabric_hub)
+        .unwrap_or(false);
 
     // MQTT broker: present when a host is configured.
     let mqtt = partial.mqtt_host.map(|host| MqttConfig {
@@ -374,6 +422,10 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
             "--accelerated-detection" => {
                 cli.accelerated_detection = Some(next_bool(&mut iter, "--accelerated-detection")?)
             }
+            "--fabric-ticket" => {
+                cli.fabric_ticket = Some(next_string(&mut iter, "--fabric-ticket")?)
+            }
+            "--fabric-hub" => cli.fabric_hub = Some(next_bool(&mut iter, "--fabric-hub")?),
             "--help" | "-h" => return Err(run_usage()),
             other => return Err(format!("{other} is not a supported run option")),
         }
@@ -723,7 +775,7 @@ fn default_options_json_path() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL] [--fabric-ticket TICKET] [--fabric-hub BOOL]"
         .to_string()
 }
 

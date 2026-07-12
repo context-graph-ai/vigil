@@ -429,7 +429,7 @@ pub fn spawn_detection_probe_with_promotion<P, F, R>(
 where
     P: DetectionForwardProbe,
     F: FnOnce() -> Result<(), String> + Send + 'static,
-    R: FnOnce(&AccelerationReceipt) + Send + 'static,
+    R: Fn(&AccelerationReceipt) + Send + Sync + 'static,
 {
     if !accelerated_detection {
         let mut receipt = base_detection_receipt(model_id, input_shape, false);
@@ -448,45 +448,164 @@ where
         let _ = tx.send(outcome);
     });
 
+    // ONE receipt authority for every probe timing: this recorder is the single
+    // constructor-side write path. Every receipt this selection produces —
+    // in-time, boot fallback, and every late terminal — flows through the SAME
+    // sink (the runtime's stats surface) and the SAME acceleration state
+    // (/health, doctor) with the writer path named in the log, so the surfaces
+    // can never diverge and a silent outcome is structurally impossible.
+    let recorder: DetectionReceiptRecorder = {
+        let accel = Arc::clone(&accel);
+        Arc::new(move |receipt: AccelerationReceipt, path: &str| {
+            println!(
+                "detection_receipt_recorded path={path} status={} backend={} failure={}",
+                receipt.probe_status.as_str(),
+                receipt.active_backend,
+                receipt.failure_code.as_str()
+            );
+            on_late_receipt(&receipt);
+            accel.record(receipt);
+        })
+    };
+
     let probe_deadline = detection_probe_deadline();
     match rx.recv_timeout(probe_deadline) {
         // In time: a valid PASS is Active NOW; the runtime loads the accelerated
         // detector directly from this selection, so no live promotion is needed
-        // and `promote` is dropped unused.
-        Ok(outcome) => classify_forward_probe_selection(outcome, model_id, input_shape),
+        // and `promote` is dropped unused. The receipt still flows through the
+        // single recorder so every surface sees the same truth.
+        Ok(outcome) => {
+            let selection = classify_forward_probe_selection(outcome, model_id, input_shape);
+            recorder(selection.receipt.clone(), "in_time");
+            selection
+        }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             // The probe is still running its cold compile. Return the honest
             // fallback-now so startup proceeds, and hand the live channel to a
-            // late recorder that awaits the probe's true outcome, promotes on a
-            // valid PASS, and records the moved-together receipt.
-            let accel_for_late = Arc::clone(&accel);
+            // late recorder that awaits the probe's true outcome within a
+            // bounded (generous) late window, promotes on a valid PASS, and
+            // ALWAYS delivers a terminal receipt — pass, fail, window expiry,
+            // probe death, or its own panic. Silence is never an outcome.
+            let recorder_for_late = Arc::clone(&recorder);
             let model_id_owned = model_id.to_string();
             let input_shape_owned = input_shape.to_string();
             thread::spawn(move || {
-                if let Ok(outcome) = rx.recv() {
-                    let receipt = classify_late_outcome_and_promote(
-                        outcome,
-                        &model_id_owned,
-                        &input_shape_owned,
-                        promote,
-                    );
-                    // The SAME final receipt reaches every surface: the stats
-                    // sink first (by reference), then the acceleration state
-                    // (which moves it) — /health, `vigil stats`, and the worker
-                    // provenance all agree on this late outcome.
-                    on_late_receipt(&receipt);
-                    accel_for_late.record(receipt);
+                let window = detection_late_window();
+                match rx.recv_timeout(window) {
+                    Ok(outcome) => {
+                        let classified =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                classify_late_outcome_and_promote(
+                                    outcome,
+                                    &model_id_owned,
+                                    &input_shape_owned,
+                                    promote,
+                                )
+                            }));
+                        match classified {
+                            Ok(receipt) => {
+                                let path = if receipt.probe_status == ProbeStatus::Active {
+                                    "late_pass"
+                                } else {
+                                    "late_terminal"
+                                };
+                                recorder_for_late(receipt, path);
+                            }
+                            Err(_) => recorder_for_late(
+                                late_terminal_receipt(
+                                    &model_id_owned,
+                                    &input_shape_owned,
+                                    "the GPU probe's late classification stopped unexpectedly; \
+                                     CPU detection keeps running - restart to retry the probe",
+                                ),
+                                "late_panic",
+                            ),
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => recorder_for_late(
+                        late_terminal_receipt(
+                            &model_id_owned,
+                            &input_shape_owned,
+                            &format!(
+                                "the GPU probe did not complete within the {}s late window; CPU \
+                                 detection keeps running - verify the GPU is usable by this \
+                                 container and restart to retry",
+                                window.as_secs()
+                            ),
+                        ),
+                        "late_window_expired",
+                    ),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => recorder_for_late(
+                        late_terminal_receipt(
+                            &model_id_owned,
+                            &input_shape_owned,
+                            "the GPU probe stopped without reporting a result; CPU detection \
+                             keeps running - restart to retry the probe",
+                        ),
+                        "late_disconnected",
+                    ),
                 }
             });
-            timeout_fallback_selection(model_id, input_shape, probe_deadline)
+            let selection = timeout_fallback_selection(model_id, input_shape, probe_deadline);
+            recorder(selection.receipt.clone(), "boot_fallback");
+            selection
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             // The probe thread vanished without sending (should not happen —
             // the panic is caught and still sent). No late outcome is coming;
-            // `promote` is dropped without being called.
-            timeout_fallback_selection(model_id, input_shape, probe_deadline)
+            // `promote` is dropped without being called, and the terminal truth
+            // is recorded rather than left silent.
+            let selection = timeout_fallback_selection(model_id, input_shape, probe_deadline);
+            recorder(
+                late_terminal_receipt(
+                    model_id,
+                    input_shape,
+                    "the GPU probe stopped without reporting a result; CPU detection keeps \
+                     running - restart to retry the probe",
+                ),
+                "probe_thread_died",
+            );
+            selection
         }
     }
+}
+
+/// The single constructor-side write path for detection receipts: sink, then
+/// acceleration state, with the writer path named in the log.
+#[cfg(feature = "detect-burn-wgpu")]
+type DetectionReceiptRecorder = Arc<dyn Fn(AccelerationReceipt, &str) + Send + Sync>;
+
+/// The bounded wait for a probe that outlived the startup deadline. Generous by
+/// default (far above the slowest measured cold compile) so a real first
+/// shader build always finishes inside it; overridable for boxes that need
+/// even longer via `VIGIL_DETECTION_LATE_WINDOW_SECS`.
+#[cfg(feature = "detect-burn-wgpu")]
+const LATE_WINDOW: Duration = Duration::from_secs(900);
+
+#[cfg(feature = "detect-burn-wgpu")]
+fn detection_late_window() -> Duration {
+    std::env::var("VIGIL_DETECTION_LATE_WINDOW_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
+        .map(Duration::from_secs_f64)
+        .unwrap_or(LATE_WINDOW)
+}
+
+/// A terminal CPU-standing receipt for a late path that ended without a probe
+/// verdict (window expiry, probe-thread death, or a classification panic):
+/// honest fallback, a concrete operator action, never an accelerated claim.
+#[cfg(feature = "detect-burn-wgpu")]
+fn late_terminal_receipt(model_id: &str, input_shape: &str, action: &str) -> AccelerationReceipt {
+    let mut receipt = base_detection_receipt(model_id, input_shape, true);
+    receipt.probe_status = ProbeStatus::Fallback;
+    receipt.attempted_backend = ACCELERATED_DETECTION_BACKEND.to_string();
+    receipt.active_backend = CPU_DETECTION_BACKEND.to_string();
+    receipt.hardware_accelerated = false;
+    receipt.failure_code = FailureCode::ProbeFailed;
+    receipt.action_kind = ActionKind::ManualActionRequired;
+    receipt.action_payload = Some(action.to_string());
+    receipt
 }
 
 /// Classifies a late probe outcome and, only for a valid-HW PASS, performs the

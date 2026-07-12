@@ -78,7 +78,7 @@ fn new_sink() -> ReceiptSink {
     Arc::new(Mutex::new(None))
 }
 
-fn capture_into(sink: &ReceiptSink) -> impl FnOnce(&AccelerationReceipt) + Send + 'static {
+fn capture_into(sink: &ReceiptSink) -> impl Fn(&AccelerationReceipt) + Send + Sync + 'static {
     let sink = Arc::clone(sink);
     move |receipt: &AccelerationReceipt| {
         *sink.lock().expect("sink lock") = Some(receipt.clone());
@@ -148,7 +148,7 @@ impl Drop for EnvGuard {
 
 #[test]
 fn late_pass_promotes_and_the_promoted_receipt_reaches_every_surface() {
-    let _env = EnvGuard::set("1");
+    let _env = EnvGuard::set(DEADLINE_ENV, "1");
     let accel = Arc::new(AccelerationState::new());
     let promoted = Arc::new(AtomicBool::new(false));
     let stats_sink = new_sink();
@@ -230,7 +230,7 @@ fn late_pass_promotes_and_the_promoted_receipt_reaches_every_surface() {
 
 #[test]
 fn promote_error_records_cpu_standing_fallback_on_every_surface_never_active() {
-    let _env = EnvGuard::set("1");
+    let _env = EnvGuard::set(DEADLINE_ENV, "1");
     let accel = Arc::new(AccelerationState::new());
     let promote_called = Arc::new(AtomicBool::new(false));
     let stats_sink = new_sink();
@@ -256,10 +256,18 @@ fn promote_error_records_cpu_standing_fallback_on_every_surface_never_active() {
 
     let health = wait_for_health_receipt(&accel, Duration::from_secs(6), |receipt| {
         receipt.action_kind == ActionKind::ManualActionRequired
+            && receipt
+                .action_payload
+                .as_deref()
+                .is_some_and(|action| action.contains("promotion"))
     })
     .expect("promote Err must record the promotion-failed receipt to /health");
     let stats = wait_for_stats_receipt(&stats_sink, Duration::from_secs(6), |receipt| {
         receipt.action_kind == ActionKind::ManualActionRequired
+            && receipt
+                .action_payload
+                .as_deref()
+                .is_some_and(|action| action.contains("promotion"))
     })
     .expect("promote Err must record the promotion-failed receipt to the stats surface too");
 
@@ -291,7 +299,7 @@ fn promote_error_records_cpu_standing_fallback_on_every_surface_never_active() {
 
 #[test]
 fn late_fail_leaves_cpu_standing_and_never_promotes() {
-    let _env = EnvGuard::set("1");
+    let _env = EnvGuard::set(DEADLINE_ENV, "1");
     let accel = Arc::new(AccelerationState::new());
     let promoted = Arc::new(AtomicBool::new(false));
     let stats_sink = new_sink();
@@ -342,34 +350,13 @@ fn late_fail_leaves_cpu_standing_and_never_promotes() {
 
 const LATE_WINDOW_ENV: &str = "VIGIL_DETECTION_LATE_WINDOW_SECS";
 
-struct WindowGuard {
-    previous: Option<std::ffi::OsString>,
-}
-impl WindowGuard {
-    fn set(value: &str) -> Self {
-        let previous = std::env::var_os(LATE_WINDOW_ENV);
-        unsafe { std::env::set_var(LATE_WINDOW_ENV, value) };
-        Self { previous }
-    }
-}
-impl Drop for WindowGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(LATE_WINDOW_ENV, value),
-                None => std::env::remove_var(LATE_WINDOW_ENV),
-            }
-        }
-    }
-}
-
 /// A probe that outlives even the late window — the stand-in for a hung or
 /// leaked GPU path that never reports. The late recorder must still deliver a
 /// terminal receipt to every surface; silence is never an outcome.
 #[test]
 fn overrunning_probe_yields_a_terminal_receipt_within_the_late_window_never_silence() {
-    let _deadline = EnvGuard::set("1");
-    let _window = WindowGuard::set("2");
+    let _deadline = EnvGuard::set(DEADLINE_ENV, "1");
+    let _window = EnvGuard::set(LATE_WINDOW_ENV, "2");
     let accel = Arc::new(AccelerationState::new());
     let promoted = Arc::new(AtomicBool::new(false));
     let stats_sink = new_sink();
@@ -392,7 +379,11 @@ fn overrunning_probe_yields_a_terminal_receipt_within_the_late_window_never_sile
     assert_eq!(selection.receipt.probe_status, ProbeStatus::Fallback);
 
     let health = wait_for_health_receipt(&accel, Duration::from_secs(8), |receipt| {
-        receipt.failure_code != FailureCode::None && receipt.probe_status == ProbeStatus::Fallback
+        receipt.failure_code != FailureCode::None
+            && receipt
+                .action_payload
+                .as_deref()
+                .is_some_and(|action| action.contains("did not complete"))
     })
     .expect(
         "an overrunning probe must yield a TERMINAL late receipt on the health surface within \
@@ -401,6 +392,10 @@ fn overrunning_probe_yields_a_terminal_receipt_within_the_late_window_never_sile
     );
     let stats = wait_for_stats_receipt(&stats_sink, Duration::from_secs(2), |receipt| {
         receipt.failure_code != FailureCode::None
+            && receipt
+                .action_payload
+                .as_deref()
+                .is_some_and(|action| action.contains("did not complete"))
     })
     .expect("the same terminal receipt must reach the stats surface — never silence");
 
@@ -428,7 +423,7 @@ fn overrunning_probe_yields_a_terminal_receipt_within_the_late_window_never_sile
 /// and become a second, divergent source of truth.
 #[test]
 fn in_time_pass_flows_through_the_single_receipt_path() {
-    let _deadline = EnvGuard::set("30");
+    let _deadline = EnvGuard::set(DEADLINE_ENV, "30");
     let accel = Arc::new(AccelerationState::new());
     let stats_sink = new_sink();
 

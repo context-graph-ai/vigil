@@ -197,3 +197,87 @@ impl FabricRuntime {
         )
     }
 }
+
+/// Result-join authority for offloaded detector work (criterion C4): remote
+/// results join back to stream/frame identity through the existing typed
+/// envelope vocabulary (`crate::workgraph::validate_result_join`); class-map
+/// authority and NMS ownership stay vigil-side and identical for local and
+/// remote results. Tracks, per submitted `vigil.detector` job id, the
+/// pending work envelope and whether a LOCAL fallback (criterion C5) has
+/// already applied the same work — so a remote result racing a local
+/// fallback (or a duplicate remote result) is discarded, never
+/// double-counted.
+pub struct PendingOffloads {
+    entries: std::sync::Mutex<std::collections::HashMap<String, PendingOffload>>,
+}
+
+struct PendingOffload {
+    work: crate::workgraph::WorkEnvelope,
+    resolved: bool,
+}
+
+/// What happened when a remote `vigil.detector` result was offered against
+/// a pending offload.
+#[derive(Debug)]
+pub enum RemoteResultOutcome {
+    /// The result joined its work and was applied (exactly once).
+    Applied,
+    /// The result failed `validate_result_join` — never applied, counted on
+    /// the shared `StageReceiptLog` via `count_rejected_join`, no events.
+    RejectedJoin(crate::workgraph::JoinRejection),
+    /// The work this result answers was already resolved (a local fallback
+    /// applied first, or an earlier remote result already landed) —
+    /// discarded with a `provenance=discarded-late` receipt, never
+    /// double-counted.
+    DiscardedLate,
+}
+
+impl Default for PendingOffloads {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PendingOffloads {
+    pub fn new() -> Self {
+        Self {
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Record that `job_id` was offloaded for `work`, pending either a
+    /// remote result or a local fallback (criterion C5).
+    pub fn track(&self, job_id: String, work: crate::workgraph::WorkEnvelope) {
+        self.entries.lock().expect("pending offloads lock").insert(
+            job_id,
+            PendingOffload {
+                work,
+                resolved: false,
+            },
+        );
+    }
+
+    /// Mark `job_id` resolved because a local fallback ran the detection
+    /// itself (criterion C5) — any later-arriving remote result for the
+    /// same job must discard as late, never double-count.
+    pub fn mark_resolved_by_fallback(&self, _job_id: &str) {
+        todo!("mark the pending offload resolved so a late remote result discards (C4/C5)")
+    }
+
+    /// Offer a remote `vigil.detector` result for `job_id`. Validates the
+    /// join via `crate::workgraph::validate_result_join`, applies exactly
+    /// once, and discards late/duplicate results — never double-counted
+    /// (criterion C4).
+    pub fn apply_remote_result(
+        &self,
+        _job_id: &str,
+        _result: &crate::workgraph::ResultEnvelope,
+        _receipt: &crate::workgraph::StageReceipt,
+        _log: &crate::workgraph::StageReceiptLog,
+    ) -> RemoteResultOutcome {
+        todo!(
+            "validate_result_join against the tracked pending work, apply exactly once, \
+             and discard a late/duplicate result as provenance=discarded-late (C4)"
+        )
+    }
+}

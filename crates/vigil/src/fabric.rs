@@ -116,6 +116,11 @@ pub struct FabricRuntime {
     pub client: Arc<SyncClient>,
     pub identity: FabricIdentity,
     pub node_id: String,
+    /// `Some` only when this node carries the hub (`fabric_hub == true`) —
+    /// Design decision E: the hub is embedded in the main vigil process
+    /// (`SyncServer::with_transport` enables relay internally), never a
+    /// separate hub process.
+    pub hub_endpoint: Option<Arc<contextdb_server::transport::iroh::IrohServer>>,
 }
 
 impl FabricRuntime {
@@ -133,10 +138,27 @@ impl FabricRuntime {
     }
 
     /// The ready-to-use join instruction this node's own status/doctor/log
-    /// surfaces print when it carries the hub (criterion C6): the current
-    /// ticket plus the exact command a second machine runs to join.
+    /// surfaces print (criterion C6): when this node carries the hub
+    /// (`hub_endpoint.is_some()`), the current ticket plus the exact
+    /// command a second machine runs to join
+    /// (`fabric-join ticket=<current> command=<...>`); when it does not,
+    /// the one-line instruction naming how to grow this node into a join
+    /// point (enable the hub role) — so a lone, unenrolled node's own
+    /// output still teaches the join path before anyone has joined it.
     pub fn join_instruction(&self) -> String {
-        todo!("render `fabric-join ticket=<current> command=<...>` (C6)")
+        todo!(
+            "render `fabric-join ticket=<current> command=<...>` when hub_endpoint is Some, \
+             else the one-line hub-off grow instruction (C6)"
+        )
+    }
+
+    /// Validate a fabric ticket an operator supplied (config/env/CLI/HAOS
+    /// options), before ever dialing it. A malformed or expired ticket
+    /// returns a typed error whose text NAMES THE FIX (criterion C6 /
+    /// USR-2) — never a panic, never a hang; the caller continues
+    /// standalone.
+    pub fn validate_fabric_ticket(_ticket: &str) -> Result<(), String> {
+        todo!("validate the ticket shape; error text must name the fix (C6)")
     }
 
     /// Submit one segment as a `vigil.detector` job onto the shared ledger

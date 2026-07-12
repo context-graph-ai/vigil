@@ -607,12 +607,14 @@ pub fn start_rtsp_probe(
             // always means an accelerated detector actually runs, and any
             // fallback selection always means the CPU detector runs, even
             // with the accel feature compiled in.
-            // C12 live promotion: a deferred handle the (late-fired) promote
-            // closure swaps once the worker's detector is built below. The
-            // closure loads the accelerated detector through the SAME load path
-            // used at initial construction and swaps the live handle, so a cold
-            // compile that finishes after the startup deadline upgrades the
-            // running detector without a restart.
+            // Live promotion: a deferred handle the (late-fired) promote closure
+            // swaps once the worker's detector is built below. The closure loads
+            // the accelerated detector through the SAME load path used at initial
+            // construction and swaps the live handle, so a cold compile that
+            // finishes after the startup deadline upgrades the running detector
+            // without a restart. The paired stats sink writes the same late
+            // receipt to RuntimeStats so `vigil stats` and the worker provenance
+            // agree with /health on every late outcome.
             #[cfg(feature = "detect-burn-wgpu")]
             let promotable_slot: Arc<
                 std::sync::OnceLock<Arc<crate::detector::PromotableDetector>>,
@@ -648,6 +650,27 @@ pub fn start_rtsp_probe(
                     );
                     Ok(())
                 };
+                // The all-surfaces late-receipt sink: write the final late
+                // receipt into RuntimeStats with the SAME shape as the startup
+                // write below, so `vigil stats` and the per-detection worker
+                // provenance read stop claiming burn-cpu after a real promotion
+                // (and stay honest CPU on a failed one).
+                let stats_for_late = stats.clone();
+                let on_late_receipt = move |receipt: &crate::acceleration::AccelerationReceipt| {
+                    stats_for_late.update(|stats| {
+                        stats.active_detector_backend = receipt.active_backend.clone();
+                        stats.detection_acceleration = format!(
+                            "{}{}",
+                            receipt.probe_status.as_str(),
+                            match receipt.failure_code {
+                                crate::acceleration::FailureCode::None => String::new(),
+                                code => format!(":{}", code.as_str()),
+                            }
+                        );
+                        stats.detection_receipt_block =
+                            crate::acceleration::render_receipt_block(receipt);
+                    });
+                };
                 crate::detection_accel::spawn_detection_probe_with_promotion(
                     config.accelerated_detection,
                     &config.detector_model_id,
@@ -658,6 +681,7 @@ pub fn start_rtsp_probe(
                     ),
                     Arc::clone(&accel),
                     promote,
+                    on_late_receipt,
                 )
             };
             #[cfg(not(feature = "detect-burn-wgpu"))]

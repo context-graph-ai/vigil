@@ -33,7 +33,7 @@ pub(crate) trait Detector: Send + Sync {
 /// write lock, without touching the worker loop: the camera workers keep
 /// calling `detect_segment` through this handle while a late-completing
 /// acceleration probe promotes the inner detector from CPU to the accelerated
-/// backend (C12 live promotion). The swap is atomic to any in-flight segment —
+/// backend after the startup deadline. The swap is atomic to any in-flight segment —
 /// a `detect_segment` reader holds the read lock for its whole call, so it
 /// runs entirely on the old or the new detector, never a torn mix.
 pub(crate) struct PromotableDetector {

@@ -402,28 +402,34 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
 }
 
 /// Runs the forward probe under a deadline, but NEVER abandons a slow probe,
-/// and PROMOTES the running detector live on a late PASS (C12). When the
-/// deadline expires it returns the honest fallback-now selection immediately
-/// (so camera startup is never blocked on a cold shader compile); the probe
-/// thread runs on to its REAL outcome, and on a valid late PASS the late
-/// recorder calls `promote` (the runtime's live detector swap) and, only if
-/// that swap succeeds, records an Active receipt into `accel` naming the
-/// accelerated backend the workers now run. A promotion that fails, or a late
-/// FAIL/timeout, leaves CPU standing with its honest classification — `promote`
-/// is never called on a non-PASS, and no Active receipt is ever recorded
-/// without the swap having succeeded. Doctor stays on the bounded variant.
+/// and promotes the running detector live when the probe passes after the
+/// startup deadline. When the deadline expires it returns the honest
+/// fallback-now selection immediately (so camera startup is never blocked on a
+/// cold shader compile); the probe thread runs on to its REAL outcome, and on a
+/// valid late PASS the late recorder calls `promote` (the runtime's live
+/// detector swap) and, only if that swap succeeds, produces an Active receipt
+/// naming the accelerated backend the workers now run. A promotion that fails,
+/// or a late FAIL/timeout, leaves CPU standing with its honest classification —
+/// `promote` is never called on a non-PASS, and no Active receipt is ever
+/// produced without the swap having succeeded. The FINAL late receipt is
+/// written to EVERY receipt surface: `accel` (/health, doctor) via `record`,
+/// and `on_late_receipt` (the runtime's RuntimeStats sink — `vigil stats` and
+/// the worker provenance read) — so no surface can disagree after a late
+/// outcome. Doctor stays on the bounded variant.
 #[cfg(feature = "detect-burn-wgpu")]
-pub fn spawn_detection_probe_with_promotion<P, F>(
+pub fn spawn_detection_probe_with_promotion<P, F, R>(
     accelerated_detection: bool,
     model_id: &str,
     input_shape: &str,
     probe: P,
     accel: Arc<AccelerationState>,
     promote: F,
+    on_late_receipt: R,
 ) -> DetectionAccelerationSelection
 where
     P: DetectionForwardProbe,
     F: FnOnce() -> Result<(), String> + Send + 'static,
+    R: FnOnce(&AccelerationReceipt) + Send + 'static,
 {
     if !accelerated_detection {
         let mut receipt = base_detection_receipt(model_id, input_shape, false);
@@ -464,6 +470,11 @@ where
                         &input_shape_owned,
                         promote,
                     );
+                    // The SAME final receipt reaches every surface: the stats
+                    // sink first (by reference), then the acceleration state
+                    // (which moves it) — /health, `vigil stats`, and the worker
+                    // provenance all agree on this late outcome.
+                    on_late_receipt(&receipt);
                     accel_for_late.record(receipt);
                 }
             });

@@ -452,7 +452,7 @@ impl FabricRuntime {
             wall_now_ms(),
         );
 
-        let frames_blob_ref = crate::detector_workclass::BlobRefPlaceholder::from_blob_hash(&hash);
+        let frames_blob_ref = crate::detector_workclass::FrameBlobRef::from_blob_hash(&hash);
         let work_id = envelope.work_id.clone();
         let job = crate::detector_workclass::DetectorJobBuilder::new(envelope, frames_blob_ref)
             .codec(codec)

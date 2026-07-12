@@ -34,8 +34,8 @@ use contextdb_server::{FabricIdentity, InProcessBroker, SyncClient, SyncServer};
 
 use vigil::DecodedRgbFrame;
 use vigil::detector_workclass::{
-    BlobRefPlaceholder, DETECTOR_CLASS_TAG, DETECTOR_MODE, DETECTOR_SCHEMA_VERSION,
-    DETECTOR_WORK_CLASS, DetectorDetection, DetectorJobBuilder, OrderedF64, WireVideoCodec,
+    DETECTOR_CLASS_TAG, DETECTOR_MODE, DETECTOR_SCHEMA_VERSION, DETECTOR_WORK_CLASS,
+    DetectorDetection, DetectorJobBuilder, FrameBlobRef, OrderedF64, WireVideoCodec,
     WireWorkEnvelope,
 };
 use vigil::fabric::{DetectorWorkExecutor, FabricDetectorBackend};
@@ -139,7 +139,7 @@ fn submit_local_detector_job(
     let placeholder_hash = BlobHash::of(job_id.as_bytes());
     let job = DetectorJobBuilder::new(
         wire_envelope(&format!("0192f6a0-0000-7000-8000-{job_id:0>12}")),
-        BlobRefPlaceholder::from_blob_hash(&placeholder_hash),
+        FrameBlobRef::from_blob_hash(&placeholder_hash),
     )
     .codec(WireVideoCodec::H264)
     .fps(15.0)

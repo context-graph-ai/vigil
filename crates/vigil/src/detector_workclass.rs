@@ -24,26 +24,25 @@ pub const DETECTOR_MODE: &str = "object-detection";
 /// The capability/requirement tag a claiming worker must advertise.
 pub const DETECTOR_CLASS_TAG: &str = "class:vigil.detector";
 
-/// Placeholder for the upstream contextdb content-addressed blob reference
-/// (`InputRef::blob_ref` / the ledger's `BlobHash`-shaped identity).
-///
-/// FLAGGED FOR IMPLEMENTER: this is a vigil-LOCAL newtype only so this RED
-/// test can assert the refs-only shape without pulling the contextdb-server
-/// dependency into the test-authoring pass. Swap for the real upstream type
-/// (do not keep both — the abstraction-placement rule forbids a parallel
-/// vigil-side shadow of an upstream-owned concept).
+/// A frame blob's content-addressed reference, in vigil's own wire schema
+/// (vigil owns this wire shape — the abstraction-placement rule reserves
+/// only the underlying blob/ledger machinery to contextdb, not the schema a
+/// consumer names its own payload fields with). Bridges to the real
+/// upstream content-addressed reference (`contextdb_engine::work_ledger::
+/// BlobHash`) via [`FrameBlobRef::from_blob_hash`]/[`FrameBlobRef::to_blob_hash`]
+/// under the `fabric` feature.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct BlobRefPlaceholder(pub String);
+pub struct FrameBlobRef(pub String);
 
 /// Fabric-only bridge to the real upstream content-addressed reference
 /// (`contextdb_engine::work_ledger::BlobHash`). Additive, not a type swap:
-/// `BlobRefPlaceholder`'s wire shape (and the pre-existing, unconditional
+/// `FrameBlobRef`'s wire shape (and the pre-existing, unconditional
 /// C1 schema test that constructs/asserts on it directly) is untouched
 /// whether or not the `fabric` feature is enabled — only the fabric submit
 /// path (which actually talks to the ledger) needs the real type, reached
 /// through this conversion.
 #[cfg(feature = "fabric")]
-impl BlobRefPlaceholder {
+impl FrameBlobRef {
     /// This crate's own wire convention: `blake3:<64-hex-chars>`.
     pub fn from_blob_hash(hash: &contextdb_engine::work_ledger::BlobHash) -> Self {
         Self(format!("blake3:{}", hash.to_hex()))
@@ -86,7 +85,7 @@ pub struct WireResultEnvelope {
 /// The `vigil.detector` job payload: refs-only, versioned. There is no field
 /// on this type (and no constructor path — see [`DetectorJobBuilder`]) that
 /// accepts raw frame bytes; the only way to name a segment's frames is
-/// [`BlobRefPlaceholder`].
+/// [`FrameBlobRef`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DetectorJob {
     pub schema_version: u32,
@@ -98,7 +97,7 @@ pub struct DetectorJob {
     pub clip_sha256: String,
     pub decoded_frames_sha256: String,
     pub model_id: String,
-    pub frames_blob_ref: BlobRefPlaceholder,
+    pub frames_blob_ref: FrameBlobRef,
 }
 
 /// Wire mirror of [`crate::VideoCodec`] (the runtime enum has no serde
@@ -171,13 +170,13 @@ pub struct DetectorJobSpecFields {
 }
 
 /// Builds a [`DetectorJob`]. The ONLY way to name a segment's frames is
-/// `frames_blob_ref: BlobRefPlaceholder` — there is no method on this
+/// `frames_blob_ref: FrameBlobRef` — there is no method on this
 /// builder (and no field on [`DetectorJob`]) that accepts `Vec<u8>` frame
 /// bytes. A job whose provenance would embed raw frame bytes cannot be
 /// constructed through this API.
 pub struct DetectorJobBuilder {
     envelope: WireWorkEnvelope,
-    frames_blob_ref: BlobRefPlaceholder,
+    frames_blob_ref: FrameBlobRef,
     codec: Option<WireVideoCodec>,
     fps: Option<f64>,
     sample_frames: Option<usize>,
@@ -190,7 +189,7 @@ pub struct DetectorJobBuilder {
 impl DetectorJobBuilder {
     /// The two fields every detector job must carry from the start: its
     /// work identity, and a reference (never bytes) to the frames.
-    pub fn new(envelope: WireWorkEnvelope, frames_blob_ref: BlobRefPlaceholder) -> Self {
+    pub fn new(envelope: WireWorkEnvelope, frames_blob_ref: FrameBlobRef) -> Self {
         Self {
             envelope,
             frames_blob_ref,

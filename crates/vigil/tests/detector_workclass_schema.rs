@@ -6,8 +6,8 @@
 
 use vigil::VideoCodec;
 use vigil::detector_workclass::{
-    BlobRefPlaceholder, DETECTOR_CLASS_TAG, DETECTOR_MODE, DETECTOR_SCHEMA_VERSION,
-    DETECTOR_WORK_CLASS, DetectorDetection, DetectorJobBuilder, DetectorResult, OrderedF64,
+    DETECTOR_CLASS_TAG, DETECTOR_MODE, DETECTOR_SCHEMA_VERSION, DETECTOR_WORK_CLASS,
+    DetectorDetection, DetectorJobBuilder, DetectorResult, FrameBlobRef, OrderedF64,
     WireResultEnvelope, WireVideoCodec, WireWorkEnvelope, decode_length_framed_units,
     detector_job_spec_fields, encode_length_framed_units,
 };
@@ -28,7 +28,7 @@ fn wire_envelope() -> WireWorkEnvelope {
 fn built_job() -> vigil::detector_workclass::DetectorJob {
     DetectorJobBuilder::new(
         wire_envelope(),
-        BlobRefPlaceholder("blake3:deadbeefcafefeedfacefeed".to_string()),
+        FrameBlobRef("blake3:deadbeefcafefeedfacefeed".to_string()),
     )
     .codec(WireVideoCodec::from(VideoCodec::H264))
     .fps(15.0)
@@ -43,7 +43,7 @@ fn built_job() -> vigil::detector_workclass::DetectorJob {
 /// C1 anchor: a job built through the ONLY public path registers under the
 /// `vigil.detector` work class, the `object-detection` mode, and the
 /// `class:vigil.detector` requirement tag — and its frame reference is a
-/// [`BlobRefPlaceholder`], never raw bytes. There is no builder method and
+/// [`FrameBlobRef`], never raw bytes. There is no builder method and
 /// no `DetectorJob` field that accepts `Vec<u8>` frame bytes; the refs-only
 /// promise is enforced by the type the builder accepts, not by a runtime
 /// check on this test's own construction.
@@ -54,7 +54,7 @@ fn detector_job_registers_as_vigil_detector_class_refs_only() {
     assert_eq!(job.schema_version, DETECTOR_SCHEMA_VERSION);
     assert_eq!(
         job.frames_blob_ref,
-        BlobRefPlaceholder("blake3:deadbeefcafefeedfacefeed".to_string()),
+        FrameBlobRef("blake3:deadbeefcafefeedfacefeed".to_string()),
         "frames must be named by a content-addressed reference, never inline bytes"
     );
 

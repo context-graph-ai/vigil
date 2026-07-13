@@ -671,7 +671,17 @@ impl FabricRuntime {
                     "fabric_capability_advertise_failed=true backend={backend_tag} error={error}"
                 );
             }
-            let _ = client.push().await;
+            // Deliver the advertisement to the hub. This one-shot startup push
+            // (like `run_worker_loop`'s own) can miss a hub that is not yet
+            // reachable; `SyncClient::push` already retries a transient miss,
+            // and the standing poll loop re-pushes the outstanding
+            // advertisement on its cadence until it lands. A push that still
+            // fails here is NOT swallowed — it is a NAMED, greppable line so a
+            // real fleet miss is diagnosable instead of silent (the S2 defect:
+            // a missed push read as `remote-detectors=-` with nothing logged).
+            if let Err(error) = client.push().await {
+                println!("fabric_capability_push_failed=true backend={backend_tag} error={error}");
+            }
             let _ = contextdb_server::work_ledger::run_worker_loop(
                 &client,
                 &config,

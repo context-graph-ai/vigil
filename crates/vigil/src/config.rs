@@ -287,10 +287,19 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     // `data_dir` itself is resolved, just above), and the CLI flag —
     // deliberately excluded from the earlier CLI merge — is applied last.
     let fabric_toml = read_fabric_toml(&data_dir);
+    // An empty ticket string from ANY source (a blank HAOS options.json
+    // field mapped to `VIGIL_FABRIC_TICKET=""`, an empty fabric.toml key)
+    // means the operator never configured a ticket — normalize it to `None`
+    // here so it is treated identically to an untouched field, never as an
+    // operator-typed malformed value that earns a "ticket rejected" error.
+    // A non-empty but malformed ticket still passes through and is rejected
+    // loudly at enrollment (criterion C6).
     let fabric_ticket = cli
         .fabric_ticket
         .or(partial.fabric_ticket)
-        .or(fabric_toml.fabric_ticket);
+        .or(fabric_toml.fabric_ticket)
+        .map(|ticket| ticket.trim().to_string())
+        .filter(|ticket| !ticket.is_empty());
     let fabric_hub = cli
         .fabric_hub
         .or(partial.fabric_hub)

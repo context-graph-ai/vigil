@@ -965,7 +965,17 @@ pub(crate) fn fabric_bring_up(
     // deferred submissions once their deadline passes (criterion C5/C8).
     let worker_bundle = bundle.clone();
     handle.spawn(async move {
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+        // Test-only override for the bounded wait below (default unchanged:
+        // 60s) — lets an integration test shorten the wait instead of
+        // sleeping through the real deadline. Inert in production: no
+        // shipped surface (add-on options/env, fabric.toml, CLI) ever sets
+        // this variable.
+        let worker_slot_deadline_ms = std::env::var("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60_000);
+        let deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_millis(worker_slot_deadline_ms);
         loop {
             if let Some((detector, backend_tag)) = worker_bundle.worker_detector_slot.get() {
                 let backend = Arc::new(crate::fabric::FabricProductionDetectorBackend::new(

@@ -186,17 +186,69 @@ impl Worker {
     }
 }
 
-fn spawn_cameraless_fabric_worker(data_dir: &std::path::Path, health_port: u16) -> Worker {
+/// The repo's real detector model fixture (a raw yolox-tiny checkpoint the
+/// production `yolox_detector` load path reads directly — the same artifact
+/// `ha_test_support` points `VIGIL_DETECTOR_MODEL_PATH` at). Staging it makes
+/// the worker's detector actually LOADABLE, which is what earns the capability
+/// advertisement (advertisement requires executable capability — PO ruling
+/// 2026-07-13).
+fn fixture_model_path() -> PathBuf {
+    workspace_root()
+        .join("tests")
+        .join("fixtures")
+        .join("models")
+        .join("yolox-tiny-coco.pth")
+}
+
+/// Run `vigil doctor acceleration` against an already-running node's data dir
+/// and return its combined stdout/stderr (the surface that renders the shared
+/// `fabric-status` / `fabric-worker-serving` line).
+fn run_doctor_acceleration(data_dir: &std::path::Path) -> String {
+    let output = Command::new(vigil_binary_path())
+        .arg("doctor")
+        .arg("acceleration")
+        .env("VIGIL_DATA_DIR", data_dir)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run vigil doctor acceleration");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn spawn_cameraless_fabric_worker(
+    data_dir: &std::path::Path,
+    health_port: u16,
+    model_path: Option<&std::path::Path>,
+    worker_slot_deadline_ms: u64,
+) -> Worker {
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("run")
         .env("VIGIL_DATA_DIR", data_dir)
         .env("VIGIL_HEALTH_PORT", health_port.to_string())
         .env("VIGIL_FABRIC_HUB", "true")
-        // Shortened deadline (test-only scaffold, fabric.rs) so this test
-        // does not have to sleep through the real 60s production wait.
-        .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", "1500")
-        .env_remove("VIGIL_RTSP_URL")
+        // Test-only deadline override (scaffold, fabric.rs): a REAL model load
+        // needs headroom over the production wait in a debug build (~2-3s to
+        // deserialize the fixture checkpoint), so the serving arm passes a
+        // generous bound; the no-model arm passes a short one so its
+        // not-started path resolves quickly.
+        .env(
+            "VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS",
+            worker_slot_deadline_ms.to_string(),
+        )
+        .env_remove("VIGIL_RTSP_URL");
+    match model_path {
+        Some(path) => {
+            command.env("VIGIL_DETECTOR_MODEL_PATH", path);
+        }
+        None => {
+            command.env_remove("VIGIL_DETECTOR_MODEL_PATH");
+        }
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -210,7 +262,17 @@ fn spawn_cameraless_fabric_worker(data_dir: &std::path::Path, health_port: u16) 
 fn detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera() {
     let data_dir = tempfile::tempdir().expect("data dir");
     let health_port = free_port();
-    let worker = spawn_cameraless_fabric_worker(data_dir.path(), health_port);
+    let model_path = fixture_model_path();
+    assert!(
+        model_path.is_file(),
+        "detector model fixture must be present to stage a loadable model: {}",
+        model_path.display()
+    );
+    // A cameraless worker with a REAL, loadable model staged: it has executable
+    // capability, so it must advertise and serve. Generous slot deadline so the
+    // debug-build checkpoint load (~2-3s) completes before the wait ends.
+    let worker =
+        spawn_cameraless_fabric_worker(data_dir.path(), health_port, Some(&model_path), 20_000);
 
     assert!(
         wait_for_health(health_port, Duration::from_secs(15)),
@@ -287,6 +349,107 @@ fn detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camer
         has_detector_capability,
         "a vigil-detector-<backend> capability row for this node must exist \
          in its own ledger once the worker loop starts serving; rows found: {:?}",
+        result.rows
+    );
+}
+
+// ── T1 truthfulness arm: advertisement requires executable capability ─────
+
+#[test]
+fn cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model() {
+    // The mirror of the arm above: the SAME cameraless serving-role node, but
+    // with NO detection model staged, has no executable capability. Advertising
+    // a detector it cannot run would lie to the fleet (PO ruling 2026-07-13:
+    // advertisement requires executable capability). So it must write NO
+    // vigil-detector-<backend> capability row, and its own doctor/status
+    // rendering must say fabric-worker-serving=false with reason=no-model and
+    // the named staging fix — never an enrolled-looking node that silently
+    // serves nothing.
+    let data_dir = tempfile::tempdir().expect("data dir");
+    let health_port = free_port();
+    // No model staged; short slot deadline so the not-started path resolves fast.
+    let worker = spawn_cameraless_fabric_worker(data_dir.path(), health_port, None, 1500);
+
+    assert!(
+        wait_for_health(health_port, Duration::from_secs(15)),
+        "a cameraless node with no staged model must still reach a ready /health \
+         (a missing model is a loud not-serving state, not a startup failure)"
+    );
+
+    // Bounded wait past the shortened worker-slot deadline so the not-started
+    // path has resolved and the persisted stats snapshot has settled.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut logs = String::new();
+    while Instant::now() < deadline {
+        logs = worker.stdout.lock().expect("stdout lock").clone();
+        if logs.contains("fabric_worker_loop_not_started=true") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(500));
+
+    assert!(
+        health_status(health_port) == Some(200),
+        "the runtime must still be alive (ready) with no staged model: {logs}"
+    );
+
+    let doctor_output = run_doctor_acceleration(data_dir.path());
+
+    let node_id = logs
+        .lines()
+        .find_map(|line| line.strip_prefix("fabric_ready=true node_id="))
+        .map(str::to_string)
+        .expect("fabric_ready line must carry this node's id");
+
+    worker.kill_and_wait();
+
+    assert!(
+        doctor_output.contains("fabric-worker-serving=false"),
+        "a worker with no loadable model must report it is not serving: {doctor_output}"
+    );
+    assert!(
+        doctor_output.contains("reason=no-model"),
+        "the not-serving reason must name the missing model (reason=no-model): {doctor_output}"
+    );
+    assert!(
+        doctor_output.contains("detector_model_path")
+            || doctor_output.contains("VIGIL_DETECTOR_MODEL_PATH"),
+        "the not-serving line must name the concrete staging fix: {doctor_output}"
+    );
+
+    // And it must NOT have advertised a detector capability it cannot execute.
+    let ledger_path = data_dir.path().join("fabric").join("fabric-ledger.db");
+    let db = Database::open(&ledger_path).expect("open this node's own fabric ledger");
+    let result = db
+        .execute(
+            "SELECT node_id, capability_id FROM work_capabilities",
+            &std::collections::HashMap::new(),
+        )
+        .expect("scan work_capabilities");
+    let node_idx = result
+        .columns
+        .iter()
+        .position(|c| c == "node_id")
+        .expect("node_id column");
+    let capability_idx = result
+        .columns
+        .iter()
+        .position(|c| c == "capability_id")
+        .expect("capability_id column");
+    let advertised_detector = result.rows.iter().any(|row| {
+        let contextdb_core::Value::Text(node) = &row[node_idx] else {
+            return false;
+        };
+        let contextdb_core::Value::Text(capability_id) = &row[capability_idx] else {
+            return false;
+        };
+        node == &node_id && capability_id.starts_with("vigil-detector-")
+    });
+    assert!(
+        !advertised_detector,
+        "a worker with no loadable model must NOT advertise a vigil-detector-<backend> \
+         capability row (advertisement requires executable capability); rows found: {:?}",
         result.rows
     );
 }

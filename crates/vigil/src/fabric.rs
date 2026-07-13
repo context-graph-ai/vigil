@@ -1,10 +1,10 @@
 //! Fabric integration (criteria C3–C8): embeds contextdb-server's shared
-//! work ledger + iroh transport so this vigil node can submit its own
+//! work ledger + peer transport so this vigil node can submit its own
 //! `vigil.detector` jobs onto the shared ledger AND/OR claim + execute jobs
 //! submitted by other enrolled nodes — the SAME binary, no bespoke protocol
 //! (placement rule; architecture Section 3 / Rule 5). Behind the
 //! default-off `fabric` feature: a `vigil` build without it links no
-//! sync/iroh/ledger code at all (today's behavior, byte-identical).
+//! sync/transport/ledger code at all (today's behavior, byte-identical).
 //!
 use std::collections::HashMap;
 use std::fs;
@@ -263,13 +263,13 @@ pub struct FabricRuntime {
     /// Design decision E: the hub is embedded in the main vigil process
     /// (`SyncServer::with_transport` enables relay internally), never a
     /// separate hub process.
-    pub hub_endpoint: Option<Arc<contextdb_server::transport::iroh::IrohServer>>,
+    pub hub_endpoint: Option<Arc<contextdb_server::PeerEndpoint>>,
     /// This node's own bound endpoint, regardless of hub role — so it can
     /// SERVE the frame blobs of its own submitted jobs to a remote claimant
     /// node-to-node, never through the hub (criterion C1). Aliases
     /// `hub_endpoint`'s bound port when this node also carries the hub (one
     /// endpoint, two protocol registrations); its own otherwise.
-    own_endpoint: Arc<contextdb_server::transport::iroh::IrohServer>,
+    own_endpoint: Arc<contextdb_server::PeerEndpoint>,
     /// This node's blob service: ingests its own submissions' frame blobs
     /// and resolves `blob_ref` inputs it claims from others.
     blob_service: Arc<contextdb_server::blob_resolver::BlobService>,
@@ -316,9 +316,9 @@ impl FabricRuntime {
             .map_err(|err| format!("fabric: install work ledger schema: {err}"))?;
         let _ = contextdb_engine::peer_directory::install_peer_directory_schema(&db);
 
-        let bind_spec = format!("iroh:?identity={}", identity_path.display());
+        let bind_spec = contextdb_server::peer_bind_spec(&identity_path);
         let own_endpoint = Arc::new(
-            contextdb_server::transport::iroh::IrohServer::bind(&bind_spec)
+            contextdb_server::PeerEndpoint::bind(&bind_spec)
                 .await
                 .map_err(|err| format!("fabric: bind this node's endpoint: {err}"))?,
         );
@@ -356,11 +356,7 @@ impl FabricRuntime {
         // bind spec, which simply never resolves a `to=` target).
         let dial_spec = match fabric_ticket {
             Some(ticket) => match Self::validate_fabric_ticket(ticket) {
-                Ok(()) => format!(
-                    "iroh:?to={}&identity={}",
-                    ticket.trim(),
-                    identity_path.display()
-                ),
+                Ok(()) => contextdb_server::peer_dial_spec(ticket.trim(), &identity_path),
                 Err(err) => {
                     eprintln!(
                         "vigil: fabric enrollment ticket rejected, continuing standalone: {err}"
@@ -418,7 +414,7 @@ impl FabricRuntime {
                     .to_string(),
             );
         }
-        match contextdb_server::transport::iroh::EndpointSpec::parse_detailed(trimmed) {
+        match contextdb_server::PeerEndpointSpec::parse_detailed(trimmed) {
             Ok(Some(spec)) if spec.dial_ticket().is_some() => Ok(()),
             Ok(_) => Err(format!(
                 "not a valid fabric enrollment ticket: {trimmed:?} — paste the exact ticket \

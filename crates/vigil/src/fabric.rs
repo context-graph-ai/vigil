@@ -827,16 +827,13 @@ impl PendingOffloads {
 /// test binds this adapter directly; it is covered by the cameraless-worker
 /// subprocess test end-to-end plus the owner smoke.
 pub struct FabricProductionDetectorBackend {
-    /// `None` for a worker box that advertises its backend but has no staged
-    /// model yet — `detect` then fails loudly per-job (owner steer
-    /// 2026-07-13), never a silent empty result.
-    detector: Option<Arc<crate::detector::PromotableDetector>>,
+    detector: Arc<crate::detector::PromotableDetector>,
     backend_tag: String,
 }
 
 impl FabricProductionDetectorBackend {
     pub(crate) fn new(
-        detector: Option<Arc<crate::detector::PromotableDetector>>,
+        detector: Arc<crate::detector::PromotableDetector>,
         backend_tag: String,
     ) -> Self {
         Self {
@@ -853,10 +850,7 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
 
     fn model_sha256(&self) -> &str {
         use crate::detector::Detector;
-        match &self.detector {
-            Some(detector) => detector.model_sha256(),
-            None => "",
-        }
+        self.detector.model_sha256()
     }
 
     fn detect(
@@ -867,15 +861,6 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
         confidence_threshold: f64,
     ) -> Result<Vec<DetectorDetection>, String> {
         use crate::detector::Detector;
-
-        let Some(detector) = &self.detector else {
-            return Err(format!(
-                "this fabric worker advertises backend {} but has no detection model staged — \
-                 stage the detection model on this worker (set detector_model_path / \
-                 VIGIL_DETECTOR_MODEL_PATH) so it can serve claimed jobs",
-                self.backend_tag
-            ));
-        };
 
         // The trait's real detection seam is keyed on the pipeline-internal
         // `DecodedVideoSegment`; this adapter wraps the already-decoded
@@ -892,7 +877,7 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
             // adapter never re-decodes `encoded_units` (which stays empty).
             codec: crate::VideoCodec::H264,
         };
-        let output = detector.detect_segment(
+        let output = self.detector.detect_segment(
             &segment,
             clip_sha256.to_string(),
             sample_frames,
@@ -938,13 +923,12 @@ pub(crate) struct FabricBundle {
     /// fabric worker loop claims/executes ANY node's `vigil.detector` job
     /// (including this node's own), so it needs exactly one live detector, not
     /// one per camera. `String` is the truthful backend tag
-    /// (`receipt.active_backend`) this node advertises to the fleet; the
-    /// detector is `Some` once a model artifact is loaded, `None` for a worker
-    /// that has a backend but no staged model yet (it still advertises + runs
-    /// the loop, failing any claimed job loudly until a model is staged —
-    /// owner steer 2026-07-13).
-    pub(crate) worker_detector_slot:
-        OnceLock<(Option<Arc<crate::detector::PromotableDetector>>, String)>,
+    /// (`receipt.active_backend`) this node advertises to the fleet. The slot
+    /// is populated ONLY once a model artifact is actually loaded — a worker
+    /// with no loadable model never fills it, never advertises, and reports
+    /// `fabric-worker-serving=false reason=no-model` (advertisement requires
+    /// executable capability — PO ruling 2026-07-13).
+    pub(crate) worker_detector_slot: OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
     /// Whether this node's fabric worker loop is actually running and serving
     /// the fleet — flipped `true` the moment the loop starts. The status task
     /// renders it onto the shared `fabric-status` line so a not-serving node
@@ -1093,11 +1077,23 @@ pub(crate) fn fabric_bring_up(
         let boot_accel = accel.clone();
         let boot_stats = stats.clone();
         thread::spawn(move || {
-            let (detector, backend_tag) =
-                crate::runtime::bootstrap_worker_detector(&boot_config, &boot_accel, &boot_stats);
-            let _ = boot_bundle
-                .worker_detector_slot
-                .set((detector, backend_tag));
+            match crate::runtime::bootstrap_worker_detector(&boot_config, &boot_accel, &boot_stats)
+            {
+                Some((detector, backend_tag)) => {
+                    let _ = boot_bundle
+                        .worker_detector_slot
+                        .set((detector, backend_tag));
+                }
+                None => {
+                    // No executable capability: name the staging fix and do
+                    // NOT advertise a detector row (PO ruling 2026-07-13).
+                    if let Ok(mut reason) = boot_bundle.worker_serving_reason.lock() {
+                        *reason = "no-model — stage a loadable detection model on this worker \
+                                   (set detector_model_path / VIGIL_DETECTOR_MODEL_PATH)"
+                            .to_string();
+                    }
+                }
+            }
         });
     }
 
@@ -1243,7 +1239,12 @@ pub(crate) fn fabric_bring_up(
                 stats.fabric_status = status_line.clone();
                 stats.fabric_join = join_line.clone();
             });
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            // Refresh promptly (1s): the worker-serving state settles shortly
+            // after bring-up (detector loaded → serving, or no-model → the
+            // named not-serving reason), and every operator surface reads this
+            // persisted snapshot, so a stale multi-second window would show an
+            // outdated serving line right when an operator checks after a join.
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
 

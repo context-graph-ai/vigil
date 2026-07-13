@@ -560,27 +560,26 @@ fn display(path: &Path) -> String {
 
 /// Bootstrap ONE worker detector for a cameraless fabric worker box (owner
 /// steer 2026-07-13): a node with a serving role but no camera source still
-/// serves the fleet, so it advertises its detector capability and runs its
-/// worker loop without any per-camera thread building a detector. Uses the
-/// SAME `detection_accel` selection the per-camera path uses (so the receipt
-/// and the live detector can never disagree) to pick the truthful backend
-/// tag, records the receipt onto stats/accel (so `vigil doctor`/`vigil stats`
-/// report it), and loads the detector through the SAME `yolox_detector` path.
+/// serves the fleet, so it needs a detector without any per-camera thread
+/// building one. Uses the SAME `detection_accel` selection the per-camera path
+/// uses (so the receipt and the live detector can never disagree) to pick the
+/// truthful backend tag, records the receipt onto stats/accel (so `vigil
+/// doctor`/`vigil stats` report it), and loads the detector through the SAME
+/// `yolox_detector` path.
 ///
-/// Returns the truthful backend tag ALWAYS (a burn-cpu/-wgpu node advertises
-/// its backend to the fleet regardless of whether a model artifact is staged
-/// yet), plus the loaded promotable detector when the model IS present. A
-/// missing/unloadable model is logged loudly here and the detector comes back
-/// `None`: the node still advertises its backend and runs its loop, but any
-/// job it claims without a staged model fails loudly per-job (a clear operator
-/// action — stage the detection model), never a silent no-op and never a
-/// panic.
+/// `Some` with the loaded promotable detector + truthful backend tag ONLY when
+/// a model artifact is actually present and loadable — advertisement requires
+/// EXECUTABLE capability (PO ruling 2026-07-13): a node that cannot run
+/// detection must not tell the fleet it can. A missing/unloadable model is
+/// logged loudly and returns `None`; the caller then renders a named
+/// `fabric-worker-serving=false reason=no-model` line with the staging fix,
+/// never a silent no-op and never a panic.
 #[cfg(feature = "fabric")]
 pub(crate) fn bootstrap_worker_detector(
     config: &config::RuntimeConfig,
     accel: &Arc<crate::acceleration::AccelerationState>,
     stats: &RuntimeStatsState,
-) -> (Option<Arc<crate::detector::PromotableDetector>>, String) {
+) -> Option<(Arc<crate::detector::PromotableDetector>, String)> {
     let selection = crate::detection_accel::select_detection_acceleration(
         config.accelerated_detection,
         &config.detector_model_id,
@@ -649,20 +648,20 @@ pub(crate) fn bootstrap_worker_detector(
                 stats.detection_receipt_block = crate::acceleration::render_receipt_block(&receipt);
             });
             accel.record(receipt);
-            (
-                Some(Arc::new(crate::detector::PromotableDetector::new(detector))),
+            Some((
+                Arc::new(crate::detector::PromotableDetector::new(detector)),
                 active_backend_tag,
-            )
+            ))
         }
         Err(error) => {
-            // Loud, named, and non-fatal: the node still advertises its
-            // backend and serves the loop; a claimed job without a model
-            // fails loudly per-job with a clear operator action.
+            // Loud, named, non-fatal: no executable capability, so this node
+            // will NOT advertise a detector row — the caller renders a
+            // named not-serving reason. Never a panic.
             println!(
                 "fabric_worker_detector_load_failed=true backend={active_backend_tag} \
                  error={error} action=stage-the-detection-model-on-this-worker"
             );
-            (None, active_backend_tag)
+            None
         }
     }
 }
@@ -933,7 +932,7 @@ pub fn start_rtsp_probe(
                     if let Some(fabric) = &fabric {
                         let _ = fabric
                             .worker_detector_slot
-                            .set((Some(Arc::clone(&handle)), active_backend_tag.clone()));
+                            .set((Arc::clone(&handle), active_backend_tag.clone()));
                     }
                     handle
                 });

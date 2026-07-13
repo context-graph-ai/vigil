@@ -55,21 +55,24 @@ pub(crate) fn open_with_recognition(
     ))
 }
 
-/// Render a store-open failure as a CLI string, classifying a locked store by
-/// the TYPED `CgError::StoreLocked` variant rather than by substring-matching
+/// Render a store-open failure as a string, classifying a locked store by the
+/// TYPED `CgError::StoreLocked` variant rather than by substring-matching
 /// context-graph's Debug text (which context-graph deliberately stopped
 /// carrying the engine's "database is locked … process" wording when it
-/// introduced the typed variant). The busy-read path (`lib.rs`
-/// `is_database_locked_error`) keys off "database is locked" + the holder pid,
-/// so a locked store must surface both — recovered here from the typed fields,
-/// never guessed from Debug shape.
-fn open_error_message(error: CgError) -> String {
+/// introduced the typed variant, cg `dev` `99ea2d3`). Every vigil store-open
+/// surface routes its error through this ONE classifier so the structured
+/// locked message is restored everywhere, not just on the CLI read path — the
+/// runtime startup open, the recognition-embedder open, and the CLI read all
+/// share it. A locked store always surfaces "database is locked" + the holder
+/// pid (recovered from the typed fields, never guessed from Debug shape); the
+/// `context` label carries the surface-specific wording for every other error.
+pub(crate) fn classify_store_open_error(context: &str, error: CgError) -> String {
     match error {
         CgError::StoreLocked { holder_pid, path } => format!(
             "database is locked by another process (holder pid {holder_pid}) at {}",
             path.display()
         ),
-        other => format!("could not open store through context-graph: {other}"),
+        other => format!("{context}: {other}"),
     }
 }
 
@@ -90,7 +93,9 @@ pub(crate) fn open(path: &Path) -> Result<OpenStore, String> {
         default_text_embedder: Some(EmbedderConfig::disabled()),
         ..StoreConfig::default()
     };
-    let handle = Store::open(config).map_err(open_error_message)?;
+    let handle = Store::open(config).map_err(|error| {
+        classify_store_open_error("could not open store through context-graph", error)
+    })?;
     let trace = handle
         .last_query_trace()
         .map_err(|error| format!("could not read store trace: {error}"))?;

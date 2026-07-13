@@ -684,6 +684,8 @@ pub fn open_store_with_embedder(
             embedder,
         }],
     )
-    .map_err(|e| format!("store open with vision embedder failed: {e}"))?;
+    .map_err(|error| {
+        crate::store::classify_store_open_error("store open with vision embedder failed", error)
+    })?;
     Ok(store)
 }

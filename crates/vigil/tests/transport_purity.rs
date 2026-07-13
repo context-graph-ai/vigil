@@ -1,14 +1,15 @@
 //! Transport purity (criterion C9, §10 rule 2): no vigil code names the
-//! transport. vigil reaches iroh ONLY through contextdb's own adapter
-//! (`contextdb_server::transport::iroh`, and the `iroh:?...` bind-spec
-//! string scheme that adapter's public API itself defines) — it never
-//! depends on the `iroh` crate directly, never imports it bare, and never
-//! authors its own iroh-named symbol.
+//! transport. vigil reaches its peer transport ONLY through contextdb's
+//! transport-neutral surface (`contextdb_server::PeerEndpoint`,
+//! `PeerEndpointSpec`, `peer_bind_spec`, `peer_dial_spec`) — it never
+//! depends on the concrete transport crate directly, never imports it bare,
+//! and never spells the concrete transport's own name anywhere in its own
+//! source, not even in a qualified path or a scheme-string literal.
 //!
 //! Pattern-matches `oss_cleanliness_scan.rs`'s source-scan idiom: walk the
-//! crate's own `src/`, strip comments, and flag disallowed occurrences of
-//! the transport name — a guard authored post-implementation is expected
-//! for C9 (mapped to the acceptance commit from the start).
+//! crate's own `src/`, strip comments, and flag any occurrence of the
+//! transport name — a guard authored post-implementation is expected for
+//! C9 (mapped to the acceptance commit from the start).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,20 +38,16 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Allowed mentions of "iroh" in vigil's own source: a qualified reference
-/// to contextdb's adapter module (`transport::iroh`, contextdb's own
-/// naming, reached only via its public path — never a bare `use iroh::` of
-/// the external crate), or the `iroh:?...` bind-spec/dial-spec URI scheme
-/// string that same adapter's public `bind`/dial API defines and requires
-/// callers to pass verbatim (an external contract's literal scheme name,
-/// not a vigil-authored transport abstraction).
+/// No mention of "iroh" is allowed anywhere in vigil's own source: not a
+/// bare `use iroh::` of the external crate, not a qualified reference to
+/// contextdb's adapter module, and not the transport's own URI scheme
+/// string. vigil consumes contextdb's transport-neutral surface
+/// (`PeerEndpoint` / `PeerEndpointSpec` / `peer_bind_spec` /
+/// `peer_dial_spec`) exclusively, so it never needs to spell the concrete
+/// transport's name at all.
 fn line_names_the_transport(line: &str) -> bool {
     let code = line.split("//").next().unwrap_or("");
-    if !code.to_ascii_lowercase().contains("iroh") {
-        return false;
-    }
-    let allowed = ["transport::iroh", "\"iroh:?"];
-    !allowed.iter().any(|pattern| code.contains(pattern))
+    code.to_ascii_lowercase().contains("iroh")
 }
 
 #[test]
@@ -78,26 +75,31 @@ fn no_iroh_symbol_in_vigil_src() {
     }
     assert!(
         violations.is_empty(),
-        "vigil source must reach iroh only through contextdb's adapter, never name the \
-         transport itself (criterion C9 / §10 rule 2):\n{}",
+        "vigil source must never name the transport at all — consume contextdb's \
+         transport-neutral surface instead (criterion C9 / §10 rule 2):\n{}",
         violations.join("\n")
     );
 }
 
-/// The guard's own allow-list is exercised both ways: a qualified
-/// contextdb-adapter reference and the bind-spec scheme string must NOT
-/// trip the guard, while a bare `use iroh::` (the disallowed shape this
-/// guard exists to catch) MUST.
+/// The guard trips on ANY "iroh" mention, qualified or not, code or
+/// scheme-string — vigil's transport-neutral surface
+/// (`contextdb_server::PeerEndpoint`, `peer_bind_spec`) never needs one.
 #[test]
-fn guard_allows_contextdb_adapter_and_bind_spec_but_not_bare_iroh() {
+fn guard_catches_every_shape_of_the_transport_name() {
     assert!(!line_names_the_transport(
-        "use contextdb_server::transport::iroh::IrohServer;"
+        "use contextdb_server::PeerEndpoint;"
     ));
     assert!(!line_names_the_transport(
-        "        let bind_spec = format!(\"iroh:?identity={}\", identity_path.display());"
+        "        let bind_spec = contextdb_server::peer_bind_spec(&identity_path);"
     ));
     assert!(line_names_the_transport("use iroh::Endpoint;"));
     assert!(line_names_the_transport(
         "struct IrohRelayHandle { endpoint: iroh::Endpoint }"
+    ));
+    assert!(line_names_the_transport(
+        "use contextdb_server::transport::iroh::IrohServer;"
+    ));
+    assert!(line_names_the_transport(
+        "        let bind_spec = format!(\"iroh:?identity={}\", identity_path.display());"
     ));
 }

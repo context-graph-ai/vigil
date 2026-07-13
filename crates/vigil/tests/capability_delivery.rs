@@ -129,9 +129,13 @@ async fn hub_up_late_still_sees_worker_capability() {
     let ticket = hub_endpoint.ticket();
 
     let worker_dir = tempfile::tempdir().expect("worker data dir");
-    let worker_runtime = within(FabricRuntime::start(worker_dir.path(), Some(&ticket), false))
-        .await
-        .expect("worker must enroll standalone against a syntactically valid ticket");
+    let worker_runtime = within(FabricRuntime::start(
+        worker_dir.path(),
+        Some(&ticket),
+        false,
+    ))
+    .await
+    .expect("worker must enroll standalone against a syntactically valid ticket");
 
     let backend = Arc::new(SpyBackend { tag: "burn-cpu" });
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -163,8 +167,7 @@ async fn hub_up_late_still_sees_worker_capability() {
     let worker_node_id = worker_runtime.node_id.clone();
     within(async {
         loop {
-            if hub_capability_backend_for(&hub_db, &worker_node_id).as_deref() == Some("burn-cpu")
-            {
+            if hub_capability_backend_for(&hub_db, &worker_node_id).as_deref() == Some("burn-cpu") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -292,10 +295,7 @@ fn spawn_worker_against_dead_ticket(
         .env("VIGIL_REVIEW_PORT", review_port.to_string())
         .env("VIGIL_FABRIC_TICKET", ticket)
         .env("VIGIL_DETECTOR_MODEL_PATH", model_path)
-        .env(
-            "VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS",
-            20_000.to_string(),
-        )
+        .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", 20_000.to_string())
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_HUB")
         .stdin(Stdio::null())

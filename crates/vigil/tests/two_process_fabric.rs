@@ -401,7 +401,11 @@ fn two_real_processes_render_remote_detectors_line_hub_up_late() {
     // which it advertises locally and fires its one-shot startup push
     // (fabric.rs:674) against the DOWN hub.
     assert!(
-        wait_for_line(&worker, "fabric_worker_loop_started=true", Duration::from_secs(20)),
+        wait_for_line(
+            &worker,
+            "fabric_worker_loop_started=true",
+            Duration::from_secs(20)
+        ),
         "the cameraless worker must start its worker loop (and fire its \
          one-shot push) before the hub returns: {}",
         worker.logs()

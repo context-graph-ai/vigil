@@ -472,11 +472,22 @@ impl StoreProbe {
                 ),
             },
             Err(error) => {
-                let detail = format!("{error:?}");
-                let pid_text = format!("pid {pid}");
+                // Upstream context-graph (cg dev 99ea2d3) surfaces a locked
+                // store as the typed `CgError::StoreLocked { holder_pid, path }`,
+                // whose Debug no longer carries the engine's "database is
+                // locked … pid N" wording. Classify by the typed variant
+                // (confirming the holder is exactly the live process), the same
+                // move vigil's own store-open surfaces make, rather than
+                // substring-matching Debug text that rots when the format
+                // shifts. Assertion INTENT is unchanged — the store is still
+                // required to be contended by THIS pid.
+                let blocked = matches!(
+                    &error,
+                    context_graph::CgError::StoreLocked { holder_pid, .. } if *holder_pid == pid
+                );
                 StoreContentionProbeResult {
-                    blocked: detail.contains("database is locked") && detail.contains(&pid_text),
-                    detail: format!("public Store::open contention result: {detail}"),
+                    blocked,
+                    detail: format!("public Store::open contention result: {error:?}"),
                 }
             }
         }

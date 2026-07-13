@@ -3,10 +3,8 @@
 //! content-addressed blob reference, never as job-row bytes, never through
 //! the hub (criterion C1).
 //!
-//! This module is SKELETON ONLY — every function is `todo!()`/`unimplemented!()`
-//! pending the ledger-wiring implementation. Types are versioned via
-//! `schema_version` so the wire shape can evolve without breaking older
-//! nodes mid-rollout.
+//! Types are versioned via `schema_version` so the wire shape can evolve
+//! without breaking older nodes mid-rollout.
 
 use crate::VideoCodec;
 

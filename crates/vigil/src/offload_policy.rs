@@ -5,9 +5,7 @@
 //! saturated) NEVER offloads, even when a remote is present. The decision
 //! is receipt-visible both ways (why offloading / why not).
 //!
-//! This module is SKELETON ONLY — [`decide`] and
-//! [`render_offload_decision_receipt`] are `todo!()` pending the
-//! implementation pass.
+//! [`decide`] and [`render_offload_decision_receipt`] implement that policy.
 
 /// The detector-queue state an offload decision is computed from — the same
 /// fields already rendered on the `detector-queue=` stats line

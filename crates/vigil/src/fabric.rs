@@ -707,6 +707,11 @@ impl PendingOffloads {
     /// Mark `job_id` resolved because a local fallback ran the detection
     /// itself (criterion C5) — any later-arriving remote result for the
     /// same job must discard as late, never double-count.
+    ///
+    /// This in-process flag is the result-join CONTRACT-TEST seam: it lets
+    /// tests exercise the late/duplicate-discard path deterministically.
+    /// Production correctness does not depend on it — the ledger's own
+    /// exactly-once result delivery is what actually prevents double-count.
     pub fn mark_resolved_by_fallback(&self, job_id: &str) {
         if let Some(entry) = self
             .entries

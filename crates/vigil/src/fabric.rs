@@ -273,6 +273,19 @@ pub struct FabricRuntime {
     /// This node's blob service: ingests its own submissions' frame blobs
     /// and resolves `blob_ref` inputs it claims from others.
     blob_service: Arc<contextdb_server::blob_resolver::BlobService>,
+    /// `true` when this node has a usable fabric SERVING role: it either
+    /// carries the hub, or it enrolled with a ticket that VALIDATED (so it is
+    /// dialing a real hub). A node with a rejected ticket has worker INTENT
+    /// but no serving role — it cannot reach the fleet, so the cameraless
+    /// worker bootstrap must not pretend it is serving (owner steer
+    /// 2026-07-13: serve with whatever you have, but only if you can actually
+    /// reach the fleet).
+    serves_role: bool,
+    /// The named enrollment rejection reason when a configured ticket was
+    /// malformed/expired (criterion C6 / USR-2) — surfaced on this node's own
+    /// status/doctor rendering so a not-serving node says WHY, never a silent
+    /// healthy-looking `enrolled=true`.
+    enrollment_error: Option<String>,
 }
 
 /// The tenant every vigil fabric node enrolls under. Single-tenant by
@@ -354,19 +367,26 @@ impl FabricRuntime {
         // A malformed ticket never blocks standalone bring-up: it is named,
         // logged, and this node dials nothing (falling back to its own
         // bind spec, which simply never resolves a `to=` target).
-        let dial_spec = match fabric_ticket {
+        let (dial_spec, ticket_valid, enrollment_error) = match fabric_ticket {
             Some(ticket) => match Self::validate_fabric_ticket(ticket) {
-                Ok(()) => contextdb_server::peer_dial_spec(ticket.trim(), &identity_path),
+                Ok(()) => (
+                    contextdb_server::peer_dial_spec(ticket.trim(), &identity_path),
+                    true,
+                    None,
+                ),
                 Err(err) => {
                     eprintln!(
                         "vigil: fabric enrollment ticket rejected, continuing standalone: {err}"
                     );
-                    bind_spec.clone()
+                    (bind_spec.clone(), false, Some(err))
                 }
             },
-            None => bind_spec.clone(),
+            None => (bind_spec.clone(), false, None),
         };
         let client = Arc::new(SyncClient::new(db.clone(), &dial_spec, tenant));
+        // A serving role means this node can actually reach the fleet: it
+        // carries the hub, or it dialed a hub with a validated ticket.
+        let serves_role = hub_endpoint.is_some() || ticket_valid;
 
         Ok(Self {
             db,
@@ -376,7 +396,23 @@ impl FabricRuntime {
             hub_endpoint,
             own_endpoint,
             blob_service,
+            serves_role,
+            enrollment_error,
         })
+    }
+
+    /// Whether this node has a usable fabric SERVING role (hub, or enrolled
+    /// with a validated ticket) — the gate for bootstrapping a cameraless
+    /// worker detector and for the honest `fabric-worker-serving` signal.
+    pub fn serves_fabric_role(&self) -> bool {
+        self.serves_role
+    }
+
+    /// The named enrollment rejection reason, when a configured ticket was
+    /// rejected (criterion C6) — `None` when no ticket was configured or the
+    /// ticket validated.
+    pub fn enrollment_error(&self) -> Option<&str> {
+        self.enrollment_error.as_deref()
     }
 
     /// The ready-to-use join instruction this node's own status/doctor/log
@@ -594,6 +630,7 @@ impl FabricRuntime {
         shutdown: Arc<AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
         let client = self.client.clone();
+        let db = self.db.clone();
         let blob_service = self.blob_service.clone();
         let node_id = self.node_id.clone();
         let backend_tag = backend.backend_tag().to_string();
@@ -604,7 +641,7 @@ impl FabricRuntime {
         let executor = DetectorWorkExecutor::new(backend, node_id.clone());
         let config = contextdb_server::work_ledger::WorkerConfig {
             node_id,
-            advertised_tags,
+            advertised_tags: advertised_tags.clone(),
             movement_policy: contextdb_engine::work_ledger::MovementPolicy {
                 auto_propagate: true,
             },
@@ -613,6 +650,28 @@ impl FabricRuntime {
             defer_own_submissions_until_deadline: true,
         };
         tokio::spawn(async move {
+            // Advertise THIS node's truthful detector capability under the
+            // `vigil-detector-<backend>` id `remote_detector_capabilities`
+            // filters on (fabric.rs's `strip_prefix("vigil-detector-")`) —
+            // contextdb's generic `run_worker_loop` only advertises the fixed
+            // literal `"worker-loop"`, which that filter can never match. A
+            // distinct id per backend tag (write-once per `(node_id,
+            // capability_id)`) means a later promotion advertises a NEW row
+            // rather than mutating this one, so the fleet sees an additive,
+            // never-edited provenance trail (criterion C3/C7).
+            let capability_id = detector_capability_id(&backend_tag);
+            if let Err(error) = contextdb_engine::work_ledger::advertise_capability(
+                &db,
+                &config.node_id,
+                &capability_id,
+                &advertised_tags,
+                wall_now_ms(),
+            ) {
+                println!(
+                    "fabric_capability_advertise_failed=true backend={backend_tag} error={error}"
+                );
+            }
+            let _ = client.push().await;
             let _ = contextdb_server::work_ledger::run_worker_loop(
                 &client,
                 &config,
@@ -759,25 +818,25 @@ impl PendingOffloads {
 }
 
 /// The production `FabricDetectorBackend` over this crate's own detection
-/// seam (`crate::detector::PromotableDetector`/`Detector`): no RED test
-/// binds this adapter — it is the real path a worker's standing loop uses,
-/// covered by `cargo check`/clippy plus the owner smoke, mirroring the
-/// existing `Detector` trait's production/test-double split.
-///
-/// Not yet wired into `runtime.rs`'s worker spawn path in this batch (that
-/// wiring is production bring-up, tracked separately from this fabric
-/// integration slice) — kept `#[allow(dead_code)]` until that caller lands
-/// so it does not trip the crate's `-D warnings` gate in the meantime.
-#[allow(dead_code)]
+/// seam (`crate::detector::PromotableDetector`/`Detector`): the real path a
+/// worker's standing loop uses. `fabric_bring_up`'s worker task constructs it
+/// from whatever detector populated `worker_detector_slot` — a camera's
+/// detector, or (for a cameraless worker box) the one
+/// `runtime::bootstrap_worker_detector` loads — so a worker serves the fleet
+/// regardless of whether it owns cameras (owner steer 2026-07-13). No RED
+/// test binds this adapter directly; it is covered by the cameraless-worker
+/// subprocess test end-to-end plus the owner smoke.
 pub struct FabricProductionDetectorBackend {
-    detector: Arc<crate::detector::PromotableDetector>,
+    /// `None` for a worker box that advertises its backend but has no staged
+    /// model yet — `detect` then fails loudly per-job (owner steer
+    /// 2026-07-13), never a silent empty result.
+    detector: Option<Arc<crate::detector::PromotableDetector>>,
     backend_tag: String,
 }
 
-#[allow(dead_code)]
 impl FabricProductionDetectorBackend {
     pub(crate) fn new(
-        detector: Arc<crate::detector::PromotableDetector>,
+        detector: Option<Arc<crate::detector::PromotableDetector>>,
         backend_tag: String,
     ) -> Self {
         Self {
@@ -794,7 +853,10 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
 
     fn model_sha256(&self) -> &str {
         use crate::detector::Detector;
-        self.detector.model_sha256()
+        match &self.detector {
+            Some(detector) => detector.model_sha256(),
+            None => "",
+        }
     }
 
     fn detect(
@@ -805,6 +867,15 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
         confidence_threshold: f64,
     ) -> Result<Vec<DetectorDetection>, String> {
         use crate::detector::Detector;
+
+        let Some(detector) = &self.detector else {
+            return Err(format!(
+                "this fabric worker advertises backend {} but has no detection model staged — \
+                 stage the detection model on this worker (set detector_model_path / \
+                 VIGIL_DETECTOR_MODEL_PATH) so it can serve claimed jobs",
+                self.backend_tag
+            ));
+        };
 
         // The trait's real detection seam is keyed on the pipeline-internal
         // `DecodedVideoSegment`; this adapter wraps the already-decoded
@@ -821,7 +892,7 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
             // adapter never re-decodes `encoded_units` (which stays empty).
             codec: crate::VideoCodec::H264,
         };
-        let output = self.detector.detect_segment(
+        let output = detector.detect_segment(
             &segment,
             clip_sha256.to_string(),
             sample_frames,
@@ -862,12 +933,28 @@ pub(crate) struct FabricBundle {
     /// ledger scan themselves on every segment.
     pub(crate) remote_capabilities: Mutex<Vec<crate::offload_policy::RemoteCapability>>,
     pub(crate) offload_policy_config: crate::offload_policy::OffloadPolicyConfig,
-    /// The first camera detector to finish loading populates this — the
+    /// The first camera detector to finish loading — or, on a cameraless
+    /// worker box, `runtime::bootstrap_worker_detector` — populates this. The
     /// fabric worker loop claims/executes ANY node's `vigil.detector` job
-    /// (including this node's own), so it needs exactly one live detector,
-    /// not one per camera. `String` is the truthful backend tag
-    /// (`receipt.active_backend`) that detector was actually built with.
-    pub(crate) worker_detector_slot: OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
+    /// (including this node's own), so it needs exactly one live detector, not
+    /// one per camera. `String` is the truthful backend tag
+    /// (`receipt.active_backend`) this node advertises to the fleet; the
+    /// detector is `Some` once a model artifact is loaded, `None` for a worker
+    /// that has a backend but no staged model yet (it still advertises + runs
+    /// the loop, failing any claimed job loudly until a model is staged —
+    /// owner steer 2026-07-13).
+    pub(crate) worker_detector_slot:
+        OnceLock<(Option<Arc<crate::detector::PromotableDetector>>, String)>,
+    /// Whether this node's fabric worker loop is actually running and serving
+    /// the fleet — flipped `true` the moment the loop starts. The status task
+    /// renders it onto the shared `fabric-status` line so a not-serving node
+    /// says so loudly (owner steer 2026-07-13 / criterion C6), rather than
+    /// looking identical to a healthy idle one.
+    pub(crate) worker_serving: Arc<AtomicBool>,
+    /// The named reason the worker loop is not serving (enrollment rejected,
+    /// no detector loaded in time) — rendered next to `fabric-worker-serving=
+    /// false`. Empty once serving.
+    pub(crate) worker_serving_reason: Arc<Mutex<String>>,
     pub(crate) tokio_handle: tokio::runtime::Handle,
     pub(crate) node_id: String,
 }
@@ -899,6 +986,7 @@ pub(crate) struct PendingOffloadSegment {
 pub(crate) fn fabric_bring_up(
     config: &config::RuntimeConfig,
     stats: &RuntimeStatsState,
+    accel: &Arc<crate::acceleration::AccelerationState>,
 ) -> Option<Arc<FabricBundle>> {
     if config.fabric_ticket.is_none() && !config.fabric_hub {
         return None;
@@ -948,6 +1036,35 @@ pub(crate) fn fabric_bring_up(
     println!("fabric_ready=true node_id={node_id}");
     println!("{}", fabric_runtime.join_instruction());
 
+    // Whether any camera will load a detector that populates the worker slot.
+    // A node with no camera source (a dedicated spare-compute worker box) must
+    // still serve the fleet with whatever backend it has — so it bootstraps
+    // its OWN worker detector below, independent of cameras (owner steer
+    // 2026-07-13).
+    let serves_role = fabric_runtime.serves_fabric_role();
+    let has_camera_source = config
+        .cameras
+        .iter()
+        .any(|camera| camera.rtsp_url.is_some());
+    // Seed the honest not-serving reason before the worker loop resolves: a
+    // node with worker intent but a rejected ticket can never serve, and says
+    // exactly that; an enrollable node is transiently "starting" until its
+    // loop begins.
+    let initial_serving_reason = if serves_role {
+        String::from("worker-loop-starting")
+    } else {
+        fabric_runtime
+            .enrollment_error()
+            .map(|error| format!("enrollment-rejected: {error}"))
+            .unwrap_or_else(|| {
+                "not-enrolled-to-a-hub — enable the hub role (fabric_hub=true) or paste the hub's \
+             fabric-join ticket"
+                    .to_string()
+            })
+    };
+    let worker_serving = Arc::new(AtomicBool::new(false));
+    let worker_serving_reason = Arc::new(Mutex::new(initial_serving_reason));
+
     let bundle = Arc::new(FabricBundle {
         runtime: fabric_runtime.clone(),
         pending: Arc::new(crate::fabric::PendingOffloads::new()),
@@ -955,9 +1072,34 @@ pub(crate) fn fabric_bring_up(
         remote_capabilities: Mutex::new(Vec::new()),
         offload_policy_config: crate::offload_policy::OffloadPolicyConfig::default(),
         worker_detector_slot: OnceLock::new(),
+        worker_serving: worker_serving.clone(),
+        worker_serving_reason: worker_serving_reason.clone(),
         tokio_handle: handle.clone(),
         node_id: node_id.clone(),
     });
+
+    // Cameraless worker bootstrap (owner steer 2026-07-13): when this node has
+    // a real serving role (hub, or enrolled with a validated ticket) but no
+    // camera will ever populate the worker slot, load ONE worker detector here
+    // through the SAME detection-accel selection the per-camera path uses, and
+    // populate the slot so the worker loop starts and advertises. Runs on a
+    // detached thread so a slow model load never delays `/health` becoming
+    // ready. A node that DOES own cameras keeps its existing behavior (the
+    // first camera detector wins the `OnceLock`); this only fills the gap for a
+    // dedicated worker box.
+    if serves_role && !has_camera_source {
+        let boot_bundle = bundle.clone();
+        let boot_config = config.clone();
+        let boot_accel = accel.clone();
+        let boot_stats = stats.clone();
+        thread::spawn(move || {
+            let (detector, backend_tag) =
+                crate::runtime::bootstrap_worker_detector(&boot_config, &boot_accel, &boot_stats);
+            let _ = boot_bundle
+                .worker_detector_slot
+                .set((detector, backend_tag));
+        });
+    }
 
     // Worker loop, started once the first camera's detector (or a
     // detector-less standalone worker box, bounded below) is ready. Claims +
@@ -984,10 +1126,25 @@ pub(crate) fn fabric_bring_up(
                 ));
                 let shutdown = Arc::new(AtomicBool::new(false));
                 worker_bundle.runtime.spawn_worker_loop(backend, shutdown);
+                worker_bundle
+                    .worker_serving
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Ok(mut reason) = worker_bundle.worker_serving_reason.lock() {
+                    reason.clear();
+                }
                 println!("fabric_worker_loop_started=true backend={backend_tag}");
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
+                // Do not overwrite a more specific reason already set (a
+                // rejected ticket, or a detector-load failure) — only fill in
+                // the deadline reason for a node that had a serving role and
+                // simply never had a detector become available in time.
+                if let Ok(mut reason) = worker_bundle.worker_serving_reason.lock()
+                    && (reason.is_empty() || reason.as_str() == "worker-loop-starting")
+                {
+                    *reason = "no-local-detector-loaded-within-deadline".to_string();
+                }
                 println!(
                     "fabric_worker_loop_not_started=true reason=no_local_detector_loaded_within_deadline"
                 );
@@ -1060,6 +1217,14 @@ pub(crate) fn fabric_bring_up(
                 .lock()
                 .expect("remote capabilities lock")
                 .clone();
+            let worker_serving = status_bundle
+                .worker_serving
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let worker_serving_reason = status_bundle
+                .worker_serving_reason
+                .lock()
+                .map(|reason| reason.clone())
+                .unwrap_or_default();
             let facts = crate::offload_policy::FabricStatusFacts {
                 enrolled: true,
                 role: if status_bundle.runtime.hub_endpoint.is_some() {
@@ -1069,6 +1234,8 @@ pub(crate) fn fabric_bring_up(
                 },
                 in_use: !remotes.is_empty(),
                 remote_detectors: remotes,
+                worker_serving,
+                worker_serving_reason,
             };
             let status_line = crate::offload_policy::render_fabric_status_receipt(&facts);
             let join_line = format!("fabric-join={}", status_bundle.runtime.join_instruction());

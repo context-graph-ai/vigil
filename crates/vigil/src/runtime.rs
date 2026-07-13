@@ -116,7 +116,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     // on this being `Some`, so an unenrolled node's detection path never
     // changes (byte-identical to today).
     #[cfg(feature = "fabric")]
-    let fabric: Option<Arc<FabricBundle>> = fabric_bring_up(&config, &stats);
+    let fabric: Option<Arc<FabricBundle>> = fabric_bring_up(&config, &stats, &accel);
     #[cfg(not(feature = "fabric"))]
     let fabric: Option<Arc<FabricBundle>> = None;
 
@@ -558,6 +558,115 @@ fn display(path: &Path) -> String {
     path.display().to_string()
 }
 
+/// Bootstrap ONE worker detector for a cameraless fabric worker box (owner
+/// steer 2026-07-13): a node with a serving role but no camera source still
+/// serves the fleet, so it advertises its detector capability and runs its
+/// worker loop without any per-camera thread building a detector. Uses the
+/// SAME `detection_accel` selection the per-camera path uses (so the receipt
+/// and the live detector can never disagree) to pick the truthful backend
+/// tag, records the receipt onto stats/accel (so `vigil doctor`/`vigil stats`
+/// report it), and loads the detector through the SAME `yolox_detector` path.
+///
+/// Returns the truthful backend tag ALWAYS (a burn-cpu/-wgpu node advertises
+/// its backend to the fleet regardless of whether a model artifact is staged
+/// yet), plus the loaded promotable detector when the model IS present. A
+/// missing/unloadable model is logged loudly here and the detector comes back
+/// `None`: the node still advertises its backend and runs its loop, but any
+/// job it claims without a staged model fails loudly per-job (a clear operator
+/// action — stage the detection model), never a silent no-op and never a
+/// panic.
+#[cfg(feature = "fabric")]
+pub(crate) fn bootstrap_worker_detector(
+    config: &config::RuntimeConfig,
+    accel: &Arc<crate::acceleration::AccelerationState>,
+    stats: &RuntimeStatsState,
+) -> (Option<Arc<crate::detector::PromotableDetector>>, String) {
+    let selection = crate::detection_accel::select_detection_acceleration(
+        config.accelerated_detection,
+        &config.detector_model_id,
+        yolox_detector::MODEL_INPUT_SHAPE,
+    );
+    let receipt = selection.receipt;
+    let active_backend_tag = receipt.active_backend.clone();
+    let accelerated_selected =
+        selection.backend == crate::detection_accel::ACCELERATED_DETECTION_BACKEND;
+    let detector_load: Result<Box<dyn crate::detector::Detector>, String> = if accelerated_selected
+    {
+        #[cfg(feature = "detect-burn-wgpu")]
+        {
+            if config.recognition.enabled {
+                yolox_detector::load_accelerated_detector_with_classes(
+                    config.detector_model_path.as_deref(),
+                    &crate::recognition::covered_class_indices(&config.recognition),
+                )
+                .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+            } else {
+                yolox_detector::load_accelerated_detector(config.detector_model_path.as_deref())
+                    .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+            }
+        }
+        #[cfg(not(feature = "detect-burn-wgpu"))]
+        {
+            if config.recognition.enabled {
+                yolox_detector::load_cpu_detector_with_classes(
+                    config.detector_model_path.as_deref(),
+                    &crate::recognition::covered_class_indices(&config.recognition),
+                )
+                .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+            } else {
+                yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
+                    .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+            }
+        }
+    } else if config.recognition.enabled {
+        yolox_detector::load_cpu_detector_with_classes(
+            config.detector_model_path.as_deref(),
+            &crate::recognition::covered_class_indices(&config.recognition),
+        )
+        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+    } else {
+        yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
+            .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+    };
+
+    match detector_load {
+        Ok(detector) => {
+            println!(
+                "fabric_worker_detector_loaded id={} sha256={} backend={active_backend_tag}",
+                config.detector_model_id,
+                detector.model_sha256()
+            );
+            stats.update(|stats| {
+                stats.active_detector_backend = receipt.active_backend.clone();
+                stats.detection_acceleration = format!(
+                    "{}{}",
+                    receipt.probe_status.as_str(),
+                    match receipt.failure_code {
+                        crate::acceleration::FailureCode::None => String::new(),
+                        code => format!(":{}", code.as_str()),
+                    }
+                );
+                stats.detection_receipt_block = crate::acceleration::render_receipt_block(&receipt);
+            });
+            accel.record(receipt);
+            (
+                Some(Arc::new(crate::detector::PromotableDetector::new(detector))),
+                active_backend_tag,
+            )
+        }
+        Err(error) => {
+            // Loud, named, and non-fatal: the node still advertises its
+            // backend and serves the loop; a claimed job without a model
+            // fails loudly per-job with a clear operator action.
+            println!(
+                "fabric_worker_detector_load_failed=true backend={active_backend_tag} \
+                 error={error} action=stage-the-detection-model-on-this-worker"
+            );
+            (None, active_backend_tag)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "fabric"), allow(unused_variables))]
 pub fn start_rtsp_probe(
@@ -824,7 +933,7 @@ pub fn start_rtsp_probe(
                     if let Some(fabric) = &fabric {
                         let _ = fabric
                             .worker_detector_slot
-                            .set((Arc::clone(&handle), active_backend_tag.clone()));
+                            .set((Some(Arc::clone(&handle)), active_backend_tag.clone()));
                     }
                     handle
                 });

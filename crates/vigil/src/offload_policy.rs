@@ -269,6 +269,16 @@ pub struct FabricStatusFacts {
     pub role: &'static str,
     pub remote_detectors: Vec<RemoteCapability>,
     pub in_use: bool,
+    /// Whether this node's OWN fabric worker loop is actually running and
+    /// serving detection to the fleet. `enrolled=true` alone never means
+    /// "serving" — a node with a rejected ticket, or one that never loaded a
+    /// worker detector, is enrolled-looking but idle. This is the distinct,
+    /// greppable not-serving signal every surface prints (owner steer
+    /// 2026-07-13 / criterion C6).
+    pub worker_serving: bool,
+    /// When not serving, the named reason (why the worker loop is not
+    /// running) so the operator reads an action, not just a bare `false`.
+    pub worker_serving_reason: String,
 }
 
 /// Render the `fabric-status=` line every surface (stats/doctor/health)
@@ -282,8 +292,20 @@ pub fn render_fabric_status_receipt(facts: &FabricStatusFacts) -> String {
         .map(|remote| format!("{}:{}", remote.node_id, remote.backend))
         .collect::<Vec<_>>()
         .join(",");
+    let serving = if facts.worker_serving {
+        "fabric-worker-serving=true".to_string()
+    } else {
+        format!(
+            "fabric-worker-serving=false reason={}",
+            if facts.worker_serving_reason.is_empty() {
+                "not-serving"
+            } else {
+                facts.worker_serving_reason.as_str()
+            }
+        )
+    };
     format!(
-        "fabric-status=enrolled={} role={} remote-detectors={} in-use={}",
+        "fabric-status=enrolled={} role={} remote-detectors={} in-use={} {}",
         facts.enrolled,
         facts.role,
         if remotes.is_empty() {
@@ -291,7 +313,8 @@ pub fn render_fabric_status_receipt(facts: &FabricStatusFacts) -> String {
         } else {
             remotes
         },
-        facts.in_use
+        facts.in_use,
+        serving
     )
 }
 

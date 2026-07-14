@@ -1006,6 +1006,17 @@ pub fn start_rtsp_probe(
                                 });
                                 println!("detector_invocations={detector_total}");
                                 sleep_shutdown_aware(&shutdown, detector_work_delay);
+                                // Test-only deterministic pressure lever: an
+                                // artificial per-detection-decision delay that
+                                // makes the owner smoke's S1/S3 pressure windows
+                                // reproducible without depending on scene
+                                // traffic. Absent env → ZERO (no hot-path cost).
+                                let decision_delay = decision_delay_from_env(env_u64(
+                                    "VIGIL_DETECTOR_DECISION_DELAY_MS",
+                                ));
+                                if !decision_delay.is_zero() {
+                                    sleep_shutdown_aware(&shutdown, decision_delay);
+                                }
                                 let detector_started = Instant::now();
                                 let detection_started_at = chrono::Utc::now();
                                 // The SAME detection work identity created at enqueue.
@@ -1857,6 +1868,17 @@ fn encoded_clip_sha256(media: &media_pipeline::DecodedVideoSegment) -> String {
 
 fn env_u64(key: &str) -> Option<u64> {
     std::env::var(key).ok()?.parse().ok()
+}
+
+/// Map a raw `VIGIL_DETECTOR_DECISION_DELAY_MS` value to a per-detection-
+/// decision delay. This is a TEST-ONLY deterministic pressure lever, fenced
+/// exactly like `VIGIL_DETECTOR_QUEUE_CAPACITY`: env-only, no options-schema
+/// entry, no CLI flag — it exists so the owner smoke's S1/S3 pressure windows
+/// are reproducible without depending on live scene traffic, never as an
+/// operator control. `None` (env unset) → `Duration::ZERO`, so there is no
+/// added latency on the hot path in normal operation.
+fn decision_delay_from_env(raw: Option<u64>) -> Duration {
+    raw.map(Duration::from_millis).unwrap_or(Duration::ZERO)
 }
 
 fn maybe_crash_after_startup_node(node: &str) {
@@ -2732,11 +2754,30 @@ pub(crate) struct FabricBundle;
 #[cfg(test)]
 mod tests {
     use super::{
-        DetectorSegmentDecision, LatestSegmentQueue, LatestSegmentRecv, detector_segment_decision,
-        generic_camera_url,
+        DetectorSegmentDecision, LatestSegmentQueue, LatestSegmentRecv, decision_delay_from_env,
+        detector_segment_decision, generic_camera_url,
     };
     use crate::config;
     use std::time::Duration;
+
+    #[test]
+    fn detector_decision_delay_is_zero_without_env_and_honors_short_values() {
+        // Absent env → zero added latency on the hot path.
+        assert_eq!(
+            decision_delay_from_env(None),
+            Duration::ZERO,
+            "no VIGIL_DETECTOR_DECISION_DELAY_MS means no per-decision delay"
+        );
+        // An explicit 0 is also zero (no sleep triggered).
+        assert_eq!(decision_delay_from_env(Some(0)), Duration::ZERO);
+        // A short value delays each decision by exactly that many ms.
+        assert_eq!(
+            decision_delay_from_env(Some(15)),
+            Duration::from_millis(15),
+            "the lever delays each detection decision by the configured ms"
+        );
+        assert_eq!(decision_delay_from_env(Some(3)), Duration::from_millis(3));
+    }
 
     #[test]
     fn latest_segment_queue_keeps_newest_pending_work_when_full() {

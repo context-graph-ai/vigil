@@ -1012,15 +1012,6 @@ pub fn start_rtsp_probe(
                                 });
                                 println!("detector_invocations={detector_total}");
                                 sleep_shutdown_aware(&shutdown, detector_work_delay);
-                                // Apply the once-resolved test-only pressure
-                                // delay (see `decision_delay` above): an
-                                // artificial per-detection-decision delay that
-                                // makes the owner smoke's S1/S3 pressure windows
-                                // reproducible without depending on scene
-                                // traffic. Zero when the env is unset.
-                                if !decision_delay.is_zero() {
-                                    sleep_shutdown_aware(&shutdown, decision_delay);
-                                }
                                 let detector_started = Instant::now();
                                 let detection_started_at = chrono::Utc::now();
                                 // The SAME detection work identity created at enqueue.
@@ -1128,6 +1119,21 @@ pub fn start_rtsp_probe(
                                     }
                                 }
 
+                                // Apply the once-resolved test-only pressure
+                                // delay (see `decision_delay` above) on the
+                                // LOCAL-inference branch only: it simulates a
+                                // slow local detector, so it must never gate
+                                // the offload decision above or an offloaded
+                                // segment's dispatch — a real slow node
+                                // decides quickly and ships work fast; only
+                                // its own inference is slow. (Round-5 S3
+                                // lesson: sleeping before the decision
+                                // throttled the policy to one decision per
+                                // delay period and starved offload.) Zero
+                                // when the env is unset.
+                                if !decision_delay.is_zero() {
+                                    sleep_shutdown_aware(&shutdown, decision_delay);
+                                }
                                 let output = detector.detect_segment(
                                     &segment.media,
                                     segment.clip_sha256.clone(),

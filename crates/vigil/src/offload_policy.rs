@@ -57,6 +57,15 @@ pub struct OffloadPolicyConfig {
     /// Consecutive degraded observations required before offload considers
     /// the pressure sustained rather than a single blip.
     pub drop_growth_window: u32,
+    /// Pressure HYSTERESIS exit width (fix cycle 7): once a node has entered
+    /// pressure mode it keeps offloading (idle remote present) until this many
+    /// CONSECUTIVE genuinely-pressure-free observations (`dropped == 0` AND
+    /// `depth == 0` at decision time). Sized so re-probing local capacity is
+    /// infrequent relative to the C2 cost of a wrong keep-local: a wrong
+    /// keep-local costs a whole local-processing period of drops, a wrong
+    /// offload costs nothing. Only affects the EXIT side — a node never under
+    /// pressure never offloads.
+    pub pressure_exit_observations: u32,
     /// How long a submitter waits for a claimed remote job before reclaiming
     /// it and running locally (the C5 fallback primitive's horizon).
     pub fallback_horizon_ms: u64,
@@ -72,6 +81,7 @@ impl Default for OffloadPolicyConfig {
         Self {
             saturation_fraction: 0.8,
             drop_growth_window: 1,
+            pressure_exit_observations: 10,
             fallback_horizon_ms: 5_000,
             max_attempts: 3,
             blob_cap_bytes: 16 * 1024 * 1024,
@@ -329,6 +339,17 @@ pub fn render_fabric_status_receipt(facts: &FabricStatusFacts) -> String {
 pub struct RuntimeOffloadSeam {
     tracker: WindowedPressureTracker,
     config: OffloadPolicyConfig,
+    /// Pressure HYSTERESIS state (fix cycle 7). `drop_growth_window` alone is
+    /// memoryless: at the default window=1, a 180s-pinned local pile drops, one
+    /// decision offloads (growth>0), the next sees zero new drops + post-dequeue
+    /// depth 0 and flips back to keep-local, re-committing to another 180s pin —
+    /// the observed S3 limit cycle (~4 offloads / 815 dmpf in a 10-min saturated
+    /// window). Once entered, pressure mode holds across zero-growth troughs and
+    /// exits only after `pressure_exit_observations` CONSECUTIVE genuinely-
+    /// pressure-free observations. Enter is unchanged (`under_pressure`), so a
+    /// node never under pressure never offloads (C2 sentence one).
+    in_pressure_mode: bool,
+    pressure_free_streak: u32,
 }
 
 impl RuntimeOffloadSeam {
@@ -336,6 +357,8 @@ impl RuntimeOffloadSeam {
         Self {
             tracker: WindowedPressureTracker::new(config.drop_growth_window),
             config,
+            in_pressure_mode: false,
+            pressure_free_streak: 0,
         }
     }
 
@@ -345,6 +368,53 @@ impl RuntimeOffloadSeam {
         remotes: &[RemoteCapability],
     ) -> Decision {
         let snapshot = self.tracker.observe(lifetime);
+        let saturated = snapshot.capacity > 0
+            && (snapshot.depth as f64)
+                >= self.config.saturation_fraction * (snapshot.capacity as f64);
+        let under_pressure = snapshot.degraded || saturated || snapshot.dropped > 0;
+        // Genuinely pressure-free: no new drops AND the queue has drained. A
+        // trough with depth still > 0 has NOT recovered, so it must not count
+        // toward exiting pressure mode (C2 asymmetry — re-probe local capacity
+        // conservatively).
+        let pressure_free = snapshot.dropped == 0 && snapshot.depth == 0;
+
+        if under_pressure {
+            self.in_pressure_mode = true;
+            self.pressure_free_streak = 0;
+        } else if self.in_pressure_mode {
+            if pressure_free {
+                self.pressure_free_streak += 1;
+                if self.pressure_free_streak >= self.config.pressure_exit_observations {
+                    self.in_pressure_mode = false;
+                    self.pressure_free_streak = 0;
+                }
+            } else {
+                self.pressure_free_streak = 0;
+            }
+        }
+
+        // Instantaneous pressure: the stateless decision + its instantaneous
+        // reason (degraded / saturated / drops-growing), unchanged.
+        if under_pressure {
+            return decide(snapshot, remotes, &self.config);
+        }
+
+        // Not under pressure this observation, but pressure mode is still held:
+        // keep offloading to an idle remote across the trough. Distinct reason so
+        // receipts separate hysteresis decisions from instantaneous ones.
+        if self.in_pressure_mode {
+            return match remotes.iter().find(|remote| remote.idle) {
+                Some(remote) => Decision::Offload {
+                    why: "sustained-pressure".to_string(),
+                    remote: remote.clone(),
+                },
+                None => Decision::KeepLocal {
+                    why: "no-remote-capability".to_string(),
+                },
+            };
+        }
+
+        // Genuinely keeping pace (never entered, or just exited): never offload.
         decide(snapshot, remotes, &self.config)
     }
 }

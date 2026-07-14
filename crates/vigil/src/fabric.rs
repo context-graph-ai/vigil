@@ -286,7 +286,22 @@ pub struct FabricRuntime {
     /// status/doctor rendering so a not-serving node says WHY, never a silent
     /// healthy-looking `enrolled=true`.
     enrollment_error: Option<String>,
+    /// How long (ms) a remote's advertised detector capability stays LIVE
+    /// since its last hub contact (or, absent a hub contact record, since its
+    /// advertisement). Past this, the remote ages out of both the rendered
+    /// remote-detectors line and the offload-routing set. Defaults to
+    /// [`DEFAULT_CAPABILITY_LIVENESS_TTL_MS`]; override with
+    /// [`FabricRuntime::with_capability_liveness_ttl_ms`].
+    capability_liveness_ttl_ms: i64,
 }
+
+/// Default liveness TTL for a remote's advertised detector capability: a
+/// generous 5× the worker poll / re-advertise cadence (2s — the
+/// `run_worker_loop` interval in [`FabricRuntime::spawn_worker_loop`], which is
+/// also the hub-contact cadence), so a single missed poll never flickers a
+/// live worker out of the rendered or routable set. Additive and overridable
+/// per node via [`FabricRuntime::with_capability_liveness_ttl_ms`].
+pub const DEFAULT_CAPABILITY_LIVENESS_TTL_MS: i64 = 10_000;
 
 /// The tenant every vigil fabric node enrolls under. Single-tenant by
 /// construction (the OSS/commercial boundary is multi-tenancy, never a
@@ -398,7 +413,16 @@ impl FabricRuntime {
             blob_service,
             serves_role,
             enrollment_error,
+            capability_liveness_ttl_ms: DEFAULT_CAPABILITY_LIVENESS_TTL_MS,
         })
+    }
+
+    /// Override the remote-capability liveness TTL (ms) for this node. Additive
+    /// knob; the default ([`DEFAULT_CAPABILITY_LIVENESS_TTL_MS`]) is derived
+    /// from the worker poll cadence and needs no touching in normal operation.
+    pub fn with_capability_liveness_ttl_ms(mut self, ttl_ms: i64) -> Self {
+        self.capability_liveness_ttl_ms = ttl_ms;
+        self
     }
 
     /// Whether this node has a usable fabric SERVING role (hub, or enrolled
@@ -531,18 +555,32 @@ impl FabricRuntime {
         Ok(job_id)
     }
 
-    /// Currently-known remote `vigil.detector` capabilities (criterion C2's
-    /// `RemoteCapability` input, and criterion C7 provenance): every
-    /// advertised `vigil-detector-*` capability row from a node other than
-    /// this one. `idle` is always reported `true` here — this node has no
-    /// live load signal for a REMOTE peer; the policy's "idle" is itself
-    /// only "not known to be saturated", never a speed claim, so this is
-    /// the honest floor pending a richer capability-detail signal.
+    /// The LIVE, CURRENT remote `vigil.detector` capability set — the ONE
+    /// vocabulary both the rendered `remote-detectors=` line and the offload
+    /// routing consume (criterion C2's `RemoteCapability` input and criterion
+    /// C7 provenance). Because both surfaces call THIS function and nothing
+    /// else, routing is structurally unable to pick a node the render would
+    /// not show.
+    ///
+    /// Per remote node (never this one), it collapses that node's advertised
+    /// `vigil-detector-*` rows to its CURRENT backend — the LATEST-advertised
+    /// row — so a worker restarted onto a different backend renders only its
+    /// present one, never a stale sibling row. The node is offered only while
+    /// LIVE: its hub last-contact (or, absent a contact record — e.g. on an
+    /// edge that never sees the hub-local table — the current row's
+    /// `advertised_at`) is within `capability_liveness_ttl_ms`. A worker that
+    /// stopped contacting the hub ages out of both surfaces even though its
+    /// capability row lingers.
+    ///
+    /// `idle` is always reported `true` here — this node has no live load
+    /// signal for a REMOTE peer; the policy's "idle" is only "not known to be
+    /// saturated", never a speed claim, so this is the honest floor pending a
+    /// richer capability-detail signal.
     pub async fn remote_detector_capabilities(&self) -> Result<Vec<RemoteCapability>, String> {
         let result = self
             .db
             .execute(
-                "SELECT node_id, capability_id FROM work_capabilities",
+                "SELECT node_id, capability_id, advertised_at FROM work_capabilities",
                 &std::collections::HashMap::new(),
             )
             .map_err(|err| format!("fabric: scan work_capabilities: {err}"))?;
@@ -556,8 +594,18 @@ impl FabricRuntime {
             .iter()
             .position(|column| column == "capability_id")
             .ok_or_else(|| "fabric: work_capabilities missing capability_id column".to_string())?;
+        let advertised_idx = result
+            .columns
+            .iter()
+            .position(|column| column == "advertised_at")
+            .ok_or_else(|| "fabric: work_capabilities missing advertised_at column".to_string())?;
 
-        let mut remotes = Vec::new();
+        let contacts = self.hub_last_contacts()?;
+
+        // Collapse each remote node's detector rows to its CURRENT backend:
+        // the one with the greatest advertised_at.
+        let mut current: std::collections::HashMap<String, (i64, String)> =
+            std::collections::HashMap::new();
         for row in &result.rows {
             let contextdb_core::Value::Text(node) = &row[node_idx] else {
                 continue;
@@ -571,13 +619,86 @@ impl FabricRuntime {
             let Some(backend) = capability_id.strip_prefix("vigil-detector-") else {
                 continue;
             };
+            let advertised_at = match &row[advertised_idx] {
+                contextdb_core::Value::Timestamp(ms) => *ms,
+                contextdb_core::Value::Int64(ms) => *ms,
+                _ => continue,
+            };
+            current
+                .entry(node.clone())
+                .and_modify(|(seen_at, seen_backend)| {
+                    if advertised_at >= *seen_at {
+                        *seen_at = advertised_at;
+                        *seen_backend = backend.to_string();
+                    }
+                })
+                .or_insert_with(|| (advertised_at, backend.to_string()));
+        }
+
+        let now = wall_now_ms();
+        let mut remotes = Vec::new();
+        for (node, (advertised_at, backend)) in current {
+            // Liveness clock: the hub's last contact with this node, or the
+            // current advertisement when no contact record exists.
+            let last_seen = contacts.get(&node).copied().unwrap_or(advertised_at);
+            if now.saturating_sub(last_seen) > self.capability_liveness_ttl_ms {
+                continue;
+            }
             remotes.push(RemoteCapability {
-                node_id: node.clone(),
-                backend: backend.to_string(),
+                node_id: node,
+                backend,
                 idle: true,
             });
         }
         Ok(remotes)
+    }
+
+    /// The hub-local per-node last-contact clock (`work_node_contacts`), read
+    /// into a `node_id → last_contact_ms` map. Present only on a node that
+    /// carries the hub — the table is never synced to edges — so an edge (or a
+    /// hub before its first served exchange) simply gets an empty map and the
+    /// caller falls back to each capability's `advertised_at` for liveness.
+    fn hub_last_contacts(&self) -> Result<std::collections::HashMap<String, i64>, String> {
+        let mut contacts = std::collections::HashMap::new();
+        if !self
+            .db
+            .table_names()
+            .iter()
+            .any(|name| name == contextdb_server::work_ledger::WORK_NODE_CONTACTS_TABLE)
+        {
+            return Ok(contacts);
+        }
+        let result = self
+            .db
+            .execute(
+                "SELECT node_id, last_contact_ms FROM work_node_contacts",
+                &std::collections::HashMap::new(),
+            )
+            .map_err(|err| format!("fabric: scan work_node_contacts: {err}"))?;
+        let node_idx = result
+            .columns
+            .iter()
+            .position(|column| column == "node_id")
+            .ok_or_else(|| "fabric: work_node_contacts missing node_id column".to_string())?;
+        let contact_idx = result
+            .columns
+            .iter()
+            .position(|column| column == "last_contact_ms")
+            .ok_or_else(|| {
+                "fabric: work_node_contacts missing last_contact_ms column".to_string()
+            })?;
+        for row in &result.rows {
+            let contextdb_core::Value::Text(node) = &row[node_idx] else {
+                continue;
+            };
+            let last_contact = match &row[contact_idx] {
+                contextdb_core::Value::Timestamp(ms) => *ms,
+                contextdb_core::Value::Int64(ms) => *ms,
+                _ => continue,
+            };
+            contacts.insert(node.clone(), last_contact);
+        }
+        Ok(contacts)
     }
 
     /// Poll for and apply any `vigil.detector` results this node submitted

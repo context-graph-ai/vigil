@@ -33,13 +33,23 @@
 
 #![cfg(feature = "fabric")]
 
+use contextdb_engine::Database;
+use contextdb_engine::work_ledger::advertise_capability;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use vigil::fabric::detector_capability_id;
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64
+}
 
 fn vigil_binary_path() -> PathBuf {
     if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
@@ -466,4 +476,227 @@ fn wait_for_health_any(node: &Node, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(50));
     }
     false
+}
+
+/// The fabric ledger db path under a node's data dir — `<data_dir>/fabric/
+/// fabric-ledger.db` (see `runtime.rs`'s `config.data_dir.join("fabric")` and
+/// `FabricRuntime::start`'s `data_dir.join("fabric-ledger.db")`).
+fn fabric_ledger_path(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join("fabric").join("fabric-ledger.db")
+}
+
+/// Poll the hub's `vigil doctor acceleration` until its rendered
+/// `remote-detectors=` NO LONGER names the worker with any backend, returning
+/// the last output seen.
+fn poll_hub_until_worker_absent(
+    hub_data_dir: &std::path::Path,
+    worker_node_id: &str,
+    timeout: Duration,
+) -> (bool, String) {
+    let start = Instant::now();
+    let mut last = String::new();
+    while start.elapsed() < timeout {
+        last = run_doctor_acceleration(hub_data_dir);
+        if !last.contains(worker_node_id) {
+            return (true, last);
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    (false, last)
+}
+
+// ── Arm C: restart onto a different backend — hub renders ONLY current ─────
+
+/// A worker that served one backend, was restarted onto another, and
+/// re-advertised must render on the hub as ONLY its CURRENT backend — the
+/// stale sibling row must never appear alongside it (the S4 defect:
+/// `burn-wgpu` served, restarted acceleration-off, `burn-cpu` re-advertised).
+/// This proves the currency collapse over two REAL processes and the real
+/// sync + render chain, not just in-process.
+///
+/// A CPU test box cannot TRUTHFULLY produce a `burn-wgpu` backend — the
+/// advertised tag must reflect REAL capability (criterion C3/C7), never a
+/// forced label — so the stale GPU-era row is injected directly into the DOWN
+/// worker's ledger at an OLD `advertised_at`, exactly the row a real prior
+/// `burn-wgpu` era would have left. The live worker still truthfully
+/// advertises its real `burn-cpu`; on restart its standing loop pushes BOTH
+/// rows, so the stale sibling genuinely reaches the hub (it rides the same
+/// changeset as, and at a lower LSN than, the re-advertised `burn-cpu`). The
+/// assertion is that the hub collapses them to the current backend on the wire.
+#[test]
+fn two_real_processes_render_only_the_restarted_workers_current_backend() {
+    assert!(
+        fixture_model_path().is_file(),
+        "detector model fixture must be present: {}",
+        fixture_model_path().display()
+    );
+
+    let hub_dir = tempfile::tempdir().expect("hub data dir");
+    let hub_health = free_port();
+    let hub = spawn_node(hub_dir.path(), hub_health, free_port(), true, None);
+    assert!(
+        wait_for_health(hub_health, Duration::from_secs(20)),
+        "hub node must come up"
+    );
+    let ticket = wait_for_ticket(&hub, Duration::from_secs(20))
+        .expect("hub must print its fabric-join ticket");
+
+    let worker_dir = tempfile::tempdir().expect("worker data dir");
+    let worker_health = free_port();
+    let worker = spawn_node(
+        worker_dir.path(),
+        worker_health,
+        free_port(),
+        false,
+        Some(&ticket),
+    );
+    assert!(
+        wait_for_health(worker_health, Duration::from_secs(20)),
+        "worker node must reach a ready /health"
+    );
+    let worker_node_id =
+        wait_for_node_id(&worker, Duration::from_secs(20)).expect("worker must print its node id");
+
+    // Control: the live worker's real backend renders end to end.
+    let (seen_cpu, out_first) = poll_hub_for_remote_worker(
+        hub_dir.path(),
+        &worker_node_id,
+        "burn-cpu",
+        Duration::from_secs(45),
+    );
+    assert!(
+        seen_cpu,
+        "the hub must first render the worker's real burn-cpu; last doctor output:\n{out_first}"
+    );
+
+    // Take the worker down and inject the stale GPU-era row it would have left.
+    worker.kill_and_wait();
+    thread::sleep(Duration::from_millis(500));
+    {
+        let db = Database::open(fabric_ledger_path(worker_dir.path()))
+            .expect("open the down worker's ledger to inject the stale backend row");
+        advertise_capability(
+            &db,
+            &worker_node_id,
+            &detector_capability_id("burn-wgpu"),
+            &["backend:burn-wgpu".to_string()],
+            now_ms() - 3_600_000,
+        )
+        .expect("inject the stale burn-wgpu era capability row");
+        db.close()
+            .expect("flush and close the injected worker ledger");
+    }
+
+    // Restart the worker on the SAME data dir (same identity ⇒ same node id):
+    // it truthfully re-advertises burn-cpu at NOW and its standing poll loop
+    // pushes both that and the older burn-wgpu row to the hub.
+    let worker2_health = free_port();
+    let worker2 = spawn_node(
+        worker_dir.path(),
+        worker2_health,
+        free_port(),
+        false,
+        Some(&ticket),
+    );
+    assert!(
+        wait_for_health(worker2_health, Duration::from_secs(20)),
+        "the restarted worker must come back up: {}",
+        worker2.logs()
+    );
+
+    // The hub must render ONLY the current backend: burn-cpu present, the
+    // stale burn-wgpu sibling absent (currency collapse over two processes).
+    let (seen_cpu2, out_second) = poll_hub_for_remote_worker(
+        hub_dir.path(),
+        &worker_node_id,
+        "burn-cpu",
+        Duration::from_secs(45),
+    );
+    let worker2_logs = worker2.logs();
+    worker2.kill_and_wait();
+    hub.kill_and_wait();
+
+    assert!(
+        seen_cpu2,
+        "the restarted worker's current burn-cpu must render; last doctor output:\n{out_second}\n\nworker logs:\n{worker2_logs}"
+    );
+    assert!(
+        !hub_renders_remote_worker(&out_second, &worker_node_id, "burn-wgpu"),
+        "the stale burn-wgpu era row must NOT render alongside the current \
+         burn-cpu — the hub collapses a restarted worker's rows to its latest \
+         advertised backend; hub doctor output:\n{out_second}"
+    );
+}
+
+// ── Arm D: dead worker ages out of the hub's rendered remote-detectors ─────
+
+/// A worker that joins and then stops contacting the hub must AGE OUT of the
+/// hub's rendered `remote-detectors=` line within the liveness TTL — its
+/// capability row lingers, but the hub stops offering a node it has not heard
+/// from. Proven over two REAL processes: the hub's per-node last-contact clock
+/// (advanced on every served exchange) freezes when the worker dies, and past
+/// the TTL the shared live/current set drops it.
+#[test]
+fn two_real_processes_age_out_a_dead_worker_from_remote_detectors() {
+    assert!(
+        fixture_model_path().is_file(),
+        "detector model fixture must be present: {}",
+        fixture_model_path().display()
+    );
+
+    let hub_dir = tempfile::tempdir().expect("hub data dir");
+    let hub_health = free_port();
+    let hub = spawn_node(hub_dir.path(), hub_health, free_port(), true, None);
+    assert!(
+        wait_for_health(hub_health, Duration::from_secs(20)),
+        "hub node must come up"
+    );
+    let ticket = wait_for_ticket(&hub, Duration::from_secs(20))
+        .expect("hub must print its fabric-join ticket");
+
+    let worker_dir = tempfile::tempdir().expect("worker data dir");
+    let worker_health = free_port();
+    let worker = spawn_node(
+        worker_dir.path(),
+        worker_health,
+        free_port(),
+        false,
+        Some(&ticket),
+    );
+    assert!(
+        wait_for_health(worker_health, Duration::from_secs(20)),
+        "worker node must reach a ready /health"
+    );
+    let worker_node_id =
+        wait_for_node_id(&worker, Duration::from_secs(20)).expect("worker must print its node id");
+
+    // The worker is rendered while alive (its pushes keep its last-contact
+    // fresh).
+    let (seen, out_alive) = poll_hub_for_remote_worker(
+        hub_dir.path(),
+        &worker_node_id,
+        "burn-cpu",
+        Duration::from_secs(45),
+    );
+    assert!(
+        seen,
+        "the live worker must first render on the hub; last doctor output:\n{out_alive}"
+    );
+
+    // Kill the worker: its last-contact freezes and its poll-cadence re-push
+    // stops. Wait past the default liveness TTL
+    // (`DEFAULT_CAPABILITY_LIVENESS_TTL_MS` = 10s) with margin.
+    worker.kill_and_wait();
+    thread::sleep(Duration::from_secs(13));
+
+    let (absent, out_dead) =
+        poll_hub_until_worker_absent(hub_dir.path(), &worker_node_id, Duration::from_secs(20));
+    hub.kill_and_wait();
+
+    assert!(
+        absent,
+        "a worker that stopped contacting the hub must age out of the rendered \
+         remote-detectors within the TTL, not linger forever; last doctor \
+         output still naming {worker_node_id}:\n{out_dead}"
+    );
 }

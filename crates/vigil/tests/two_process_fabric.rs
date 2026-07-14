@@ -485,6 +485,32 @@ fn fabric_ledger_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("fabric").join("fabric-ledger.db")
 }
 
+/// Whether a node's `work_capabilities` table physically holds `capability_id`,
+/// read straight from a ledger db. Used to prove a synced row ARRIVED at the
+/// hub regardless of what the collapsed render shows. The db is single-writer
+/// locked cross-process (redb), so the caller must open it only when the owning
+/// process is DOWN (e.g. after `hub.kill_and_wait()`).
+fn ledger_has_capability(data_dir: &std::path::Path, node_id: &str, capability_id: &str) -> bool {
+    let Ok(db) = Database::open(fabric_ledger_path(data_dir)) else {
+        return false;
+    };
+    let key = format!("{node_id}#{capability_id}");
+    let mut params = std::collections::HashMap::new();
+    params.insert(
+        "capability_key".to_string(),
+        contextdb_core::Value::Text(key),
+    );
+    let found = db
+        .execute(
+            "SELECT capability_key FROM work_capabilities WHERE capability_key = $capability_key",
+            &params,
+        )
+        .map(|result| !result.rows.is_empty())
+        .unwrap_or(false);
+    let _ = db.close();
+    found
+}
+
 /// Poll the hub's `vigil doctor acceleration` until its rendered
 /// `remote-detectors=` NO LONGER names the worker with any backend, returning
 /// the last output seen.
@@ -638,6 +664,26 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
     worker2.kill_and_wait();
     hub.kill_and_wait();
 
+    // NON-VACUITY ANCHOR: with the hub down (ledger lock released), read its
+    // work_capabilities directly and require the injected stale burn-wgpu row
+    // to be PHYSICALLY present — proof that era-2's push carrying it actually
+    // reached the hub's store, so the collapse below is asserted against a hub
+    // that genuinely HELD both the stale and the current row (not a timing
+    // window where only era-1 burn-cpu was ever there). The era-1 aging gap
+    // above already makes `out_second`'s burn-cpu attributable to era-2; this
+    // makes the "burn-wgpu arrived" premise explicit rather than inferred from
+    // LSN ordering.
+    assert!(
+        ledger_has_capability(
+            hub_dir.path(),
+            &worker_node_id,
+            &detector_capability_id("burn-wgpu"),
+        ),
+        "the injected stale burn-wgpu row must have reached the hub's \
+         work_capabilities (proving era-2's push carrying the stale sibling \
+         landed) — otherwise the collapse assertion is vacuous"
+    );
+
     assert!(
         seen_cpu2,
         "the restarted worker's current burn-cpu must render; last doctor output:\n{out_second}\n\nworker logs:\n{worker2_logs}"
@@ -647,6 +693,14 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
         "the stale burn-wgpu era row must NOT render alongside the current \
          burn-cpu — the hub collapses a restarted worker's rows to its latest \
          advertised backend; hub doctor output:\n{out_second}"
+    );
+    assert_eq!(
+        out_second
+            .matches(&format!("{worker_node_id}:burn-cpu"))
+            .count(),
+        1,
+        "the node must render EXACTLY ONCE, as its current burn-cpu — not \
+         duplicated and not once per era; hub doctor output:\n{out_second}"
     );
 }
 

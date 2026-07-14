@@ -1354,13 +1354,55 @@ pub(crate) fn fabric_bring_up(
                 .keys()
                 .cloned()
                 .collect();
+            // The live claimant set for the C5 dead-capability steal below:
+            // the SAME liveness-filtered vocabulary the routing/render surfaces
+            // read (refreshed just above this iteration). A claimant absent
+            // from it has aged out; a slow-but-alive one is still present.
+            let live_node_ids: Vec<String> = consumer_bundle
+                .remote_capabilities
+                .lock()
+                .expect("remote capabilities lock")
+                .iter()
+                .map(|remote| remote.node_id.clone())
+                .collect();
+            let steal_now_ms = wall_now_ms();
+            let my_node_id = consumer_bundle.runtime.node_id.clone();
             for job_id in job_ids {
                 let result = match contextdb_engine::work_ledger::job_result(
                     &consumer_bundle.runtime.db,
                     &job_id,
                 ) {
                     Ok(Some(result)) => result,
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        // No result yet. If this job's remote claimant has died
+                        // mid-lease (fallen out of the live set) AND the
+                        // fallback horizon has passed, steal it back so THIS
+                        // submitter's own deferring worker re-runs it locally
+                        // (criterion C5) — never waiting out the claimant's full
+                        // (5-minute) lease. The steal is a single guarded
+                        // failure-row write; the worker loop and the
+                        // `executor == self` apply path do the rest.
+                        match try_steal_stranded_claim(
+                            &consumer_bundle.runtime.db,
+                            &my_node_id,
+                            &job_id,
+                            &live_node_ids,
+                            steal_now_ms,
+                        ) {
+                            Ok(true) => {
+                                // Deliver the abandon row to the hub so the
+                                // reclaim is visible fleet-wide; a miss is
+                                // tolerated (offline mode) and the standing
+                                // worker loop re-pushes.
+                                let _ = consumer_bundle.runtime.client.push().await;
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                println!("fabric_steal_failed=true job_id={job_id} error={error}");
+                            }
+                        }
+                        continue;
+                    }
                     Err(error) => {
                         println!("fabric_result_scan_failed=true job_id={job_id} error={error}");
                         continue;
@@ -1453,6 +1495,93 @@ fn wire_envelope_from_work(
         ordering_stream_sequence: work.ordering.stream_sequence,
         schema_version: crate::detector_workclass::DETECTOR_SCHEMA_VERSION,
     }
+}
+
+/// Reason recorded on the failure row the C5 dead-claimant steal writes, so a
+/// ledger reader can tell a genuine execution failure from a submitter-driven
+/// reclaim of a worker whose heartbeat stopped.
+#[cfg(feature = "fabric")]
+pub(crate) const STEAL_REASON: &str = "claimant-capability-expired";
+
+/// The submitter's C5 dead-claimant steal (fix cycle 8): reclaim a stranded
+/// offloaded job whose claimant has died mid-lease, WITHOUT waiting out the
+/// claimant's full (5-minute) lease. It records a failure row for the dead
+/// claimant's attempt, which the ledger's failure-aware rule turns the job
+/// `Pending` again, so the submitter's own deferring worker claims and runs it
+/// locally on its normal poll — and the existing `executor == self` apply path
+/// prints `offload-fallback=local why=lease-expired`. No lease field is mutated
+/// and no engine state machine changes: this is one guarded write over existing
+/// ledger semantics.
+///
+/// Returns `Ok(true)` iff a steal row was written. Guards, in order:
+/// 1. ONLY the job's own submitter may steal (a foreign node never does — it
+///    does not own the C5 fallback duty). Enforced against the ledger's own
+///    `submitter_node_id`, not merely the caller's structural context.
+/// 2. The job must be actively `Leased` (nothing to steal from a job that is
+///    already `Pending`/`Done`/`Failed`/`Cancelled` — in particular a result
+///    that landed before the steal makes this a no-op).
+/// 3. The claimant must be a FOREIGN node — never this submitter's own live
+///    self-reclaim in flight (which a second steal would loop to `Failed`).
+/// 4. The pure [`crate::offload_policy::should_steal_stranded_claim`] policy
+///    must hold: horizon elapsed AND the claimant fallen out of the live
+///    capability set. A slow-but-ALIVE claimant is never stolen.
+#[cfg(feature = "fabric")]
+pub fn try_steal_stranded_claim(
+    db: &Database,
+    my_node_id: &str,
+    job_id: &str,
+    live_capability_node_ids: &[String],
+    now_ms: i64,
+) -> Result<bool, String> {
+    use contextdb_engine::work_ledger::{JobState, job_snapshot, job_state, record_failure};
+
+    let Some(job) = job_snapshot(db, job_id)
+        .map_err(|err| format!("fabric: steal read job {job_id}: {err}"))?
+    else {
+        return Ok(false);
+    };
+    // Guard 1: only the job's own submitter may steal.
+    if job.submitter_node_id != my_node_id {
+        return Ok(false);
+    }
+    // Guard 2: there must be a live claimant's attempt to abandon (a job that
+    // is already Pending/Done/Failed/Cancelled has nothing to steal — a result
+    // that landed before the steal makes this a no-op).
+    let JobState::Leased {
+        node_id: claimant,
+        attempt,
+        ..
+    } = job_state(db, job_id, now_ms)
+        .map_err(|err| format!("fabric: steal read state {job_id}: {err}"))?
+    else {
+        return Ok(false);
+    };
+    // Guard 3: never steal the submitter's OWN claim. After a steal the
+    // submitter reclaims locally, so the job is briefly Leased by this node
+    // while it runs; abandoning that live self-claim would loop the in-flight
+    // local execution to Failed. The steal targets a FOREIGN dead claimant
+    // only. (A node's own id is never in the REMOTE capability set, so the
+    // liveness policy below cannot make this distinction — it must be explicit.)
+    if claimant == my_node_id {
+        return Ok(false);
+    }
+    // Guard 4: the horizon has elapsed AND the claimant has fallen out of the
+    // live capability set (a slow-but-alive claimant is never stolen).
+    if !crate::offload_policy::should_steal_stranded_claim(
+        now_ms,
+        job.deadline_ms,
+        &claimant,
+        live_capability_node_ids,
+    ) {
+        return Ok(false);
+    }
+    // Abandon the dead claimant's attempt. The ledger's failure-aware rule
+    // (a failure row on the highest attempt releases the lease) turns the job
+    // Pending, so the submitter's own deferring worker reclaims it. max_attempts
+    // defaults to 2, so this one abandon flips the job Pending, never Failed.
+    record_failure(db, job_id, attempt, &claimant, STEAL_REASON, now_ms)
+        .map_err(|err| format!("fabric: steal abandon {job_id}#{attempt}: {err}"))?;
+    Ok(true)
 }
 
 /// Submit one segment as a `vigil.detector` job (criteria C1/C2's offload

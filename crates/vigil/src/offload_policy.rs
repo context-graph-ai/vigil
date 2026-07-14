@@ -165,6 +165,37 @@ pub fn render_offload_fallback_receipt(why: &str) -> String {
     format!("offload-fallback=local why={why}")
 }
 
+/// The C5 dead-worker steal decision (fix cycle 8): may the SUBMITTER reclaim a
+/// stranded offloaded job by abandoning its dead claimant's attempt? True only
+/// when BOTH hold — the fallback horizon has elapsed (`now_ms > deadline_ms`),
+/// AND the claimant has fallen out of the live capability set. A job with no
+/// fallback deadline is never an offload job and is never stolen.
+///
+/// Capability liveness — not the wall clock — is the discriminator, and that is
+/// the whole point: a merely SLOW-but-alive worker keeps re-advertising on its
+/// poll cadence, so it stays in `live_capability_node_ids` and is NEVER stolen
+/// no matter how far past the deadline it runs. Only a claimant whose heartbeat
+/// has genuinely stopped (aged out of the fresh set) is reclaimed. This is what
+/// makes the steal safe where a blunt lease-cap would not be: capping the lease
+/// at the horizon would yank work from a live-but-slow worker and double-execute
+/// it; keying on sustained heartbeat absence cannot.
+pub fn should_steal_stranded_claim(
+    now_ms: i64,
+    deadline_ms: Option<i64>,
+    claimant_node_id: &str,
+    live_capability_node_ids: &[String],
+) -> bool {
+    let Some(deadline_ms) = deadline_ms else {
+        return false;
+    };
+    if now_ms <= deadline_ms {
+        return false;
+    }
+    !live_capability_node_ids
+        .iter()
+        .any(|node_id| node_id == claimant_node_id)
+}
+
 /// Render one remote-detection provenance line (criterion C7): every
 /// remotely-executed detection's node + backend, in the ONE shape stats/
 /// doctor/health all print — never a per-surface reimplementation, so

@@ -237,3 +237,123 @@ async fn only_a_dead_worker_means_no_offload() {
          detection; got: {decision:?}"
     );
 }
+
+// A never-invoked executor: the worker loop below claims no work (there are no
+// jobs), so `execute` is unreachable — it exists only to satisfy the trait.
+struct NoopExecutor;
+
+impl contextdb_server::work_ledger::WorkExecutor for NoopExecutor {
+    fn execute(
+        &self,
+        _job: &contextdb_engine::work_ledger::JobSnapshot,
+        _inputs: &contextdb_engine::work_ledger::ExecutionInputs,
+        _should_abandon: &dyn Fn() -> bool,
+    ) -> contextdb_server::work_ledger::ExecutionVerdict {
+        contextdb_server::work_ledger::ExecutionVerdict::Abandoned
+    }
+}
+
+// RED (fix cycle 4 review, finding 1) — a LIVE, re-advertising worker must
+// STAY rendered/routed on a CONSUMER edge across several TTLs ───────────────
+//
+// The mirror of RED-5: where a DEAD worker (a frozen advertisement) must age
+// out, a LIVE worker whose standing loop keeps advertising must NOT. A consumer
+// edge has no hub-local last-contact clock (`work_node_contacts` never syncs to
+// edges), so liveness there falls back to the freshest advertisement the node
+// has synced. Fails before the fix: the worker's standing loop advertised once
+// and only RE-PUSHED the unchanged row, so a perfectly live worker's
+// advertisement went stale and it aged out of render + routing after the TTL —
+// even though it never stopped polling.
+#[tokio::test]
+async fn a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls() {
+    let dir = tempfile::tempdir().expect("data dir");
+    // A CONSUMER edge (not a hub): no hub-local work_node_contacts table, so
+    // liveness uses the synced advertisement. A short TTL makes "several TTLs"
+    // a fast wall-clock window.
+    let runtime = FabricRuntime::start(dir.path(), None, false)
+        .await
+        .expect("consumer edge stands up")
+        .with_capability_liveness_ttl_ms(150);
+
+    // The remote worker's current detector backend, as its first sync landed it.
+    advertise_capability(
+        &runtime.db,
+        "live-worker",
+        &detector_capability_id("burn-cpu"),
+        &tags(&["backend:burn-cpu"]),
+        now_ms(),
+    )
+    .expect("worker's detector capability lands");
+
+    // The remote worker's STANDING loop, writing into this consumer's store the
+    // way its synced pushes would. An in-process hub receives its pushes so the
+    // loop advances promptly (a server-less push would back off for seconds);
+    // the hub's per-node contact clock lives in the SEPARATE hub db, so the
+    // consumer store stays contact-free and liveness there is purely the synced
+    // advertisement. The consumer reads the worker's re-advertisements from the
+    // SHARED local store directly.
+    let broker = contextdb_server::InProcessBroker::new();
+    let hub_db = std::sync::Arc::new(contextdb_engine::Database::open_memory());
+    let hub = std::sync::Arc::new(contextdb_server::SyncServer::with_transport(
+        hub_db.clone(),
+        broker.server(),
+        contextdb_core::TenantId::from("vigil-fabric"),
+        contextdb_engine::sync_types::ConflictPolicies::uniform(
+            contextdb_engine::sync_types::ConflictPolicy::LatestWins,
+        ),
+    ));
+    let hub_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hub_task = {
+        let hub = hub.clone();
+        let hub_shutdown = hub_shutdown.clone();
+        tokio::spawn(async move { hub.run_until(hub_shutdown).await })
+    };
+
+    let worker_client = std::sync::Arc::new(contextdb_server::SyncClient::with_transport(
+        runtime.db.clone(),
+        broker.client(),
+        contextdb_core::TenantId::from("vigil-fabric"),
+    ));
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let client = worker_client.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let config = contextdb_server::work_ledger::WorkerConfig {
+                node_id: "live-worker".to_string(),
+                advertised_tags: tags(&["backend:burn-cpu"]),
+                movement_policy: contextdb_engine::work_ledger::MovementPolicy {
+                    auto_propagate: true,
+                },
+                lease_duration_ms: 5 * 60_000,
+                blob_service: None,
+                defer_own_submissions_until_deadline: false,
+            };
+            let _ = contextdb_server::work_ledger::run_worker_loop(
+                &client,
+                &config,
+                &NoopExecutor,
+                std::time::Duration::from_millis(30),
+                shutdown,
+            )
+            .await;
+        })
+    };
+
+    // Let the clock pass several TTLs (150ms each) while the worker keeps
+    // advertising on its 30ms cadence.
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let line = rendered_status_line(&runtime).await;
+
+    shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    hub_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    let _ = worker.await;
+    let _ = hub_task.await;
+
+    assert!(
+        line.contains("live-worker:burn-cpu"),
+        "a live worker that keeps re-advertising on its poll cadence must STAY \
+         rendered on a consumer edge across several TTLs — it must not age out \
+         like a dead one; got: {line}"
+    );
+}

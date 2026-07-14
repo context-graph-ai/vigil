@@ -61,6 +61,7 @@ fn run_detector_probe_inner(args: Vec<OsString>) -> Result<(), String> {
 }
 
 fn run_inner(args: Vec<OsString>) -> Result<(), String> {
+    let boot_started = Instant::now();
     let config = config::load(args)?;
     privilege::prepare_runtime_user(&config.store_path)?;
     let mut shutdown = shutdown::install()?;
@@ -111,14 +112,74 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
         );
     }
 
-    // Fabric bring-up (criteria C1-C10): `None` unless fabric_ticket/
-    // fabric_hub is configured — every downstream call site below is gated
-    // on this being `Some`, so an unenrolled node's detection path never
-    // changes (byte-identical to today).
+    // Fabric attaches ASYNCHRONOUSLY, off the readiness-critical path. Opening
+    // the fabric ledger (Database::open) can take minutes on a large ledger, and
+    // a node with a camera must serve NVR duty (store + camera + detector +
+    // /health ready) without waiting for it — otherwise the Supervisor watchdog
+    // kills a slow boot and reloops. So the NVR pipeline comes up first and
+    // /health reports ready before fabric is done; the fabric wiring (offload
+    // seam, worker loop, result-consumer, status task) lands in the SAME state
+    // the old synchronous path produced, just later, published through this
+    // shared slot. Every downstream consumer already tolerates absent fabric
+    // (fabric is optional config), so reads of an unattached slot behave exactly
+    // like an unenrolled node.
+    //
+    // `worker_detector_candidate` is created HERE, before both the cameras and
+    // the fabric bring-up, and shared with both: a camera's detector may load
+    // before fabric finishes attaching, so it publishes its detector into this
+    // slot and the worker loop picks it up the instant the bundle appears —
+    // decoupling "first camera detector wins the worker slot" from bring-up
+    // timing.
     #[cfg(feature = "fabric")]
-    let fabric: Option<Arc<FabricBundle>> = fabric_bring_up(&config, &stats, &accel);
-    #[cfg(not(feature = "fabric"))]
-    let fabric: Option<Arc<FabricBundle>> = None;
+    let fabric_slot: Arc<std::sync::OnceLock<Arc<FabricBundle>>> =
+        Arc::new(std::sync::OnceLock::new());
+    #[cfg(feature = "fabric")]
+    let worker_detector_candidate: Arc<
+        std::sync::OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
+    > = Arc::new(std::sync::OnceLock::new());
+    #[cfg(feature = "fabric")]
+    if config.fabric_ticket.is_some() || config.fabric_hub {
+        // Honest transient status until the async attach completes: every
+        // operator surface (stats/doctor/health) reads this persisted line, so
+        // it must say "starting" rather than look like an unenrolled node or a
+        // healthy enrolled one. The async status task overwrites it with the
+        // real enrolled/hub line once attached.
+        stats.update(|stats| {
+            stats.fabric_status = "fabric-status=starting fabric=starting \
+                 reason=fabric-bringup-in-progress remote-detectors=- in-use=false \
+                 fabric-worker-serving=false"
+                .to_string();
+        });
+        println!("boot_phase=fabric-bringup-start");
+        let bringup_config = config.clone();
+        let bringup_stats = stats.clone();
+        let bringup_accel = accel.clone();
+        let bringup_slot = fabric_slot.clone();
+        let bringup_candidate = worker_detector_candidate.clone();
+        thread::spawn(move || {
+            let started = Instant::now();
+            match fabric_bring_up(
+                &bringup_config,
+                &bringup_stats,
+                &bringup_accel,
+                bringup_candidate,
+            ) {
+                Some(bundle) => {
+                    let _ = bringup_slot.set(bundle);
+                    println!(
+                        "boot_phase=fabric-bringup-done elapsed_ms={} attached=true",
+                        started.elapsed().as_millis()
+                    );
+                }
+                None => {
+                    println!(
+                        "boot_phase=fabric-bringup-done elapsed_ms={} attached=false",
+                        started.elapsed().as_millis()
+                    );
+                }
+            }
+        });
+    }
 
     log_startup(&config);
 
@@ -129,8 +190,17 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let mut detection_publisher_handle: Option<crate::ha_mqtt_tasks::DetectionPublisherHandle> =
         None;
     let mut review_server = None;
+    println!(
+        "boot_phase=store-open-start path={}",
+        config.store_path.display()
+    );
+    let store_open_started = Instant::now();
     let opened = match store::open_with_recognition(&config.store_path, &config.recognition) {
         Ok((store, embedder)) => {
+            println!(
+                "boot_phase=store-open-done elapsed_ms={}",
+                store_open_started.elapsed().as_millis()
+            );
             if embedder.is_some() {
                 println!("{}", recognition_enabled_startup_line(&config.recognition));
             }
@@ -244,7 +314,10 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                         recognition_embedder.clone(),
                         accel.clone(),
                         stage_receipts.clone(),
-                        fabric.clone(),
+                        #[cfg(feature = "fabric")]
+                        fabric_slot.clone(),
+                        #[cfg(feature = "fabric")]
+                        worker_detector_candidate.clone(),
                     );
                     camera_handles.push(handle);
                 }
@@ -310,6 +383,10 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                 mqtt_subscriber = Some(subscriber);
                 println!("mqtt_subscriber_started=true");
             }
+            println!(
+                "boot_phase=pipeline-up elapsed_ms={}",
+                boot_started.elapsed().as_millis()
+            );
             Some(store.handle)
         }
         None => None,
@@ -680,7 +757,15 @@ pub fn start_rtsp_probe(
     recognition_embedder: Option<Arc<dyn context_graph::Embedder>>,
     accel: Arc<crate::acceleration::AccelerationState>,
     receipts: Arc<crate::workgraph::StageReceiptLog>,
-    fabric: Option<Arc<FabricBundle>>,
+    // Fabric attaches asynchronously (see `run_inner`), so the probe reads the
+    // bundle from a shared slot per-segment rather than capturing it at spawn:
+    // it may still be empty when the camera starts and fill in later. The
+    // detector, when it loads, publishes itself into `worker_detector_candidate`
+    // (independent of fabric timing) for the worker loop to claim.
+    #[cfg(feature = "fabric")] fabric_slot: Arc<std::sync::OnceLock<Arc<FabricBundle>>>,
+    #[cfg(feature = "fabric")] worker_detector_candidate: Arc<
+        std::sync::OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
+    >,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         // A panic on this thread must not kill a camera silently while
@@ -928,12 +1013,14 @@ pub fn start_rtsp_probe(
                     // First camera detector ready wins the fabric worker
                     // loop's backend (the worker claims/executes ANY node's
                     // job, not one per camera — see `FabricBundle`'s doc).
+                    // Published into the shared candidate slot independently of
+                    // fabric attach timing: the bundle's `worker_detector_slot`
+                    // IS this same `Arc<OnceLock>`, so a detector that loads
+                    // before fabric finishes attaching is still claimed the
+                    // instant the worker loop starts.
                     #[cfg(feature = "fabric")]
-                    if let Some(fabric) = &fabric {
-                        let _ = fabric
-                            .worker_detector_slot
-                            .set((Arc::clone(&handle), active_backend_tag.clone()));
-                    }
+                    let _ = worker_detector_candidate
+                        .set((Arc::clone(&handle), active_backend_tag.clone()));
                     handle
                 });
             let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
@@ -958,11 +1045,14 @@ pub fn start_rtsp_probe(
                 let panic_alive = detector_alive.clone();
                 let panic_queue = detector_queue.clone();
                 #[cfg(feature = "fabric")]
-                let fabric_for_detector = fabric.clone();
+                let fabric_for_detector = fabric_slot.clone();
+                // Created lazily on the first segment that actually sees an
+                // attached fabric: bring-up may still be in flight when this
+                // detector thread starts, and the seam's config comes from the
+                // bundle. Until then it stays `None` and no offload is
+                // considered — byte-identical to an unenrolled node.
                 #[cfg(feature = "fabric")]
-                let mut offload_seam = fabric_for_detector
-                    .as_ref()
-                    .map(|fabric| crate::offload_policy::RuntimeOffloadSeam::new(fabric.offload_policy_config));
+                let mut offload_seam: Option<crate::offload_policy::RuntimeOffloadSeam> = None;
                 thread::spawn(move || {
                     let panic_health = health.clone();
                     let panic_stats = stats.clone();
@@ -1034,7 +1124,7 @@ pub fn start_rtsp_probe(
                                 // (always local).
                                 #[cfg(feature = "fabric")]
                                 if let Some(fabric_state) = fabric_for_detector
-                                    .as_ref()
+                                    .get()
                                     .filter(|_| config.fabric_allow_frame_offload)
                                 {
                                     let counters = detector_queue.counters();
@@ -1055,8 +1145,11 @@ pub fn start_rtsp_probe(
                                         .expect("remote capabilities lock")
                                         .clone();
                                     let decision = offload_seam
-                                        .as_mut()
-                                        .expect("offload seam present when fabric_for_detector is")
+                                        .get_or_insert_with(|| {
+                                            crate::offload_policy::RuntimeOffloadSeam::new(
+                                                fabric_state.offload_policy_config,
+                                            )
+                                        })
                                         .decide_for_segment(lifetime, &remotes);
                                     let decision_line =
                                         crate::offload_policy::render_offload_decision_receipt(&decision);
@@ -2753,13 +2846,6 @@ fn get_or_create_decision(
 // only the feature-gated calls into `crate::fabric`.
 #[cfg(feature = "fabric")]
 use crate::fabric::{FabricBundle, PendingOffloadSegment, fabric_bring_up, try_offload_segment};
-
-/// Marker-only when the `fabric` cargo feature is not compiled in: never
-/// constructed (`crate::fabric::fabric_bring_up` is fabric-only), but the
-/// type must exist so `start_rtsp_probe`'s signature does not fork between
-/// builds.
-#[cfg(not(feature = "fabric"))]
-pub(crate) struct FabricBundle;
 
 #[cfg(test)]
 mod tests {

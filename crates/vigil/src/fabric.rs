@@ -1085,7 +1085,15 @@ pub(crate) struct FabricBundle {
     /// with no loadable model never fills it, never advertises, and reports
     /// `fabric-worker-serving=false reason=no-model` (advertisement requires
     /// executable capability — PO ruling 2026-07-13).
-    pub(crate) worker_detector_slot: OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
+    /// Shared with the camera detector threads (which populate it the moment a
+    /// detector loads) and, for a cameraless worker box, the bootstrap thread.
+    /// An `Arc<OnceLock<..>>` rather than an owned `OnceLock` so it is created in
+    /// `run_inner` BEFORE this bundle exists: fabric now attaches asynchronously,
+    /// so a camera's detector may load before the bundle is built, and the
+    /// worker loop must still observe that detector the instant the bundle
+    /// appears.
+    pub(crate) worker_detector_slot:
+        Arc<OnceLock<(Arc<crate::detector::PromotableDetector>, String)>>,
     /// Whether this node's fabric worker loop is actually running and serving
     /// the fleet — flipped `true` the moment the loop starts. The status task
     /// renders it onto the shared `fabric-status` line so a not-serving node
@@ -1128,9 +1136,22 @@ pub(crate) fn fabric_bring_up(
     config: &config::RuntimeConfig,
     stats: &RuntimeStatsState,
     accel: &Arc<crate::acceleration::AccelerationState>,
+    worker_detector_slot: Arc<OnceLock<(Arc<crate::detector::PromotableDetector>, String)>>,
 ) -> Option<Arc<FabricBundle>> {
     if config.fabric_ticket.is_none() && !config.fabric_hub {
         return None;
+    }
+    // Test-only bring-up delay lever (default absent → ZERO cost; no shipped
+    // surface — add-on options/env, fabric.toml, CLI — ever sets it): lets the
+    // boot-readiness test make fabric bring-up deliberately slow so it can prove
+    // /health reaches Ready WITHOUT waiting for the fabric ledger to open. Inert
+    // in production, mirroring VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS.
+    if let Some(delay_ms) = std::env::var("VIGIL_FABRIC_BRINGUP_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+    {
+        thread::sleep(Duration::from_millis(delay_ms));
     }
     let tokio_runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -1212,7 +1233,7 @@ pub(crate) fn fabric_bring_up(
         pending_segments: Mutex::new(HashMap::new()),
         remote_capabilities: Mutex::new(Vec::new()),
         offload_policy_config: crate::offload_policy::OffloadPolicyConfig::default(),
-        worker_detector_slot: OnceLock::new(),
+        worker_detector_slot,
         worker_serving: worker_serving.clone(),
         worker_serving_reason: worker_serving_reason.clone(),
         tokio_handle: handle.clone(),

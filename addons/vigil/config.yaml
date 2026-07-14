@@ -64,7 +64,14 @@ schema:
   fabric_hub: bool?
   fabric_allow_frame_offload: bool?
 apparmor: true
-host_network: false
+# Host networking is REQUIRED for the fabric (distributed compute): the iroh
+# sync/blob endpoint is QUIC over UDP on a dynamically bound port, and the
+# fabric-join ticket advertises this node's discovered interface addresses.
+# Behind the default container network the ticket advertises the unreachable
+# container-internal bridge address and every worker dial times out — no port
+# mapping can fix a dynamically bound UDP port. Same pattern as other NVR
+# add-ons (e.g. Frigate).
+host_network: true
 host_pid: false
 # Narrow DRM render-node mapping for hardware video decode (hardware_decoding).
 # Never full_access and never the whole /dev/dri tree — only the render node.

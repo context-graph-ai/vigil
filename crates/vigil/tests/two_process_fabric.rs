@@ -579,13 +579,35 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
             &db,
             &worker_node_id,
             &detector_capability_id("burn-wgpu"),
-            &["backend:burn-wgpu".to_string()],
+            &[
+                "class:vigil.detector".to_string(),
+                "backend:burn-wgpu".to_string(),
+            ],
             now_ms() - 3_600_000,
         )
         .expect("inject the stale burn-wgpu era capability row");
         db.close()
             .expect("flush and close the injected worker ledger");
     }
+
+    // Determinism anchor: age the era-1 rows out of the hub's render BEFORE
+    // the restart (same aging the dead-worker arm proves). After this, ANY
+    // render of the worker can only come from the restarted worker's fresh
+    // push — and the injected burn-wgpu row rides that same push at a lower
+    // LSN than the era-2 burn-cpu re-advertise, so a burn-cpu render proves
+    // the stale row also arrived. Without this gap, the era-1 burn-cpu row
+    // (same key, same backend string) could satisfy the anchor before the
+    // era-2 push lands, leaving a timing window where a regressed
+    // no-collapse build would also pass.
+    thread::sleep(Duration::from_secs(13));
+    let (era1_aged_out, out_gap) =
+        poll_hub_until_worker_absent(hub_dir.path(), &worker_node_id, Duration::from_secs(20));
+    assert!(
+        era1_aged_out,
+        "the down worker's era-1 rows must age out before the restart so the \
+         post-restart render is attributable only to the fresh push; last \
+         doctor output still naming {worker_node_id}:\n{out_gap}"
+    );
 
     // Restart the worker on the SAME data dir (same identity ⇒ same node id):
     // it truthfully re-advertises burn-cpu at NOW and its standing poll loop

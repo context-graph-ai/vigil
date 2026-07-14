@@ -296,11 +296,14 @@ pub struct FabricRuntime {
 }
 
 /// Default liveness TTL for a remote's advertised detector capability: a
-/// generous 5× the worker poll / re-advertise cadence (2s — the
-/// `run_worker_loop` interval in [`FabricRuntime::spawn_worker_loop`], which is
-/// also the hub-contact cadence), so a single missed poll never flickers a
-/// live worker out of the rendered or routable set. Additive and overridable
-/// per node via [`FabricRuntime::with_capability_liveness_ttl_ms`].
+/// generous 5× the worker poll cadence (2s — the `run_worker_loop` interval in
+/// [`FabricRuntime::spawn_worker_loop`]). On every poll the worker BOTH
+/// re-advertises (refreshing `advertised_at`, which propagates to consumer
+/// edges) AND contacts the hub (advancing the hub's last-contact clock), so
+/// both liveness signals refresh on that 2s cadence; a TTL of several times it
+/// means a single missed poll never flickers a live worker out of the rendered
+/// or routable set. Additive and overridable per node via
+/// [`FabricRuntime::with_capability_liveness_ttl_ms`].
 pub const DEFAULT_CAPABILITY_LIVENESS_TTL_MS: i64 = 10_000;
 
 /// The tenant every vigil fabric node enrolls under. Single-tenant by
@@ -602,9 +605,12 @@ impl FabricRuntime {
 
         let contacts = self.hub_last_contacts()?;
 
-        // Collapse each remote node's detector rows to its CURRENT backend:
-        // the one with the greatest advertised_at.
+        // Per remote node, collapse its detector rows to its CURRENT backend
+        // (the greatest-advertised_at `vigil-detector-*` row) AND track the
+        // freshest advertisement across ALL its capability rows for liveness.
         let mut current: std::collections::HashMap<String, (i64, String)> =
+            std::collections::HashMap::new();
+        let mut node_last_advertised: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
         for row in &result.rows {
             let contextdb_core::Value::Text(node) = &row[node_idx] else {
@@ -616,13 +622,28 @@ impl FabricRuntime {
             let contextdb_core::Value::Text(capability_id) = &row[capability_idx] else {
                 continue;
             };
-            let Some(backend) = capability_id.strip_prefix("vigil-detector-") else {
-                continue;
-            };
             let advertised_at = match &row[advertised_idx] {
                 contextdb_core::Value::Timestamp(ms) => *ms,
                 contextdb_core::Value::Int64(ms) => *ms,
                 _ => continue,
+            };
+            // Liveness is fed by the node's FRESHEST advertisement across all
+            // its rows — the standing worker loop refreshes its `worker-loop`
+            // heartbeat every poll cycle even when the detector backend row is
+            // unchanged, so on a consumer edge (no hub last-contact clock) a
+            // live worker stays current here rather than aging out on a frozen
+            // detector-row timestamp.
+            node_last_advertised
+                .entry(node.clone())
+                .and_modify(|seen| {
+                    if advertised_at > *seen {
+                        *seen = advertised_at;
+                    }
+                })
+                .or_insert(advertised_at);
+            // The CURRENT backend is the latest-advertised detector row.
+            let Some(backend) = capability_id.strip_prefix("vigil-detector-") else {
+                continue;
             };
             current
                 .entry(node.clone())
@@ -637,10 +658,15 @@ impl FabricRuntime {
 
         let now = wall_now_ms();
         let mut remotes = Vec::new();
-        for (node, (advertised_at, backend)) in current {
-            // Liveness clock: the hub's last contact with this node, or the
-            // current advertisement when no contact record exists.
-            let last_seen = contacts.get(&node).copied().unwrap_or(advertised_at);
+        for (node, (_current_at, backend)) in current {
+            // Liveness clock: the hub's last contact with this node (the
+            // strongest signal, present only on a hub), else the node's
+            // freshest advertisement across all its rows.
+            let last_seen = contacts
+                .get(&node)
+                .copied()
+                .or_else(|| node_last_advertised.get(&node).copied())
+                .unwrap_or(0);
             if now.saturating_sub(last_seen) > self.capability_liveness_ttl_ms {
                 continue;
             }

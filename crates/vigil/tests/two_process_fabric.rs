@@ -485,30 +485,70 @@ fn fabric_ledger_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("fabric").join("fabric-ledger.db")
 }
 
-/// Whether a node's `work_capabilities` table physically holds `capability_id`,
-/// read straight from a ledger db. Used to prove a synced row ARRIVED at the
-/// hub regardless of what the collapsed render shows. The db is single-writer
-/// locked cross-process (redb), so the caller must open it only when the owning
-/// process is DOWN (e.g. after `hub.kill_and_wait()`).
-fn ledger_has_capability(data_dir: &std::path::Path, node_id: &str, capability_id: &str) -> bool {
-    let Ok(db) = Database::open(fabric_ledger_path(data_dir)) else {
-        return false;
-    };
-    let key = format!("{node_id}#{capability_id}");
-    let mut params = std::collections::HashMap::new();
-    params.insert(
-        "capability_key".to_string(),
-        contextdb_core::Value::Text(key),
-    );
-    let found = db
+/// One read of a node's `work_capabilities` capability ids straight from a
+/// ledger db file. `Err` distinguishes "could not open/read the db" (a
+/// transient just after the owner process exits — the redb lock/file settles)
+/// from "opened cleanly, row simply absent". The db is single-writer locked
+/// cross-process (redb), so the caller must read only when the owning process
+/// is DOWN (e.g. after `hub.kill_and_wait()`).
+fn read_ledger_capability_ids(
+    data_dir: &std::path::Path,
+    node_id: &str,
+) -> Result<Vec<String>, String> {
+    let db = Database::open(fabric_ledger_path(data_dir)).map_err(|err| format!("open: {err}"))?;
+    let ids = db
         .execute(
-            "SELECT capability_key FROM work_capabilities WHERE capability_key = $capability_key",
-            &params,
+            "SELECT node_id, capability_id FROM work_capabilities",
+            &std::collections::HashMap::new(),
         )
-        .map(|result| !result.rows.is_empty())
-        .unwrap_or(false);
+        .map_err(|err| format!("query: {err}"))
+        .map(|result| {
+            let node_idx = result.columns.iter().position(|c| c == "node_id");
+            let cap_idx = result.columns.iter().position(|c| c == "capability_id");
+            let mut ids = Vec::new();
+            if let (Some(node_idx), Some(cap_idx)) = (node_idx, cap_idx) {
+                for row in &result.rows {
+                    if let (contextdb_core::Value::Text(node), contextdb_core::Value::Text(cap)) =
+                        (&row[node_idx], &row[cap_idx])
+                        && node == node_id
+                    {
+                        ids.push(cap.clone());
+                    }
+                }
+            }
+            ids
+        });
     let _ = db.close();
-    found
+    ids
+}
+
+/// Poll a node's ledger `work_capabilities` (opening the DOWN process's db
+/// fresh each attempt) until `capability_id` is physically present, returning
+/// the last capability-id list seen (or the last open/read error) for the
+/// failure message. Retries ride out both the transient post-exit db-open
+/// window and any persistence lag; a genuinely-never-arriving row still fails
+/// after the timeout.
+fn poll_ledger_for_capability(
+    data_dir: &std::path::Path,
+    node_id: &str,
+    capability_id: &str,
+    timeout: Duration,
+) -> (bool, String) {
+    let start = Instant::now();
+    let mut last = "no read attempted".to_string();
+    while start.elapsed() < timeout {
+        match read_ledger_capability_ids(data_dir, node_id) {
+            Ok(ids) => {
+                if ids.iter().any(|id| id == capability_id) {
+                    return (true, format!("{ids:?}"));
+                }
+                last = format!("opened ok; node capability ids = {ids:?}");
+            }
+            Err(err) => last = err,
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+    (false, last)
 }
 
 /// Poll the hub's `vigil doctor acceleration` until its rendered
@@ -533,22 +573,25 @@ fn poll_hub_until_worker_absent(
 
 // ── Arm C: restart onto a different backend — hub renders ONLY current ─────
 
-/// A worker that served one backend, was restarted onto another, and
-/// re-advertised must render on the hub as ONLY its CURRENT backend — the
-/// stale sibling row must never appear alongside it (the S4 defect:
-/// `burn-wgpu` served, restarted acceleration-off, `burn-cpu` re-advertised).
-/// This proves the currency collapse over two REAL processes and the real
-/// sync + render chain, not just in-process.
+/// A hub that holds BOTH a node's stale prior-era backend row and its current
+/// one must render the node as ONLY its current backend — the stale sibling
+/// must never appear alongside it (the S4 defect: a `burn-wgpu` era row left
+/// behind after the worker restarted acceleration-off onto `burn-cpu`). This
+/// proves the currency collapse over two REAL processes and the real render
+/// chain, not just in-process.
 ///
 /// A CPU test box cannot TRUTHFULLY produce a `burn-wgpu` backend — the
 /// advertised tag must reflect REAL capability (criterion C3/C7), never a
-/// forced label — so the stale GPU-era row is injected directly into the DOWN
-/// worker's ledger at an OLD `advertised_at`, exactly the row a real prior
-/// `burn-wgpu` era would have left. The live worker still truthfully
-/// advertises its real `burn-cpu`; on restart its standing loop pushes BOTH
-/// rows, so the stale sibling genuinely reaches the hub (it rides the same
-/// changeset as, and at a lower LSN than, the re-advertised `burn-cpu`). The
-/// assertion is that the hub collapses them to the current backend on the wire.
+/// forced label — so the stale GPU-era row is injected directly into the hub's
+/// ledger (at an OLD `advertised_at`, with the exact tags production's
+/// `spawn_worker_loop` writes) while the hub is briefly DOWN; its redb ledger
+/// is single-writer locked cross-process while it runs. Injecting at the hub —
+/// rather than at a restarted worker whose `changes_since` only replays its own
+/// session's writes and so would never re-push a prior-session row — makes the
+/// stale row's presence at the hub DETERMINISTIC: the restarted hub loads and
+/// keeps it, and the still-running worker's fresh `burn-cpu` re-advertisement
+/// gives the hub both rows. The post-kill ledger read then proves the stale row
+/// was physically present, so the collapse assertion is never vacuous.
 #[test]
 fn two_real_processes_render_only_the_restarted_workers_current_backend() {
     assert!(
@@ -595,12 +638,13 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
         "the hub must first render the worker's real burn-cpu; last doctor output:\n{out_first}"
     );
 
-    // Take the worker down and inject the stale GPU-era row it would have left.
-    worker.kill_and_wait();
+    // Take the HUB down and inject the stale GPU-era row a prior era would have
+    // left in its ledger for this node (OLD advertised_at, production tags).
+    hub.kill_and_wait();
     thread::sleep(Duration::from_millis(500));
     {
-        let db = Database::open(fabric_ledger_path(worker_dir.path()))
-            .expect("open the down worker's ledger to inject the stale backend row");
+        let db = Database::open(fabric_ledger_path(hub_dir.path()))
+            .expect("open the down hub's ledger to inject the stale era row");
         advertise_capability(
             &db,
             &worker_node_id,
@@ -611,88 +655,60 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
             ],
             now_ms() - 3_600_000,
         )
-        .expect("inject the stale burn-wgpu era capability row");
-        db.close()
-            .expect("flush and close the injected worker ledger");
+        .expect("inject the stale burn-wgpu era capability row at the hub");
+        db.close().expect("flush and close the injected hub ledger");
     }
 
-    // Determinism anchor: age the era-1 rows out of the hub's render BEFORE
-    // the restart (same aging the dead-worker arm proves). After this, ANY
-    // render of the worker can only come from the restarted worker's fresh
-    // push — and the injected burn-wgpu row rides that same push at a lower
-    // LSN than the era-2 burn-cpu re-advertise, so a burn-cpu render proves
-    // the stale row also arrived. Without this gap, the era-1 burn-cpu row
-    // (same key, same backend string) could satisfy the anchor before the
-    // era-2 push lands, leaving a timing window where a regressed
-    // no-collapse build would also pass.
-    thread::sleep(Duration::from_secs(13));
-    let (era1_aged_out, out_gap) =
-        poll_hub_until_worker_absent(hub_dir.path(), &worker_node_id, Duration::from_secs(20));
+    // Restart the hub on the SAME data dir (sticky port ⇒ the worker's ticket
+    // stays reachable and it reconnects), now carrying the stale burn-wgpu row.
+    let hub = spawn_node(hub_dir.path(), free_port(), free_port(), true, None);
     assert!(
-        era1_aged_out,
-        "the down worker's era-1 rows must age out before the restart so the \
-         post-restart render is attributable only to the fresh push; last \
-         doctor output still naming {worker_node_id}:\n{out_gap}"
+        wait_for_health_any(&hub, Duration::from_secs(20)),
+        "the restarted hub must come back up: {}",
+        hub.logs()
     );
 
-    // Restart the worker on the SAME data dir (same identity ⇒ same node id):
-    // it truthfully re-advertises burn-cpu at NOW and its standing poll loop
-    // pushes both that and the older burn-wgpu row to the hub.
-    let worker2_health = free_port();
-    let worker2 = spawn_node(
-        worker_dir.path(),
-        worker2_health,
-        free_port(),
-        false,
-        Some(&ticket),
-    );
-    assert!(
-        wait_for_health(worker2_health, Duration::from_secs(20)),
-        "the restarted worker must come back up: {}",
-        worker2.logs()
-    );
-
-    // The hub must render ONLY the current backend: burn-cpu present, the
-    // stale burn-wgpu sibling absent (currency collapse over two processes).
+    // The still-running worker reconnects and re-advertises its fresh burn-cpu;
+    // the hub now holds BOTH the old burn-wgpu and the fresh burn-cpu and must
+    // render ONLY the current backend (currency collapse over two processes).
     let (seen_cpu2, out_second) = poll_hub_for_remote_worker(
         hub_dir.path(),
         &worker_node_id,
         "burn-cpu",
         Duration::from_secs(45),
     );
-    let worker2_logs = worker2.logs();
-    worker2.kill_and_wait();
+    let worker_logs = worker.logs();
+    worker.kill_and_wait();
     hub.kill_and_wait();
 
     // NON-VACUITY ANCHOR: with the hub down (ledger lock released), read its
-    // work_capabilities directly and require the injected stale burn-wgpu row
-    // to be PHYSICALLY present — proof that era-2's push carrying it actually
-    // reached the hub's store, so the collapse below is asserted against a hub
-    // that genuinely HELD both the stale and the current row (not a timing
-    // window where only era-1 burn-cpu was ever there). The era-1 aging gap
-    // above already makes `out_second`'s burn-cpu attributable to era-2; this
-    // makes the "burn-wgpu arrived" premise explicit rather than inferred from
-    // LSN ordering.
+    // work_capabilities directly and require the stale burn-wgpu row to be
+    // PHYSICALLY present — so the collapse below is asserted against a hub that
+    // genuinely HELD both the stale and the current row, not a timing window.
+    // Deterministic here: it was injected straight into the hub and persisted
+    // across the restart.
+    let (wgpu_present, wgpu_diag) = poll_ledger_for_capability(
+        hub_dir.path(),
+        &worker_node_id,
+        &detector_capability_id("burn-wgpu"),
+        Duration::from_secs(15),
+    );
     assert!(
-        ledger_has_capability(
-            hub_dir.path(),
-            &worker_node_id,
-            &detector_capability_id("burn-wgpu"),
-        ),
-        "the injected stale burn-wgpu row must have reached the hub's \
-         work_capabilities (proving era-2's push carrying the stale sibling \
-         landed) — otherwise the collapse assertion is vacuous"
+        wgpu_present,
+        "the injected stale burn-wgpu row must be physically present in the \
+         hub's work_capabilities — otherwise the collapse assertion is vacuous; \
+         last hub-ledger read: {wgpu_diag}"
     );
 
     assert!(
         seen_cpu2,
-        "the restarted worker's current burn-cpu must render; last doctor output:\n{out_second}\n\nworker logs:\n{worker2_logs}"
+        "the hub must render the worker's current burn-cpu; last doctor output:\n{out_second}\n\nworker logs:\n{worker_logs}"
     );
     assert!(
         !hub_renders_remote_worker(&out_second, &worker_node_id, "burn-wgpu"),
         "the stale burn-wgpu era row must NOT render alongside the current \
-         burn-cpu — the hub collapses a restarted worker's rows to its latest \
-         advertised backend; hub doctor output:\n{out_second}"
+         burn-cpu — the hub collapses a node's rows to its latest advertised \
+         backend; hub doctor output:\n{out_second}"
     );
     assert_eq!(
         out_second

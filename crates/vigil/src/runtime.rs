@@ -969,6 +969,12 @@ pub fn start_rtsp_probe(
                     let unwind =
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                             let mut detector_total = 0_u64;
+                            // Test-only deterministic pressure lever, resolved
+                            // ONCE at loop start (not re-read per decision):
+                            // absent env → ZERO, no hot-path cost.
+                            let decision_delay = decision_delay_from_env(env_u64(
+                                "VIGIL_DETECTOR_DECISION_DELAY_MS",
+                            ));
                             while !shutdown.load(Ordering::SeqCst) {
                                 let segment =
                                     match detector_queue.recv_timeout(Duration::from_millis(100)) {
@@ -1006,14 +1012,12 @@ pub fn start_rtsp_probe(
                                 });
                                 println!("detector_invocations={detector_total}");
                                 sleep_shutdown_aware(&shutdown, detector_work_delay);
-                                // Test-only deterministic pressure lever: an
+                                // Apply the once-resolved test-only pressure
+                                // delay (see `decision_delay` above): an
                                 // artificial per-detection-decision delay that
                                 // makes the owner smoke's S1/S3 pressure windows
                                 // reproducible without depending on scene
-                                // traffic. Absent env → ZERO (no hot-path cost).
-                                let decision_delay = decision_delay_from_env(env_u64(
-                                    "VIGIL_DETECTOR_DECISION_DELAY_MS",
-                                ));
+                                // traffic. Zero when the env is unset.
                                 if !decision_delay.is_zero() {
                                     sleep_shutdown_aware(&shutdown, decision_delay);
                                 }

@@ -351,9 +351,7 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
     // no-noise assertion below is exercised against a hub whose worker loop
     // genuinely ran — not vacuously green against a hub still in bring-up.
     let hub_loop_deadline = Instant::now() + Duration::from_secs(40);
-    while Instant::now() < hub_loop_deadline
-        && !hub.logs().contains("fabric_worker_loop_started")
-    {
+    while Instant::now() < hub_loop_deadline && !hub.logs().contains("fabric_worker_loop_started") {
         thread::sleep(Duration::from_millis(500));
     }
     thread::sleep(Duration::from_secs(25));

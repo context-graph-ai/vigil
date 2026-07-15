@@ -786,6 +786,11 @@ impl FabricRuntime {
             format!("backend:{backend_tag}"),
         ];
         let executor = DetectorWorkExecutor::new(backend, node_id.clone());
+        // This node's ledger writes are canonical exactly when it hosts the
+        // hub over the same db (`hub_endpoint.is_some()`) — a ticket-only
+        // edge still has a real hub to dial, so ticket presence alone is not
+        // the condition.
+        let writes_are_canonical = self.hub_endpoint.is_some();
         let config = contextdb_server::work_ledger::WorkerConfig {
             node_id,
             advertised_tags: advertised_tags.clone(),
@@ -795,6 +800,7 @@ impl FabricRuntime {
             lease_duration_ms: 5 * 60_000,
             blob_service: Some(blob_service),
             defer_own_submissions_until_deadline: true,
+            writes_are_canonical,
         };
         tokio::spawn(async move {
             // Advertise THIS node's truthful detector capability under the
@@ -826,7 +832,12 @@ impl FabricRuntime {
             // fails here is NOT swallowed — it is a NAMED, greppable line so a
             // real fleet miss is diagnosable instead of silent (the S2 defect:
             // a missed push read as `remote-detectors=-` with nothing logged).
-            if let Err(error) = client.push().await {
+            // A node that hosts the hub over this same db skips the push
+            // outright (operator honesty, fix cycle 8 option C): its rows are
+            // already in the canonical store, so there is no dialable hub to
+            // miss and nothing to retry — printing the failure line here
+            // would just be permanent, meaningless noise on a healthy hub.
+            if !writes_are_canonical && let Err(error) = client.push().await {
                 println!("fabric_capability_push_failed=true backend={backend_tag} error={error}");
             }
             let _ = contextdb_server::work_ledger::run_worker_loop(

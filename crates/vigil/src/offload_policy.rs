@@ -89,6 +89,22 @@ impl Default for OffloadPolicyConfig {
     }
 }
 
+impl OffloadPolicyConfig {
+    /// Every field at its sane default (identical to [`Default::default`])
+    /// except `fallback_horizon_ms`, taken from the config surface
+    /// (criterion C10, fix cycle 9). The one legal construction for a
+    /// caller that has resolved an operator-configured fallback horizon but
+    /// wants every other threshold left at its own default — callers
+    /// outside this file must never spell a bare `::default()` for that
+    /// case, since it would silently drop the configured value.
+    pub fn with_fallback_horizon_ms(fallback_horizon_ms: u64) -> Self {
+        Self {
+            fallback_horizon_ms,
+            ..Self::default()
+        }
+    }
+}
+
 /// A node is under pressure when it is already flagged degraded, its queue
 /// depth has reached the configured saturation fraction of capacity, or it
 /// has dropped anything at all (a snapshot starts at zero drops, so any

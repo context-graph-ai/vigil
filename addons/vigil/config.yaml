@@ -39,6 +39,8 @@ options:
   fabric_ticket: ""
   fabric_hub: false
   fabric_allow_frame_offload: true
+  fabric_worker_lease_ms: 300000
+  fabric_fallback_horizon_ms: 5000
 schema:
   store_path: str
   health_port: int
@@ -63,6 +65,8 @@ schema:
   fabric_ticket: str?
   fabric_hub: bool?
   fabric_allow_frame_offload: bool?
+  fabric_worker_lease_ms: int?
+  fabric_fallback_horizon_ms: int?
 apparmor: true
 # Host networking is REQUIRED for the fabric (distributed compute): the iroh
 # sync/blob endpoint is QUIC over UDP on a dynamically bound port, and the

@@ -791,13 +791,23 @@ impl FabricRuntime {
         // edge still has a real hub to dial, so ticket presence alone is not
         // the condition.
         let writes_are_canonical = self.hub_endpoint.is_some();
+        // Worker lease duration (criterion C10, fix cycle 9): resolves from
+        // VIGIL_FABRIC_WORKER_LEASE_MS when set — the same direct-env-read
+        // idiom this file already uses for VIGIL_FABRIC_BRINGUP_DELAY_MS
+        // above — else the config surface's own default (config.rs's
+        // `fabric_worker_lease_ms` field, 300000ms = this method's prior
+        // hardcoded literal, byte-identical when unset).
+        let lease_duration_ms: u64 = std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300_000);
         let config = contextdb_server::work_ledger::WorkerConfig {
             node_id,
             advertised_tags: advertised_tags.clone(),
             movement_policy: contextdb_engine::work_ledger::MovementPolicy {
                 auto_propagate: true,
             },
-            lease_duration_ms: 5 * 60_000,
+            lease_duration_ms: lease_duration_ms as i64,
             blob_service: Some(blob_service),
             defer_own_submissions_until_deadline: true,
             writes_are_canonical,
@@ -1243,7 +1253,15 @@ pub(crate) fn fabric_bring_up(
         pending: Arc::new(crate::fabric::PendingOffloads::new()),
         pending_segments: Mutex::new(HashMap::new()),
         remote_capabilities: Mutex::new(Vec::new()),
-        offload_policy_config: crate::offload_policy::OffloadPolicyConfig::default(),
+        // Criterion C10, fix cycle 9: the fallback horizon comes from the
+        // resolved config surface (config.rs's `fabric_fallback_horizon_ms`,
+        // default 5000ms = this field's prior hardcoded default,
+        // byte-identical when unset) — never a bare default construction
+        // that would silently drop whatever the operator configured. Every
+        // other offload-policy field keeps its own sane default.
+        offload_policy_config: crate::offload_policy::OffloadPolicyConfig::with_fallback_horizon_ms(
+            config.fabric_fallback_horizon_ms,
+        ),
         worker_detector_slot,
         worker_serving: worker_serving.clone(),
         worker_serving_reason: worker_serving_reason.clone(),

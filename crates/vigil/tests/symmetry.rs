@@ -209,6 +209,7 @@ async fn one_node_submits_and_claims_in_one_run() {
         lease_duration_ms: LEASE,
         blob_service: None,
         defer_own_submissions_until_deadline: false,
+        writes_are_canonical: false,
     };
 
     // ONE poll pass claims and executes ONE matching job (priority/deadline/

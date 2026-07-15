@@ -333,6 +333,7 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
         lease_duration_ms: LEASE,
         blob_service: Some(worker_blob_service),
         defer_own_submissions_until_deadline: false,
+        writes_are_canonical: false,
     };
 
     let outcome = within(poll_and_execute_once(

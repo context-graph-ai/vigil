@@ -257,6 +257,7 @@ fn deferring_config(node_id: &str) -> WorkerConfig {
         lease_duration_ms: LEASE,
         blob_service: None,
         defer_own_submissions_until_deadline: true,
+        writes_are_canonical: false,
     }
 }
 
@@ -581,6 +582,7 @@ async fn result_before_steal_makes_steal_a_noop() {
             blob_service: None,
             // B is a FOREIGN worker to this job: it never defers it.
             defer_own_submissions_until_deadline: true,
+        writes_are_canonical: false,
         },
         &RemoteEchoExecutor,
         T0 + 10,

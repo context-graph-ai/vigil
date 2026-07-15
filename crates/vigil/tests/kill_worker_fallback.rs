@@ -177,6 +177,7 @@ fn deferring_config(node_id: &str) -> WorkerConfig {
         lease_duration_ms: LEASE,
         blob_service: None,
         defer_own_submissions_until_deadline: true,
+        writes_are_canonical: false,
     }
 }
 

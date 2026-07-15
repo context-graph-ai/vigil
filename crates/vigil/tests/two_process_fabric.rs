@@ -346,6 +346,19 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
         Duration::from_secs(45),
     );
 
+    // Wait for the HUB's own worker role to come up and attempt its first
+    // capability delivery (worker-slot deadline + one push attempt), so the
+    // no-noise assertion below is exercised against a hub whose worker loop
+    // genuinely ran — not vacuously green against a hub still in bring-up.
+    let hub_loop_deadline = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < hub_loop_deadline
+        && !hub.logs().contains("fabric_worker_loop_started")
+    {
+        thread::sleep(Duration::from_millis(500));
+    }
+    thread::sleep(Duration::from_secs(25));
+
+    let hub_logs = hub.logs();
     worker.kill_and_wait();
     hub.kill_and_wait();
 
@@ -354,6 +367,22 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
         "with the hub up first, its own doctor acceleration must render \
          remote-detectors={worker_node_id}:burn-cpu once the worker joins; \
          last doctor output:\n{doctor_output}"
+    );
+    assert!(
+        hub_logs.contains("fabric_worker_loop_started"),
+        "the hub's own worker role must have started before the no-noise \
+         assertion means anything; hub log:\n{hub_logs}"
+    );
+    // Operator honesty (fix cycle 8, option C): a HEALTHY hub must never
+    // spend its life printing capability-push failures — the hub's writes
+    // are already canonical in the shared ledger db, so its worker role has
+    // nothing to push and must not try (a self-push is a category error,
+    // and a permanently-failing loud line trains operators to ignore the
+    // exact signal that matters on a real edge).
+    assert!(
+        !hub_logs.contains("fabric_capability_push_failed"),
+        "a healthy hub's worker role must not emit capability-push failure \
+         noise — its ledger writes are already canonical; hub log:\n{hub_logs}"
     );
 }
 

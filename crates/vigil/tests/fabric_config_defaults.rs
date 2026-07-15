@@ -118,6 +118,23 @@ fn all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset() {
         "fabric_hub must default false — no silent new network surface on existing installs"
     );
 
+    // (a, fix cycle 9) The two new tuning knobs resolve with nothing
+    // provided to today's hardcoded fabric.rs literals, byte-identical —
+    // introducing the knob changes nothing for an operator who sets
+    // nothing.
+    let tuning_intent = vigil::fabric_tuning_intent_from_args(Vec::new())
+        .expect("vigil must build with NONE of the fabric tuning knobs provided");
+    assert_eq!(
+        tuning_intent.fabric_worker_lease_ms, 300_000,
+        "fabric_worker_lease_ms must default to today's hardcoded fabric.rs worker lease \
+         (5 minutes = 300000ms)"
+    );
+    assert_eq!(
+        tuning_intent.fabric_fallback_horizon_ms, 5_000,
+        "fabric_fallback_horizon_ms must default to today's hardcoded \
+         OffloadPolicyConfig::default() value (5000ms)"
+    );
+
     // (b) The HAOS add-on options yaml must show the fabric knob defaults —
     // both `options:` (the operator-visible default) and `schema:` (the
     // type contract), mirroring the `addon_config_surface` pattern. This is
@@ -156,6 +173,90 @@ fn all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset() {
             if source.text.contains(forbidden) {
                 failures.push(format!(
                     "{} hardcodes offload-policy threshold literal `{forbidden}` outside offload_policy.rs's defaults struct",
+                    source.path.display()
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
+/// (i, fix cycle 9) Config-surface flow: an explicit value supplied via CLI
+/// must reach the public `FabricTuningIntent` accessor — proves the inert
+/// scaffold's OWN plumbing (PartialConfig/CliOverrides/merge/defaulting) is
+/// wired correctly, independent of whether `fabric.rs` yet consumes it (that
+/// is `fabric_rs_never_hardcodes_the_tuning_defaults_outside_their_config_owned_home`,
+/// below).
+#[test]
+fn fabric_tuning_knobs_flow_through_the_config_surface_when_set() {
+    let tuning_intent = vigil::fabric_tuning_intent_from_args(vec![
+        std::ffi::OsString::from("--fabric-worker-lease-ms"),
+        std::ffi::OsString::from("45000"),
+        std::ffi::OsString::from("--fabric-fallback-horizon-ms"),
+        std::ffi::OsString::from("1500"),
+    ])
+    .expect("vigil must build with explicit fabric tuning knobs provided");
+    assert_eq!(
+        tuning_intent.fabric_worker_lease_ms, 45_000,
+        "--fabric-worker-lease-ms must flow into FabricTuningIntent.fabric_worker_lease_ms"
+    );
+    assert_eq!(
+        tuning_intent.fabric_fallback_horizon_ms, 1_500,
+        "--fabric-fallback-horizon-ms must flow into FabricTuningIntent.fabric_fallback_horizon_ms"
+    );
+}
+
+/// (iii, fix cycle 9) Extends the `addon_config_surface` HAOS options/schema
+/// contract (mirroring the `["fabric_ticket", "fabric_hub"]` check above) to
+/// the two new tuning knobs. RED by construction, per the 705b1ac
+/// precedent's own line: editing the yaml is implementation, not
+/// test-authoring, so it is deliberately left untouched here.
+#[test]
+fn addon_config_declares_the_new_fabric_tuning_knobs_in_options_and_schema() {
+    let addon_config_path = repo_root().join("addons/vigil/config.yaml");
+    let addon_config = fs::read_to_string(&addon_config_path).unwrap_or_else(|error| {
+        panic!(
+            "add-on config must be readable at {}: {error}",
+            addon_config_path.display()
+        )
+    });
+    for key in ["fabric_worker_lease_ms", "fabric_fallback_horizon_ms"] {
+        assert!(
+            section_scalar(&addon_config, "options", key).is_some(),
+            "{key} must be present under the HAOS add-on options: block with a visible default"
+        );
+        assert!(
+            section_scalar(&addon_config, "schema", key).is_some(),
+            "{key} must be present under the HAOS add-on schema: block"
+        );
+    }
+}
+
+/// (ii, fix cycle 9) Source-scan arm mirroring the offload-threshold check
+/// above: `fabric.rs` must never carry its own copy of the worker-lease
+/// literal, and must never construct `OffloadPolicyConfig` via a bare
+/// `::default()` that silently drops whatever the operator configured — both
+/// are true today (the live defect this run's RED 2/3 pins), so this is RED
+/// until `fabric.rs` is rewired to consume the resolved config value.
+#[test]
+fn fabric_rs_never_hardcodes_the_tuning_defaults_outside_their_config_owned_home() {
+    let vigil_src = repo_root().join("crates/vigil/src");
+    let sources = collect_rust_source_files(&vigil_src);
+    let mut failures = Vec::new();
+    for source in &sources {
+        if source.path.file_name() != Some(OsStr::new("fabric.rs")) {
+            continue;
+        }
+        for forbidden in [
+            "lease_duration_ms: 5 * 60_000",
+            "OffloadPolicyConfig::default()",
+        ] {
+            if source.text.contains(forbidden) {
+                failures.push(format!(
+                    "{} hardcodes/bypasses the config-owned tuning default via `{forbidden}` — \
+                     it must consume the resolved RuntimeConfig/FabricTuningIntent value instead",
                     source.path.display()
                 ));
             }

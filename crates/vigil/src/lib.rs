@@ -87,6 +87,27 @@ pub fn fabric_intent_from_args(args: Vec<OsString>) -> Result<FabricIntent, Stri
     })
 }
 
+/// The operator-facing fabric TUNING intent (criterion C10, fix cycle 9):
+/// every knob has a sane default and resolves with nothing provided.
+/// Mirrors [`FabricIntent`] (same precedent, 705b1ac). Inert scaffold: not
+/// yet wired to `OffloadPolicyConfig`/`WorkerConfig` construction in
+/// `fabric.rs` — see `crates/vigil/tests/fabric_config_defaults.rs` and
+/// `crates/vigil/tests/fabric_worker_lease_knob.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FabricTuningIntent {
+    pub fabric_worker_lease_ms: u64,
+    pub fabric_fallback_horizon_ms: u64,
+}
+
+/// Resolve the fabric tuning intent exactly as `vigil run` would from the
+/// same arguments (config file, options.json, environment, CLI overrides).
+pub fn fabric_tuning_intent_from_args(args: Vec<OsString>) -> Result<FabricTuningIntent, String> {
+    config::load(args).map(|config| FabricTuningIntent {
+        fabric_worker_lease_ms: config.fabric_worker_lease_ms,
+        fabric_fallback_horizon_ms: config.fabric_fallback_horizon_ms,
+    })
+}
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;

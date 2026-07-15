@@ -77,6 +77,22 @@ pub(crate) struct RuntimeConfig {
     /// across builds).
     #[allow(dead_code)]
     pub(crate) fabric_allow_frame_offload: bool,
+    /// Worker lease duration in milliseconds (criterion C10, fix cycle 9).
+    /// Inert scaffold: present on the config surface with a sane default
+    /// (300000ms = 5 minutes, today's hardcoded `fabric.rs`
+    /// `lease_duration_ms: 5 * 60_000` literal) so every shape shows the
+    /// knob; not yet wired to `WorkerConfig.lease_duration_ms` construction.
+    /// Precedent: `fabric_ticket`/`fabric_hub` above (705b1ac).
+    #[allow(dead_code)]
+    pub(crate) fabric_worker_lease_ms: u64,
+    /// Offload fallback horizon in milliseconds (criterion C10, fix cycle
+    /// 9). Inert scaffold: sane default (5000ms, today's hardcoded
+    /// `OffloadPolicyConfig::default()` value) so every shape shows the
+    /// knob; not yet wired to `OffloadPolicyConfig.fallback_horizon_ms`
+    /// construction. Precedent: `fabric_ticket`/`fabric_hub` above
+    /// (705b1ac).
+    #[allow(dead_code)]
+    pub(crate) fabric_fallback_horizon_ms: u64,
 }
 
 /// Per-camera entry as it appears in TOML/JSON config files.
@@ -123,6 +139,8 @@ struct PartialConfig {
     fabric_ticket: Option<String>,
     fabric_hub: Option<bool>,
     fabric_allow_frame_offload: Option<bool>,
+    fabric_worker_lease_ms: Option<u64>,
+    fabric_fallback_horizon_ms: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -149,6 +167,8 @@ struct CliOverrides {
     fabric_ticket: Option<String>,
     fabric_hub: Option<bool>,
     fabric_allow_frame_offload: Option<bool>,
+    fabric_worker_lease_ms: Option<u64>,
+    fabric_fallback_horizon_ms: Option<u64>,
 }
 
 /// `<data_root>/fabric.toml` — the fabric enrollment file surface (criterion
@@ -225,6 +245,8 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             recognition_covered_classes: None,
             hardware_decoding: cli.hardware_decoding,
             accelerated_detection: cli.accelerated_detection,
+            fabric_worker_lease_ms: cli.fabric_worker_lease_ms,
+            fabric_fallback_horizon_ms: cli.fabric_fallback_horizon_ms,
             // Fabric enrollment knobs are deliberately left OUT of this
             // merge (unlike every other CLI flag above): their precedence
             // is CLI > env > options.json/fabric.toml, the REVERSE of this
@@ -309,6 +331,13 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     // requires default movement; this is the documented per-source opt-out
     // (criterion C10 / the addon privacy wording).
     let fabric_allow_frame_offload = partial.fabric_allow_frame_offload.unwrap_or(true);
+    // Fabric tuning knobs (criterion C10, fix cycle 9): sane defaults match
+    // today's hardcoded literals byte-identical (fabric.rs's
+    // `lease_duration_ms: 5 * 60_000` and `OffloadPolicyConfig::default()`'s
+    // `fallback_horizon_ms: 5_000`) — inert scaffold, neither is consumed
+    // yet.
+    let fabric_worker_lease_ms = partial.fabric_worker_lease_ms.unwrap_or(300_000);
+    let fabric_fallback_horizon_ms = partial.fabric_fallback_horizon_ms.unwrap_or(5_000);
 
     // MQTT broker: present when a host is configured.
     let mqtt = partial.mqtt_host.map(|host| MqttConfig {
@@ -394,6 +423,8 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         fabric_ticket,
         fabric_hub,
         fabric_allow_frame_offload,
+        fabric_worker_lease_ms,
+        fabric_fallback_horizon_ms,
     })
 }
 
@@ -463,6 +494,18 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
             "--fabric-allow-frame-offload" => {
                 cli.fabric_allow_frame_offload =
                     Some(next_bool(&mut iter, "--fabric-allow-frame-offload")?)
+            }
+            "--fabric-worker-lease-ms" => {
+                let value = next_string(&mut iter, "--fabric-worker-lease-ms")?;
+                cli.fabric_worker_lease_ms = Some(value.parse().map_err(|error| {
+                    format!("--fabric-worker-lease-ms must be an integer: {error}")
+                })?);
+            }
+            "--fabric-fallback-horizon-ms" => {
+                let value = next_string(&mut iter, "--fabric-fallback-horizon-ms")?;
+                cli.fabric_fallback_horizon_ms = Some(value.parse().map_err(|error| {
+                    format!("--fabric-fallback-horizon-ms must be an integer: {error}")
+                })?);
             }
             "--help" | "-h" => return Err(run_usage()),
             other => return Err(format!("{other} is not a supported run option")),
@@ -689,6 +732,18 @@ fn env_overrides() -> Result<PartialConfig, String> {
         fabric_ticket: std::env::var("VIGIL_FABRIC_TICKET").ok(),
         fabric_hub: env_intent_bool("VIGIL_FABRIC_HUB")?,
         fabric_allow_frame_offload: env_intent_bool("VIGIL_FABRIC_ALLOW_FRAME_OFFLOAD")?,
+        fabric_worker_lease_ms: match std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS") {
+            Ok(value) => Some(value.parse::<u64>().map_err(|error| {
+                format!("VIGIL_FABRIC_WORKER_LEASE_MS must be an integer: {error}")
+            })?),
+            Err(_) => None,
+        },
+        fabric_fallback_horizon_ms: match std::env::var("VIGIL_FABRIC_FALLBACK_HORIZON_MS") {
+            Ok(value) => Some(value.parse::<u64>().map_err(|error| {
+                format!("VIGIL_FABRIC_FALLBACK_HORIZON_MS must be an integer: {error}")
+            })?),
+            Err(_) => None,
+        },
         // Multi-camera list is not configurable via env vars; comes from config file only.
         cameras: None,
     })
@@ -785,6 +840,12 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.fabric_allow_frame_offload.is_some() {
         target.fabric_allow_frame_offload = source.fabric_allow_frame_offload;
     }
+    if source.fabric_worker_lease_ms.is_some() {
+        target.fabric_worker_lease_ms = source.fabric_worker_lease_ms;
+    }
+    if source.fabric_fallback_horizon_ms.is_some() {
+        target.fabric_fallback_horizon_ms = source.fabric_fallback_horizon_ms;
+    }
 }
 
 /// Derive a stable lowercase slug from a human-readable string.
@@ -817,7 +878,7 @@ fn default_options_json_path() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL] [--fabric-ticket TICKET] [--fabric-hub BOOL] [--fabric-allow-frame-offload BOOL]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL] [--fabric-ticket TICKET] [--fabric-hub BOOL] [--fabric-allow-frame-offload BOOL] [--fabric-worker-lease-ms MS] [--fabric-fallback-horizon-ms MS]"
         .to_string()
 }
 

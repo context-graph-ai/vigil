@@ -293,6 +293,17 @@ pub struct FabricRuntime {
     /// [`DEFAULT_CAPABILITY_LIVENESS_TTL_MS`]; override with
     /// [`FabricRuntime::with_capability_liveness_ttl_ms`].
     capability_liveness_ttl_ms: i64,
+    /// This node's resolved worker-lease duration (ms), criterion C10 fix
+    /// cycle 9. `None` (the `start()` default) means "no resolved config
+    /// value was threaded through" — [`FabricRuntime::spawn_worker_loop`]
+    /// then falls back to `VIGIL_FABRIC_WORKER_LEASE_MS` directly, then
+    /// 300000ms. Production sets this via
+    /// [`FabricRuntime::with_worker_lease_ms`] from
+    /// `config::RuntimeConfig::fabric_worker_lease_ms` — the add-on options
+    /// page, config file, and CLI all reach the worker through THIS field,
+    /// never the direct env fallback (options never become env vars; see
+    /// `fabric_bring_up`'s call site).
+    worker_lease_ms: Option<u64>,
 }
 
 /// Default liveness TTL for a remote's advertised detector capability: a
@@ -417,6 +428,7 @@ impl FabricRuntime {
             serves_role,
             enrollment_error,
             capability_liveness_ttl_ms: DEFAULT_CAPABILITY_LIVENESS_TTL_MS,
+            worker_lease_ms: None,
         })
     }
 
@@ -425,6 +437,19 @@ impl FabricRuntime {
     /// from the worker poll cadence and needs no touching in normal operation.
     pub fn with_capability_liveness_ttl_ms(mut self, ttl_ms: i64) -> Self {
         self.capability_liveness_ttl_ms = ttl_ms;
+        self
+    }
+
+    /// Set this node's resolved worker-lease duration (ms), criterion C10
+    /// fix cycle 9 — the production path from the config surface (add-on
+    /// options page / config file / CLI, all folded through
+    /// `config::RuntimeConfig::fabric_worker_lease_ms`) into
+    /// [`FabricRuntime::spawn_worker_loop`]. Additive builder, same shape as
+    /// [`FabricRuntime::with_capability_liveness_ttl_ms`]; a construction
+    /// that never calls this (e.g. a test driving `start()` directly) keeps
+    /// `spawn_worker_loop`'s env-var/hardcoded-default fallback.
+    pub fn with_worker_lease_ms(mut self, lease_ms: u64) -> Self {
+        self.worker_lease_ms = Some(lease_ms);
         self
     }
 
@@ -791,16 +816,26 @@ impl FabricRuntime {
         // edge still has a real hub to dial, so ticket presence alone is not
         // the condition.
         let writes_are_canonical = self.hub_endpoint.is_some();
-        // Worker lease duration (criterion C10, fix cycle 9): resolves from
-        // VIGIL_FABRIC_WORKER_LEASE_MS when set — the same direct-env-read
-        // idiom this file already uses for VIGIL_FABRIC_BRINGUP_DELAY_MS
-        // above — else the config surface's own default (config.rs's
-        // `fabric_worker_lease_ms` field, 300000ms = this method's prior
-        // hardcoded literal, byte-identical when unset).
-        let lease_duration_ms: u64 = std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(300_000);
+        // Worker lease duration (criterion C10, fix cycle 9), resolved in
+        // this order: (1) `self.worker_lease_ms` — the RESOLVED config
+        // value, set via `with_worker_lease_ms` at the production
+        // construction site (`fabric_bring_up`, from
+        // `config::RuntimeConfig::fabric_worker_lease_ms`, which already
+        // folds add-on options/config-file/env/CLI through `config.rs`'s own
+        // CLI > env > options precedence) — this is the path every real
+        // operator surface reaches, since add-on OPTIONS ARE NOT ENV VARS
+        // and never reach this method any other way; (2) a direct
+        // `VIGIL_FABRIC_WORKER_LEASE_MS` read (the same idiom this file
+        // already uses for `VIGIL_FABRIC_BRINGUP_DELAY_MS` above) — for a
+        // construction that bypasses config resolution entirely (e.g. a
+        // test driving `FabricRuntime::start` directly); (3) 300000ms,
+        // byte-identical to this method's prior hardcoded literal.
+        let lease_duration_ms: u64 = self.worker_lease_ms.unwrap_or_else(|| {
+            std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(300_000)
+        });
         let config = contextdb_server::work_ledger::WorkerConfig {
             node_id,
             advertised_tags: advertised_tags.clone(),
@@ -1196,7 +1231,13 @@ pub(crate) fn fabric_bring_up(
         fabric_hub,
     ));
     let fabric_runtime = match start_result {
-        Ok(runtime) => Arc::new(runtime),
+        // Criterion C10, fix cycle 9: thread the resolved config value
+        // (add-on options page / config file / CLI, already folded through
+        // config.rs's own precedence) into the worker-lease resolution —
+        // this is the ONLY production path, since add-on options never
+        // become env vars (see `spawn_worker_loop`'s resolution-order
+        // comment).
+        Ok(runtime) => Arc::new(runtime.with_worker_lease_ms(config.fabric_worker_lease_ms)),
         Err(error) => {
             println!("fabric_bring_up_failed=true error={error}");
             return None;

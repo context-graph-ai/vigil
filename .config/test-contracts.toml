@@ -1,0 +1,628 @@
+# REVIEW PROPOSAL ONLY. This command never writes or approves registry entries.
+version = 1
+
+[[contract]]
+id = "acceleration-selection-fallback-promotion-and-honesty"
+lineage = "Accepted acceleration selection, fallback, promotion, artifact, and receipt criteria."
+sources = [
+  "crates/vigil/tests/acceleration_receipts.rs",
+  "crates/vigil/tests/config_acceleration_intent.rs",
+  "crates/vigil/tests/decode_backend_contract.rs",
+  "crates/vigil/tests/detection_accel_backend.rs",
+  "crates/vigil/tests/detection_fallback_action_truth.rs",
+  "crates/vigil/tests/detection_probe_completes_after_deadline.rs",
+  "crates/vigil/tests/detection_probe_promotes_after_deadline.rs",
+  "crates/vigil/tests/doctor_acceleration.rs",
+  "crates/vigil/tests/shader_cache_persistence.rs",
+]
+evidence_kind = "integration"
+gate = "accelerated-detection"
+tests = [
+  "vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct", # crates/vigil/tests/acceleration_receipts.rs
+  "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback", # crates/vigil/tests/acceleration_receipts.rs
+  "vigil::acceleration_receipts::health_reports_degraded_decode_and_detection_when_configured_but_fallback", # crates/vigil/tests/acceleration_receipts.rs
+  "vigil::acceleration_receipts::logs_are_bounded_per_stream_selection_plus_fallback", # crates/vigil/tests/acceleration_receipts.rs
+  "vigil::acceleration_receipts::receipt_carries_fixed_field_vocabulary", # crates/vigil/tests/acceleration_receipts.rs
+  "vigil::acceleration_receipts::stats_show_active_decoder_per_stream_and_detector_backend", # crates/vigil/tests/acceleration_receipts.rs
+  "vigil::config_acceleration_intent::acceleration_booleans_default_true_everywhere", # crates/vigil/tests/config_acceleration_intent.rs
+  "vigil::config_acceleration_intent::cli_flags_override_config_file", # crates/vigil/tests/config_acceleration_intent.rs
+  "vigil::config_acceleration_intent::env_vars_are_understood", # crates/vigil/tests/config_acceleration_intent.rs
+  "vigil::config_acceleration_intent::invalid_boolean_fails_loud", # crates/vigil/tests/config_acceleration_intent.rs
+  "vigil::config_acceleration_intent::toml_config_can_disable_each_boolean_independently", # crates/vigil/tests/config_acceleration_intent.rs
+  "vigil::decode_backend_contract::cross_epoch_units_are_rejected_by_backend", # crates/vigil/tests/decode_backend_contract.rs
+  "vigil::decode_backend_contract::encoded_access_unit_carries_epoch_codec_config_keyframe_sequence_markers", # crates/vigil/tests/decode_backend_contract.rs
+  "vigil::decode_backend_contract::hardware_backend_failure_activates_software_fallback_with_visible_reason", # crates/vigil/tests/decode_backend_contract.rs
+  "vigil::decode_backend_contract::probe_reports_decoded_frames_and_classification", # crates/vigil/tests/decode_backend_contract.rs
+  "vigil::decode_backend_contract::software_backend_preserves_first_light_decode_behavior", # crates/vigil/tests/decode_backend_contract.rs
+  "vigil::decode_backend_contract::unclassified_selected_decoder_never_claims_hardware", # crates/vigil/tests/decode_backend_contract.rs
+  "vigil::detection_accel_backend::detection_accel_compiled_in_receipt_agrees_with_recorded_probe", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_accel_backend::detection_accel_compiled_out_is_backend_not_compiled_from_observed_state", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_accel_backend::detection_accel_disabled_skips_probe_and_reports_disabled", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_accel_backend::detection_accel_hardware_flag_requires_recorded_passing_probe", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_accel_backend::detection_kill_path_action_names_cpu_detection_as_supported", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_accel_backend::detection_probe_timeout_and_panic_classify_probe_failed_without_hang", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_accel_backend::doctor_detection_action_line_names_cpu_detection_as_supported", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_accel_backend::runtime_detection_receipt_action_line_is_honest", # crates/vigil/tests/detection_accel_backend.rs
+  "vigil::detection_fallback_action_truth::fallback_action_says_backend_absent_when_accelerated_detection_is_not_compiled", # crates/vigil/tests/detection_fallback_action_truth.rs
+  "vigil::detection_fallback_action_truth::probe_failure_action_names_real_next_steps_when_accelerated_backend_is_compiled", # crates/vigil/tests/detection_fallback_action_truth.rs
+  "vigil::detection_probe_completes_after_deadline::deadline_returns_fallback_now_but_probe_runs_to_completion_and_promotes_on_late_pass", # crates/vigil/tests/detection_probe_completes_after_deadline.rs
+  "vigil::detection_probe_promotes_after_deadline::in_time_pass_flows_through_the_single_receipt_path", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
+  "vigil::detection_probe_promotes_after_deadline::late_fail_leaves_cpu_standing_and_never_promotes", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
+  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
+  "vigil::detection_probe_promotes_after_deadline::overrunning_probe_yields_a_terminal_receipt_within_the_late_window_never_silence", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
+  "vigil::detection_probe_promotes_after_deadline::promote_error_records_cpu_standing_fallback_on_every_surface_never_active", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
+  "vigil::doctor_acceleration::blocked_device_classifies_permission_denied_with_ready_fix", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::doctor_acceleration::disabled_intent_skips_probes_and_reports_disabled", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::doctor_acceleration::doctor_cli_requires_the_acceleration_subcommand", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::doctor_acceleration::doctor_renders_receipts_in_fixed_format", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::doctor_acceleration::missing_device_is_no_device_visible_not_permission", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::doctor_acceleration::no_sudo_reports_current_process_truth_only", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::doctor_acceleration::service_user_resolution_order_is_flag_env_systemd", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::doctor_acceleration::sudo_without_service_user_source_is_manual_action_required", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::shader_cache_persistence::persistent_gpu_caches_live_under_data_root_and_export_their_env", # crates/vigil/tests/shader_cache_persistence.rs
+]
+
+[[contract]]
+id = "acceptance-harness-process-port-and-network-safety"
+lineage = "Accepted first-light harness-safety criteria and the explicit acceptance-harness lineage review."
+sources = [
+  "tests/acceptance/common.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil-acceptance::acceptance::common::tests::direct_child_cleanup_rejects_current_acceptance_process", # tests/acceptance/common.rs
+  "vigil-acceptance::acceptance::common::tests::free_port_allocates_unique_ports_within_acceptance_process", # tests/acceptance/common.rs
+  "vigil-acceptance::acceptance::common::tests::network_trace_does_not_classify_unspecified_local_connect_as_outbound", # tests/acceptance/common.rs
+  "vigil-acceptance::acceptance::common::tests::process_cleanup_has_no_wildcard_or_shell_kill_paths", # tests/acceptance/common.rs
+  "vigil-acceptance::acceptance::common::tests::signal_target_rejects_wildcard_process_targets", # tests/acceptance/common.rs
+]
+
+[[contract]]
+id = "camera-process-store-and-cli-journeys"
+lineage = "Accepted first-light process, store, RTSP, and CLI criteria."
+sources = [
+  "crates/vigil/tests/first_light_loop.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::camera_survives_store_reopen", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::cli_read_when_runtime_busy_errors_cleanly", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::confidence_is_detector_output_not_threshold_derived", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::credentialed_existing_camera_rtsp_url_is_redacted_on_startup", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::detection_produces_observation_referencing_clip", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::detector_config_recorded_as_decision", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::event_history_survives_store_reopen", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::motion_gate_suppresses_non_motion_frames", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::observation_never_references_undurable_clip", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::reregistration_is_idempotent_no_duplicate", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::site_context_created_and_name_retained", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::startup_crash_mid_config_heals_on_restart", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::two_rapid_events_get_distinct_observations_and_clips", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_events_on_empty_store_returns_clean_empty_list", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_events_shows_only_landed_events_not_motion_only", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_stats_before_any_frame_is_all_zero_no_panic", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_why_latest_on_empty_store_is_clean_not_found", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_why_latest_walks_the_newest_event", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_why_served_over_socket_while_store_is_locked", # crates/vigil/tests/first_light_loop.rs
+  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context", # crates/vigil/tests/first_light_loop.rs
+]
+
+[[contract]]
+id = "codec-parameter-sets-complete-decoder-config"
+lineage = "Vigil inventory: inline decode tests; current SDP parameter-set defect work list."
+sources = [
+  "crates/vigil/src/decode.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::decode::tests::split_h264_parameter_sets_are_not_codec_config", # crates/vigil/src/decode.rs
+  "vigil::decode::tests::split_h265_parameter_sets_are_not_codec_config", # crates/vigil/src/decode.rs
+]
+
+[[contract]]
+id = "corrections-are-authoritative-durable-and-readable"
+lineage = "Accepted Home Assistant correction durability contract."
+sources = [
+  "crates/vigil/tests/ha_correction_seam.rs",
+]
+evidence_kind = "integration"
+gate = "slow-acceptance"
+tests = [
+  "vigil::ha_correction_seam::confirmed_correction_does_not_set_correction_recorded", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::correction_anchored_to_named_detection_only", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::correction_held_outside_cg_fails_readback", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::correction_reads_back_via_review_why", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::correction_survives_daemon_restart", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::correction_writes_durably_through_cg_record_path", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::false_alarm_and_wrong_class_corrections_record_and_read_back", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::record_correction_with_unknown_detection_id_returns_typed_error", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::review_events_row_flags_corrected_events", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::review_events_rows_expose_current_correction_authority_fields", # crates/vigil/tests/ha_correction_seam.rs
+  "vigil::ha_correction_seam::vigil_events_lists_recent_events_through_review_api", # crates/vigil/tests/ha_correction_seam.rs
+]
+
+[[contract]]
+id = "distributed-schema-policy-and-workgraph-authority"
+lineage = "Accepted distributed-compute schema, pressure policy, workgraph, and visible-config criteria."
+sources = [
+  "crates/vigil/tests/detector_workclass_schema.rs",
+  "crates/vigil/tests/fabric_config_defaults.rs",
+  "crates/vigil/tests/offload_policy.rs",
+  "crates/vigil/tests/runtime_offload_seam.rs",
+  "crates/vigil/tests/workgraph_contract.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "fabric"
+tests = [
+  "vigil::detector_workclass_schema::detector_job_registers_as_vigil_detector_class_refs_only", # crates/vigil/tests/detector_workclass_schema.rs
+  "vigil::detector_workclass_schema::detector_job_serde_round_trips_bit_exact", # crates/vigil/tests/detector_workclass_schema.rs
+  "vigil::detector_workclass_schema::detector_result_serde_round_trips_bit_exact", # crates/vigil/tests/detector_workclass_schema.rs
+  "vigil::detector_workclass_schema::length_framed_encoded_units_round_trip", # crates/vigil/tests/detector_workclass_schema.rs
+  "vigil::fabric_config_defaults::addon_config_declares_the_new_fabric_tuning_knobs_in_options_and_schema", # crates/vigil/tests/fabric_config_defaults.rs
+  "vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset", # crates/vigil/tests/fabric_config_defaults.rs
+  "vigil::fabric_config_defaults::fabric_rs_never_hardcodes_the_tuning_defaults_outside_their_config_owned_home", # crates/vigil/tests/fabric_config_defaults.rs
+  "vigil::fabric_config_defaults::fabric_tuning_knobs_flow_through_the_config_surface_when_set", # crates/vigil/tests/fabric_config_defaults.rs
+  "vigil::offload_policy::happy_path_never_touches_a_threshold_knob", # crates/vigil/tests/offload_policy.rs
+  "vigil::offload_policy::keeping_pace_never_offloads_and_pressure_with_remote_offloads", # crates/vigil/tests/offload_policy.rs
+  "vigil::runtime_offload_seam::a_node_never_under_pressure_never_offloads_through_the_seam", # crates/vigil/tests/runtime_offload_seam.rs
+  "vigil::runtime_offload_seam::in_mode_receipts_name_sustained_pressure_distinctly", # crates/vigil/tests/runtime_offload_seam.rs
+  "vigil::runtime_offload_seam::sustained_pressure_offloads_then_recovers_to_keeping_pace_on_windowed_deltas", # crates/vigil/tests/runtime_offload_seam.rs
+  "vigil::runtime_offload_seam::sustained_pressure_stays_offloaded_across_zero_growth_troughs_until_k_clear", # crates/vigil/tests/runtime_offload_seam.rs
+  "vigil::workgraph_contract::aggregation_stage_joins_two_parents_via_contributing_work_ids", # crates/vigil/tests/workgraph_contract.rs
+  "vigil::workgraph_contract::bounded_queue_has_explicit_capacity_and_visible_counters", # crates/vigil/tests/workgraph_contract.rs
+  "vigil::workgraph_contract::custom_stage_id_needs_no_vocabulary_change", # crates/vigil/tests/workgraph_contract.rs
+  "vigil::workgraph_contract::keep_newest_replacement_is_counted_not_silent", # crates/vigil/tests/workgraph_contract.rs
+  "vigil::workgraph_contract::mismatched_stream_or_media_result_is_rejected_not_guessed", # crates/vigil/tests/workgraph_contract.rs
+  "vigil::workgraph_contract::receipt_links_result_to_exact_backend_attempt", # crates/vigil/tests/workgraph_contract.rs
+  "vigil::workgraph_contract::result_envelope_joins_only_to_exact_work_identity", # crates/vigil/tests/workgraph_contract.rs
+  "vigil::workgraph_contract::stage_may_emit_zero_or_many_results_with_counted_disposition", # crates/vigil/tests/workgraph_contract.rs
+]
+
+[[contract]]
+id = "distributed-worker-lifecycle-routing-and-receipts"
+lineage = "Accepted distributed-compute worker, ledger, routing, fallback, and receipt criteria."
+sources = [
+  "crates/vigil/tests/boot_readiness.rs",
+  "crates/vigil/tests/cameraless_worker.rs",
+  "crates/vigil/tests/capability_delivery.rs",
+  "crates/vigil/tests/capability_lifecycle.rs",
+  "crates/vigil/tests/dead_capability_steal.rs",
+  "crates/vigil/tests/detector_worker.rs",
+  "crates/vigil/tests/fabric_enrollment.rs",
+  "crates/vigil/tests/fabric_worker_lease_knob.rs",
+  "crates/vigil/tests/kill_worker_fallback.rs",
+  "crates/vigil/tests/promotion_readvertise.rs",
+  "crates/vigil/tests/provenance_receipts.rs",
+  "crates/vigil/tests/result_join_authority.rs",
+  "crates/vigil/tests/symmetry.rs",
+  "crates/vigil/tests/two_process_fabric.rs",
+  "crates/vigil/tests/worker_intent_loudness.rs",
+]
+evidence_kind = "integration"
+gate = "fabric"
+tests = [
+  "vigil::boot_readiness::boot_prints_phase_markers", # crates/vigil/tests/boot_readiness.rs
+  "vigil::boot_readiness::health_becomes_ready_before_fabric_attaches", # crates/vigil/tests/boot_readiness.rs
+  "vigil::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model", # crates/vigil/tests/cameraless_worker.rs
+  "vigil::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera", # crates/vigil/tests/cameraless_worker.rs
+  "vigil::cameraless_worker::hub_sees_cameraless_worker_detector_capability_after_join", # crates/vigil/tests/cameraless_worker.rs
+  "vigil::capability_delivery::failed_capability_push_emits_named_error", # crates/vigil/tests/capability_delivery.rs
+  "vigil::capability_lifecycle::a_dead_worker_ages_out_of_remote_detectors", # crates/vigil/tests/capability_lifecycle.rs
+  "vigil::capability_lifecycle::a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls", # crates/vigil/tests/capability_lifecycle.rs
+  "vigil::capability_lifecycle::a_restarted_worker_renders_only_its_current_backend", # crates/vigil/tests/capability_lifecycle.rs
+  "vigil::capability_lifecycle::offload_routes_to_the_live_worker_never_a_dead_one", # crates/vigil/tests/capability_lifecycle.rs
+  "vigil::capability_lifecycle::only_a_dead_worker_means_no_offload", # crates/vigil/tests/capability_lifecycle.rs
+  "vigil::dead_capability_steal::claimant_within_horizon_is_not_stolen", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::dead_claimant_past_deadline_is_stolen", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::dead_worker_steal_reclaims_locally_with_named_receipt", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::deadlineless_job_is_never_stolen", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::foreign_node_never_steals", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::own_self_reclaimed_claim_is_never_stolen", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::result_before_steal_makes_steal_a_noop", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::slow_but_alive_claimant_is_never_stolen", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::detector_worker::worker_advertises_truthful_backend_claims_materializes_runs_records_once", # crates/vigil/tests/detector_worker.rs
+  "vigil::fabric_enrollment::main_prints_join_instruction_and_malformed_ticket_names_fix", # crates/vigil/tests/fabric_enrollment.rs
+  "vigil::fabric_worker_lease_knob::explicit_fabric_worker_lease_ms_flows_into_the_claimed_lease_deadline", # crates/vigil/tests/fabric_worker_lease_knob.rs
+  "vigil::fabric_worker_lease_knob::worker_lease_defaults_to_five_minutes_when_unset", # crates/vigil/tests/fabric_worker_lease_knob.rs
+  "vigil::kill_worker_fallback::worker_death_midlease_falls_back_local_with_named_receipt", # crates/vigil/tests/kill_worker_fallback.rs
+  "vigil::promotion_readvertise::late_promotion_advertises_a_new_backend_row_and_keeps_the_old_one", # crates/vigil/tests/promotion_readvertise.rs
+  "vigil::provenance_receipts::remote_detection_carries_node_and_backend_one_vocabulary", # crates/vigil/tests/provenance_receipts.rs
+  "vigil::result_join_authority::remote_result_joins_or_is_rejected_and_is_idempotent", # crates/vigil/tests/result_join_authority.rs
+  "vigil::symmetry::one_node_submits_and_claims_in_one_run", # crates/vigil/tests/symmetry.rs
+  "vigil::two_process_fabric::two_real_processes_age_out_a_dead_worker_from_remote_detectors", # crates/vigil/tests/two_process_fabric.rs
+  "vigil::two_process_fabric::two_real_processes_render_only_the_restarted_workers_current_backend", # crates/vigil/tests/two_process_fabric.rs
+  "vigil::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_first", # crates/vigil/tests/two_process_fabric.rs
+  "vigil::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_up_late", # crates/vigil/tests/two_process_fabric.rs
+  "vigil::worker_intent_loudness::empty_string_ticket_from_the_addon_options_mapping_is_treated_as_no_ticket_configured", # crates/vigil/tests/worker_intent_loudness.rs
+  "vigil::worker_intent_loudness::worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering", # crates/vigil/tests/worker_intent_loudness.rs
+]
+
+[[contract]]
+id = "health-watchdog-liveness-and-recovery"
+lineage = "Vigil inventory: health watchdog production-boundary regressions."
+sources = [
+  "crates/vigil/tests/health_watchdog_liveness.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog", # crates/vigil/tests/health_watchdog_liveness.rs
+  "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx", # crates/vigil/tests/health_watchdog_liveness.rs
+  "vigil::health_watchdog_liveness::ready_runtime_is_alive_for_the_watchdog", # crates/vigil/tests/health_watchdog_liveness.rs
+]
+
+[[contract]]
+id = "home-assistant-discovery-events-and-corrections"
+lineage = "Accepted Home Assistant discovery and MQTT contract."
+sources = [
+  "crates/vigil/src/ha_discovery.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::ha_discovery::tests::command_topic_parses_to_channel_agnostic_request", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::discovery_entities_carry_required_ha_fields", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::discovery_has_no_per_camera_health_entity", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::discovery_payload_uses_default_entity_id_not_object_id", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch", # crates/vigil/src/ha_discovery.rs
+  "vigil::ha_discovery::tests::running_condition_maps_each_named_fault", # crates/vigil/src/ha_discovery.rs
+]
+
+[[contract]]
+id = "http-events-evidence-health-and-review-surfaces"
+lineage = "Accepted HTTP data-plane and media contract, superseded by same-origin owner ruling where applicable."
+sources = [
+  "crates/vigil/tests/http_data_plane.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil::http_data_plane::clip_range_streams_from_large_file_without_whole_file_transfer", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::clip_unsatisfiable_range_returns_416_with_content_range_star", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::correction_post_bad_payload_or_unknown_id_and_bad_method_return_4xx_not_5xx", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::data_plane_serves_in_process_then_stops_on_shutdown", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::event_list_does_not_leak_foreign_context_events", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::event_list_ordering_matches_review_events_newest_first", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::event_list_serializes_current_correction_authority_fields", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::health_liveness_still_serves_alongside_data_plane_in_single_binary", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::large_media_reads_use_fixed_content_length_not_chunked_transfer", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::media_path_traversal_rejected_serves_no_out_of_tree_bytes", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::media_read_for_event_with_no_media_returns_not_found", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::media_reference_from_event_list_resolves_to_media_bytes", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::pruned_media_returns_clean_not_found_while_event_still_lists_and_walks_back", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::review_data_plane_does_not_enable_cross_origin_access", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::snapshot_read_serves_image_bytes_with_image_content_type", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::why_unknown_or_malformed_detection_id_returns_not_found", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction", # crates/vigil/tests/http_data_plane.rs
+]
+
+[[contract]]
+id = "injected-clock-controls-test-time"
+lineage = "Test-estate deterministic harness implementation: injected clock boundary."
+sources = [
+  "crates/vigil/src/clock.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::clock::tests::persisted_time_uses_the_contextdb_wallclock_seam", # crates/vigil/src/clock.rs
+]
+
+[[contract]]
+id = "installable-binary-container-lifecycle-and-health"
+lineage = "Accepted installable substrate binary and container criteria."
+sources = [
+  "tests/acceptance/installable_substrate.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil-acceptance::acceptance::installable_substrate::vigil_container_first_start_health_succeeds_with_network_none", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_container_healthcheck_serves_ready_and_stops_cleanly", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_container_persistent_volume_reopens_same_store", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_first_start_opens_local_context_graph_store", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_health_200_requires_store_open_and_runtime_loop", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_health_503_when_store_cannot_open", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_idle_rss_stays_below_100mb_without_growth", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_kill9_survivor_store_reopens_cleanly", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_restart_reopens_existing_store", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_sigterm_exits_zero_and_releases_store", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_version_reports_nonempty_build_identity", # tests/acceptance/installable_substrate.rs
+]
+
+[[contract]]
+id = "media-evidence-credentials-and-redaction"
+lineage = "Accepted HTTP/media and Home Assistant live-camera contracts."
+sources = [
+  "crates/vigil/src/media_pipeline.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::media_pipeline::tests::boundary_unit_belongs_to_the_segment_it_starts", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::browser_playable_mp4_writer_round_trips_to_h264_mp4", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::credentialed_rtsp_url_is_stripped_for_session_and_kept_for_auth", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::explicit_rtsp_credentials_override_url_userinfo", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::playable_dimensions_cap_large_review_clips_without_upscaling", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::rtsp_credentials_debug_redacts_password", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::rtsp_url_redaction_removes_userinfo_from_parse_errors", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::separate_password_can_pair_with_url_username", # crates/vigil/src/media_pipeline.rs
+]
+
+[[contract]]
+id = "mqtt-discovery-delivery-state-and-corrections"
+lineage = "Accepted live-broker Home Assistant integration contract."
+sources = [
+  "crates/vigil/tests/ha_mqtt_broker.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil::ha_mqtt_broker::bounded_wait_reports_the_missing_state", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::correction_and_event_under_disk_full_fail_loudly", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::correction_command_channel_overflow_is_loud", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::correction_path_makes_no_outbound_network_beyond_broker", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::correction_rejected_for_non_detection_anchor", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::detection_fires_active_sensor_on", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::detection_only_events_excludes_corrections", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::detection_publisher_delivers_to_broker", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::empty_stream_publishes_no_event_to_broker", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::malformed_correction_command_is_rejected_and_subscriber_survives", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::outbound_detection_publish_is_nonblocking_and_overflow_is_loud", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::redelivered_correction_command_is_idempotent", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::running_condition_tracks_live_health_retained", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::tcp_reservation_holds_port_until_release", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::two_distinct_corrections_on_same_detection_both_land", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg", # crates/vigil/tests/ha_mqtt_broker.rs
+]
+
+[[contract]]
+id = "operator-configuration-reaches-runtime"
+lineage = "Vigil inventory: inline production-module configuration tests; owner rulings and HTTP/recognition contracts."
+sources = [
+  "crates/vigil/src/config.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line", # crates/vigil/src/config.rs
+  "vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url", # crates/vigil/src/config.rs
+  "vigil::config::tests::review_port_cli_override_is_documented_and_loaded", # crates/vigil/src/config.rs
+]
+
+[[contract]]
+id = "recognition-enrollment-matching-honesty-and-deletion"
+lineage = "Accepted recognition enrollment, matching, unknown honesty, provenance, and deletion contract."
+sources = [
+  "crates/vigil/tests/recognition_slice.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil::recognition_slice::animal_class_enrolls_and_matches_as_an_animal_entity", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::bbox_mapping_clamps_to_frame_and_rejects_degenerate_boxes", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::bbox_maps_from_detector_space_to_original_frame_pixels", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::below_threshold_sighting_stays_unknown", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::configured_recognition_threshold_is_honored_without_a_hidden_floor", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::covered_class_indices_map_names_to_coco_indices_including_person", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::covered_classes_and_entity_types_route_all_classes_one_mechanism", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::crop_png_extracts_the_requested_region", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::enroll_failure_writes_no_correction_row", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::enroll_wire_shape_parses_from_the_command_topic", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::enroll_without_a_name_is_refused", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::event_payload_carries_the_entity_name_when_matched", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::forget_removes_references_and_the_subject_reverts_to_unknown", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::http_event_rows_and_why_carry_recognition_for_the_card", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::match_records_observation_against_the_matched_entity_with_vector_and_score", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::recognition_provenance_joins_enroll_correction_by_matched_reference_label", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::review_events_enroll_row_carries_server_authoritative_name", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::review_events_row_carries_the_entity_name", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::vehicle_sighting_cannot_match_a_person_identity_even_with_identical_vector", # crates/vigil/tests/recognition_slice.rs
+  "vigil::recognition_slice::why_view_shows_match_provenance_reference_score_and_enrolling_correction", # crates/vigil/tests/recognition_slice.rs
+]
+
+[[contract]]
+id = "runtime-queue-camera-selection-and-detection-gates"
+lineage = "Vigil owner rulings for newest-wins queues, camera URLs, and stationary scanning."
+sources = [
+  "crates/vigil/src/runtime.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::runtime::tests::detector_decision_delay_is_zero_without_env_and_honors_short_values", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::detector_gate_still_enqueues_motion_positive_segments", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::detector_gate_suppresses_motion_free_segments_when_stationary_scan_is_disabled", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::latest_segment_queue_keeps_newest_pending_work_when_full", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::latest_segment_queue_wakes_receiver_when_closed", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::runtime_detection_selection_seam_is_honest_for_this_artifact", # crates/vigil/src/runtime.rs
+]
+
+[[contract]]
+id = "structural-packaging-and-source-contracts"
+lineage = "Vigil inventory structural-evidence section; replacement remains required before deleting source scans."
+sources = [
+  "crates/vigil/tests/addon_config_surface.rs",
+  "crates/vigil/tests/artifact_profile_honesty.rs",
+  "crates/vigil/tests/oss_cleanliness_scan.rs",
+  "crates/vigil/tests/probe_deadline_knob_surface.rs",
+  "crates/vigil/tests/runtime_packages_manifest.rs",
+  "crates/vigil/tests/source_scan_contract.rs",
+  "crates/vigil/tests/transport_purity.rs",
+]
+evidence_kind = "structural"
+gate = "pull-request"
+tests = [
+  "vigil::addon_config_surface::addon_config_exposes_both_booleans_in_options_and_schema_defaulting_true", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::addon_config_maps_video_device_and_forbids_full_access", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::addon_config_states_accelerated_detection_gpu_with_cpu_fallback_in_help", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::artifact_profile_honesty::hardware_addon_image_carries_manifest_hardware_profile", # crates/vigil/tests/artifact_profile_honesty.rs
+  "vigil::artifact_profile_honesty::release_notes_name_the_hardware_generic_docker_artifact", # crates/vigil/tests/artifact_profile_honesty.rs
+  "vigil::oss_cleanliness_scan::backend_nouns_stay_out_of_product_domain_outputs", # crates/vigil/tests/oss_cleanliness_scan.rs
+  "vigil::oss_cleanliness_scan::no_private_environment_nouns_in_repo_sources", # crates/vigil/tests/oss_cleanliness_scan.rs
+  "vigil::oss_cleanliness_scan::packaging_and_docs_surfaces_are_covered_by_the_cleanliness_scan", # crates/vigil/tests/oss_cleanliness_scan.rs
+  "vigil::probe_deadline_knob_surface::addon_config_declares_both_probe_deadline_knobs_as_optional_integers", # crates/vigil/tests/probe_deadline_knob_surface.rs
+  "vigil::probe_deadline_knob_surface::addon_help_documents_decode_probe_deadline_option", # crates/vigil/tests/probe_deadline_knob_surface.rs
+  "vigil::probe_deadline_knob_surface::addon_help_documents_detection_probe_deadline_option", # crates/vigil/tests/probe_deadline_knob_surface.rs
+  "vigil::runtime_packages_manifest::addon_dockerfile_installs_only_manifest_declared_packages", # crates/vigil/tests/runtime_packages_manifest.rs
+  "vigil::runtime_packages_manifest::runtime_packages_manifest_bakes_packages_with_no_runtime_download", # crates/vigil/tests/runtime_packages_manifest.rs
+  "vigil::runtime_packages_manifest::runtime_packages_manifest_exists_and_parses", # crates/vigil/tests/runtime_packages_manifest.rs
+  "vigil::runtime_packages_manifest::runtime_packages_manifest_has_amd64_and_aarch64_profiles_with_backends_and_packages", # crates/vigil/tests/runtime_packages_manifest.rs
+  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::generic_camera_registration_confirms_home_assistant_preview_step", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::generic_camera_registration_logs_validation_errors_and_deletes_failed_flows", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::ha_os_vm_shell_signals_stay_behind_child_pid_validator", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::live_read_and_owner_control_source_contracts_are_fast", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::review_data_plane_bounds_request_fanout_and_survives_accept_panics", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::rtsp_success_recovers_health_after_transient_ingest_failure", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::vigil_addon_does_not_auto_install_legacy_lovelace_gallery", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::yolox_oracle_owns_decode_path_without_dead_code_link_shims", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::transport_purity::guard_catches_every_shape_of_the_transport_name", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::no_iroh_symbol_in_vigil_src", # crates/vigil/tests/transport_purity.rs
+]
+
+[[contract]]
+id = "supervisor-service-and-generic-camera-payloads"
+lineage = "Accepted Home Assistant Supervisor and Generic Camera integration contract."
+sources = [
+  "crates/vigil/src/supervisor.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::supervisor::tests::build_generic_camera_flow_confirm_payload_accepts_preview_step", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::build_generic_camera_flow_start_payload_has_generic_handler", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::build_generic_camera_flow_step_payload_includes_still_image_url_when_provided", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::build_generic_camera_flow_step_payload_nests_advanced_fields", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::flow_step_errors_extracts_generic_camera_validation_errors", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::flow_step_errors_ignores_non_error_responses", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::is_flow_create_entry_false_on_form_type", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::is_flow_create_entry_true_on_create_entry_type", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_flow_id_extracts_from_valid_response", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_flow_id_returns_none_on_missing_field", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_supervisor_mqtt_response_empty_host_returns_none", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_supervisor_mqtt_response_malformed_json_returns_none", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_supervisor_mqtt_response_missing_host_returns_none", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_supervisor_mqtt_response_non_ok_result_returns_none", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_supervisor_mqtt_response_valid", # crates/vigil/src/supervisor.rs
+]
+
+[[contract]]
+id = "supplemental-group-privilege-ordering"
+lineage = "Current test-estate work list: privilege ordering is an untouchable regression."
+sources = [
+  "crates/vigil/tests/privilege_supplemental_gids.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil::privilege_supplemental_gids::invalid_gid_list_fails_loud", # crates/vigil/tests/privilege_supplemental_gids.rs
+  "vigil::privilege_supplemental_gids::no_supplemental_gids_still_clears_groups_before_drop", # crates/vigil/tests/privilege_supplemental_gids.rs
+  "vigil::privilege_supplemental_gids::supplemental_gids_env_parses_and_orders_setgroups_before_setgid_setuid", # crates/vigil/tests/privilege_supplemental_gids.rs
+  "vigil::privilege_supplemental_gids::whitespace_and_empty_entries_are_tolerated", # crates/vigil/tests/privilege_supplemental_gids.rs
+]
+
+[[contract]]
+id = "synthetic-camera-frigate-replacement-journey"
+lineage = "Accepted installable one-camera Frigate-replacement journey."
+sources = [
+  "tests/acceptance/one_camera_acceptance.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic", # tests/acceptance/one_camera_acceptance.rs
+]
+
+[[contract]]
+id = "real-camera-physical-frigate-replacement-journey"
+lineage = "Vigil test-estate inventory: installable and physical acceptance; owner-run real-camera window."
+sources = [
+  "tests/acceptance/one_camera_acceptance.rs",
+]
+evidence_kind = "physical"
+gate = "physical"
+deterministic_witness = "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic"
+explicit_run = "cargo test --features acceptance --test acceptance one_camera_acceptance::frigate_replacement_real_camera_event_lands_and_walks -- --ignored --exact"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_real_camera_event_lands_and_walks", # tests/acceptance/one_camera_acceptance.rs
+]
+
+[[contract]]
+id = "test-estate-guard-self-enforcement"
+lineage = "The test-estate guard's own adversarial fixtures enforce inventory, transition, CI, documentation, nondeterminism, and schema invariants."
+sources = [
+  "xtask/src/test_estate.rs",
+]
+evidence_kind = "structural"
+gate = "pull-request"
+tests = [
+  "xtask::test_estate::tests::all_test_estate_registries_reject_unknown_fields",
+  "xtask::test_estate::tests::authoritative_nextest_json_preserves_exact_binary_identity",
+  "xtask::test_estate::tests::bind_to_port_zero_is_detected_independent_of_helper_name",
+  "xtask::test_estate::tests::cfg_predicates_containing_test_are_audited",
+  "xtask::test_estate::tests::ci_rejects_cargo_targets_on_tmpfs_even_with_disk_capacity",
+  "xtask::test_estate::tests::ci_topology_accepts_required_shapes_and_discipline",
+  "xtask::test_estate::tests::ci_topology_rejects_removed_shape_cli_retry_and_missing_guard",
+  "xtask::test_estate::tests::contract_paragraph_coverage_requires_binding_or_strict_unenforced_reason",
+  "xtask::test_estate::tests::deleting_a_registry_identity_without_a_receipt_fails",
+  "xtask::test_estate::tests::documentation_contract_accepts_exact_reviewed_mapping",
+  "xtask::test_estate::tests::documentation_contract_rejects_changed_or_missing_paragraph",
+  "xtask::test_estate::tests::documentation_contract_rejects_renamed_test_and_disallowed_mapping",
+  "xtask::test_estate::tests::documentation_contract_rejects_unregistered_and_duplicate_claims",
+  "xtask::test_estate::tests::documentation_contract_requires_honest_review_status_and_known_schema_values",
+  "xtask::test_estate::tests::every_enforced_paragraph_must_carry_one_well_formed_claim_id",
+  "xtask::test_estate::tests::ha_smoke_required_steps_cannot_skip_or_warn_green",
+  "xtask::test_estate::tests::ledger_rejects_unknown_fields",
+  "xtask::test_estate::tests::mandatory_prerequisite_branch_cannot_return_green",
+  "xtask::test_estate::tests::paragraph_normalization_is_whitespace_stable_but_word_sensitive",
+  "xtask::test_estate::tests::path_modules_contribute_their_real_harness_identity",
+  "xtask::test_estate::tests::pending_receipt_review_is_not_a_completed_attestation",
+  "xtask::test_estate::tests::physical_contract_requires_active_nonignored_witness_and_exact_command",
+  "xtask::test_estate::tests::placeholder_reasons_are_not_approvals",
+  "xtask::test_estate::tests::qualified_and_imported_sleep_calls_are_sites",
+  "xtask::test_estate::tests::receipt_must_enumerate_the_exact_surviving_vector",
+  "xtask::test_estate::tests::release_note_hardware_names_do_not_substitute_for_named_target_builds",
+  "xtask::test_estate::tests::relocating_same_syntax_changes_the_exact_site_identity",
+  "xtask::test_estate::tests::sleep_hidden_in_macro_tokens_is_a_site",
+  "xtask::test_estate::tests::source_scan_definition_ignores_doc_links_but_catches_executable_reads",
+  "xtask::test_estate::tests::wall_and_monotonic_clocks_and_elapsed_calls_are_sites",
+]

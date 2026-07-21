@@ -7,6 +7,7 @@
 #
 # Required environment variables:
 #   VIGIL_HEALTH_URL   — e.g. http://127.0.0.1:8099/health
+#   VIGIL_REVIEW_URL   — e.g. http://127.0.0.1:8098
 #   MQTT_HOST          — broker hostname/IP
 #   MQTT_PORT          — broker port (default 1883)
 #   HAOS_SSH_TARGET    — ssh target for the HA-OS VM (optional; if not set,
@@ -18,6 +19,8 @@
 #   VIGIL_CORRECTION_TOPIC — MQTT correction command topic
 #   GO2RTC_API_BASE    — go2rtc REST API base (default: http://127.0.0.1:1984)
 #   DOCKER_CLI         — docker CLI command (default: docker)
+#   HA_S4_MANUAL_PROOF — exported HA automation trace JSON for the HA-S2 detection
+#   HA_S5_MEDIA_BROWSE_PROOF — exported media_source/browse_media root response JSON
 #
 # Optional:
 #   MQTT_USERNAME / MQTT_PASSWORD  — broker credentials
@@ -32,6 +35,7 @@ status=0
 smoke_detection_id=""
 
 health_url="${VIGIL_HEALTH_URL:-http://127.0.0.1:8099/health}"
+review_url="${VIGIL_REVIEW_URL:-http://127.0.0.1:8098}"
 mqtt_host="${MQTT_HOST:-127.0.0.1}"
 mqtt_port="${MQTT_PORT:-1883}"
 haos_ssh_target="${HAOS_SSH_TARGET:-}"
@@ -39,13 +43,13 @@ addon_slug="${VIGIL_ADDON_SLUG:-local_vigil}"
 ha_api_token="${HA_API_TOKEN:-}"
 ha_api_base="${HA_API_BASE:-http://127.0.0.1:8123}"
 vigil_event_topic="${VIGIL_EVENT_TOPIC:-vigil/events}"
-vigil_correction_topic="${VIGIL_CORRECTION_TOPIC:-vigil/correction/command}"
+vigil_correction_topic="${VIGIL_CORRECTION_TOPIC:-vigil/commands/correct}"
 go2rtc_api_base="${GO2RTC_API_BASE:-http://127.0.0.1:1984}"
 docker_cli="${DOCKER_CLI:-docker}"
 mqtt_username="${MQTT_USERNAME:-}"
 mqtt_password="${MQTT_PASSWORD:-}"
 detection_wait_seconds="${HA_DETECTION_WAIT_SECONDS:-120}"
-correction_label="${HA_CORRECTION_LABEL:-smoke test correction}"
+correction_label="${HA_CORRECTION_LABEL:-smoke-test-correction}-$$-$RANDOM"
 
 mosquitto_auth_args=()
 if [[ -n "$mqtt_username" ]]; then
@@ -66,8 +70,9 @@ fail_step() {
   status=1
 }
 
-skip_step() {
-  printf 'HA-S%s SKIP %s\n' "$1" "$2"
+not_run_step() {
+  printf 'HA-S%s NOT-RUN %s\n' "$1" "$2" >&2
+  status=1
 }
 
 have_cmd() {
@@ -76,11 +81,20 @@ have_cmd() {
 
 curl_ha() {
   if [[ -n "$haos_ssh_target" ]]; then
-    local remote_script
-    printf -v remote_script 'curl -fsS %s' "$*"
-    ssh -n -o BatchMode=yes "$haos_ssh_target" "$remote_script"
+    local quoted
+    printf -v quoted '%q ' "$@"
+    ssh -n -o BatchMode=yes "$haos_ssh_target" "curl -fsS $quoted"
   else
     curl -fsS "$@"
+  fi
+}
+
+review_curl_available() {
+  if [[ -n "$haos_ssh_target" ]]; then
+    have_cmd ssh \
+      && ssh -n -o BatchMode=yes "$haos_ssh_target" 'command -v curl >/dev/null 2>&1'
+  else
+    have_cmd curl
   fi
 }
 
@@ -169,9 +183,9 @@ fi
 
 printf '\n[HA-S2] Waiting for a real detection event on the event topic...\n'
 if ! have_cmd mosquitto_sub; then
-  skip_step 2 "mosquitto_sub not available; skipping event topic check"
+  not_run_step 2 "mosquitto_sub is required for the event-topic acceptance check"
 elif ! have_cmd jq; then
-  skip_step 2 "jq not available; skipping event topic check"
+  not_run_step 2 "jq is required to validate the detection-event contract"
 else
   printf '  Waiting up to %ss for a detection event on %s...\n' \
     "$detection_wait_seconds" "$vigil_event_topic"
@@ -207,8 +221,24 @@ else
     fail_step 3 "go2rtc is reachable but no Vigil stream is registered; \
 the camera entity stream source must be registered with go2rtc so the live tile renders inside HA"
   else
-    printf '  go2rtc stream entry: %s\n' "$vigil_stream"
-    pass_step 3 "go2rtc stream registered and reachable inside HA network namespace"
+    camera_entity="$(ha_rest /api/states 2>/dev/null \
+      | jq -er '[.[] | select(.entity_id | startswith("camera.")) | select(.entity_id | test("vigil"; "i"))][0].entity_id // empty' \
+        2>/dev/null || true)"
+    if [[ -z "$camera_entity" ]]; then
+      fail_step 3 "go2rtc has a Vigil stream but Home Assistant has no Vigil camera entity to play it"
+    else
+      first_frame_sha="$(ha_rest "/api/camera_proxy/${camera_entity}" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+      sleep 2
+      second_frame_sha="$(ha_rest "/api/camera_proxy/${camera_entity}" 2>/dev/null | sha256sum | awk '{print $1}' || true)"
+      if ! [[ "$first_frame_sha" =~ ^[0-9a-f]{64}$ && "$second_frame_sha" =~ ^[0-9a-f]{64}$ ]]; then
+        fail_step 3 "Home Assistant camera_proxy returned no hashable frames for ${camera_entity}"
+      elif [[ "$first_frame_sha" == "$second_frame_sha" ]]; then
+        fail_step 3 "Home Assistant camera_proxy returned the same frame twice for ${camera_entity}; stream registration alone does not prove live playback"
+      else
+        printf '  go2rtc stream entry: %s\n' "$vigil_stream"
+        pass_step 3 "Home Assistant camera entity delivered two distinct live frames from the registered go2rtc stream"
+      fi
+    fi
   fi
 fi
 
@@ -218,32 +248,58 @@ printf '\n[HA-S4] Automation check (manual verification required)...\n'
 printf '  This step requires a Home Assistant automation targeting the detection event entity.\n'
 printf '  Confirm the automation triggered on the detection captured in HA-S2 and record the\n'
 printf '  trace in farm-release-checklist.md HA-S4.\n'
-printf '  (Automated probe not available; manual sign-off required.)\n'
-skip_step 4 "manual verification required — record HA automation trace in farm-release-checklist.md"
+manual_proof="${HA_S4_MANUAL_PROOF:-}"
+if [[ -z "$manual_proof" ]] || [[ ! -s "$manual_proof" ]]; then
+  not_run_step 4 "set HA_S4_MANUAL_PROOF to an exported HA automation trace for the HA-S2 detection"
+elif [[ -z "$smoke_detection_id" ]]; then
+  not_run_step 4 "HA-S2 produced no detection_id, so the automation trace cannot be causally matched"
+elif ! have_cmd jq; then
+  not_run_step 4 "jq is required to validate the exported automation trace"
+elif ! jq -e --arg detection_id "$smoke_detection_id" '
+    .trace.state == "stopped"
+    and .trace.script_execution == "finished"
+    and ([.. | strings] | index($detection_id) != null)
+  ' "$manual_proof" >/dev/null 2>&1; then
+  fail_step 4 "automation trace must be valid JSON with trace.state=stopped, trace.script_execution=finished, and the exact HA-S2 detection_id"
+else
+  printf '  Automation trace receipt: %s\n' "$manual_proof"
+  pass_step 4 "exported HA automation trace completed successfully for the exact HA-S2 detection"
+fi
 
 # ─── HA-S5: Recorded clip reached via evidence reference ─────────────────
 
 printf '\n[HA-S5] Checking vigil why / evidence reference...\n'
 if [[ -z "$smoke_detection_id" ]]; then
-  skip_step 5 "no detection_id from HA-S2; cannot run vigil why"
+  not_run_step 5 "HA-S2 produced no detection_id, so evidence lookup cannot run"
+elif ! have_cmd jq; then
+  not_run_step 5 "jq is required to validate the /why evidence reference"
+elif ! review_curl_available; then
+  not_run_step 5 "curl access to the Vigil review data plane is required"
 else
-  why_output="$(vigil_exec vigil why "$smoke_detection_id" 2>/dev/null || true)"
-  if [[ -z "$why_output" ]]; then
-    fail_step 5 "'vigil why $smoke_detection_id' returned no output inside the add-on container; \
-the read path must be functional and the detection must be in cg authority"
+  why_json="$(curl_ha --max-time 5 "${review_url%/}/why/$smoke_detection_id" 2>/dev/null || true)"
+  evidence_ref="$(jq -er '[.. | objects | .evidence_ref? // empty | strings | select(length > 0)][0] // empty' \
+    <<< "$why_json" 2>/dev/null || true)"
+  if [[ -z "$why_json" ]]; then
+    fail_step 5 "GET ${review_url%/}/why/$smoke_detection_id returned no JSON; the detection must be in cg authority"
+  elif [[ -z "$evidence_ref" ]]; then
+    fail_step 5 "GET /why/$smoke_detection_id returned no non-empty evidence_ref"
+  elif [[ "$evidence_ref" == http://* || "$evidence_ref" == https://* ]]; then
+    fail_step 5 "evidence_ref must remain a same-origin review path, not an external URL: $evidence_ref"
+  elif ! curl_ha -fsS --max-time 10 -o /dev/null "${review_url%/}/${evidence_ref#/}"; then
+    fail_step 5 "evidence_ref '$evidence_ref' was not fetchable from the shipped review data plane"
   else
-    evidence_ref="$(printf '%s' "$why_output" | grep -iE 'evidence|clip|recording' | head -3 || true)"
-    printf '  vigil why output (first 10 lines):\n'
-    printf '%s\n' "$why_output" | head -10 | sed 's/^/    /'
-    # Assert no HA media_source entity
-    media_source_entities="$(ha_rest /api/states 2>/dev/null \
-      | jq -er '[.[] | select(.entity_id | test("vigil"; "i")) | select(.entity_id | startswith("media_source"))] | length' \
-      2>/dev/null || echo 0)"
-    if [[ "$media_source_entities" =~ ^[0-9]+$ ]] && (( media_source_entities > 0 )); then
-      fail_step 5 "HA media_source entity for Vigil is registered; clips must be reachable \
-only through vigil why/events evidence reference, not via the HA Media panel"
+    printf '  fetchable evidence_ref: %s\n' "$evidence_ref"
+    media_browse_proof="${HA_S5_MEDIA_BROWSE_PROOF:-}"
+    if [[ -z "$media_browse_proof" ]] || [[ ! -s "$media_browse_proof" ]]; then
+      not_run_step 5 "set HA_S5_MEDIA_BROWSE_PROOF to the exported Home Assistant media_source/browse_media root response"
+    elif ! jq -e '
+        .success == true
+        and .result.media_content_id == "media-source://media_source"
+        and ([.. | strings | select(test("vigil"; "i"))] | length == 0)
+      ' "$media_browse_proof" >/dev/null 2>&1; then
+      fail_step 5 "HA media-source browse proof must be a successful root response with no Vigil entry"
     else
-      pass_step 5 "clip reachable via vigil why evidence reference; no HA media_source entity registered"
+      pass_step 5 "clip bytes are reachable through the /why evidence_ref and the HA Media root contains no Vigil source"
     fi
   fi
 fi
@@ -252,9 +308,9 @@ fi
 
 printf '\n[HA-S6] Publishing a correction command to the broker...\n'
 if [[ -z "$smoke_detection_id" ]]; then
-  skip_step 6 "no detection_id from HA-S2; cannot publish correction"
+  not_run_step 6 "HA-S2 produced no detection_id, so correction publishing cannot run"
 elif ! have_cmd mosquitto_pub; then
-  skip_step 6 "mosquitto_pub not available; cannot publish correction command"
+  not_run_step 6 "mosquitto_pub is required for the correction-command acceptance check"
 else
   correction_payload="$(printf '{"detection_id":"%s","label":"%s","correction_type":"FalseAlarm"}' \
     "$smoke_detection_id" "$correction_label")"
@@ -269,37 +325,42 @@ broker must be reachable and the correction command topic must be subscribed by 
   fi
 fi
 
-# ─── HA-S7: vigil why lists the correction ───────────────────────────────
+# ─── HA-S7: review JSON lists the correction ─────────────────────────────
 
-printf '\n[HA-S7] Verifying correction reads back in vigil why...\n'
+printf '\n[HA-S7] Verifying correction reads back through the review API...\n'
 if [[ -z "$smoke_detection_id" ]]; then
-  skip_step 7 "no detection_id from HA-S2; cannot verify correction read-back"
+  not_run_step 7 "HA-S2 produced no detection_id, so correction read-back cannot run"
+elif ! have_cmd jq; then
+  not_run_step 7 "jq is required to validate the exact correction label and type"
+elif ! review_curl_available; then
+  not_run_step 7 "curl access to the Vigil review data plane is required"
 else
-  sleep 3
-  why_after="$(vigil_exec vigil why "$smoke_detection_id" 2>/dev/null || true)"
-  if [[ -z "$why_after" ]]; then
-    fail_step 7 "'vigil why $smoke_detection_id' returned no output after correction; \
-the add-on must be running and the store must be accessible"
-  elif [[ "$why_after" != *"$correction_label"* ]] && [[ "$why_after" != *"FalseAlarm"* ]] && \
-       [[ "$why_after" != *"false_alarm"* ]] && [[ "$why_after" != *"false-alarm"* ]]; then
-    fail_step 7 "'vigil why $smoke_detection_id' does not list the correction \
-(label: '$correction_label' / type: FalseAlarm); the correction must be recorded durably in cg \
-authority and must read back through the review API"
-  else
-    printf '  vigil why output after correction (first 15 lines):\n'
-    printf '%s\n' "$why_after" | head -15 | sed 's/^/    /'
-    # No outbound network check: assert the correction stub's known wrong socket is absent
-    container_id="$(addon_container_id || true)"
-    if [[ -n "$container_id" ]]; then
-      extra_socket="$("${docker_cmd[@]}" exec "$container_id" sh -c '
-        ss -tnp 2>/dev/null | awk '"'"'$1=="ESTAB" && $4!~/127\.0\.0\.1:'"$mqtt_port"'/ {print}'"'"' | head -3
-      ' 2>/dev/null || true)"
-      if [[ -n "$extra_socket" ]]; then
-        printf '  Warning: unexpected outbound socket detected:\n%s\n' "$extra_socket" >&2
-        printf '  (correction path must open no outbound network beyond the local broker)\n' >&2
-      fi
+  why_json=""
+  correction_deadline=$((SECONDS + 10))
+  while (( SECONDS < correction_deadline )); do
+    why_json="$(curl_ha --max-time 5 \
+      "${review_url%/}/why/$smoke_detection_id" 2>/dev/null || true)"
+    if jq -e --arg label "$correction_label" --arg detection_id "$smoke_detection_id" \
+      'any(.corrections[]?; .label == $label and .correction_type == "FalseAlarm" and .anchored_detection_id == $detection_id)' \
+      <<< "$why_json" >/dev/null 2>&1; then
+      break
     fi
-    pass_step 7 "correction reads back in vigil why after publishing to the command topic; nothing left the property"
+    sleep 0.1
+  done
+  if [[ -z "$why_json" ]]; then
+    fail_step 7 "GET ${review_url%/}/why/$smoke_detection_id returned no JSON after correction; \
+the review data plane must be reachable and the detection must exist in cg authority"
+  elif ! jq -e --arg label "$correction_label" --arg detection_id "$smoke_detection_id" \
+    'any(.corrections[]?; .label == $label and .correction_type == "FalseAlarm" and .anchored_detection_id == $detection_id)' \
+    <<< "$why_json" >/dev/null 2>&1; then
+    fail_step 7 "GET /why/$smoke_detection_id did not return the exact anchored correction \
+(label: '$correction_label' / correction_type: FalseAlarm / anchored_detection_id: '$smoke_detection_id') in .corrections"
+  else
+    printf '  Matching /why correction: '
+    jq -c --arg label "$correction_label" --arg detection_id "$smoke_detection_id" \
+      '.corrections[] | select(.label == $label and .correction_type == "FalseAlarm" and .anchored_detection_id == $detection_id)' \
+      <<< "$why_json" | head -1
+    pass_step 7 "the exact anchored correction object read back from cg through /why JSON; TH-23 separately owns correction-writer egress proof"
   fi
 fi
 

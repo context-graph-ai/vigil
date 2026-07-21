@@ -1,0 +1,98 @@
+[
+  {
+    "diff": "--- crates/vigil/src/ha_mqtt_tasks.rs\n+++ replace DetectionPublisher::try_publish with ()\n@@ -582,33 +582,17 @@\n     /// Counts detection publishes dropped due to channel overflow.\n     pub overflow_count: Arc<AtomicUsize>,\n     health: crate::health::HealthState,\n }\n \n impl DetectionPublisher {\n     /// Non-blocking send of a detection event payload.  Never blocks.\n     pub fn try_publish(&self, topic: String, json: String) {\n-        match self\n-            .tx\n-            .try_send(PublisherMsg::Detection(topic, json.into_bytes()))\n-        {\n-            Ok(()) => {}\n-            Err(mpsc::TrySendError::Full(_)) => {\n-                let n = self.overflow_count.fetch_add(1, Ordering::SeqCst) + 1;\n-                println!(\"mqtt_detection_publish_overflow=true total={n}\");\n-                self.health.set(\n-                    crate::health::HealthStatus::KeepPaceFailed,\n-                    \"mqtt outbound channel overflow\",\n-                );\n-            }\n-            Err(mpsc::TrySendError::Disconnected(_)) => {\n-                println!(\"mqtt_detection_publisher_disconnected=true\");\n-            }\n-        }\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Non-blocking signal that a detection occurred for the camera whose\n     /// `active_topic` is `vigil/{service_id}/{camera_id}/active`.\n     ///\n     /// The background thread publishes \"ON\" retained immediately and schedules\n     /// an \"OFF\" retained after `MOTION_ACTIVE_WINDOW` of no further signals.\n     /// Overflow is silently dropped — the retained \"ON\" from the next detection\n",
+    "file": "crates/vigil/src/ha_mqtt_tasks.rs",
+    "function": {
+      "function_name": "DetectionPublisher::try_publish",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 607
+        },
+        "start": {
+          "column": 5,
+          "line": 588
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/vigil/src/ha_mqtt_tasks.rs:590:9: replace DetectionPublisher::try_publish with ()",
+    "package": "vigil",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 606
+      },
+      "start": {
+        "column": 9,
+        "line": 590
+      }
+    }
+  },
+  {
+    "diff": "--- crates/vigil/src/ha_mqtt_tasks.rs\n+++ replace + with - in DetectionPublisher::try_publish\n@@ -588,17 +588,17 @@\n     /// Non-blocking send of a detection event payload.  Never blocks.\n     pub fn try_publish(&self, topic: String, json: String) {\n         match self\n             .tx\n             .try_send(PublisherMsg::Detection(topic, json.into_bytes()))\n         {\n             Ok(()) => {}\n             Err(mpsc::TrySendError::Full(_)) => {\n-                let n = self.overflow_count.fetch_add(1, Ordering::SeqCst) + 1;\n+                let n = self.overflow_count.fetch_add(1, Ordering::SeqCst) - /* ~ changed by cargo-mutants ~ */ 1;\n                 println!(\"mqtt_detection_publish_overflow=true total={n}\");\n                 self.health.set(\n                     crate::health::HealthStatus::KeepPaceFailed,\n                     \"mqtt outbound channel overflow\",\n                 );\n             }\n             Err(mpsc::TrySendError::Disconnected(_)) => {\n                 println!(\"mqtt_detection_publisher_disconnected=true\");\n",
+    "file": "crates/vigil/src/ha_mqtt_tasks.rs",
+    "function": {
+      "function_name": "DetectionPublisher::try_publish",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 607
+        },
+        "start": {
+          "column": 5,
+          "line": 588
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/vigil/src/ha_mqtt_tasks.rs:596:76: replace + with - in DetectionPublisher::try_publish",
+    "package": "vigil",
+    "replacement": "-",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 596
+      },
+      "start": {
+        "column": 76,
+        "line": 596
+      }
+    }
+  },
+  {
+    "diff": "--- crates/vigil/src/ha_mqtt_tasks.rs\n+++ replace spawn_detection_publisher -> (Arc<DetectionPublisher>, DetectionPublisherHandle) with (Arc::new(Default::default()), Default::default())\n@@ -642,114 +642,10 @@\n ///\n /// Returns `(Arc<DetectionPublisher>, DetectionPublisherHandle)`.\n /// The publisher is cheaply cloneable via Arc.  Drop or join the handle\n /// after camera threads have exited (so all senders are gone).\n pub fn spawn_detection_publisher(\n     config: &MqttConfig,\n     health: crate::health::HealthState,\n ) -> (Arc<DetectionPublisher>, DetectionPublisherHandle) {\n-    let (tx, rx) = mpsc::sync_channel::<PublisherMsg>(DETECTION_PUBLISH_CHANNEL_CAPACITY);\n-    let shutdown = Arc::new(AtomicBool::new(false));\n-\n-    let publisher = Arc::new(DetectionPublisher {\n-        tx,\n-        overflow_count: Arc::new(AtomicUsize::new(0)),\n-        health,\n-    });\n-\n-    let config = config.clone();\n-    let shutdown_clone = Arc::clone(&shutdown);\n-\n-    let thread = thread::spawn(move || {\n-        let opts = make_mqtt_options(&config, \"vp\");\n-        let (client, mut connection) = Client::new(opts, 64);\n-        let mut connected = false;\n-        let mut reconnect_delay_ms: u64 = 500;\n-        // topic → time of last MotionActive signal; publisher publishes OFF after\n-        // MOTION_ACTIVE_WINDOW of no further signals.\n-        let mut last_active: HashMap<String, Instant> = HashMap::new();\n-\n-        loop {\n-            if shutdown_clone.load(Ordering::SeqCst) {\n-                break;\n-            }\n-\n-            // Drive the event loop to maintain the connection.\n-            match connection.recv_timeout(Duration::from_millis(50)) {\n-                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {\n-                    connected = true;\n-                    reconnect_delay_ms = 500;\n-                }\n-                Ok(Ok(_)) => {}\n-                Ok(Err(_)) => {\n-                    connected = false;\n-                    thread::sleep(Duration::from_millis(reconnect_delay_ms));\n-                    reconnect_delay_ms = (reconnect_delay_ms * 2).min(30_000);\n-                }\n-                Err(RecvTimeoutError::Timeout) => {}\n-                Err(RecvTimeoutError::Disconnected) => break,\n-            }\n-\n-            // Drain pending messages and manage motion OFF timer while connected.\n-            if connected {\n-                while let Ok(msg) = rx.try_recv() {\n-                    match msg {\n-                        PublisherMsg::Detection(topic, payload) => {\n-                            if client\n-                                .publish(&topic, QoS::AtMostOnce, false, payload)\n-                                .is_err()\n-                            {\n-                                // Outbound queue full; event lost but publisher stays alive.\n-                                println!(\"mqtt_detection_publisher_client_full=true\");\n-                            }\n-                        }\n-                        PublisherMsg::MotionActive(topic) => {\n-                            // Publish ON retained immediately, then arm the OFF timer.\n-                            let _ = client.publish(\n-                                &topic,\n-                                QoS::AtMostOnce,\n-                                true,\n-                                \"ON\".as_bytes().to_vec(),\n-                            );\n-                            last_active.insert(topic, Instant::now());\n-                        }\n-                    }\n-                }\n-                // Publish OFF retained for any camera that has been quiet for\n-                // MOTION_ACTIVE_WINDOW.\n-                let now = Instant::now();\n-                last_active.retain(|topic, last_at| {\n-                    if now.duration_since(*last_at) > MOTION_ACTIVE_WINDOW {\n-                        let _ =\n-                            client.publish(topic, QoS::AtMostOnce, true, \"OFF\".as_bytes().to_vec());\n-                        false // remove from map\n-                    } else {\n-                        true // keep watching\n-                    }\n-                });\n-            }\n-        }\n-\n-        // Drain remaining detection events before exiting (best-effort flush).\n-        // MotionActive signals are skipped — broker retains the last ON/OFF state.\n-        let flush_deadline = Instant::now() + Duration::from_millis(500);\n-        while Instant::now() < flush_deadline {\n-            if let Ok(PublisherMsg::Detection(topic, payload)) = rx.try_recv() {\n-                let _ = client.publish(&topic, QoS::AtMostOnce, false, payload);\n-            }\n-            match connection.recv_timeout(Duration::from_millis(20)) {\n-                Ok(Ok(_)) | Err(RecvTimeoutError::Timeout) => {}\n-                Err(RecvTimeoutError::Disconnected) => break,\n-                Ok(Err(_)) => break,\n-            }\n-        }\n-        let _ = client.disconnect();\n-    });\n-\n-    (\n-        publisher,\n-        DetectionPublisherHandle {\n-            shutdown,\n-            thread: Some(thread),\n-        },\n-    )\n+    (Arc::new(Default::default()), Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n",
+    "file": "crates/vigil/src/ha_mqtt_tasks.rs",
+    "function": {
+      "function_name": "spawn_detection_publisher",
+      "return_type": "-> (Arc<DetectionPublisher>, DetectionPublisherHandle)",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 755
+        },
+        "start": {
+          "column": 1,
+          "line": 641
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/vigil/src/ha_mqtt_tasks.rs:650:5: replace spawn_detection_publisher -> (Arc<DetectionPublisher>, DetectionPublisherHandle) with (Arc::new(Default::default()), Default::default())",
+    "package": "vigil",
+    "replacement": "(Arc::new(Default::default()), Default::default())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 754
+      },
+      "start": {
+        "column": 5,
+        "line": 650
+      }
+    }
+  }
+]

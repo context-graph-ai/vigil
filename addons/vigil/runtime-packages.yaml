@@ -119,3 +119,11 @@ profiles:
   decode_backend: software
   detector_backend: burn-cpu
   packages: []
+- name: vigil-static-musl-aarch64
+  base: scratch
+  arch: aarch64
+  artifact: static-musl
+  hardware_enabled: false
+  decode_backend: software
+  detector_backend: burn-cpu
+  packages: []

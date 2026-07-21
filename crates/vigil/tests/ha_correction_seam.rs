@@ -5,9 +5,12 @@
 // REGRESSION GUARDs pass at scaffold.
 // RED tests fail on assertions via the deliberate wrong stubs.
 
-use std::{thread, time::Duration};
-
 use context_graph::{EvidenceId, Observation, ObservationId, RecordObservation, Store};
+use contextdb_core::Wallclock;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use vigil::{
     CorrectionError, CorrectionRequest, CorrectionType, record_correction, review_events,
     review_why,
@@ -703,6 +706,12 @@ fn review_events_rows_expose_current_correction_authority_fields() {
     let false_alarm_id = detections[2].id.to_string();
     let unreviewed_id = clone_detection_for_unreviewed_row(&store, &detections[2]);
 
+    let correction_clock = Arc::new(AtomicU64::new(Wallclock::now().0));
+    let _clock = Wallclock::test_clock_guard({
+        let correction_clock = Arc::clone(&correction_clock);
+        move || correction_clock.load(Ordering::SeqCst)
+    });
+
     record_correction(
         &store,
         CorrectionRequest {
@@ -722,7 +731,7 @@ fn review_events_rows_expose_current_correction_authority_fields() {
         },
     )
     .expect("initial Identity correction must record");
-    thread::sleep(Duration::from_millis(2));
+    correction_clock.fetch_add(1, Ordering::SeqCst);
     record_correction(
         &store,
         CorrectionRequest {

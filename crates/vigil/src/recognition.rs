@@ -24,8 +24,6 @@ use context_graph::{
 };
 use serde_json::Value;
 
-const STRONG_IDENTITY_MATCH_THRESHOLD: f64 = 0.90;
-
 /// Site recognition configuration. Class lists and the threshold are
 /// operator-configurable; the defaults are generic COCO classes, never
 /// site-specific.
@@ -44,7 +42,7 @@ impl Default for RecognitionConfig {
             enabled: false,
             weights_dir: None,
             embedding_space_id: "vigil_site_vision_v1".to_string(),
-            match_threshold: 0.6,
+            match_threshold: 0.90,
             covered_classes: [
                 "person",
                 "dog",
@@ -307,10 +305,9 @@ pub fn match_vector_for_class(
         )
         .map_err(|e| format!("match failed: {e}"))?;
     let score = matches.first().map(|m| m.score as f64).unwrap_or(0.0);
-    let effective_threshold = threshold.max(STRONG_IDENTITY_MATCH_THRESHOLD);
     for candidate in matches.iter().filter(|candidate| {
         let candidate_score = candidate.score as f64;
-        candidate_score >= effective_threshold
+        candidate_score >= threshold
     }) {
         let entity = store
             .get_entity(candidate.entity_id)
@@ -361,7 +358,7 @@ pub fn record_match_observation(
     source_ref: &str,
 ) -> Result<ObservationId, String> {
     let id = ObservationId::new_v7();
-    let observed_at = chrono::Utc::now();
+    let observed_at = crate::clock::now_utc();
     let entity_id = outcome
         .entity_id
         .as_deref()

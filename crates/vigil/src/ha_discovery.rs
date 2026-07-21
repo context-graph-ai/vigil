@@ -37,7 +37,6 @@ pub struct DetectionInput {
     pub timestamp_ms: i64,
     pub evidence_ref: String,
     pub snapshot_ref: String,
-    pub zone: Option<String>,
     /// The recognized entity's name when the detection matched an enrolled
     /// subject; None keeps the event an honest "unknown <class>".
     pub entity_name: Option<String>,
@@ -56,7 +55,6 @@ pub struct EventPayload {
     pub timestamp_ms: i64,
     pub evidence_ref: String,
     pub snapshot_ref: String,
-    pub zone: Option<String>,
     pub entity_name: Option<String>,
     pub match_score: Option<f64>,
 }
@@ -325,7 +323,6 @@ pub fn map_detection_to_event_payload(detection: &DetectionInput) -> EventPayloa
         timestamp_ms: detection.timestamp_ms,
         evidence_ref: detection.evidence_ref.clone(),
         snapshot_ref: detection.snapshot_ref.clone(),
-        zone: detection.zone.clone(),
         entity_name: detection.entity_name.clone(),
         match_score: detection.match_score,
     }
@@ -671,7 +668,7 @@ mod tests {
     /// RED — wrong stub hardcodes class="person", drops detection_id, drops evidence_ref.
     /// Fails on the object_class value-equality with the NON-"person" input "vehicle".
     #[test]
-    fn detection_event_payload_carries_contract_with_person_empty_zone() {
+    fn detection_event_payload_carries_current_contract_without_future_zone_field() {
         let detection = DetectionInput {
             observation_id: "11111111-2222-3333-4444-555555555555".to_string(),
             camera_name: "lower gate".to_string(),
@@ -680,7 +677,6 @@ mod tests {
             timestamp_ms: 1_700_000_000_000,
             evidence_ref: "clips/2024-01-01/clip-abc.mp4".to_string(),
             snapshot_ref: "snapshots/2024-01-01/snap-abc.jpg".to_string(), // distinct from evidence_ref
-            zone: None,
             entity_name: None,
             match_score: None,
         };
@@ -726,7 +722,7 @@ mod tests {
             "snapshot_ref must be distinct from evidence_ref"
         );
 
-        // confidence, timestamp_ms, camera, zone value-equality
+        // confidence, timestamp_ms, camera value-equality
         assert_eq!(
             payload.confidence, detection.confidence,
             "event payload confidence must value-equal detection.confidence; \
@@ -742,11 +738,10 @@ mod tests {
             "event payload camera must value-equal detection.camera_name; \
              wrong stub sets camera = camera_name so this tightens the contract"
         );
+        let json = serde_json::to_value(&payload).expect("event payload serializes");
         assert!(
-            payload.zone.is_none(),
-            "event payload zone must be None when detection.zone is None; \
-             got {:?}",
-            payload.zone
+            json.get("zone").is_none(),
+            "zone must stay off the public event schema until zone configuration and runtime matching ship, got {json}"
         );
     }
 
@@ -778,6 +773,31 @@ mod tests {
     fn discovery_has_no_per_camera_health_entity() {
         let config = one_camera_config();
         let payloads = generate_discovery_payloads(&config);
+
+        let whole_service_running_conditions = payloads
+            .iter()
+            .filter(|payload| {
+                payload
+                    .payload
+                    .get("device")
+                    .and_then(|device| device.get("via_device"))
+                    .is_none()
+                    && payload
+                        .payload
+                        .get("component")
+                        .and_then(|value| value.as_str())
+                        == Some("sensor")
+                    && payload
+                        .payload
+                        .get("state_topic")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|topic| topic.ends_with("/running-condition"))
+            })
+            .count();
+        assert_eq!(
+            whole_service_running_conditions, 1,
+            "discovery must contain exactly one whole-service running-condition entity"
+        );
 
         // Broadened discriminator — any health/diagnostic role or health-ish device_class
         // on ANY entity (health roles regardless of via_device; device_class/availability

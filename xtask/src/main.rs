@@ -6,6 +6,8 @@ use std::process::{Command, ExitCode};
 
 use sha2::{Digest, Sha256};
 
+mod test_estate;
+
 const PERSON_SHA: &str = "a65415f0da868f59014777ace1b702f6d7c6274c18e5af3e344cf710c37526ea";
 const EMPTY_SHA: &str = "2d4c35233e497d1c81d2a08187e856b5aba84acaf4f10cb47ccd33b9b5edee63";
 const MODEL_SHA: &str = "9de513de589ac98bb92d3bca53b5af7b9acfa9b0bacb831f7999d0f7afaee8f0";
@@ -25,8 +27,74 @@ fn main() -> ExitCode {
 fn run(args: Vec<OsString>) -> Result<(), String> {
     match args.first().and_then(|arg| arg.to_str()) {
         Some("setup-harness") => setup_harness(),
-        _ => Err("usage: cargo xtask setup-harness".to_string()),
+        Some("setup-runtime-harness") => setup_runtime_harness(),
+        Some("test-estate-check") => test_estate::check(&args[1..]),
+        Some("test-estate-proposal") => test_estate::propose_ledger(&args[1..]),
+        Some("documentation-contract-proposal") => {
+            test_estate::propose_documentation_contracts(&args[1..])
+        }
+        Some("test-contract-proposal") => test_estate::propose_test_contracts(&args[1..]),
+        Some("test-baseline-proposal") => test_estate::propose_test_baseline(&args[1..]),
+        _ => Err(
+            "usage: cargo xtask <setup-harness|setup-runtime-harness|test-estate-check [--docs PATH] [--nextest-json SHAPE=PATH]...|test-estate-proposal|documentation-contract-proposal [--docs PATH]|test-contract-proposal|test-baseline-proposal [--root PATH]>"
+                .to_string(),
+        ),
     }
+}
+
+/// Install only the process-test prerequisites used by the default and feature
+/// lanes. The full harness also prepares cross-musl Zig linkers; making the
+/// cheap runtime subset explicit keeps fast CI from relying on a stale cached
+/// MediaMTX binary without paying the cross-build setup cost.
+fn setup_runtime_harness() -> Result<(), String> {
+    let repo_root = repo_root()?;
+    let fixture_dir = repo_root.join("tests/fixtures/video");
+    let cache_dir = repo_root.join("tests/fixtures/.cache");
+    let tool_dir = repo_root.join(format!(
+        "target/vigil-test-tools/mediamtx/{MEDIAMTX_VERSION}"
+    ));
+    let model_file = repo_root.join("tests/fixtures/models/yolox-tiny-coco.pth");
+    let person_clip = fixture_dir.join("one-by-one-person-detection.mp4");
+    let empty_clip = fixture_dir.join("empty-scene-from-one-by-one-person-detection.mp4");
+
+    let ffmpeg = require_tool("ffmpeg")?;
+    let ffprobe = require_tool("ffprobe")?;
+    require_tool("mosquitto")?;
+    require_tool("mosquitto_pub")?;
+    require_tool("mosquitto_sub")?;
+    require_tool("curl")?;
+    require_tool("tar")?;
+
+    verify_sha(PERSON_SHA, &person_clip)?;
+    verify_sha(EMPTY_SHA, &empty_clip)?;
+    verify_sha(MODEL_SHA, &model_file)?;
+    ffprobe_video(&ffprobe, &person_clip)?;
+    ffprobe_video(&ffprobe, &empty_clip)?;
+
+    fs::create_dir_all(&cache_dir).map_err(|error| format!("create cache dir: {error}"))?;
+    fs::create_dir_all(&tool_dir).map_err(|error| format!("create mediamtx dir: {error}"))?;
+    let mediamtx = mediamtx_asset()?;
+    let mediamtx_archive = cache_dir.join(mediamtx.asset);
+    download_if_missing(&mediamtx.url, &mediamtx_archive)?;
+    verify_sha(mediamtx.sha, &mediamtx_archive)?;
+    run_command(
+        Command::new("tar")
+            .arg("-xzf")
+            .arg(&mediamtx_archive)
+            .arg("-C")
+            .arg(&tool_dir)
+            .arg("mediamtx"),
+        "extract mediamtx",
+    )?;
+    make_executable(&tool_dir.join("mediamtx"))?;
+
+    println!("ffmpeg: {}", ffmpeg.display());
+    println!("ffprobe: {}", ffprobe.display());
+    println!("mediamtx: {}", tool_dir.join("mediamtx").display());
+    println!("person fixture: {}", person_clip.display());
+    println!("empty fixture: {}", empty_clip.display());
+    println!("model fixture: {}", model_file.display());
+    Ok(())
 }
 
 fn setup_harness() -> Result<(), String> {

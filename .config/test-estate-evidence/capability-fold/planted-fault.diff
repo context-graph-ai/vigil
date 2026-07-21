@@ -1,0 +1,21 @@
+diff --git a/crates/contextdb-server/src/work_ledger.rs b/crates/contextdb-server/src/work_ledger.rs
+index 50f5f7c..6464e46 100644
+--- a/crates/contextdb-server/src/work_ledger.rs
++++ b/crates/contextdb-server/src/work_ledger.rs
+@@ -478,15 +478,8 @@ pub async fn poll_and_execute_once(
+         // offline mode); a persistent miss is surfaced, not swallowed.
+         // A canonical node's rows are already home — there is nothing to
+         // re-deliver and no hub to dial (writes_are_canonical).
+-        if !config.writes_are_canonical
+-            && let Err(err) = client.push().await
+-        {
+-            tracing::debug!(
+-                node_id = %config.node_id,
+-                error = %err,
+-                "worker capability re-push deferred; hub unreachable"
+-            );
+-        }
++        // TEST-ESTATE PLANTED FAULT: suppress the standing no-work re-push.
++        // Only the startup pushes remain, reproducing the lost-capability bug.
+         return Ok(PollOutcome::NoMatchingWork);
+     }

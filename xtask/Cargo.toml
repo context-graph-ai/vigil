@@ -5,4 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+quote = "1"
+syn = { version = "2", features = ["full", "visit"] }
+toml.workspace = true

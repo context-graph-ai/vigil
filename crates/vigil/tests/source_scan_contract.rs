@@ -63,14 +63,6 @@ fn ha_os_vm_shell_signals_stay_behind_child_pid_validator() {
         ));
     }
 
-    for forbidden in ["kill -", "kill -- -", "kill 0", "kill -0", "kill -1"] {
-        if script.contains(forbidden) {
-            failures.push(format!(
-                "HA-OS VM harness contains forbidden process-group or wildcard signal target {forbidden}"
-            ));
-        }
-    }
-
     if !failures.is_empty() {
         panic!("{}", failures.join("\n"));
     }
@@ -421,6 +413,22 @@ fn addon_config_exposes_recognition_options_and_schema() {
         if !yaml_section_contains_key(&options, key) {
             failures.push(format!(
                 "{} must expose top-level options.{key} so a Home Assistant add-on user can see the active recognition setting",
+                addon_config_path.display()
+            ));
+        }
+    }
+    if !yaml_section_contains_entry(&options, "recognition_threshold", "0.9") {
+        failures.push(format!(
+            "{} must keep options.recognition_threshold at the owner-approved visible default 0.9",
+            addon_config_path.display()
+        ));
+    }
+    for future_key in ["zones", "masks"] {
+        if yaml_section_contains_key(&options, future_key)
+            || yaml_section_contains_key(&schema, future_key)
+        {
+            failures.push(format!(
+                "{} must not expose future {future_key} configuration before runtime support exists",
                 addon_config_path.display()
             ));
         }

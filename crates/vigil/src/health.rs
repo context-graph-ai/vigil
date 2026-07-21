@@ -120,11 +120,31 @@ impl HealthServer {
         acceleration: Option<Arc<crate::acceleration::AccelerationState>>,
         stats: Option<crate::runtime_stats::RuntimeStatsState>,
     ) -> Result<Self, String> {
-        let listener = TcpListener::bind(("0.0.0.0", port))
+        let test_ephemeral_bind =
+            port == 0 && std::env::var("VIGIL_TEST_EPHEMERAL_HEALTH_PORT").as_deref() == Ok("1");
+        if port == 0 && !test_ephemeral_bind {
+            return Err(
+                "health port 0 is reserved for VIGIL_TEST_EPHEMERAL_HEALTH_PORT=1 test probes"
+                    .to_string(),
+            );
+        }
+        let bind_host = if test_ephemeral_bind {
+            "127.0.0.1"
+        } else {
+            "0.0.0.0"
+        };
+        let listener = TcpListener::bind((bind_host, port))
             .map_err(|error| format!("health port {port} bind failed: {error}"))?;
+        let bound_port = listener
+            .local_addr()
+            .map_err(|error| format!("health port {port} local-address receipt failed: {error}"))?
+            .port();
         listener
             .set_nonblocking(true)
             .map_err(|error| format!("health port {port} nonblocking setup failed: {error}"))?;
+        if test_ephemeral_bind {
+            println!("test_health_port_receipt=bound address=127.0.0.1 port={bound_port}");
+        }
         let handle = thread::spawn(move || {
             while !shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {

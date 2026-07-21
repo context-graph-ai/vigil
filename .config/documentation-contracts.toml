@@ -1,0 +1,1870 @@
+# Every entry below is an active executable mapping accepted by independent semantic review.
+# Changing prose, evidence tier, or the allowed canonical test set requires a fresh review.
+version = 1
+
+# README.md:20
+[[claim]]
+id = "vigil.readme.a-vigil-process-can-read-a-directly"
+document = "README.md"
+paragraph_sha256 = "sha256:26806ad8c8abe7029405e70679505941489fd533b181b23a215cc6906999c9da"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+[[claim]]
+id = "vigil.docs-cameras.zones-and-masks-are-not-yet-available"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:e825f3d97e298c4073ecda86a46e83eb0079e019a9f8e7dcffd2e4a91ce9581c"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the add-on schema has no zones or masks and the Home Assistant event payload has no zone field."
+
+[[claim]]
+id = "vigil.docs-cli.run-options-and-current-defaults"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:db6a1482b14290ec01c0f8ed5a592b33f96bc079abe911fb1ec63a38204f530b"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
+  "vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras",
+]
+reviewed = true
+reviewed_by = "Luna independent documentation review, 2026-07-20"
+rationale = "The adjacent table is checked against the real usage/default config surface, with runtime evidence for the live-URL fallback."
+
+[[claim]]
+id = "vigil.docs-configuration.review-service-does-not-emit-cross-origin-access-headers"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:85181ccceff1dd8650a2da3caf5e75c188e75b39a76766f1afaf1429f82056a3"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::review_data_plane_does_not_enable_cross_origin_access",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+[[claim]]
+id = "vigil.docs-detection.stationary-scan-defaults-to-30-seconds"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:0d4fe845965afd073891c78291406fbdca5eb7fa7f68651896c7550d6373f3a3"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line",
+  "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan",
+  "vigil::runtime::tests::detector_gate_suppresses_motion_free_segments_when_stationary_scan_is_disabled",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+[[claim]]
+id = "vigil.docs-detection.zones-and-masks-are-not-yet-available"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:8bcf06c8bf308abc183b7af3a5cb6edb2fd4ca050b4f5faa486e5e1c61588cd2"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed the absence of zones and masks in add-on configuration and of zone fields in Home Assistant and review HTTP event rows."
+
+[[claim]]
+id = "vigil.docs-detection.recognition-matching-defaults-to-0-90"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:310b9450f9351482cb30e91005e831ed9327e037d190ecdb4aa61c7a1c6d7190"
+evidence_tier = "integration"
+tests = [
+  "vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line",
+  "vigil::recognition_slice::configured_recognition_threshold_is_honored_without_a_hidden_floor",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+[[claim]]
+id = "vigil.docs-privacy.review-service-does-not-opt-browsers-into-cross-origin-access"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:4570cdb1eb427f6e47df78f41451b189ae37b70d7dfc7ecaf997af94c4cd0846"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::review_data_plane_does_not_enable_cross_origin_access",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# README.md:25
+[[claim]]
+id = "vigil.readme.the-current-home-assistant-path-publishes-discovery"
+document = "README.md"
+paragraph_sha256 = "sha256:8c266da7f936ffab3a626ca128c0cb7c61ee3a355eafef05d9b4528a7f20d284"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
+  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
+  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the discovery, retained switch-state, broker event, and durable MQTT correction tests collectively enforce every adjacent Home Assistant claim."
+
+# README.md:33
+[[claim]]
+id = "vigil.readme.the-local-review-service-lists-detections-walks"
+document = "README.md"
+paragraph_sha256 = "sha256:7c774f91a1344fe5e2a79532d3cb14ad20d3a8ecbb6d0d660a83619a6355b08d"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
+  "vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
+  "vigil::http_data_plane::snapshot_read_serves_image_bytes_with_image_content_type",
+  "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the HTTP tests enforce every listed review operation and that both HTTP and MQTT witnesses land through the durable Context Graph correction seam."
+
+# README.md:43
+[[claim]]
+id = "vigil.readme.the-implemented-recognition-storage-and-matching-seam"
+document = "README.md"
+paragraph_sha256 = "sha256:aa23eb24ce57b34b148a2b0ca14db18ef9f7ea9bfbc616dbab556870bbcd8e60"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::below_threshold_sighting_stays_unknown",
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+  "vigil::recognition_slice::why_view_shows_match_provenance_reference_score_and_enrolling_correction",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# README.md:50
+[[claim]]
+id = "vigil.readme.hardware-acceleration-is-intent-not-a-label"
+document = "README.md"
+paragraph_sha256 = "sha256:6beea0dd65fb3439217c66d8b873d604eb09ec64cb5b7589d165f8436073ce93"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback",
+  "vigil::acceleration_receipts::health_reports_degraded_decode_and_detection_when_configured_but_fallback",
+  "vigil::decode_backend_contract::probe_reports_decoded_frames_and_classification",
+  "vigil::detection_accel_backend::detection_accel_compiled_in_receipt_agrees_with_recorded_probe",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# README.md:70
+[[claim]]
+id = "vigil.readme.vigil-why-eventid-and-vigil-why-latest"
+document = "README.md"
+paragraph_sha256 = "sha256:00c5b75ced7781065b91ca3e541f83314d8f6777d801cc6e366909547d7f23a9"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the acceptance walk and event-time configuration test read the persisted provenance chain rather than reconstructing it from logs."
+
+# README.md:109
+[[claim]]
+id = "vigil.readme.vigil-oss-is-for-one-selfhosted-site"
+document = "README.md"
+paragraph_sha256 = "sha256:0efb480b5fdcf59510e50f74c362ab4c72a0d8fc65473b4d8bee3af1362b1ece"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the traced direct-camera acceptance keeps evidence local and opens no unrelated outbound connection."
+
+# docs/architecture.md:7
+[[claim]]
+id = "vigil.docs-architecture.vigils-edge-runtime-is-one-rust-binary"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:c743044b6fb2263cddc613a829570a48a82c0ef174df3479e292c3dba402ec0c"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::health_liveness_still_serves_alongside_data_plane_in_single_binary",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that one spawned Vigil process simultaneously serves distinct health and review HTTP responses."
+
+# docs/architecture.md:23
+[[claim]]
+id = "vigil.docs-architecture.the-default-data-directory-is-vigildata-for"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:b7e27f30685ab6bd249049c39dd910b6bd3a1c351229d599e8d33dea9f07d9f9"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::camera_survives_store_reopen",
+  "vigil::first_light_loop::event_history_survives_store_reopen",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named reopen tests enforce persistence of both registered camera data and landed event history."
+
+# docs/architecture.md:30
+[[claim]]
+id = "vigil.docs-architecture.for-each-configured-rtsp-camera-vigil-captures"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:50596bfa8bb7c054dd3ed13de3ff173cc6823d805e30f67a66728c47f3ec12e5"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::confidence_is_detector_output_not_threshold_derived",
+  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that detector confidence remains detector-produced and that real empty and undecodable sources land no event."
+
+# docs/architecture.md:35
+[[claim]]
+id = "vigil.docs-architecture.the-portable-static-artifact-uses-software-decode"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:454d0c54904d7c4a1916ecde3a5ca42f63c46c4b5b55a37cf7aeb3067d437807"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback",
+  "vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed the CPU-only backend-not-compiled fallback receipt and 2xx watchdog liveness while CPU fallback detection is behind."
+
+# docs/architecture.md:42
+[[claim]]
+id = "vigil.docs-architecture.startup-maintains-four-configuration-nodes-site-context"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:bcc277b9a674d6321441af737424c2fcdc0a3920d4a9709c5f79f67fce7997a7"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/architecture.md:46
+[[claim]]
+id = "vigil.docs-architecture.evidence-is-durable-before-the-observation-is"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:b90c6f7008bb409982fdceb882e7248ee6b222cd2d20fc1815b57f756f3edabe"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence",
+  "vigil::first_light_loop::observation_never_references_undurable_clip",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/architecture.md:59
+[[claim]]
+id = "vigil.docs-architecture.the-http-server-offers-get-events-get"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:1dc5db2ebf2df9afb4a0831d1f1395b92a1358d938551dd11c3f1c81f38dc5b6"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::clip_range_streams_from_large_file_without_whole_file_transfer",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
+  "vigil::http_data_plane::media_path_traversal_rejected_serves_no_out_of_tree_bytes",
+  "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named HTTP tests collectively exercise the listed routes, traversal rejection, byte-range media, durable corrections, and RTSP-URL exclusion."
+
+# docs/architecture.md:66
+[[claim]]
+id = "vigil.docs-architecture.the-mqtt-connection-is-a-control-and"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:102657b0a7ce448e04f1ff99d8224aa49c0c668331dcaad1ef9507818de185c1"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
+  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
+  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras",
+  "vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url",
+  "vigil::supervisor::tests::build_generic_camera_flow_step_payload_nests_advanced_fields",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed direct broker witnesses for discovery, retained state, detection, snapshots, control and correction commands, plus Generic Camera flow and URL selection."
+
+# docs/architecture.md:74
+[[claim]]
+id = "vigil.docs-architecture.recognition-is-off-unless-a-weights-directory"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:4b2eaa0e094182f47ea5902f597261558e43c02e59bbfb92508be7ba38356089"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::match_records_observation_against_the_matched_entity_with_vector_and_score",
+  "vigil::recognition_slice::configured_recognition_threshold_is_honored_without_a_hidden_floor",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the implemented seam records same-site match vector and score provenance and honors the configured threshold without a hidden floor."
+
+# docs/architecture.md:81
+[[claim]]
+id = "vigil.docs-architecture.distributed-detector-work-is-compiled-only-with"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:5ff0d00940cae37325813a0c71110f2c6b6f39ec9b38d2519cebb5a33c4eef13"
+evidence_tier = "integration"
+tests = [
+  "vigil::detector_worker::worker_advertises_truthful_backend_claims_materializes_runs_records_once",
+  "vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset",
+  "vigil::kill_worker_fallback::worker_death_midlease_falls_back_local_with_named_receipt",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed fabric configuration, truthful detector capability advertisement, exchanged detector work, and named local fallback after a claimed worker dies."
+
+# docs/cameras.md:22
+[[claim]]
+id = "vigil.docs-cameras.on-startup-vigil-records-the-configured-camera"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:446bec9968c1d1ec56c2721455299c4e19afc4d266943a7bcf9ad5bed4417451"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity",
+  "vigil::first_light_loop::camera_survives_store_reopen",
+  "vigil::first_light_loop::reregistration_is_idempotent_no_duplicate",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/cameras.md:49
+[[claim]]
+id = "vigil.docs-cameras.this-lets-a-deployment-analyze-a-lowerbandwidth"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:424be8e92f175db100530027e0a6efd2e541f742979fd12bc3ec4a5d9709ac92"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras",
+  "vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that Generic Camera receives the distinct live URL when present and otherwise the detection RTSP URL."
+
+# docs/cameras.md:66
+[[claim]]
+id = "vigil.docs-cameras.toml-cameras-name-side-gate-rtspurl-rtspcameralocal554stream"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:1233dfa4b0f29633792e4f71609f941d36ceae074b4678cd4a7dc96a01b85822"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface",
+  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
+  "vigil::media_pipeline::tests::explicit_rtsp_credentials_override_url_userinfo",
+  "vigil::media_pipeline::tests::rtsp_url_redaction_removes_userinfo_from_parse_errors",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/cameras.md:94
+[[claim]]
+id = "vigil.docs-cameras.yaml-cameras-name-frontgate-rtspurl-rtspfrontgatelocal554stream-name"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:4258db6cab30f7c8e751d54a880bdb449f7d841fbad9d29b74f62ece5e99546a"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that repeated discovery derives stable entity identifiers and topics from the configured identity and changes them for a different configuration."
+
+# docs/cameras.md:104
+[[claim]]
+id = "vigil.docs-cameras.with-mqtthome-assistant-integration-active-each-camera"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:0034426224e74b3548f2546ae70c0c338927b02b3c2bd253a049fb5ba24fee4d"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/cameras.md:116
+[[claim]]
+id = "vigil.docs-cameras.a-transient-rtsp-drop-changes-health-retries"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:4187b4012460c864335f0badfae7ed04d56b2829aabd7122a16f850d6ebd362c"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/cameras.md:122
+[[claim]]
+id = "vigil.docs-cameras.if-a-source-is-empty-or-undecodable"
+document = "docs/cameras.md"
+paragraph_sha256 = "sha256:304bc8d6e4b28cede2144022ce3635352a14631e076272f884495c45f75d9070"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the real empty and undecodable stream fixture proves that neither source can fabricate an event."
+
+# docs/cli.md:49
+[[claim]]
+id = "vigil.docs-cli.the-confidence-threshold-must-be-between-00"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:fb30e16dc1e658199b6e4e367034563e9d2a538f764efab9401c2f1ec3394b67"
+evidence_tier = "integration"
+tests = [
+  "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
+  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the configuration test rejects the documented invalid threshold, sample-count, and boolean values and that the detector test proves threshold filtering."
+
+# docs/cli.md:64
+[[claim]]
+id = "vigil.docs-cli.varlibvigil-must-match-the-running-daemons-datadir"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:d3992a63824aa4395290368640f0274888eb72d3a4c028eb0eecb6ea4b4a59e9"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that `vigil events` reads the explicitly selected persisted store and orders its landed events newest observed first."
+
+# docs/cli.md:75
+[[claim]]
+id = "vigil.docs-cli.walks-a-detection-through-camera-site-detector"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:edf383db958bff7ea8deb85f53bc9f1bfaa715ac2ce5d55590d60533ab4203da"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_why_latest_walks_the_newest_event",
+  "vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that `why --latest` selects the newest observed event and walks its stored authority, while a well-formed unknown UUID returns not found."
+
+# docs/cli.md:86
+[[claim]]
+id = "vigil.docs-cli.prints-the-runtimes-local-persisted-snapshot-of"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:281749849f2d1dd3d1c5a0c089113c7e4b163356f84cbe0a4e4a7392b192c791"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that `vigil stats` reads persisted pipeline counters and reports their live workload and health consequences."
+
+# docs/cli.md:96
+[[claim]]
+id = "vigil.docs-cli.enrolls-the-subject-in-a-detection-as"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:bc7a086d7fa0489575a4e17ceb45c58d8de282cdec07f13c4018f65aeb76f31e"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+  "vigil::recognition_slice::enroll_failure_writes_no_correction_row",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the underlying enrollment operation creates the site-local named reference and linked correction, while missing-probe failure leaves no stranded correction."
+
+# docs/cli.md:107
+[[claim]]
+id = "vigil.docs-cli.removes-recognition-references-for-the-named-subject"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:c84d8703dbbcac6b0506c0515b30f4ae3fbf8628daeaf008a54ccaf9d568a84f"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::forget_removes_references_and_the_subject_reverts_to_unknown",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that context-scoped forget removes the named subject's local references and makes a later identical sighting unknown."
+
+# docs/cli.md:117
+[[claim]]
+id = "vigil.docs-cli.inspects-the-current-host-and-prints-structured"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:156026d4c00790081deab89572814bda1d167a7dbda6ebb88640be36d25ed4cc"
+evidence_tier = "integration"
+tests = [
+  "vigil::doctor_acceleration::doctor_renders_receipts_in_fixed_format",
+  "vigil::doctor_acceleration::no_sudo_reports_current_process_truth_only",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:9
+[[claim]]
+id = "vigil.docs-concepts.a-site-is-one-vigil-installation-and"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:5046e5eafacff3b17bfa33090b969cd9cb39a3bac43e82225716bc10af54b111"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::site_context_created_and_name_retained",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:15
+[[claim]]
+id = "vigil.docs-concepts.a-camera-is-a-named-rtsp-source"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:aa1f0174e4232bb47ec06c9265748c037dfc0256e5938b864a8fb9311d59e4f5"
+evidence_tier = "integration"
+tests = [
+  "vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url",
+  "vigil::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:25
+[[claim]]
+id = "vigil.docs-concepts.a-stream-is-the-rtsp-media-vigil"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:eb280e304778ee4d5eb244165679e1d9088bd4bf71b8721e3cb1432275320ead"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+  "vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:32
+[[claim]]
+id = "vigil.docs-concepts.the-detector-is-the-configured-yolox-objectdetection"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:70a97d348ad58df7fa3b11f510294f0a9570e6d0b8a0793a6c8e379d4bae2109"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::detector_config_recorded_as_decision",
+  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:39
+[[claim]]
+id = "vigil.docs-concepts.zone-is-unavailable-and-not-exposed"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:a521b2e5240782637542bd9b16615e1997cc70e3ca7b08d5c71834819c1cb90a"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:49
+[[claim]]
+id = "vigil.docs-concepts.the-current-recording-unit-is-an-event"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:b93ae341a7492b9b298a1116c1dd23f96a3a29dbdf5c73370e15b713cb855c3b"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::observation_never_references_undurable_clip",
+  "vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/concepts.md:56
+[[claim]]
+id = "vigil.docs-concepts.an-event-is-a-durable-detection-observation"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:8901c20bbc077cdaa39fa9703bc75d3c41cb545496a55bfea7a564cdf5c01121"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::detection_produces_observation_referencing_clip",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:71
+[[claim]]
+id = "vigil.docs-concepts.an-observation-is-the-durable-context-graph"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:be5d528f615e8ab8378baca62acfb5286596c4380d712de49e68f806dd777bef"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_writes_durably_through_cg_record_path",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:77
+[[claim]]
+id = "vigil.docs-concepts.an-intention-records-why-a-decision-exists"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:84d65c4bce5d51b9705b413ecee570cb66b9c31e9d0a649af287be6007816900"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:83
+[[claim]]
+id = "vigil.docs-concepts.a-decision-is-the-detector-configuration-serving"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:d614371ee25886981bf5820c9f0cd9a97666aedb2d0755d9b7ba88ead2824d86"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/concepts.md:89
+[[claim]]
+id = "vigil.docs-concepts.unavailable-as-a-vigil-product-surface-context"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:2037fb12e913c9355d18740f9f0162417c49f516db2784a2d8db38d483762d69"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::false_alarm_and_wrong_class_corrections_record_and_read_back",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/concepts.md:99
+[[claim]]
+id = "vigil.docs-concepts.an-evidenceref-is-the-typed-link-from"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:6bc6e8466b9c920fbcbc7aaa3bb321093ddd11e664f0405fdc326e6ef0f15b82"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the strengthened why witness value-compares both returned media routes with the stored video and detector-image evidence references."
+
+# docs/concepts.md:105
+[[claim]]
+id = "vigil.docs-concepts.site-memory-is-the-optional-recognition-library"
+document = "docs/concepts.md"
+paragraph_sha256 = "sha256:c89f802a4789aa9db65cd72c3f70af4875d3fcd30cc182f122573af6a1bb0841"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::below_threshold_sighting_stays_unknown",
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+  "vigil::recognition_slice::forget_removes_references_and_the_subject_reverts_to_unknown",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/configuration.md:101
+[[claim]]
+id = "vigil.docs-configuration.field-required-meaning-name-yes-display-label"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:35d5e7f5d14755df3e1e90566fd8a249f7eec53a494eacbce821e3a420cf5633"
+evidence_tier = "integration"
+tests = [
+  "vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url",
+  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/configuration.md:125
+[[claim]]
+id = "vigil.docs-configuration.field-default-validation-and-behavior-detectormodelid-yoloxtinyburncpu"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:810b810cee3450c9cc7d181eaa4f6aa9ecb8e1c463da81b9093b80201cd6a510"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback",
+  "vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line",
+  "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
+  "vigil::config_acceleration_intent::acceleration_booleans_default_true_everywhere",
+  "vigil::config_acceleration_intent::toml_config_can_disable_each_boolean_independently",
+  "vigil::decode_backend_contract::hardware_backend_failure_activates_software_fallback_with_visible_reason",
+  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
+  "vigil::first_light_loop::detector_config_recorded_as_decision",
+  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames",
+  "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed the narrowed model-ID provenance claim, configured checkpoint loading over real frames, and every remaining table default, validation, and fallback behavior."
+
+# docs/configuration.md:149
+[[claim]]
+id = "vigil.docs-configuration.field-default-recognitionweightsdir-none-recognition-off-recognitionspaceid"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:39044dc6ae2b5c6f1791f13d2c03fe6cb92a621dd4b954996ac38f12b29f3105"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/configuration.md:165
+[[claim]]
+id = "vigil.docs-configuration.in-the-addon-the-broker-is-optional"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:89d0d3a44d602111eeefda25863b3821e6e2814e0f3fa80ab2506e225ac06060"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/configuration.md:176
+[[claim]]
+id = "vigil.docs-configuration.the-addon-schema-accepts-optional-decodeprobedeadlinesecs-and"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:ccf07047604585620fe5f60ede998aee61750529c2af967bbc16052f8a88e45f"
+evidence_tier = "integration"
+tests = [
+  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface",
+  "vigil::probe_deadline_knob_surface::addon_config_declares_both_probe_deadline_knobs_as_optional_integers",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/configuration.md:202
+[[claim]]
+id = "vigil.docs-configuration.the-current-parser-reads-vigilhardwaredecoding-and-vigilaccelerateddetection"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:036e320e7ad9ed5e21004ca802cf5ccb310f4de070c88145b7ffcf0c537ef34b"
+evidence_tier = "integration"
+tests = [
+  "vigil::config_acceleration_intent::env_vars_are_understood",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/detection.md:12
+[[claim]]
+id = "vigil.docs-detection.motionpositive-segments-go-to-the-detector-motionfree"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:49edca82ed95f4c19319d7491267b950c49a8d9a485bb4bfe931bbeab528a2cc"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::motion_gate_suppresses_non_motion_frames",
+  "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan",
+  "vigil::runtime::tests::detector_gate_still_enqueues_motion_positive_segments",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/detection.md:28
+[[claim]]
+id = "vigil.docs-detection.the-current-baseline-model-is-yolox-tiny"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:120be5d38b5262ff18113e93382654c80f346bc1a726eb6826090ed9149f4938"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/detection.md:33
+[[claim]]
+id = "vigil.docs-detection.detectorconfidencethreshold-defaults-to-05-a-result-below"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:eef6f394b96cf6e44a6bf4545810a808f48ece2274dd1b8bf3e8a52fed0e9fbd"
+evidence_tier = "integration"
+tests = [
+  "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
+  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/detection.md:66
+[[claim]]
+id = "vigil.docs-detection.hardwaredecoding-true-means-probe-and-use-hardware"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:fb1e9292cc08c4c47a17424ba2c61bf12945dd08438b60f3610e6aec2b760e56"
+evidence_tier = "integration"
+tests = [
+  "vigil::addon_config_surface::addon_config_maps_video_device_and_forbids_full_access",
+  "vigil::decode_backend_contract::hardware_backend_failure_activates_software_fallback_with_visible_reason",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/detection.md:78
+[[claim]]
+id = "vigil.docs-detection.accelerateddetection-true-asks-vigil-to-probe-the"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:979ab70b99063cadb4b7b6ad904dadd8f4813b654af1e7a1ca465e751ac3f3b5"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct",
+  "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback",
+  "vigil::detection_accel_backend::detection_accel_hardware_flag_requires_recorded_passing_probe",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/detection.md:88
+[[claim]]
+id = "vigil.docs-detection.a-slow-first-shader-compilation-can-outlive"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:4884fdf05cb956bc1874927b7fca2fab92f4ecbe09fbd00843bfa2f1b0d6944c"
+evidence_tier = "integration"
+tests = [
+  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/detection.md:100
+[[claim]]
+id = "vigil.docs-detection.the-doctor-classifies-a-missing-render-device"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:40fa01f705894f52eae5ce6d3bfc3ec244981740617c511648821213d469396c"
+evidence_tier = "integration"
+tests = [
+  "vigil::doctor_acceleration::blocked_device_classifies_permission_denied_with_ready_fix",
+  "vigil::doctor_acceleration::disabled_intent_skips_probes_and_reports_disabled",
+  "vigil::doctor_acceleration::doctor_renders_receipts_in_fixed_format",
+  "vigil::doctor_acceleration::missing_device_is_no_device_visible_not_permission",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/detection.md:120
+[[claim]]
+id = "vigil.docs-detection.recognition-has-an-implemented-optional-storage-and"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:772fc873765f58317911c18b4adb75ad2964be984d19bf2b5df3d9fa99eaf064"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::below_threshold_sighting_stays_unknown",
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/detection.md:134
+[[claim]]
+id = "vigil.docs-detection.a-detector-or-ingest-failure-changes-health"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:6d31382237a0458448eae05407540cb1b5038dabe9e5b12c1fb0188197a11f29"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence",
+  "vigil::first_light_loop::observation_never_references_undurable_clip",
+  "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/getting-started.md:46
+[[claim]]
+id = "vigil.docs-getting-started.the-current-addon-options-also-default-hardware"
+document = "docs/getting-started.md"
+paragraph_sha256 = "sha256:2724ea1bb59f7c1615d4685c571090941081990a4d0bcc579e8b49decb886ee9"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback",
+  "vigil::config_acceleration_intent::acceleration_booleans_default_true_everywhere",
+  "vigil::decode_backend_contract::hardware_backend_failure_activates_software_fallback_with_visible_reason",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/getting-started.md:66
+[[claim]]
+id = "vigil.docs-getting-started.a-ready-runtime-returns-a-successful-http"
+document = "docs/getting-started.md"
+paragraph_sha256 = "sha256:7c6f54c7cefb49a82aecd9944eadde14eb80c9eb9bec183687e048fcf36d6a73"
+evidence_tier = "integration"
+tests = [
+  "vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog",
+  "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx",
+  "vigil::health_watchdog_liveness::ready_runtime_is_alive_for_the_watchdog",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/getting-started.md:86
+[[claim]]
+id = "vigil.docs-getting-started.the-camera-enable-switch-is-stateful-enabledisable"
+document = "docs/getting-started.md"
+paragraph_sha256 = "sha256:8db8d6c7446fde4416779ca04c29b7e0a383b101fd8577ba33b16f656fd3daf9"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/getting-started.md:105
+[[claim]]
+id = "vigil.docs-getting-started.when-a-motionpositive-segment-contains-a-detection"
+document = "docs/getting-started.md"
+paragraph_sha256 = "sha256:0c9d316dc07ccbbeaf45d66453cbc771f5789b8e57dbf6dad31c2943ef56480c"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::detection_produces_observation_referencing_clip",
+  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
+  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/getting-started.md:132
+[[claim]]
+id = "vigil.docs-getting-started.vigil-events-lists-recent-detections-vigil-why"
+document = "docs/getting-started.md"
+paragraph_sha256 = "sha256:f6627437bb0294ab4b1d56be480b4a315b8e690cd90cc2cf6b054321a98e52b2"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first",
+  "vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters",
+  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/ha-integration.md:13
+[[claim]]
+id = "vigil.docs-ha-integration.install-and-run-the-mosquitto-broker-addon"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:16b64edf2e16bbf47efe0c8df6a9f5350b60c39b1457b44935010eca3e5920aa"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/ha-integration.md:25
+[[claim]]
+id = "vigil.docs-ha-integration.detection-an-event-entity-for-vigildetection-messages"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:6a286e2632a14d4a0b1daade61f28f999d853c638052b598758398a1c306338b"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/ha-integration.md:30
+[[claim]]
+id = "vigil.docs-ha-integration.entity-ids-and-discovery-topics-are-derived"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:08cb4df474aa787858d6bedda42b02c3d496c3b426ed78f60fb7783348bdff6f"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::ha_discovery::tests::discovery_entities_carry_required_ha_fields",
+  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/ha-integration.md:37
+[[claim]]
+id = "vigil.docs-ha-integration.vigil-does-not-create-an-mqtt-camera"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:71d86f783554daa1959c391dd68c654b3ec8603577dae9e7d7a49c7d5fe10750"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras",
+  "vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url",
+  "vigil::source_scan_contract::generic_camera_registration_confirms_home_assistant_preview_step",
+  "vigil::source_scan_contract::generic_camera_registration_logs_validation_errors_and_deletes_failed_flows",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/ha-integration.md:48
+[[claim]]
+id = "vigil.docs-ha-integration.each-event-payload-carries-eventtype-vigildetection-the"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:2af443b3f0a2302f4cbf336d56599f37862aa90d666fec748811473a92108f01"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil::ha_mqtt_broker::detection_publisher_delivers_to_broker",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/ha-integration.md:53
+[[claim]]
+id = "vigil.docs-ha-integration.the-current-runtime-does-not-configure-zones"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:eebeb92cfd6f0266b50ec58e2becbad90c59b729d7f1799ea281f142825e2820"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil::recognition_slice::event_payload_carries_the_entity_name_when_matched",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/ha-integration.md:59
+[[claim]]
+id = "vigil.docs-ha-integration.the-running-condition-sensor-reports-running-storeopenfailed"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:1d3fb6ca58b73ca8825342c34f027e500e455d849548f3e61f79462d5a7167d3"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::running_condition_maps_each_named_fault",
+  "vigil::ha_mqtt_broker::running_condition_tracks_live_health_retained",
+  "vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog",
+  "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/ha-integration.md:69
+[[claim]]
+id = "vigil.docs-ha-integration.use-the-cameras-enabled-switch-to-enable"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:11e1b195b67c2ccac3614df07d50ea232e57b576c22b9858801575a81fc6fe99"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/ha-integration.md:74
+[[claim]]
+id = "vigil.docs-ha-integration.press-snapshot-trigger-to-publish-the-latest"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:887e679992639f8bb5d0f0104d44986f46b42dfc1657df67c6f570e244a22de1"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/ha-integration.md:80
+[[claim]]
+id = "vigil.docs-ha-integration.vigils-local-review-server-listens-on-reviewport"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:82cbdd503af2b38a18312aacb1be1915e9794064b98a6d51ab8d7ea48a4f31d5"
+evidence_tier = "integration"
+tests = [
+  "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
+  "vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport",
+  "vigil::http_data_plane::data_plane_serves_in_process_then_stops_on_shutdown",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
+  "vigil::http_data_plane::snapshot_read_serves_image_bytes_with_image_content_type",
+  "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/ha-integration.md:84
+[[claim]]
+id = "vigil.docs-ha-integration.corrections-supported-by-the-current-server-are"
+document = "docs/ha-integration.md"
+paragraph_sha256 = "sha256:eeb577b8b80ec385ff9a264cb58dd5a5592991c33401d6c6894bca5d14eb7f19"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::confirmed_correction_does_not_set_correction_recorded",
+  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "vigil::http_data_plane::http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent",
+  "vigil::recognition_slice::enroll_wire_shape_parses_from_the_command_topic",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed Identity/Confirmed authority, typed FalseAlarm and WrongClass delivery, Enroll parsing, and identical-correction idempotence across the mapped correction seams."
+
+# docs/privacy.md:17
+[[claim]]
+id = "vigil.docs-privacy.detection-clips-detector-images-context-graph-memory"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:17eb4ed1ec901f942b155c781bbd65cf340a3972e12e5f2a7891acd0d8f9acbf"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::detection_produces_observation_referencing_clip",
+  "vigil::first_light_loop::observation_never_references_undurable_clip",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/privacy.md:23
+[[claim]]
+id = "vigil.docs-privacy.vigil-events-vigil-why-and-vigil-stats"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:34d3db2854fb7d757bc5b2d151f1ce2c50a698f75a661837a17398775e6bfd17"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call",
+  "vigil::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/privacy.md:29
+[[claim]]
+id = "vigil.docs-privacy.the-firstlight-camera-loops-network-trace-permits"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:92f672407d0cb8865d4b090d60e06b2e1d7feb11f80394a081662112776efc93"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/privacy.md:45
+[[claim]]
+id = "vigil.docs-privacy.mqtt-is-gated-off-when-no-broker"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:c7c57f25e1a727de900c1b08fb0c1c59badfde47f378f1e028ea908c54bdb787"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record",
+  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/privacy.md:77
+[[claim]]
+id = "vigil.docs-privacy.the-review-data-plane-serves-event-media"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:384f7d6025d7852ba67aacc39eae1ef3497931d11acfb43640734510232915c3"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::clip_range_streams_from_large_file_without_whole_file_transfer",
+  "vigil::http_data_plane::media_path_traversal_rejected_serves_no_out_of_tree_bytes",
+  "vigil::http_data_plane::pruned_media_returns_clean_not_found_while_event_still_lists_and_walks_back",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/privacy.md:107
+[[claim]]
+id = "vigil.docs-privacy.when-recognition-is-enabled-vigil-stores-a"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:e8320b874d50ae0488b26a4805268b4cd7d0fb7ee4f0b3fe4ccaf00f6d74f34b"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+  "vigil::recognition_slice::forget_removes_references_and_the_subject_reverts_to_unknown",
+  "vigil::recognition_slice::match_records_observation_against_the_matched_entity_with_vector_and_score",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the narrowed claim states only the vector, score, detection anchor, matched entity, site-local enrollment, and forgetting behavior directly asserted by the tests."
+
+# docs/privacy.md:124
+[[claim]]
+id = "vigil.docs-privacy.corrections-are-stored-in-the-local-context"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:d7bcc0d72a62cd3c1752dfd01f8c313031691101693fcf857d953974893f4a59"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_anchored_to_named_detection_only",
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/privacy.md:136
+[[claim]]
+id = "vigil.docs-privacy.rtsp-credentials-embedded-in-a-url-are"
+document = "docs/privacy.md"
+paragraph_sha256 = "sha256:a013406ed8edeb178265725edb01e83a6683a403b2f535dd45a743b3d6562985"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface",
+  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:13
+[[claim]]
+id = "vigil.docs-promise.vigil-run-opens-the-local-context-graph"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:2ee8af3dce52f5e19574e1dd051c0e05193a6a908f57bfb41dda7fef966f135d"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_first_start_opens_local_context_graph_store",
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_health_200_requires_store_open_and_runtime_loop",
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_sigterm_exits_zero_and_releases_store",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:19
+[[claim]]
+id = "vigil.docs-promise.the-repository-contains-home-assistant-addon-and"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:2eb354bd7903a458331c590298799655aaf1518b7677f12d821ece08705fbb4d"
+evidence_tier = "structural_contract"
+tests = [
+  "vigil::artifact_profile_honesty::release_notes_name_the_hardware_generic_docker_artifact",
+  "vigil::runtime_packages_manifest::addon_dockerfile_installs_only_manifest_declared_packages",
+  "vigil::runtime_packages_manifest::runtime_packages_manifest_has_amd64_and_aarch64_profiles_with_backends_and_packages",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that structural witnesses read the actual add-on and generic-container Dockerfiles and bind them to amd64 and aarch64 manifest profiles."
+
+# docs/promise.md:26
+[[claim]]
+id = "vigil.docs-promise.the-current-vertical-slice-connects-to-one"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:2b3f9e7f05d75c97bcce82cfc8de7ab3b22df4087f9af0056f02710315a4540c"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:33
+[[claim]]
+id = "vigil.docs-promise.the-directrtsp-path-records-the-site-context"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:6ad5e04c24c9eaf5accb818dfeaa215c28e93b7e4f816a9f32a533af4ec2ad37"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:37
+[[claim]]
+id = "vigil.docs-promise.the-http-why-response-carries-the-same"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:81b5c55103df4e0b746aa8fda71cf0a039b0156ff521ae08ac083ca9866c1f65"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:44
+[[claim]]
+id = "vigil.docs-promise.the-review-service-exposes-detection-rows-detectionspecific"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:3ad8cbf68aecd42431d89b0dcbf4b22a8811da1643a6e4ab033f6f13337c81af"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::http_data_plane::media_reference_from_event_list_resolves_to_media_bytes",
+  "vigil::http_data_plane::snapshot_read_serves_image_bytes_with_image_content_type",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:54
+[[claim]]
+id = "vigil.docs-promise.identity-falsealarm-and-wrongclass-corrections-are-anchored"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:1075efd13bf52d7e9113925cab845800a1c4065f89ebb5aa14006d4f1c630392"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_anchored_to_named_detection_only",
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+  "vigil::ha_correction_seam::false_alarm_and_wrong_class_corrections_record_and_read_back",
+  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:69
+[[claim]]
+id = "vigil.docs-promise.an-enrollment-correction-creates-a-named-entity"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:9b80e364e107e6680e86fe1006063d3717688c5e57ed53fdee980550f95fb38b"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::below_threshold_sighting_stays_unknown",
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+  "vigil::recognition_slice::forget_removes_references_and_the_subject_reverts_to_unknown",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:75
+[[claim]]
+id = "vigil.docs-promise.the-event-and-why-surfaces-expose-the"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:940eda3552be1b2f6f4dd376448ce290f1c4f10ef903e88ff865c76c2445c8c8"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::http_event_rows_and_why_carry_recognition_for_the_card",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:87
+[[claim]]
+id = "vigil.docs-promise.vigil-publishes-mqtt-discovery-for-a-service"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:5e0fab8a2ed5b16ac8f7100ffd8ff8476a3b16df0648a8ae780ac06869ee1dd6"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
+  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/promise.md:103
+[[claim]]
+id = "vigil.docs-promise.hardware-decoding-and-accelerated-detection-are-independent"
+document = "docs/promise.md"
+paragraph_sha256 = "sha256:66683c51af56c07257e1f9590f5dc10b2971a40d9132a2c230db658bed0fd59e"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct",
+  "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback",
+  "vigil::acceleration_receipts::health_reports_degraded_decode_and_detection_when_configured_but_fallback",
+  "vigil::config_acceleration_intent::toml_config_can_disable_each_boolean_independently",
+  "vigil::decode_backend_contract::probe_reports_decoded_frames_and_classification",
+  "vigil::detection_accel_backend::detection_accel_compiled_in_receipt_agrees_with_recorded_probe",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/rules.md:9
+[[claim]]
+id = "vigil.docs-rules.vigil-does-create-a-baseline-watch-intention"
+document = "docs/rules.md"
+paragraph_sha256 = "sha256:f54589be6f8966697dcc39de9e13ca32b97bc318776ec5e3053914e5d30dbbea"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::detector_config_recorded_as_decision",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/rules.md:15
+[[claim]]
+id = "vigil.docs-rules.home-assistant-receives-a-vigildetection-event-entity"
+document = "docs/rules.md"
+paragraph_sha256 = "sha256:46a3b3666ad279aecdb2a19f1113979694e41e8e20eb3c4d5bb8346fb32d0b5e"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/rules.md:23
+[[claim]]
+id = "vigil.docs-rules.each-camera-has-an-enabled-switch-and"
+document = "docs/rules.md"
+paragraph_sha256 = "sha256:67dee5941a45104c2827aea8336ba1df2f89f610a709547d32210db19c38d5d1"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/rules.md:30
+[[claim]]
+id = "vigil.docs-rules.confirming-a-detection-marking-a-false-alarm"
+document = "docs/rules.md"
+paragraph_sha256 = "sha256:60fa5cb8b8e62bfc997bcca21add94bd3795f8975f2033a3d7501cd9ec3b3e1f"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_writes_durably_through_cg_record_path",
+  "vigil::ha_correction_seam::false_alarm_and_wrong_class_corrections_record_and_read_back",
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/strategy.md:13
+[[claim]]
+id = "vigil.docs-strategy.the-developer-preview-already-proves-that-memory"
+document = "docs/strategy.md"
+paragraph_sha256 = "sha256:914b55d7e33501453ea3621d2aafdb38a221b11f7cb0fafdbbf66e15a2f20d6c"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/strategy.md:18
+[[claim]]
+id = "vigil.docs-strategy.vigil-embeds-context-graph-for-typed-operational"
+document = "docs/strategy.md"
+paragraph_sha256 = "sha256:d4b16eef93db4494c5f323793f68253b29f24b5d7e1ecc8ac63c74f4631d67e2"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_first_start_opens_local_context_graph_store",
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/strategy.md:42
+[[claim]]
+id = "vigil.docs-strategy.mqtt-discovery-and-control-provide-the-entity"
+document = "docs/strategy.md"
+paragraph_sha256 = "sha256:1e11d77a4e80bdfd12c700ac42e9007e83ddde461b538e90b20f927e979f3329"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/strategy.md:56
+[[claim]]
+id = "vigil.docs-strategy.the-current-firstlight-path-performs-decode-detection"
+document = "docs/strategy.md"
+paragraph_sha256 = "sha256:899ac71a6340e01fc23bd1504dbec0a05cde2eae4e714de12e32bcd0e5493c21"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/strategy.md:65
+[[claim]]
+id = "vigil.docs-strategy.vigil-reports-the-decode-and-detection-backend"
+document = "docs/strategy.md"
+paragraph_sha256 = "sha256:e4065f28d2f2ea1075e9ab398c74e403f9a04ff5b7bd7ec9d91e04822cf914a0"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct",
+  "vigil::acceleration_receipts::stats_show_active_decoder_per_stream_and_detector_backend",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/strategy.md:76
+[[claim]]
+id = "vigil.docs-strategy.mqtt-and-http-correction-entry-points-converge"
+document = "docs/strategy.md"
+paragraph_sha256 = "sha256:fdb00558c31fa48ad276095e752332ab22823a352081a983a21717b6020db452"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record",
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:13
+[[claim]]
+id = "vigil.docs-why-this-fired.the-detection-observation-carries-the-detected-class"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:ec2932d3ddeda3e1608d6ca47dff6bdc2cc30b22a073615e6966e5e6c4f32e5d"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:27
+[[claim]]
+id = "vigil.docs-why-this-fired.the-command-lists-recent-landed-detections-newest"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:835f23298949ad99e6039cf124e7194bf97fb79bb8c96a5de3ebae086c06377c"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first",
+  "vigil::ha_mqtt_broker::detection_only_events_excludes_corrections",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:32
+[[claim]]
+id = "vigil.docs-why-this-fired.home-assistant-detection-events-carry-the-same"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:638014298c4e27368603665cfcafc05b45538311efa184c932c3f4611c8dcc13"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/why-this-fired.md:49
+[[claim]]
+id = "vigil.docs-why-this-fired.the-result-includes-the-detection-and-event"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:cb47ec6db046755104ef777b013cd681062fbefb6baac38e2de1233695ee485e"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly",
+  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/why-this-fired.md:54
+[[claim]]
+id = "vigil.docs-why-this-fired.when-the-daemon-owns-the-open-store"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:4302e2aca835f8d3653ffb63844da4fc2cc1f2836ffa82dfc6d4f46cf624f01a"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call",
+  "vigil::first_light_loop::vigil_why_served_over_socket_while_store_is_locked",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:61
+[[claim]]
+id = "vigil.docs-why-this-fired.the-companion-vigil-review-card-reads-event"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:cde99250586360e09e049265d001f6752c6154504f9827303f42601bb32cb4cf"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
+  "vigil::http_data_plane::media_reference_from_event_list_resolves_to_media_bytes",
+  "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/why-this-fired.md:65
+[[claim]]
+id = "vigil.docs-why-this-fired.if-media-has-been-pruned-the-event"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:8f8353ee70229eae49b22498c4d0c8fd29e3c30f85522c6dda0b1a5c0b404b86"
+evidence_tier = "integration"
+tests = [
+  "vigil::http_data_plane::pruned_media_returns_clean_not_found_while_event_still_lists_and_walks_back",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:71
+[[claim]]
+id = "vigil.docs-why-this-fired.vigil-why-follows-the-decision-linked-to"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:ac1d7f4566db68b876242911db00fd3c00baba26cc4663943c2c33e6a500a195"
+evidence_tier = "integration"
+tests = [
+  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:86
+[[claim]]
+id = "vigil.docs-why-this-fired.the-event-list-exposes-the-serverauthoritative-current"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:0010922a99775fec3b53e45fb57831d899b2cf71c07472e15baf42f8fb763c7d"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_reads_back_via_review_why",
+  "vigil::ha_correction_seam::review_events_rows_expose_current_correction_authority_fields",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:91
+[[claim]]
+id = "vigil.docs-why-this-fired.corrections-survive-store-reopen-repeating-the-same"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:3045c2be64867f225120ac8d5fa059217a5beb53240007819a77ea16196110d2"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+  "vigil::ha_mqtt_broker::two_distinct_corrections_on_same_detection_both_land",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-this-fired.md:100
+[[claim]]
+id = "vigil.docs-why-this-fired.when-a-coveredclass-sighting-matches-an-enrolled"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:a183b8ad37cf2801ce7b3df811a375dc8bef783af9ab866ab6b99173cdd70390"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::below_threshold_sighting_stays_unknown",
+  "vigil::recognition_slice::why_view_shows_match_provenance_reference_score_and_enrolling_correction",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:12
+[[claim]]
+id = "vigil.docs-why-vigil.vigil-keeps-those-facts-as-one-local"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:57861d4ef0dfbdac5c85950f78d96af24ec57d52f0e04c1a2a2cbdbc3100d5f7"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:23
+[[claim]]
+id = "vigil.docs-why-vigil.a-correction-in-the-current-preview-is"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:92db34d35f8d9276a8a675184e67481af910288d8f496ff14365466ec4aed92a"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::correction_anchored_to_named_detection_only",
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+  "vigil::ha_correction_seam::review_events_rows_expose_current_correction_authority_fields",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:29
+[[claim]]
+id = "vigil.docs-why-vigil.mqtt-and-http-do-not-own-separate"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:65ebd9b4c72e18a56b210d1a2bebc07e1b170d71f23775b19d079f784d0a9cc9"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record",
+  "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:42
+[[claim]]
+id = "vigil.docs-why-vigil.the-implemented-recognition-storage-and-matching-seam"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:01a9510646385bf9ab49baf35f42131fc5026d71acd5b581baa407a72a0722d9"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::below_threshold_sighting_stays_unknown",
+  "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match",
+  "vigil::recognition_slice::vehicle_sighting_cannot_match_a_person_identity_even_with_identical_vector",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:48
+[[claim]]
+id = "vigil.docs-why-vigil.the-explanation-includes-the-score-the-exact"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:026d3e96e9a86b2b14b1ea7131dafbe6f97346cf2447021f8d4d7343e1407cee"
+evidence_tier = "integration"
+tests = [
+  "vigil::recognition_slice::recognition_provenance_joins_enroll_correction_by_matched_reference_label",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:53
+[[claim]]
+id = "vigil.docs-why-vigil.falsealarm-and-wrongclass-corrections-are-durable-and"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:ac11c389a95af04089390663bfb11a915316683b35b41cba3ddc98323defb754"
+evidence_tier = "integration"
+tests = [
+  "vigil::ha_correction_seam::false_alarm_and_wrong_class_corrections_record_and_read_back",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
+
+# docs/why-vigil.md:61
+[[claim]]
+id = "vigil.docs-why-vigil.camera-software-often-exposes-an-acceleration-switch"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:ea823b3ce3e43a4a43785ce0f438633341c0d738ba2bed8437319ce0959d9327"
+evidence_tier = "integration"
+tests = [
+  "vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct",
+  "vigil::acceleration_receipts::stats_show_active_decoder_per_stream_and_detector_backend",
+  "vigil::decode_backend_contract::probe_reports_decoded_frames_and_classification",
+  "vigil::detection_accel_backend::detection_accel_compiled_in_receipt_agrees_with_recorded_probe",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:69
+[[claim]]
+id = "vigil.docs-why-vigil.the-tested-latepromotion-seam-can-swap-a"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:1008889b62eaf45d0515f9f6c9bd86acf0309cae894ec7700b138f86600b2135"
+evidence_tier = "integration"
+tests = [
+  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface",
+]
+reviewed = true
+reviewed_by = "Feynman independent documentation review, 2026-07-21"
+rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+
+# docs/why-vigil.md:82
+[[claim]]
+id = "vigil.docs-why-vigil.the-developer-preview-has-proved-one-direct"
+document = "docs/why-vigil.md"
+paragraph_sha256 = "sha256:14d0418fd9b39379a788341c2901384513930d1217dfa158513487c7774b6943"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+]
+reviewed = true
+reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
+rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."

@@ -66,7 +66,7 @@ ha_api_token="${HA_API_TOKEN:-}"
 ha_api_base="${HA_API_BASE:-http://127.0.0.1:8123}"
 vigil_discovery_prefix="${VIGIL_DISCOVERY_PREFIX:-homeassistant}"
 vigil_event_topic="${VIGIL_EVENT_TOPIC:-vigil/events}"
-vigil_correction_topic="${VIGIL_CORRECTION_TOPIC:-vigil/correction/command}"
+vigil_correction_topic="${VIGIL_CORRECTION_TOPIC:-vigil/commands/correct}"
 vigil_availability_topic="${VIGIL_AVAILABILITY_TOPIC:-vigil/availability}"
 vigil_running_condition_topic="${VIGIL_RUNNING_CONDITION_TOPIC:-vigil/running_condition}"
 vigil_control_topic="${VIGIL_CONTROL_TOPIC:-vigil/commands/control}"
@@ -118,6 +118,11 @@ pass() {
 
 fail() {
   printf '%s FAIL %s\n' "$1" "$2" >&2
+  status=1
+}
+
+not_run() {
+  printf '%s NOT-RUN %s\n' "$1" "$2" >&2
   status=1
 }
 
@@ -223,8 +228,14 @@ assert_receipt_surfaces_match() {
   local doctor_output="$3"
   local runtime_surface="$4"
   local field doctor_block runtime_block doctor_value runtime_value
-  doctor_block="$(printf '%s\n' "$doctor_output" | receipt_block_from_surface "$header")" || return 0
-  runtime_block="$(printf '%s\n' "$runtime_surface" | receipt_block_from_surface "$header")" || return 0
+  doctor_block="$(printf '%s\n' "$doctor_output" | receipt_block_from_surface "$header")" || {
+    fail "$id" "doctor output is missing required receipt block: $header"
+    return 1
+  }
+  runtime_block="$(printf '%s\n' "$runtime_surface" | receipt_block_from_surface "$header")" || {
+    fail "$id" "runtime surface is missing required receipt block: $header"
+    return 1
+  }
   for field in "status" "active_backend" "failure_code" "action_kind"; do
     doctor_value="$(receipt_field_value "$doctor_block" "$field")"
     runtime_value="$(receipt_field_value "$runtime_block" "$field")"
@@ -401,6 +412,14 @@ docker_cli_available() {
     return
   fi
   [[ -n "${docker_cmd[0]:-}" ]] && have_cmd "${docker_cmd[0]}"
+}
+
+curl_cli_available() {
+  if [[ -n "$haos_ssh_target" ]]; then
+    have_cmd ssh && ssh -n -o BatchMode=yes "$haos_ssh_target" "type -P curl" >/dev/null 2>&1
+    return
+  fi
+  [[ -n "${curl_cmd[0]:-}" ]] && have_cmd "${curl_cmd[0]}"
 }
 
 docker_cli_run() {
@@ -822,6 +841,55 @@ addon_container_runtime_pid() {
   docker_cli_run exec "$container_id" sh -c 'for pid in $(pidof vigil 2>/dev/null); do echo "$pid"; exit 0; done; pgrep -x vigil 2>/dev/null | head -n 1 || echo 1'
 }
 
+# Print established socket inodes owned by one container process. Mode "only"
+# selects the named remote port; "except" selects every remote port except it.
+# The inode join happens in one shell process, avoiding the old awk-array leak.
+container_pid_established_socket_inodes() {
+  local container_id="$1"
+  local runtime_pid="$2"
+  local remote_port="$3"
+  local mode="$4"
+  docker_cli_run exec "$container_id" sh -c '
+    pid="$1"
+    remote_port="$2"
+    mode="$3"
+    hex_port="$(printf "%04X" "$remote_port")"
+    network_rows="$(awk -v port="$hex_port" -v mode="$mode" '"'"'
+      $4 == "01" {
+        split($3, remote, ":")
+        if (mode == "only" && remote[2] != port) next
+        if (mode == "except" && remote[2] == port) next
+        print $10 "|" $3
+      }
+    '"'"' /proc/net/tcp /proc/net/tcp6 2>/dev/null | sort -u)"
+    for row in $network_rows; do
+      inode="$(printf "%s\n" "$row" | cut -d "|" -f 1)"
+      remote="$(printf "%s\n" "$row" | cut -d "|" -f 2)"
+      for fd in /proc/"$pid"/fd/*; do
+        target="$(readlink "$fd" 2>/dev/null || true)"
+        if [ "$target" = "socket:[$inode]" ]; then
+          printf "%s %s\n" "$inode" "$remote"
+          break
+        fi
+      done
+    done
+  ' sh "$runtime_pid" "$remote_port" "$mode"
+}
+
+wait_for_file_text() {
+  local path="$1"
+  local expected="$2"
+  local wait_seconds="$3"
+  local deadline=$((SECONDS + wait_seconds))
+  while (( SECONDS < deadline )); do
+    if [[ -f "$path" ]] && grep -Fq "$expected" "$path"; then
+      return 0
+    fi
+    sleep 0.025
+  done
+  return 1
+}
+
 container_pid_owns_listen_port() {
   local container_id="$1"
   local runtime_pid="$2"
@@ -1074,18 +1142,29 @@ addon_dockerfile_uses_rust_build() {
 }
 
 apparmor_default_or_stricter() {
-  ! grep -Eiq '^[[:space:]]*apparmor:[[:space:]]*(false|unconfined|disable|disabled)[[:space:]]*$' "$addon_dir/config.yaml"
+  grep -Eq '^[[:space:]]*apparmor:[[:space:]]*true[[:space:]]*$' "$addon_dir/config.yaml"
 }
 
-declares_privileged_resources() {
-  grep -Eiq 'host_network:[[:space:]]*true|host_pid:[[:space:]]*true|devices:' "$addon_dir/config.yaml" && return 0
-  awk '
+addon_declares_current_narrow_host_access() {
+  grep -Eq '^[[:space:]]*host_network:[[:space:]]*true[[:space:]]*$' "$addon_dir/config.yaml" || return 1
+  grep -Eq '^[[:space:]]*host_pid:[[:space:]]*false[[:space:]]*$' "$addon_dir/config.yaml" || return 1
+  ! grep -Eq '^[[:space:]]*(full_access|host_pid):[[:space:]]*true[[:space:]]*$' "$addon_dir/config.yaml" || return 1
+  ! awk '
     /^[[:space:]]*privileged:[[:space:]]*$/ { in_privileged=1; next }
     /^[^[:space:]][^:]*:/ { in_privileged=0 }
-    /^[[:space:]]*privileged:[[:space:]]*(false|false[[:space:]]*)$/ { next }
+    /^[[:space:]]*privileged:[[:space:]]*(false|\[\])[[:space:]]*$/ { next }
     /^[[:space:]]*privileged:[[:space:]]+/ { found=1 }
     in_privileged && /^[[:space:]]*-[[:space:]]*[^[:space:]]/ { found=1 }
     END { exit(found ? 0 : 1) }
+  ' "$addon_dir/config.yaml" || return 1
+  awk '
+    /^devices:[[:space:]]*$/ { in_devices=1; next }
+    /^[^[:space:]][^:]*:/ { in_devices=0 }
+    in_devices && /^[[:space:]]*-[[:space:]]*/ {
+      count += 1
+      if ($0 !~ /^[[:space:]]*-[[:space:]]*\/dev\/dri\/renderD[0-9]+:\/dev\/dri\/renderD[0-9]+:rwm[[:space:]]*$/) bad=1
+    }
+    END { exit(count > 0 && !bad ? 0 : 1) }
   ' "$addon_dir/config.yaml"
 }
 
@@ -1375,15 +1454,15 @@ th07() {
 th08() {
   local id="TH-08"
   require_file "$id" "$addon_dir/config.yaml" || return
-  if declares_privileged_resources; then
-    fail "$id" "config.yaml declares privileged host resources"
-    return
-  fi
   apparmor_default_or_stricter || {
     fail "$id" "config.yaml disables or weakens AppArmor"
     return
   }
-  pass "$id" "add-on config declares no privileged host resources"
+  addon_declares_current_narrow_host_access || {
+    fail "$id" "config.yaml must declare host_network:true for fabric, host_pid:false, no full_access/privileged grant, and only narrow /dev/dri/renderD* device mappings"
+    return
+  }
+  pass "$id" "owner-approved host access is exact: fabric host networking, narrow DRM render node, AppArmor enabled, and no broad privilege"
 }
 
 th09() {
@@ -1414,16 +1493,27 @@ th09() {
     BEGIN { found=0 }
     {
       line=tolower($0)
-      if (line ~ /(^|[\/ _.-])vigil([\/ _.-]|$)/ || line ~ /local_vigil/) found=1
+      if (line ~ /^frigate\// && (line ~ /(^|[\/ _.-])vigil([\/ _.-]|$)/ || line ~ /local_vigil/)) found=1
     }
     END { exit(found ? 0 : 1) }
   ' "$capture"; then
-    fail "$id" "Vigil-named MQTT messages appeared on Home Assistant or Frigate topics during Vigil lifecycle"
+    fail "$id" "Vigil-named MQTT messages appeared below frigate/# during the Vigil lifecycle"
+    rm -f "$capture" "$sub_err"
+    return
+  fi
+  if ! awk '
+    {
+      line=tolower($0)
+      if (line ~ /^homeassistant\// && (line ~ /(^|[\/ _.-])vigil([\/ _.-]|$)/ || line ~ /local_vigil/)) found=1
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$capture"; then
+    fail "$id" "no Vigil MQTT discovery payload appeared below homeassistant/# during the Vigil lifecycle"
     rm -f "$capture" "$sub_err"
     return
   fi
   rm -f "$capture" "$sub_err"
-  pass "$id" "no Vigil-named MQTT discovery or Frigate-topic messages observed"
+  pass "$id" "Vigil discovery appeared below homeassistant/# and no Vigil message contaminated frigate/#"
 }
 
 th10() {
@@ -1556,8 +1646,8 @@ mqtt_count_messages() {
   sub_status=$?
   if [[ "$sub_status" -ne 0 && "$sub_status" -ne 124 ]]; then
     rm -f "$capture" "$sub_err"
-    printf '0\n'
-    return
+    printf 'MQTT subscription to %s failed with status %s\n' "$topic" "$sub_status" >&2
+    return 1
   fi
   wc -l < "$capture"
   rm -f "$capture" "$sub_err"
@@ -1678,6 +1768,8 @@ th14() {
   mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
   have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event topic audit"; return; }
   have_cmd jq || { fail "$id" "jq is required for event payload audit"; return; }
+  curl_cli_available || { fail "$id" "curl access is required for structured /why value-equality audit"; return; }
+  docker_cli_available || { fail "$id" "docker access is required for mandatory /why value-equality audit"; return; }
   ensure_addon_installed "$id" || return
   start_addon "$id" "for detection event audit" || return
   wait_for_health || { fail "$id" "Vigil health did not reach 200 for detection event audit"; return; }
@@ -1692,9 +1784,9 @@ broker when a real detection lands so it is reachable as an event entity in Home
   fi
   # Assert event payload carries the required contract fields
   local detection_id class confidence
-  detection_id="$(jq -er '.detection_id // empty' <<< "$event_payload" 2>/dev/null)"
-  class="$(jq -er '.class // .object_class // empty' <<< "$event_payload" 2>/dev/null)"
-  confidence="$(jq -er '.confidence // empty' <<< "$event_payload" 2>/dev/null)"
+  detection_id="$(jq -er '.detection_id | select(type == "string" and length > 0)' <<< "$event_payload" 2>/dev/null)"
+  class="$(jq -er '(.class // .object_class) | select(type == "string" and length > 0)' <<< "$event_payload" 2>/dev/null)"
+  confidence="$(jq -er '.confidence | select(type == "number")' <<< "$event_payload" 2>/dev/null)"
   [[ -n "$detection_id" ]] || {
     fail "$id" "event payload is missing the detection_id field; the event payload must carry the \
 detection id so the owner's automation and the correction card can source it"
@@ -1711,24 +1803,50 @@ detection id so the owner's automation and the correction card can source it"
   # F15: value-equality via vigil why — assert cg observation fields match the event payload.
   # A correct implementation writes the detection to cg and publishes matching fields to MQTT;
   # wrong stub publishes to MQTT without writing to cg so vigil why returns no output.
-  if docker_cli_available; then
-    local why_output
-    why_output="$(vigil_exec_cmd vigil why "$detection_id" 2>/dev/null)"
-    if [[ -z "$why_output" ]]; then
-      fail "$id" "'vigil why $detection_id' returned no output inside the add-on container; \
+  local why_output
+  why_output="$(vigil_exec_cmd vigil why "$detection_id" 2>/dev/null)" || {
+    fail "$id" "'vigil why $detection_id' failed inside the add-on container; \
+the mandatory authority comparison cannot be skipped"
+    return
+  }
+  if [[ -z "$why_output" ]]; then
+    fail "$id" "'vigil why $detection_id' returned no output inside the add-on container; \
 the detection must be written to cg authority so vigil why can resolve the observation from \
 the store — wrong stub publishes the event to MQTT but writes nothing to cg"
-      return
-    fi
-    # Assert the event payload class value-equals the cg observation's class field.
-    if [[ -n "$class" ]] && [[ "$why_output" != *"$class"* ]]; then
-      fail "$id" "'vigil why $detection_id' output does not contain the object class '$class' \
-from the event payload; the published event must value-equal the cg observation's class field — \
-wrong stub hardcodes a different class in the event than what cg holds"
-      return
-    fi
+    return
   fi
-  pass "$id" "real detection surfaced as MQTT event entity and vigil why resolves value-equal cg observation"
+  # Read the same id through the shipped structured /why surface so field
+  # comparisons are exact and cannot pass through substring matches in CLI text.
+  local why_json why_detection_id why_class why_confidence
+  why_json="$(curl_run -fsS --max-time 5 "${review_url%/}/why/$detection_id" 2>/dev/null)" || {
+    fail "$id" "GET /why/$detection_id failed after the same id resolved through the installed vigil CLI"
+    return
+  }
+  why_detection_id="$(jq -er '.observation_id | select(type == "string" and length > 0)' <<< "$why_json" 2>/dev/null)" || {
+    fail "$id" "/why/$detection_id response is missing a nonempty observation_id"
+    return
+  }
+  why_class="$(jq -er '.class_name | select(type == "string" and length > 0)' <<< "$why_json" 2>/dev/null)" || {
+    fail "$id" "/why/$detection_id response is missing a nonempty class_name"
+    return
+  }
+  why_confidence="$(jq -er '.confidence | select(type == "number")' <<< "$why_json" 2>/dev/null)" || {
+    fail "$id" "/why/$detection_id response is missing numeric confidence"
+    return
+  }
+  if [[ "$detection_id" != "$why_detection_id" ]]; then
+    fail "$id" "broker event detection_id '$detection_id' does not equal /why observation_id '$why_detection_id'"
+    return
+  fi
+  if [[ "$class" != "$why_class" ]]; then
+    fail "$id" "broker event class '$class' does not equal class_name '$why_class' on the same /why/$detection_id record"
+    return
+  fi
+  if ! jq -ne --argjson event "$confidence" --argjson why "$why_confidence" '$event == $why' >/dev/null; then
+    fail "$id" "broker event confidence '$confidence' does not equal confidence '$why_confidence' on the same /why/$detection_id record"
+    return
+  fi
+  pass "$id" "one broker event's id, class, and confidence value-equal the same cg /why record"
 }
 
 th15() {
@@ -1910,43 +2028,95 @@ cannot source detection_id for operator acknowledge sub-check"
     fail "$id" "could not publish disable-camera command to '$vigil_control_topic'"
     return
   }
-  # Allow the disable to propagate, then listen for events on the disabled camera for 10 s.
-  # A correctly-wired subscriber effects the disable so the camera produces no further detections;
-  # wrong stub never connects to the broker so the camera keeps detecting.
-  sleep 1
-  local camera_event_after_disable
-  camera_event_after_disable="$(
-    timeout 10 mosquitto_sub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
-      -t "$vigil_event_topic" -C 1 2>/dev/null \
-    | jq -er --arg cid "$camera_id_for_ops" 'select(.camera_id == $cid) | .detection_id // empty' \
-      2>/dev/null || true
-  )"
-  if [[ -n "$camera_event_after_disable" ]]; then
-    fail "$id" "camera '${camera_id_for_ops}' produced a new detection event after the disable-camera \
-command was published (detection_id='${camera_event_after_disable}'); the subscriber must effect the \
-disable on the named camera so it stops contributing detections — wrong stub never connects and the \
-camera keeps detecting"
+  # Observe the complete window after a broker-confirmed SUBACK. Do not stop at
+  # the first shared-topic event: traffic from another camera is expected and
+  # must neither fail nor falsely satisfy the named-camera silence assertion.
+  local disable_capture disable_sub_err disable_sub_pid disable_sub_status
+  disable_capture="$(mktemp)"
+  disable_sub_err="$(mktemp)"
+  timeout 15 mosquitto_sub -d -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_event_topic" > "$disable_capture" 2>"$disable_sub_err" &
+  disable_sub_pid=$!
+  if ! wait_for_file_text "$disable_sub_err" "Received SUBACK" 5; then
+    signal_child_pid "$disable_sub_pid" >/dev/null 2>&1 || true
+    wait "$disable_sub_pid" >/dev/null 2>&1 || true
+    fail "$id" "event observer did not receive SUBACK before the disable-camera silence window: $(tr '\n' ' ' < "$disable_sub_err")"
+    rm -f "$disable_capture" "$disable_sub_err"
     return
   fi
-  # Step 2b (F17): snapshot sub-check — publishing a snapshot command must write an artifact to
-  # the add-on's snapshots directory.
+  wait "$disable_sub_pid" >/dev/null 2>&1
+  disable_sub_status=$?
+  if [[ "$disable_sub_status" -ne 0 && "$disable_sub_status" -ne 124 ]]; then
+    fail "$id" "event observer failed during the disable-camera silence window: $(tr '\n' ' ' < "$disable_sub_err")"
+    rm -f "$disable_capture" "$disable_sub_err"
+    return
+  fi
+  if ! jq -se 'all(.[]; type == "object")' "$disable_capture" >/dev/null 2>&1; then
+    fail "$id" "event observer received a non-JSON payload while checking named-camera silence"
+    rm -f "$disable_capture" "$disable_sub_err"
+    return
+  fi
+  if jq -se --arg cid "$camera_id_for_ops" \
+    'any(.[]; (.camera_id // "") == $cid)' "$disable_capture" >/dev/null 2>&1; then
+    local camera_event_after_disable
+    camera_event_after_disable="$(jq -sr --arg cid "$camera_id_for_ops" \
+      '[.[] | select((.camera_id // "") == $cid) | .detection_id // "<missing>"][0]' \
+      "$disable_capture")"
+    fail "$id" "camera '${camera_id_for_ops}' produced a new detection event after the disable-camera \
+command was published (detection_id='${camera_event_after_disable}'); the subscriber must effect the \
+disable on the named camera so it stops contributing detections — other-camera traffic does not end \
+or satisfy this observation window"
+    rm -f "$disable_capture" "$disable_sub_err"
+    return
+  fi
+  rm -f "$disable_capture" "$disable_sub_err"
+  # Step 2b (F17): snapshot sub-check — publishing a snapshot command must publish bytes to
+  # the named camera's MQTT image topic. Start the subscriber before the command so only bytes
+  # causally published after this action can satisfy the assertion; preexisting files do not count.
+  local snapshot_topic="vigil/${camera_id_for_ops}/snapshot"
+  local snapshot_capture snapshot_sub_err snapshot_sub_pid snapshot_sub_status
+  mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$snapshot_topic" -r -n >/dev/null 2>&1 || {
+    fail "$id" "could not clear retained preexisting bytes from '$snapshot_topic' before the causal snapshot audit"
+    return
+  }
+  snapshot_capture="$(mktemp)"
+  snapshot_sub_err="$(mktemp)"
+  timeout 10 mosquitto_sub -d -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$snapshot_topic" -C 1 > "$snapshot_capture" 2>"$snapshot_sub_err" &
+  snapshot_sub_pid=$!
+  if ! wait_for_file_text "$snapshot_sub_err" "Received SUBACK" 5; then
+    signal_child_pid "$snapshot_sub_pid" >/dev/null 2>&1 || true
+    wait "$snapshot_sub_pid" >/dev/null 2>&1 || true
+    fail "$id" "snapshot observer did not receive SUBACK before the snapshot command: $(tr '\n' ' ' < "$snapshot_sub_err")"
+    rm -f "$snapshot_capture" "$snapshot_sub_err"
+    return
+  fi
   local snapshot_payload
   printf -v snapshot_payload '{"camera_id":"%s","action":"snapshot"}' "$camera_id_for_ops"
   mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
     -t "$vigil_control_topic" -m "$snapshot_payload" >/dev/null 2>&1 || {
+    signal_child_pid "$snapshot_sub_pid" >/dev/null 2>&1 || true
+    wait "$snapshot_sub_pid" >/dev/null 2>&1 || true
+    rm -f "$snapshot_capture" "$snapshot_sub_err"
     fail "$id" "could not publish snapshot command to '$vigil_control_topic'"
     return
   }
-  sleep 3
-  # Assert a snapshot file was written inside the add-on container under /data/snapshots/.
-  local snapshot_count
-  snapshot_count="$(vigil_exec_cmd sh -c 'ls /data/snapshots/ 2>/dev/null | wc -l' 2>/dev/null || echo 0)"
-  if [[ "${snapshot_count//[[:space:]]/}" == "0" ]]; then
-    fail "$id" "no snapshot file found at /data/snapshots/ inside the add-on container after the \
-snapshot command was published; wrong stub subscriber never connects to the broker so the snapshot \
-command is never processed and no artifact is written"
+  wait "$snapshot_sub_pid" >/dev/null 2>&1
+  snapshot_sub_status=$?
+  if [[ "$snapshot_sub_status" -ne 0 ]]; then
+    fail "$id" "snapshot observer failed after its broker-confirmed subscription: $(tr '\n' ' ' < "$snapshot_sub_err")"
+    rm -f "$snapshot_capture" "$snapshot_sub_err"
     return
   fi
+  if [[ ! -s "$snapshot_capture" ]]; then
+    rm -f "$snapshot_capture" "$snapshot_sub_err"
+    fail "$id" "snapshot action published no nonempty bytes to '$snapshot_topic'; preexisting snapshot files are not causal evidence"
+    return
+  fi
+  local snapshot_bytes
+  snapshot_bytes="$(wc -c < "$snapshot_capture")"
+  rm -f "$snapshot_capture" "$snapshot_sub_err"
   # Step 2c: re-enable camera before proceeding to the acknowledge sub-check.
   local enable_payload
   printf -v enable_payload '{"camera_id":"%s","action":"enable"}' "$camera_id_for_ops"
@@ -1974,7 +2144,7 @@ the correction command, call record_correction, and write it to cg authority —
 connects so the command is never processed"
     return
   fi
-  pass "$id" "operator action commands effect disable-camera silence, snapshot artifact, and acknowledge correction on the named detection"
+  pass "$id" "operator actions effect disable-camera silence, ${snapshot_bytes} causal snapshot bytes, and acknowledge correction on the named detection"
 }
 
 th18() {
@@ -2115,12 +2285,11 @@ be down once an estate has more than one camera"
   local health_role_count
   health_role_count="$(ha_rest_api_run /api/states 2>/dev/null \
     | jq -er '[.[] | select(.entity_id | test("vigil"; "i")) |
-        select(.attributes.device_class? | . == "problem" or . == "connectivity" or . == "running")] |
-        length' 2>/dev/null || echo 0)"
-  if [[ "$health_role_count" =~ ^[0-9]+$ ]] && (( health_role_count > 1 )); then
-    fail "$id" "${health_role_count} health-role entities found under the Vigil device; \
-exactly one is expected (the whole-service running-condition) and no per-camera health entities \
-may be registered, even under a different name"
+        select(.entity_id | test("running[_-]?condition"; "i"))] | length' \
+      2>/dev/null || echo invalid)"
+  if ! [[ "$health_role_count" =~ ^[0-9]+$ ]] || (( health_role_count != 1 )); then
+    fail "$id" "${health_role_count:-non-numeric} health-role entities found under the Vigil device; \
+exactly one is required (the whole-service running-condition), with zero per-camera health entities"
     return
   fi
   pass "$id" "no per-camera health entity registered; exactly the whole-service running-condition is present"
@@ -2159,8 +2328,15 @@ th22() {
   wait_for_health || { fail "$id" "Vigil health did not reach 200 for empty-stream honesty audit"; return; }
   # Collect event topic messages over the observation window; expect zero
   local event_count
-  event_count="$(mqtt_count_messages "${vigil_event_topic}" "$th22_observation_window_seconds")"
-  if [[ "$event_count" =~ ^[0-9]+$ ]] && (( event_count > 0 )); then
+  event_count="$(mqtt_count_messages "${vigil_event_topic}" "$th22_observation_window_seconds")" || {
+    fail "$id" "event-topic subscription failed, so zero published events was not observed"
+    return
+  }
+  if ! [[ "$event_count" =~ ^[0-9]+$ ]]; then
+    fail "$id" "event-topic observation returned a non-numeric count: ${event_count:-<empty>}"
+    return
+  fi
+  if (( event_count > 0 )); then
     fail "$id" "${event_count} detection event(s) published to '${vigil_event_topic}' during the \
 ${th22_observation_window_seconds}s observation window on an empty/garbage stream; the event \
 publish path must be gated on a real detection, not a timer or fabricated event"
@@ -2171,67 +2347,226 @@ publish path must be gated on a real detection, not a timer or fabricated event"
 
 th23() {
   local id="TH-23"
-  ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
-  have_cmd jq || { fail "$id" "jq is required for entity registry audit"; return; }
-  have_cmd mosquitto_pub || { fail "$id" "mosquitto_pub is required for correction round-trip"; return; }
-  have_cmd mosquitto_sub || { fail "$id" "mosquitto_sub is required for event observation"; return; }
-  docker_cli_available || { fail "$id" "docker command '$docker_cli' is required for network audit"; return; }
+  local network_trace_pattern='(^|[[:space:]])(socket|socketpair|connect|accept|accept4|bind|listen|sendto|sendmsg|sendmmsg|recvfrom|recvmsg|recvmmsg|getsockname|getpeername|getsockopt|setsockopt|shutdown)\('
+  ha_cli_available || { not_run "$id" "Home Assistant CLI '$ha_cli' is required for the physical correction egress audit"; return; }
+  docker_cli_available || { not_run "$id" "docker command '$docker_cli' is required for correction-worker syscall tracing"; return; }
+  mqtt_ok || { fail "$id" "MQTT broker is not reachable at $mqtt_host:$mqtt_port"; return; }
+  have_cmd mosquitto_sub || { not_run "$id" "mosquitto_sub is required to source a real detection"; return; }
+  have_cmd mosquitto_pub || { not_run "$id" "mosquitto_pub is required to drive the correction path"; return; }
+  have_cmd jq || { not_run "$id" "jq is required to build and inspect correction payloads"; return; }
+  have_cmd sha256sum || { not_run "$id" "sha256sum is required to correlate the private correction request with its writer receipt"; return; }
+  curl_cli_available || { not_run "$id" "curl access to the Vigil review data plane is required"; return; }
   ensure_addon_installed "$id" || return
-  start_addon "$id" "for local privacy audit" || return
-  wait_for_health || { fail "$id" "Vigil health did not reach 200 for local privacy audit"; return; }
-  # Assert: no HA media_source entity for Vigil
-  local media_source_entities
-  media_source_entities="$(ha_vigil_entity_ids 2>/dev/null | grep -E 'media_source\.' || true)"
-  if [[ -n "$media_source_entities" ]]; then
-    fail "$id" "HA media_source entity found for Vigil (${media_source_entities}); the full \
-recorded clip must be reachable only through Vigil's own vigil events/vigil why evidence reference, \
-not via Home Assistant's native Media panel — corrections and clips must not be browsable via \
-the HA media source"
+  start_addon "$id" "for correction-worker syscall tracing" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 for correction-worker syscall tracing"; return; }
+
+  local event_payload detection_id
+  event_payload="$(mqtt_wait_for_message "${vigil_event_topic}" "$th14_detection_wait_seconds")"
+  if [[ -z "$event_payload" ]]; then
+    fail "$id" "no detection event on '${vigil_event_topic}' within ${th14_detection_wait_seconds}s; cannot drive a real correction"
     return
   fi
-  # Assert: correction path opens no outbound network beyond the local broker
-  # The wrong stub opens an outbound socket to 127.0.0.1:19876; a real socket monitor inside
-  # the container catches this.  A negative control (known port) proves the monitor works.
-  local container_id
-  container_id="$(addon_container_id)" || { fail "$id" "could not identify Vigil add-on container"; return; }
-  [[ -n "$container_id" ]] || { fail "$id" "could not identify Vigil add-on container"; return; }
-  # Check for unexpected non-broker outbound connections from the Vigil process
-  local runtime_pid unexpected_conns
-  runtime_pid="$(addon_container_runtime_pid "$container_id")" || {
-    fail "$id" "could not identify Vigil runtime pid for network audit"
+  detection_id="$(jq -er '.detection_id // empty' <<< "$event_payload" 2>/dev/null)"
+  if [[ -z "$detection_id" ]]; then
+    fail "$id" "event payload is missing detection_id; cannot drive a real correction"
     return
-  }
-  unexpected_conns="$(docker_cli_run exec "$container_id" sh -c '
-    pid="$1"
-    broker_port="$2"
-    hex_broker="$(printf "%04X" "$broker_port")"
-    awk -v pid="$pid" -v broker="$hex_broker" '"'"'
-      $4 == "01" {
-        split($3, remote, ":")
-        if (remote[2] == broker) next
-        if (remote[2] == "0000") next
-        inode=$10
-        found[inode]=1
-      }
-    '"'"' /proc/net/tcp /proc/net/tcp6 2>/dev/null
-    for fd in /proc/"$pid"/fd/*; do
-      target=$(readlink "$fd" 2>/dev/null || true)
-      case "$target" in
-        socket:*)
-          inode="${target#socket:[}"
-          inode="${inode%]}"
-          if [ "${found[$inode]+x}" ]; then printf "outbound socket found\n"; exit 0; fi
-          ;;
-      esac
+  fi
+
+  local container_id correction_tid correction_tids correction_tid_count
+  container_id="$(addon_container_id 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    not_run "$id" "running Vigil add-on container was not found"
+    return
+  fi
+  correction_tids="$(docker_cli_run exec "$container_id" sh -c '
+    for comm in /proc/[0-9]*/task/[0-9]*/comm; do
+      test -r "$comm" || continue
+      if test "$(cat "$comm")" = vigil-correct; then
+        basename "$(dirname "$comm")"
+      fi
     done
-  ' sh "$runtime_pid" "$mqtt_port" 2>/dev/null)"
-  if [[ "$unexpected_conns" == *"outbound socket found"* ]]; then
-    fail "$id" "Vigil add-on has an unexpected outbound network connection beyond the local broker; \
-the correction path must open no outbound network beyond the broker — the wrong stub opens a socket \
-to 127.0.0.1:19876 to simulate this failure"
+  ' 2>/dev/null || true)"
+  correction_tid_count="$(printf '%s\n' "$correction_tids" | awk 'NF { count += 1 } END { print count + 0 }')"
+  if [[ "$correction_tid_count" != "1" ]]; then
+    fail "$id" "expected exactly one dedicated vigil-correct writer thread, found $correction_tid_count; the correction path has no unambiguous trace boundary"
     return
   fi
-  pass "$id" "clips reachable only via Vigil surface; no HA media_source entity; no unexpected outbound connections"
+  correction_tid="$(printf '%s\n' "$correction_tids" | awk 'NF { print; exit }')"
+  if ! [[ "$correction_tid" =~ ^[0-9]+$ ]]; then
+    fail "$id" "dedicated vigil-correct writer thread id is not numeric: ${correction_tid:-<missing>}"
+    return
+  fi
+
+  local trace_image="${VIGIL_STRACE_IMAGE:-vigil-haos-strace:3.22}"
+  if [[ -n "${VIGIL_STRACE_IMAGE:-}" ]]; then
+    if ! docker_cli_run image inspect "$trace_image" >/dev/null 2>&1; then
+      not_run "$id" "configured test-only strace sidecar image '$trace_image' is not available on the HA-OS Docker host"
+      return
+    fi
+  elif ! docker_cli_run build -t "$trace_image" - < "$script_dir/strace.Dockerfile" >/dev/null; then
+    not_run "$id" "could not build test-only strace sidecar image '$trace_image' from tests/ha-os-vm/strace.Dockerfile"
+    return
+  fi
+
+  local trace_name="" positive_trace_name="" trace_pid="" tracer_pid=""
+  local positive_trace_capture product_trace_capture
+  local prior_exit_trap prior_int_trap prior_term_trap
+  positive_trace_capture="$(mktemp)"
+  product_trace_capture="$(mktemp)"
+  prior_exit_trap="$(trap -p EXIT || true)"
+  prior_int_trap="$(trap -p INT || true)"
+  prior_term_trap="$(trap -p TERM || true)"
+
+  th23_stop_product_trace() {
+    if [[ -n "${trace_name:-}" ]]; then
+      docker_cli_run kill --signal INT "$trace_name" >/dev/null 2>&1 || true
+      trace_name=""
+    fi
+    if [[ "${trace_pid:-}" =~ ^[0-9]+$ ]] && (( trace_pid > 1 )); then
+      wait "$trace_pid" >/dev/null 2>&1 || true
+      trace_pid=""
+    fi
+  }
+  th23_cleanup_trace_resources() {
+    th23_stop_product_trace
+    if [[ -n "${positive_trace_name:-}" ]]; then
+      docker_cli_run kill --signal INT "$positive_trace_name" >/dev/null 2>&1 || true
+      positive_trace_name=""
+    fi
+    [[ -z "${positive_trace_capture:-}" ]] || rm -f "$positive_trace_capture"
+    [[ -z "${product_trace_capture:-}" ]] || rm -f "$product_trace_capture"
+  }
+  th23_restore_traps() {
+    trap - EXIT INT TERM
+    [[ -z "$prior_exit_trap" ]] || eval "$prior_exit_trap"
+    [[ -z "$prior_int_trap" ]] || eval "$prior_int_trap"
+    [[ -z "$prior_term_trap" ]] || eval "$prior_term_trap"
+  }
+  th23_signal_cleanup() {
+    local exit_code="$1"
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    exit "$exit_code"
+  }
+  trap 'th23_cleanup_trace_resources' EXIT
+  trap 'th23_signal_cleanup 130' INT
+  trap 'th23_signal_cleanup 143' TERM
+
+  # Positive control: the same image, strace arguments, isolated network, and
+  # stderr capture used below must observe a real refused connect from nc.
+  # A fabricated grep fixture cannot establish ptrace/image/capture viability.
+  positive_trace_name="vigil-th23-control-$$-$RANDOM"
+  docker_cli_run run --rm --name "$positive_trace_name" --network none "$trace_image" \
+    -f -tt -e trace=network /usr/local/bin/vigil-trace-nc -z -w 1 127.0.0.1 9 \
+    > /dev/null 2> "$positive_trace_capture" || true
+  positive_trace_name=""
+  if ! grep -Eq 'connect\(.* = -1 (ECONNREFUSED|ENETUNREACH|EHOSTUNREACH)' \
+    "$positive_trace_capture"; then
+    local positive_detail
+    positive_detail="$(tr '\n' ' ' < "$positive_trace_capture")"
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    not_run "$id" "real strace positive control did not capture nc's refused loopback connection: $positive_detail"
+    return
+  fi
+
+  trace_name="vigil-th23-trace-$$-$RANDOM"
+  docker_cli_run run --rm --name "$trace_name" \
+    --pid "container:$container_id" \
+    --network none \
+    --cap-add SYS_PTRACE \
+    --security-opt seccomp=unconfined \
+    --security-opt apparmor=unconfined \
+    "$trace_image" -f -tt -e trace=network -p "$correction_tid" \
+    > /dev/null 2> "$product_trace_capture" &
+  trace_pid=$!
+
+  local attempt
+  for attempt in $(seq 1 50); do
+    tracer_pid="$(docker_cli_run exec "$container_id" sh -c \
+      "awk '/^TracerPid:/ { print \$2 }' /proc/$correction_tid/status" 2>/dev/null || true)"
+    [[ "$tracer_pid" =~ ^[0-9]+$ ]] && (( tracer_pid > 0 )) && break
+    if ! ps -p "$trace_pid" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  if ! [[ "$tracer_pid" =~ ^[0-9]+$ ]] || (( tracer_pid == 0 )); then
+    local attach_detail
+    attach_detail="$(tr '\n' ' ' < "$product_trace_capture")"
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    not_run "$id" "strace sidecar did not attach to vigil-correct thread $correction_tid: $attach_detail"
+    return
+  fi
+
+  local correction_label="th23-no-egress-$$-$RANDOM" correction_payload correction_fingerprint
+  correction_payload="$(jq -cn \
+    --arg detection_id "$detection_id" \
+    --arg label "$correction_label" \
+    '{detection_id:$detection_id,label:$label,correction_type:"FalseAlarm"}')"
+  # The receipt correlates the traced writer to this random detection request.
+  # Do not hash the owner-entered label into an unkeyed, dictionary-testable log value.
+  correction_fingerprint="$(printf 'vigil-correction-writer-v1\0%s\0FalseAlarm\0' \
+    "$detection_id" | sha256sum | awk '{print $1}')"
+  if ! mosquitto_pub -h "$mqtt_host" -p "$mqtt_port" "${mosquitto_auth_args[@]}" \
+    -t "$vigil_correction_topic" -m "$correction_payload" >/dev/null 2>&1; then
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    fail "$id" "could not publish traced correction to '$vigil_correction_topic'"
+    return
+  fi
+
+  local why_json="" writer_receipt=""
+  for attempt in $(seq 1 100); do
+    why_json="$(curl_run -fsS --max-time 5 \
+      "${review_url%/}/why/$detection_id" 2>/dev/null || true)"
+    writer_receipt="$(docker_cli_run logs "$container_id" 2>&1 \
+      | grep -F "correction_writer_receipt=$correction_fingerprint status=landed" \
+      | tail -n 1 || true)"
+    if jq -e --arg label "$correction_label" --arg detection_id "$detection_id" \
+      'any(.corrections[]?; .label == $label and .correction_type == "FalseAlarm" and .anchored_detection_id == $detection_id)' \
+      <<< "$why_json" >/dev/null 2>&1 && [[ -n "$writer_receipt" ]]; then
+      break
+    fi
+    sleep 0.1
+  done
+  local tracer_after
+  tracer_after="$(docker_cli_run exec "$container_id" sh -c \
+    "awk '/^TracerPid:/ { print \$2 }' /proc/$correction_tid/status" 2>/dev/null || true)"
+  th23_stop_product_trace
+
+  if ! jq -e --arg label "$correction_label" --arg detection_id "$detection_id" \
+    'any(.corrections[]?; .label == $label and .correction_type == "FalseAlarm" and .anchored_detection_id == $detection_id)' \
+    <<< "$why_json" >/dev/null 2>&1; then
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    fail "$id" "GET ${review_url%/}/why/$detection_id did not return the exact traced correction object: label '$correction_label', correction_type 'FalseAlarm', anchored_detection_id '$detection_id'"
+    return
+  fi
+  if [[ -z "$writer_receipt" ]]; then
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    fail "$id" "correction read back, but the traced writer emitted no privacy-safe receipt for request fingerprint $correction_fingerprint"
+    return
+  fi
+  if ! [[ "$tracer_after" =~ ^[0-9]+$ ]] || (( tracer_after == 0 )); then
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    not_run "$id" "strace detached from vigil-correct before correction read-back; zero captured calls would not prove zero attempted calls"
+    return
+  fi
+  local network_syscalls
+  network_syscalls="$(grep -E "$network_trace_pattern" "$product_trace_capture" || true)"
+  if [[ -n "$network_syscalls" ]]; then
+    th23_cleanup_trace_resources
+    th23_restore_traps
+    fail "$id" "dedicated correction writer made a network syscall while recording '$correction_label': $(printf '%s' "$network_syscalls" | head -3 | tr '\n' ' ')"
+    return
+  fi
+  th23_cleanup_trace_resources
+  th23_restore_traps
+  pass "$id" "exact anchored MQTT correction object read back from cg through /why JSON while fail-closed syscall tracing observed zero network operations on the dedicated correction writer"
 }
 
 th24() {
@@ -2391,13 +2726,12 @@ review_events_have_rows() {
 th26() {
   local id="TH-26"
   ensure_addon_installed "$id" || return
-  start_addon "$id" "for browser review data-plane audit" || return
-  wait_for_health || { fail "$id" "Vigil health did not reach 200 before browser data-plane audit"; return; }
-  have_cmd python3 || { fail "$id" "python3 is required to host the foreign-origin browser test page"; return; }
+  start_addon "$id" "for browser same-origin boundary audit" || return
+  wait_for_health || { fail "$id" "Vigil health did not reach 200 before browser same-origin boundary audit"; return; }
+  have_cmd python3 || { fail "$id" "python3 is required to host the foreign-origin denial page"; return; }
   have_cmd curl || { fail "$id" "curl is required to wait for the local browser test page"; return; }
-  have_cmd jq || { fail "$id" "jq is required to verify the browser event fixture"; return; }
-  review_events_have_rows || {
-    fail "$id" "Vigil review data plane at $review_url has no event rows; seed a real detection before running browser review acceptance"
+  curl -fsS --max-time 5 "$review_url/events" >/dev/null 2>&1 || {
+    fail "$id" "Vigil review data plane at $review_url is not directly reachable before the browser origin-boundary check"
     return
   }
   local browser
@@ -2442,16 +2776,16 @@ th26() {
     return
   fi
   if [[ "$dump" != *'data-status="PASS"'* ]]; then
-    fail "$id" "browser_cross_origin_fetch_renders_media_and_posts_correction failed from foreign origin ${page_url} to ${review_url}: ${dump:0:700}"
+    fail "$id" "browser_cross_origin_access_is_denied did not reject foreign origin ${page_url} from ${review_url}: ${dump:0:700}"
     return
   fi
-  pass "$id" "browser cross-origin fetch renders snapshot, range-fetches clip transport, and posts correction"
+  pass "$id" "browser rejects foreign-origin access to the same-origin review data plane"
 }
 
 th27() {
   local id="TH-27"
   if [[ -z "$haos_ssh_target" ]]; then
-    pass "$id" "skipped; set HAOS_SSH_TARGET to run the live add-on acceleration check"
+    not_run "$id" "physical HA-OS acceleration was not exercised; run HAOS_SSH_TARGET=<host> TH_RUN_LIST=TH-27 tests/ha-os-vm/run-th-suite.sh"
     return
   fi
   ha_cli_available || { fail "$id" "Home Assistant CLI '$ha_cli' is not available"; return; }
@@ -2598,7 +2932,7 @@ run_th() {
     23|th23|th-23) th23 ;;
     24|th24|th-24) th24 ;;
     25|th25|th-25) th25 ;;
-    26|th26|th-26|browser_cross_origin_fetch_renders_media_and_posts_correction) th26 ;;
+    26|th26|th-26|browser_cross_origin_access_is_denied) th26 ;;
     27|th27|th-27) th27 ;;
     *) fail "TH-RUN" "unknown TH_RUN_LIST entry: $1" ;;
   esac
@@ -2616,8 +2950,24 @@ th_requires_destructive_opt_in() {
   esac
 }
 
+if [[ "${VIGIL_SHELL_SELF_TEST:-}" == "missing-doctor-receipt" ]]; then
+  status=0
+  if assert_receipt_surfaces_match "TH-SELF" "[decode.hardware]" \
+      "doctor output without a receipt" \
+      $'[decode.hardware]\nstatus: active\nactive_backend: gstreamer\nfailure_code: none\naction_kind: none'; then
+    printf 'TH-SELF FAIL missing doctor receipt returned success\n' >&2
+    exit 1
+  fi
+  (( status == 1 )) || {
+    printf 'TH-SELF FAIL missing doctor receipt did not set suite failure\n' >&2
+    exit 1
+  }
+  printf 'TH-SELF PASS missing doctor receipt fails closed\n'
+  exit 0
+fi
+
 if [[ -z "$th_run_list" ]]; then
-  th_run_list="TH-01 TH-02 TH-03 TH-04 TH-26 TH-27"
+  th_run_list="TH-01 TH-02 TH-03 TH-04 TH-26"
 fi
 
 for th_name in $th_run_list; do

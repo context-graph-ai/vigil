@@ -78,6 +78,8 @@ Run `tests/ha-os-vm/ha-integration-smoke.sh` with a live farm camera and the HA-
 - Mosquitto broker add-on running; broker reachable
 - Synthetic or real farm RTSP camera feed live
 - `VIGIL_HEALTH_URL`, `MQTT_HOST`, `MQTT_PORT`, `HA_API_TOKEN`, `HA_API_BASE` set
+- `HA_S4_MANUAL_PROOF` points to the exported automation trace JSON
+- `HA_S5_MEDIA_BROWSE_PROOF` points to the exported HA media-source root response JSON
 
 ### HA-S1 Device assembled itself
 
@@ -101,25 +103,31 @@ Run `tests/ha-os-vm/ha-integration-smoke.sh` with a live farm camera and the HA-
 - Camera entity in Home Assistant Lovelace card shows a live feed:
 - Stream plays inside Home Assistant (not a host-only black tile):
 - go2rtc stream URL resolves from inside HA network namespace:
-- Receipt (screenshot of live tile with visible frames):
+- Camera entity id used by `camera_proxy`:
+- First and second frame SHA-256 values are both present and distinct:
+- Receipt (script output plus screenshot of live tile with visible frames):
 
 ### HA-S4 Automation fired on detection event
 
 - HA automation targeting the detection event entity created or confirmed:
 - Automation triggered on a real detection event (at least one trigger recorded):
 - Automation action completed:
-- Receipt (HA automation trace or logbook entry):
+- Exported trace is JSON with `trace.state=stopped` and `trace.script_execution=finished`:
+- Exported trace contains the exact HA-S2 `detection_id`:
+- `HA_S4_MANUAL_PROOF` path:
+- Receipt (exported HA automation trace):
 
 ### HA-S5 Recorded clip reached via evidence reference
 
-- detection_id from HA-S2 used to run `vigil why <id>` inside the add-on:
+- detection_id from HA-S2 used to query the shipped review endpoint:
   ```
-  docker exec <vigil-container> vigil why <detection_id>
+  curl -fsS "$VIGIL_REVIEW_URL/why/<detection_id>" | jq .
   ```
-- evidence_ref field present in `vigil why` output:
-- Clip file path or URL reachable via the evidence_ref:
-- Clip is NOT browsable via HA Media panel (no media_source entity for Vigil):
-- Receipt (`vigil why` output attached or summarized):
+- Nonempty same-origin `evidence_ref` present in `/why` JSON:
+- Evidence URL returned bytes through the shipped review data plane:
+- Exported `media_source/browse_media` root response is successful and contains no Vigil entry:
+- `HA_S5_MEDIA_BROWSE_PROOF` path:
+- Receipt (`/why` JSON, evidence fetch, and HA media browse response):
 
 ### HA-S6 Correction made from inside Home Assistant
 
@@ -131,20 +139,32 @@ Run `tests/ha-os-vm/ha-integration-smoke.sh` with a live farm camera and the HA-
 - label used:
 - Receipt (correction card interaction screenshot or mosquitto_sub capture):
 
-### HA-S7 `vigil why` lists the correction
+### HA-S7 `/why/<detection_id>` JSON lists the correction
 
-- `vigil why <detection_id>` run inside the add-on container after the correction:
+- Shipped review endpoint queried after the correction:
   ```
-  docker exec <vigil-container> vigil why <detection_id>
+  curl -fsS "$VIGIL_REVIEW_URL/why/<detection_id>" | jq .
   ```
-- Correction listed in output with correct label and correction_type:
+- `.corrections` contains the exact label, `correction_type`, and `anchored_detection_id`:
 - Correction still listed after add-on restart (daemon restart durability):
-- No outbound network calls beyond the local broker observed:
-- Receipt (`vigil why` output attached or summarized):
+- Receipt (`/why` JSON attached or summarized):
+
+### TH-23 Correction writer makes no network syscall
+
+- Exact physical command run:
+  ```
+  TH_RUN_LIST=TH-23 tests/ha-os-vm/run-th-suite.sh
+  ```
+- Real strace positive control captured the deliberately refused loopback connection:
+- Exactly one `vigil-correct` writer was attached before correction publication:
+- Unique correction fingerprint received a `status=landed` writer receipt and its exact label/type/anchor read back through `/why/<detection_id>` JSON:
+- The attached writer emitted zero network syscalls through read-back:
+- Full `TH-23 PASS` output attached:
 
 ### HA-S8 Sign-off
 
 - All seven steps passed:
+- TH-23 correction-writer egress receipt passed:
 - Operator initials:
 - Timestamp:
 - Notes:

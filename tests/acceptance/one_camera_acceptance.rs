@@ -231,6 +231,7 @@ fn frigate_replacement_loop_runs_over_direct_rtsp_synthetic() {
 }
 
 #[test]
+#[ignore = "physical: requires VIGIL_ACCEPTANCE_RTSP_URL and a recorded 30-minute real-camera window; run this exact test explicitly"]
 fn frigate_replacement_real_camera_event_lands_and_walks() {
     let mut failures = Vec::new();
 
@@ -437,10 +438,10 @@ fn frigate_replacement_real_camera_event_lands_and_walks() {
             }
         }
         _ => {
-            println!(
-                "skipped-pending-source: set VIGIL_ACCEPTANCE_RTSP_URL to run the real-camera gate"
+            failures.push(
+                "physical real-camera gate requires VIGIL_ACCEPTANCE_RTSP_URL; absence is NOT RUN, never PASS"
+                    .to_string(),
             );
-            return;
         }
     }
 

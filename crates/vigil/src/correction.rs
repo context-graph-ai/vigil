@@ -5,6 +5,7 @@ use context_graph::{
     RecordObservation, RetentionStatus, Store,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::live_read::{handle_events_read, handle_why_read};
 
@@ -103,7 +104,6 @@ pub struct EventRow {
     pub confidence: f64,
     pub bbox: String,
     pub frame_index: u64,
-    pub zone: Option<String>,
     pub clip_ref: String,
     pub detector_image_ref: String,
     /// True when a WrongClass or FalseAlarm correction has been recorded against this
@@ -167,6 +167,26 @@ fn correction_type_from_str(s: &str) -> Option<CorrectionType> {
     }
 }
 
+/// Privacy-safe correlation key for the correction writer's execution receipt.
+///
+/// The request's random detection UUID makes the value request-specific, and
+/// the log does not print the owner's label or detection identifier directly.
+/// Owner-entered labels are deliberately excluded: an unkeyed digest that
+/// includes a low-entropy name or class would let a log reader test guesses.
+/// This is a correlation fingerprint, not an authentication or secrecy token.
+/// The HA-OS physical audit recomputes it from the request it published and
+/// therefore proves that the syscall-traced writer processed that correction.
+#[doc(hidden)]
+pub fn correction_execution_fingerprint(request: &CorrectionRequest) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"vigil-correction-writer-v1\0");
+    digest.update(request.detection_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(correction_type_to_str(&request.correction_type).as_bytes());
+    digest.update(b"\0");
+    format!("{:x}", digest.finalize())
+}
+
 // ── Correction implementation ──────────────────────────────────────────────
 
 /// Write a human correction anchored to the named detection into cg authority.
@@ -184,6 +204,18 @@ fn correction_type_from_str(s: &str) -> Option<CorrectionType> {
 pub fn record_correction(
     store: &Store,
     request: CorrectionRequest,
+) -> Result<CorrectionReceipt, CorrectionError> {
+    record_correction_with_clock(store, request, &crate::clock::PersistedClock::contextdb())
+}
+
+/// Record a correction using an explicit persisted-time authority.
+///
+/// Workers use this form when a clock was injected at construction. Keeping the
+/// authority in the worker value makes deterministic ordering cross thread boundaries.
+pub fn record_correction_with_clock(
+    store: &Store,
+    request: CorrectionRequest,
+    clock: &crate::clock::PersistedClock,
 ) -> Result<CorrectionReceipt, CorrectionError> {
     // Parse detection_id → ObservationId.
     let uuid = uuid::Uuid::parse_str(&request.detection_id)
@@ -251,7 +283,7 @@ pub fn record_correction(
 
     // Build the correction observation.
     let correction_id = ObservationId::new_v7();
-    let observed_at = chrono::Utc::now();
+    let observed_at = clock.now_utc();
 
     let mut observed_properties: BTreeMap<String, Value> = BTreeMap::new();
     observed_properties.insert(
@@ -516,7 +548,6 @@ pub fn review_events(store: &Store, limit: usize) -> Result<EventsView, ReviewEr
             confidence: row.confidence,
             bbox: row.bbox.clone(),
             frame_index: row.frame_index,
-            zone: row.zone.clone(),
             clip_ref: row.clip_ref.clone(),
             detector_image_ref: row.detector_image_ref.clone(),
             correction_recorded: correction_summary

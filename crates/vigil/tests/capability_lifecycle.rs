@@ -27,21 +27,58 @@
 
 use contextdb_engine::work_ledger::advertise_capability;
 
+use vigil::PersistedClock;
 use vigil::fabric::{FabricRuntime, detector_capability_id};
 use vigil::offload_policy::{
     Decision, DetectorQueueSnapshot, FabricStatusFacts, OffloadPolicyConfig, decide,
     render_fabric_status_receipt,
 };
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock after epoch")
-        .as_millis() as i64
+fn fixed_clock(now_ms: i64) -> PersistedClock {
+    PersistedClock::from_millis_source(move || {
+        u64::try_from(now_ms).expect("test ledger clock is non-negative")
+    })
 }
 
 fn tags(list: &[&str]) -> Vec<String> {
     list.iter().map(|t| t.to_string()).collect()
+}
+
+fn freshest_advertisement_ms(runtime: &FabricRuntime, node_id: &str) -> Option<i64> {
+    let result = runtime
+        .db
+        .execute(
+            "SELECT node_id, advertised_at FROM work_capabilities",
+            &std::collections::HashMap::new(),
+        )
+        .expect("query capability advertisements");
+    let node_index = result
+        .columns
+        .iter()
+        .position(|column| column == "node_id")
+        .expect("capability query returns node_id");
+    let advertised_index = result
+        .columns
+        .iter()
+        .position(|column| column == "advertised_at")
+        .expect("capability query returns advertised_at");
+    result
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let contextdb_core::Value::Text(row_node) = &row[node_index] else {
+                return None;
+            };
+            if row_node != node_id {
+                return None;
+            }
+            match row.get(advertised_index) {
+                Some(contextdb_core::Value::Timestamp(value))
+                | Some(contextdb_core::Value::Int64(value)) => Some(value.to_owned()),
+                _ => None,
+            }
+        })
+        .max()
 }
 
 /// The `remote-detectors=` fragment every operator surface renders, built the
@@ -82,10 +119,11 @@ fn pressured_snapshot() -> DetectorQueueSnapshot {
 #[tokio::test]
 async fn a_restarted_worker_renders_only_its_current_backend() {
     let dir = tempfile::tempdir().expect("data dir");
+    let now = 1_900_000_000_000_i64;
     let runtime = FabricRuntime::start(dir.path(), None, true)
         .await
-        .expect("hub node must stand up");
-    let now = now_ms();
+        .expect("hub node must stand up")
+        .with_persisted_clock(fixed_clock(now));
 
     // The worker first served burn-wgpu, then was restarted with acceleration
     // off and re-advertised burn-cpu (the LATER, current claim). Both
@@ -124,10 +162,11 @@ async fn a_restarted_worker_renders_only_its_current_backend() {
 #[tokio::test]
 async fn a_dead_worker_ages_out_of_remote_detectors() {
     let dir = tempfile::tempdir().expect("data dir");
+    let now = 1_900_000_000_000_i64;
     let runtime = FabricRuntime::start(dir.path(), None, true)
         .await
-        .expect("hub node must stand up");
-    let now = now_ms();
+        .expect("hub node must stand up")
+        .with_persisted_clock(fixed_clock(now));
 
     // A worker advertised long ago and has not contacted the hub since. Its
     // last-contact (for a never-refreshed advertisement, the advertised_at
@@ -153,10 +192,11 @@ async fn a_dead_worker_ages_out_of_remote_detectors() {
 #[tokio::test]
 async fn offload_routes_to_the_live_worker_never_a_dead_one() {
     let dir = tempfile::tempdir().expect("data dir");
+    let now = 1_900_000_000_000_i64;
     let runtime = FabricRuntime::start(dir.path(), None, true)
         .await
-        .expect("hub node must stand up");
-    let now = now_ms();
+        .expect("hub node must stand up")
+        .with_persisted_clock(fixed_clock(now));
 
     advertise_capability(
         &runtime.db,
@@ -208,10 +248,11 @@ async fn offload_routes_to_the_live_worker_never_a_dead_one() {
 #[tokio::test]
 async fn only_a_dead_worker_means_no_offload() {
     let dir = tempfile::tempdir().expect("data dir");
+    let now = 1_900_000_000_000_i64;
     let runtime = FabricRuntime::start(dir.path(), None, true)
         .await
-        .expect("hub node must stand up");
-    let now = now_ms();
+        .expect("hub node must stand up")
+        .with_persisted_clock(fixed_clock(now));
 
     advertise_capability(
         &runtime.db,
@@ -276,12 +317,14 @@ async fn a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls() {
         .with_capability_liveness_ttl_ms(150);
 
     // The remote worker's current detector backend, as its first sync landed it.
+    let initial_advertised_at = i64::try_from(contextdb_core::Wallclock::now().0)
+        .expect("contextdb wall clock fits ledger timestamp");
     advertise_capability(
         &runtime.db,
         "live-worker",
         &detector_capability_id("burn-cpu"),
         &tags(&["backend:burn-cpu"]),
-        now_ms(),
+        initial_advertised_at,
     )
     .expect("worker's detector capability lands");
 
@@ -341,9 +384,23 @@ async fn a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls() {
         })
     };
 
-    // Let the clock pass several TTLs (150ms each) while the worker keeps
-    // advertising on its 30ms cadence.
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    // Wait for observed ledger progress across three TTLs. The condition is
+    // the contract; the timeout only bounds a broken worker and cannot turn a
+    // slow scheduler into a false product failure.
+    let target_advertised_at = initial_advertised_at + 3 * 150;
+    let refreshed_at = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(advertised_at) = freshest_advertisement_ms(&runtime, "live-worker")
+                && advertised_at >= target_advertised_at
+            {
+                break advertised_at;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("live worker must refresh its ledger advertisement across three liveness TTLs");
+    assert!(refreshed_at >= target_advertised_at);
     let line = rendered_status_line(&runtime).await;
 
     shutdown.store(true, std::sync::atomic::Ordering::SeqCst);

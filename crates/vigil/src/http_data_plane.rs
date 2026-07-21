@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
-    CorrectionError, CorrectionRequest, CorrectionType, EventRow, ReviewError, WhyView,
-    record_correction, review_events, review_why,
+    CorrectionError, CorrectionRequest, CorrectionType, EventRow, PersistedClock, ReviewError,
+    WhyView, record_correction_with_clock, review_events, review_why,
 };
 
 const DEFAULT_EVENT_LIMIT: usize = 100;
@@ -72,6 +72,19 @@ pub fn spawn_review_data_plane(
     store: Store,
     data_dir: PathBuf,
     port: u16,
+) -> Result<ReviewDataPlaneHandle, String> {
+    spawn_review_data_plane_with_clock(store, data_dir, port, PersistedClock::contextdb())
+}
+
+/// Spawn the review worker with an explicit persisted-time authority.
+///
+/// The clock is cloned into the worker instead of relying on thread-local test
+/// state, so correction ordering can be tested across the real HTTP boundary.
+pub fn spawn_review_data_plane_with_clock(
+    store: Store,
+    data_dir: PathBuf,
+    port: u16,
+    clock: PersistedClock,
 ) -> Result<ReviewDataPlaneHandle, String> {
     let (server, local_addr) = bind_review_server(port)?;
     let bind_port = local_addr.port();
@@ -131,7 +144,7 @@ pub fn spawn_review_data_plane(
                     } else {
                         let store = Arc::clone(&store);
                         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                            handle_request(request, store);
+                            handle_request(request, store, &clock);
                         }));
                         if result.is_err() {
                             eprintln!("review_data_plane_request_panic=true");
@@ -202,15 +215,14 @@ fn handle_media_request(request: Request, data_dir: Arc<PathBuf>, shutdown: Arc<
     let _ = request.respond(response);
 }
 
-fn handle_request(mut request: Request, store: Arc<Store>) {
+fn handle_request(mut request: Request, store: Arc<Store>, clock: &PersistedClock) {
     let method = request.method().clone();
     let raw_url = request.url().to_string();
     let path = raw_url.split('?').next().unwrap_or(raw_url.as_str());
     let response = match (&method, path) {
         (Method::Get, "/events") => events_response(&store, &raw_url),
         (Method::Get, path) if path.starts_with("/why/") => why_response(&store, path),
-        (Method::Post, "/correction") => correction_response(&store, &mut request),
-        (Method::Options, _) => empty_response(204),
+        (Method::Post, "/correction") => correction_response(&store, &mut request, clock),
         (Method::Post, "/events") => json_error(405, "method_not_allowed"),
         _ => json_error(404, "not_found"),
     };
@@ -253,7 +265,6 @@ fn event_row_json(row: &EventRow) -> Value {
         "confidence": row.confidence,
         "bbox": row.bbox,
         "frame_index": row.frame_index,
-        "zone": row.zone,
         "clip_ref": media_route(&row.clip_ref),
         "detector_image_ref": media_route(&row.detector_image_ref),
         "correction_recorded": row.correction_recorded,
@@ -315,7 +326,11 @@ fn why_json(why: &WhyView) -> Value {
     })
 }
 
-fn correction_response(store: &Store, request: &mut Request) -> Response<Box<dyn Read + Send>> {
+fn correction_response(
+    store: &Store,
+    request: &mut Request,
+    clock: &PersistedClock,
+) -> Response<Box<dyn Read + Send>> {
     let Some(body) = read_limited_body(request) else {
         return json_error(413, "payload_too_large");
     };
@@ -337,13 +352,14 @@ fn correction_response(store: &Store, request: &mut Request) -> Response<Box<dyn
         .get("label")
         .and_then(Value::as_str)
         .map(ToString::to_string);
-    match record_correction(
+    match record_correction_with_clock(
         store,
         CorrectionRequest {
             detection_id,
             label,
             correction_type,
         },
+        clock,
     ) {
         Ok(receipt) => json_response(200, &json!({ "correction_id": receipt.correction_id })),
         Err(CorrectionError::NoAnchor(_)) => json_error(404, "detection_not_found"),
@@ -524,9 +540,10 @@ fn why_error_response(error: ReviewError) -> Response<Box<dyn Read + Send>> {
 
 fn json_response(status: u16, value: &Value) -> Response<Box<dyn Read + Send>> {
     let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
-    let mut headers = cors_headers();
-    headers.push(header("Content-Type", "application/json"));
-    headers.push(header("Content-Length", &body.len().to_string()));
+    let headers = vec![
+        header("Content-Type", "application/json"),
+        header("Content-Length", &body.len().to_string()),
+    ];
     Response::new(
         StatusCode(status),
         headers,
@@ -540,34 +557,10 @@ fn json_error(status: u16, code: &str) -> Response<Box<dyn Read + Send>> {
     json_response(status, &json!({ "error": code }))
 }
 
-fn empty_response(status: u16) -> Response<Box<dyn Read + Send>> {
-    let mut headers = cors_headers();
-    headers.push(header("Content-Length", "0"));
-    Response::new(
-        StatusCode(status),
-        headers,
-        Box::new(io::empty()) as Box<dyn Read + Send>,
-        Some(0),
-        None,
-    )
-}
-
 fn media_headers(content_type: &str) -> Vec<Header> {
-    let mut headers = cors_headers();
-    headers.push(header("Content-Type", content_type));
-    headers.push(header("Accept-Ranges", "bytes"));
-    headers
-}
-
-fn cors_headers() -> Vec<Header> {
     vec![
-        header("Access-Control-Allow-Origin", "*"),
-        header("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-        header("Access-Control-Allow-Headers", "content-type, range"),
-        header(
-            "Access-Control-Expose-Headers",
-            "content-range, accept-ranges, content-length, content-type",
-        ),
+        header("Content-Type", content_type),
+        header("Accept-Ranges", "bytes"),
     ]
 }
 

@@ -1,0 +1,472 @@
+# Existing physical identities are registered for drift detection. Registration
+# is executable inventory, not product-owner ratification or a PASS receipt.
+version = 2
+
+[[case]]
+id = "TH-00"
+source = "tests/ha-os-vm/bootstrap.sh"
+handler = "script"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-00 proves a real amd64 HA-OS VM, Home Assistant, Mosquitto, Frigate, RTSP input, and broker round-trip are jointly usable; no local deterministic test can instantiate that physical estate."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: TH-00 is correctly blocked on the declared physical HA-OS, Home Assistant, Mosquitto, Frigate, RTSP, and broker-round-trip estate."
+blocker_reason = "Requires the declared amd64 HA-OS VM with reachable Home Assistant, Mosquitto, Frigate, and RTSP camera state; repository-only execution cannot prove those services coexist."
+deterministic_witnesses = []
+explicit_run = "VIGIL_PHYSICAL_CASE=TH-00 tests/ha-os-vm/bootstrap.sh"
+
+[[case]]
+id = "TH-01"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th01"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-01 installs or rebuilds the current add-on through a real Home Assistant Supervisor and rejects in-Supervisor Rust compilation."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: Supervisor install or rebuild and installed-package state require the physical Home Assistant Supervisor."
+blocker_reason = "Only a real Home Assistant Supervisor can prove the add-on repository install/rebuild transaction and installed package state."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-01 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-02"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th02"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-02 applies Supervisor options, starts the installed add-on, verifies Supervisor watchdog state, and dwells on the physical health endpoint."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: Supervisor option acceptance, watchdog state, installed-container health, and dwell are physical-only evidence."
+blocker_reason = "Local runtime tests cannot prove Supervisor option acceptance, Supervisor watchdog enablement, or health of the installed HA-OS container."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-02 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-03"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th03"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-03 restarts the installed add-on and requires recent startup and existing-store evidence through the Home Assistant Supervisor log surface."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the post-restart Supervisor log surface and installed-store evidence require the physical Supervisor container."
+blocker_reason = "Only the physical Supervisor log API can prove that container logs survive and appear on Home Assistant's operator-facing log surface after restart."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-03 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-04"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th04"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-04 measures a running Frigate installation's API metrics and MQTT publish rate before and while the Vigil add-on runs."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: Frigate API metrics, live broker rate, real cameras, and HA-OS contention cannot be reproduced by a Vigil-only deterministic witness."
+blocker_reason = "Requires the physical Frigate workload, its real cameras, broker traffic, and HA-OS resource contention; a Vigil-only test cannot prove coexistence."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-04 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-05"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th05"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-05 stops the installed add-on through Supervisor, requires its health socket to refuse connections, and verifies the physical Frigate installation remains reachable."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: Supervisor stop, refused installed-container health, and continued separately installed Frigate service require the physical estate."
+blocker_reason = "Repository tests cannot prove Supervisor stop semantics and continued availability of a separately installed Frigate add-on."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-05 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-06"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th06"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-06 uninstalls Vigil through Supervisor and inspects the HA-OS Docker host for removed container, image-owned state, and unaffected Frigate metrics."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: Supervisor uninstall cleanup of the container and mounted data plus unaffected Frigate metrics requires an installed HA-OS add-on."
+blocker_reason = "Only an installed HA-OS add-on can prove Supervisor uninstall cleanup across its container, host data mount, and neighboring Frigate service."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-06 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-07"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th07"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-07 compares the installed add-on's store identity across Supervisor stop/start and a full HA-OS host reboot."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: mounted store identity across Supervisor restart and a full HA-OS host reboot is physical-only evidence."
+blocker_reason = "A local process restart cannot prove Supervisor-mounted /data identity survives a physical HA-OS host reboot."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-07 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-08"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th08"
+gate = "physical"
+status = "active"
+lineage = "TH-08 now enforces the owner-approved boundary: host networking for fabric, a narrow DRM render-node mapping, AppArmor enabled, host_pid false, and no full_access or privileged grant."
+reviewed_by = "Fermat independent physical-to-deterministic review, 2026-07-21: both handlers require at least one exact /dev/dri/renderD<number> self-mapping with rwm, host networking for fabric, host_pid false, AppArmor enabled, and no scalar, list, full-access, or privileged grant."
+deterministic_witnesses = ["vigil::addon_config_surface::addon_config_maps_video_device_and_forbids_full_access"]
+explicit_run = "TH_RUN_LIST=TH-08 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-09"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th09"
+gate = "physical"
+status = "active"
+lineage = "TH-09 now requires Vigil discovery below homeassistant/# while rejecting Vigil-named traffic below frigate/#; the deterministic publisher witness restricts every generated discovery topic to the same namespace."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker witness requires Vigil discovery below homeassistant/# and rejects every generated discovery topic below frigate/#, matching the owner-approved namespace boundary."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
+explicit_run = "TH_RUN_LIST=TH-09 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-10"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th10"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-10 compares the add-on's declared port set with listening sockets inside the real Supervisor-managed container."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: only the installed Supervisor container can prove its actual listening socket set equals the declared two-port surface."
+blocker_reason = "Static configuration and local HTTP tests cannot prove the installed HA-OS container exposes no additional runtime listeners."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-10 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-11"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th11"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-11 performs a real Supervisor version-A to version-B update and compares mounted store identity and Supervisor options across the transaction."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the Supervisor version-A to version-B transaction and preservation of mounted store identity and options require physical Supervisor state."
+blocker_reason = "Only Home Assistant Supervisor can prove update/rebuild behavior preserves both its option object and the add-on's mounted data identity."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-11 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-12"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th12"
+gate = "physical"
+status = "active"
+lineage = "HA-OS discovery acceptance verifies that Vigil publishes device and per-camera discovery to the real Home Assistant broker."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker discovery witness enforces the same core invariant."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
+explicit_run = "TH_RUN_LIST=TH-12 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-13"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th13"
+gate = "physical"
+status = "active"
+lineage = "TH-13 requires discovery topics and entity ids to remain a pure function of service/camera identity across Vigil and broker restarts; the deterministic generator witness compares repeated generations and a distinct identity."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: repeated and distinct-identity generation proves the stable identity function, and the real-broker witness proves those generated discovery topics are actually published."
+deterministic_witnesses = [
+  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
+  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+]
+explicit_run = "TH_RUN_LIST=TH-13 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-14"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th14"
+gate = "physical"
+status = "active"
+lineage = "TH-14 requires detection id, class, and confidence in one real-broker event, then resolves that same detection from cg through why; the deterministic witness builds the production payload from one cg why record, publishes it through Mosquitto, and value-compares the received id, class, and confidence to that same record."
+reviewed_by = "Fermat independent physical-to-deterministic review, 2026-07-21: physical TH-14 requires nonempty typed broker fields, resolves that exact detection ID through both the installed CLI and structured /why route, and value-compares ID, class, and numeric confidence with the same cg record; the deterministic real-broker witness enforces the identical causal join."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker"]
+explicit_run = "TH_RUN_LIST=TH-14 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-15"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th15"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-15 probes a real go2rtc stream from inside Home Assistant's network namespace and requires a Generic Camera entity to return changing frames."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: go2rtc codec reachability inside Home Assistant's namespace and two changing camera_proxy frames require the physical HA/go2rtc installation."
+blocker_reason = "Only a physical Home Assistant/go2rtc installation can prove codec reachability inside HA's namespace and visible moving playback through the registered camera entity."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-15 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-16"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th16"
+gate = "physical"
+status = "active"
+lineage = "TH-16 publishes an Identity correction through the production broker subscriber and reads it from cg through why; the direct real-broker witness proves that complete Identity path."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the production subscriber receives an Identity correction from a SUBACK-proven real-broker path, commits it to cg, and review_why value-compares both the label and Identity type."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg"]
+explicit_run = "TH_RUN_LIST=TH-16 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-17"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th17"
+gate = "physical"
+status = "active"
+lineage = "TH-17 requires disable-camera silence, clears retained snapshot state before the action and requires causal nonempty bytes on the named snapshot topic, then requires acknowledge on the named detection; the real-broker witness exercises the same three handlers."
+reviewed_by = "Fermat independent physical-to-deterministic review, 2026-07-21: both paths prove named-camera disable behavior, causal nonempty snapshot bytes after a broker-confirmed subscription, and an Identity acknowledgement read back from cg; the physical silence audit scans the full shared-topic window after SUBACK and ignores sibling-camera traffic."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::operator_action_command_effects_action"]
+explicit_run = "TH_RUN_LIST=TH-17 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-18"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th18"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-18 kills the real add-on container without MQTT DISCONNECT and requires Mosquitto to publish the exact retained offline last-will payload."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: an unclean kill of the production subscriber followed by Mosquitto's exact retained last-will payload has no equivalent deterministic witness."
+blocker_reason = "No deterministic test currently drops the production subscriber's TCP session uncleanly and observes Mosquitto publish its last will; discovery metadata alone does not prove broker behavior."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-18 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-19"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th19"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-19 chmods the physical Supervisor data directory, restarts the installed add-on, and requires the runtime-detected store-open failure to cause a named broker running-condition state."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: TH-19 is honestly classified as physical-blocked because no deterministic witness causally carries an actual production store-open failure to the real broker; injected HealthState values are not equivalent."
+blocker_reason = "No deterministic witness currently starts the production runtime against an actually inaccessible store and observes that causal startup fault reach the real broker; injected HealthState values do not prove detection."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-19 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-20"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th20"
+gate = "physical"
+status = "active"
+lineage = "TH-20 now requires exactly one whole-service running-condition entity and zero per-camera health entities; the deterministic discovery witness asserts both cardinalities from generated payloads."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the witness asserts exactly one whole-service running-condition and rejects health, problem, status, diagnostic, connectivity, and availability roles on per-camera discovery."
+deterministic_witnesses = ["vigil::ha_discovery::tests::discovery_has_no_per_camera_health_entity"]
+explicit_run = "TH_RUN_LIST=TH-20 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-21"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th21"
+gate = "physical"
+status = "active"
+lineage = "TH-21 requires Vigil not to ship or auto-register its removed legacy Lovelace gallery; the structural witness scans the add-on package and runtime for the exact obsolete resource and registration mechanisms."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the structural witness rejects the exact removed gallery asset and its package or runtime registration mechanisms, matching the legacy-resource absence contract."
+deterministic_witnesses = ["vigil::source_scan_contract::vigil_addon_does_not_auto_install_legacy_lovelace_gallery"]
+explicit_run = "TH_RUN_LIST=TH-21 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-22"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th22"
+gate = "physical"
+status = "active"
+lineage = "TH-22 now fails when broker observation fails and requires a numeric zero event count; paired witnesses prove the real runtime lands no empty/undecodable observation and a ConnAck-proven production publisher emits no unsolicited event."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the runtime witness lands no event for empty, zero-media, and undecodable streams, while the ConnAck-proven publisher witness rejects unsolicited broker events."
+deterministic_witnesses = [
+  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+  "vigil::ha_mqtt_broker::empty_stream_publishes_no_event_to_broker",
+]
+explicit_run = "TH_RUN_LIST=TH-22 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-23"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th23"
+gate = "physical"
+status = "active"
+lineage = "HA-OS physical acceptance attaches fail-closed network-syscall tracing to the dedicated correction writer before publishing a real MQTT correction, then requires the exact label/type/anchor through shipped /why JSON and zero traced network operations."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the witnesses jointly freeze fingerprint correlation, fail-closed physical tracing, a planted network call inside the dedicated writer closure, real broker correction landing, and durable cg readback."
+deterministic_witnesses = [
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+  "vigil::ha_mqtt_broker::correction_path_makes_no_outbound_network_beyond_broker",
+  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "xtask::test_estate::tests::ha_smoke_required_steps_cannot_skip_or_warn_green",
+]
+explicit_run = "TH_RUN_LIST=TH-23 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-24"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th24"
+gate = "physical"
+status = "active"
+lineage = "TH-24 requires a broker-ingressed correction to remain in cg and read through /why after restart; the paired witnesses prove production MQTT ingress and durable store reopen/readback."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: one witness proves production MQTT correction ingress into cg and the other proves the correction survives store reopen and remains visible through why."
+deterministic_witnesses = [
+  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+]
+explicit_run = "TH_RUN_LIST=TH-24 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-25"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th25"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "TH-25 restarts the installed Mosquitto add-on and requires the long-lived Vigil subscriber to reconnect, re-announce discovery and online availability, and publish a fresh detection."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: restarting a real broker under the long-lived subscriber and observing rediscovery, online availability, and a fresh detection has no equivalent one-shot broker witness."
+blocker_reason = "No deterministic test currently restarts a real broker under the production long-lived subscriber and observes all three post-ConnAck outputs; one-shot broker tests are not equivalent."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-25 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-26"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th26"
+gate = "physical"
+status = "active"
+lineage = "Owner same-origin ruling: real browser acceptance must deny foreign-origin review-plane access; registration is not a completed run receipt."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the deterministic CORS witness enforces the same foreign-origin denial invariant."
+deterministic_witnesses = ["vigil::http_data_plane::review_data_plane_does_not_enable_cross_origin_access"]
+explicit_run = "TH_RUN_LIST=TH-26 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "TH-27"
+source = "tests/ha-os-vm/run-th-suite.sh"
+handler = "th27"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "Physical acceleration audit reports NOT-RUN and exits nonzero when HAOS_SSH_TARGET is absent; registration is not a completed receipt."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: runtime-uid DRM access and matching decode and detection receipts from the installed HA-OS container require the configured physical device."
+blocker_reason = "Requires the configured DRM render character device to be readable and writable by the dropped add-on uid and requires matching decode/detection receipts from the physical HA-OS container."
+deterministic_witnesses = []
+explicit_run = "TH_RUN_LIST=TH-27 tests/ha-os-vm/run-th-suite.sh"
+
+[[case]]
+id = "HA-S1"
+source = "tests/ha-os-vm/ha-integration-smoke.sh"
+handler = "section"
+gate = "physical"
+status = "active"
+lineage = "Home Assistant physical smoke step verifies device and per-camera discovery against a real broker; registration is not a completed run receipt."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker discovery witness enforces the same core invariant."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
+explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S1 full-suite receipt"
+
+[[case]]
+id = "HA-S2"
+source = "tests/ha-os-vm/ha-integration-smoke.sh"
+handler = "section"
+gate = "physical"
+status = "active"
+lineage = "Home Assistant physical smoke step verifies a real Vigil detection event delivered through the broker; registration is not a completed run receipt."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker event witness enforces the same delivery invariant."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker"]
+explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S2 full-suite receipt"
+
+[[case]]
+id = "HA-S3"
+source = "tests/ha-os-vm/ha-integration-smoke.sh"
+handler = "section"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "HA-S3 now requires a registered go2rtc stream and two distinct frames delivered through the real Home Assistant camera_proxy entity before live playback passes."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the step fails without a registered go2rtc stream, a Vigil camera entity, and two distinct camera_proxy frames; those facts require physical Home Assistant."
+blocker_reason = "Only a running Home Assistant/go2rtc installation can prove the registered Generic Camera entity decodes and advances live frames inside HA's network namespace."
+deterministic_witnesses = []
+explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S3 full-suite receipt"
+
+[[case]]
+id = "HA-S4"
+source = "tests/ha-os-vm/ha-integration-smoke.sh"
+handler = "section"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "HA-S4 now parses the exported automation trace and requires terminal success causally containing the exact HA-S2 detection id."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: missing proof is NOT-RUN, and the supplied trace must finish successfully while containing the exact HA-S2 detection id from the physical automation engine."
+blocker_reason = "Only Home Assistant's automation engine can execute the configured owner automation and export the completed trace caused by the physical detection event."
+deterministic_witnesses = []
+explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S4 full-suite receipt"
+
+[[case]]
+id = "HA-S5"
+source = "tests/ha-os-vm/ha-integration-smoke.sh"
+handler = "section"
+gate = "physical"
+status = "implementation-blocked-physical"
+lineage = "HA-S5 now requires /why JSON to contain a nonempty same-origin evidence_ref, fetches its bytes through the shipped review plane, and validates a successful HA media-source root response contains no Vigil entry."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the step fails closed unless physical why returns a same-origin fetchable evidence reference and the exported successful HA media root contains no Vigil entry."
+blocker_reason = "Repository-local review-plane tests cannot prove the installed Home Assistant media-source root contains no Vigil exposure while the physical add-on evidence URL remains reachable."
+deterministic_witnesses = []
+explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S5 full-suite receipt"
+
+[[case]]
+id = "HA-S6"
+source = "tests/ha-os-vm/ha-integration-smoke.sh"
+handler = "section"
+gate = "physical"
+status = "active"
+lineage = "Home Assistant physical smoke step verifies a broker correction command lands in the Context Graph; registration is not a completed run receipt."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker correction witness enforces the same landing invariant."
+deterministic_witnesses = ["vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg"]
+explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S6 full-suite receipt"
+
+[[case]]
+id = "HA-S7"
+source = "tests/ha-os-vm/ha-integration-smoke.sh"
+handler = "section"
+gate = "physical"
+status = "active"
+lineage = "Home Assistant physical smoke requires the exact correction label/type/anchor through shipped /why JSON; TH-23 exclusively owns correction-writer egress proof."
+reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the witnesses jointly prove broker-ingressed typed correction, restart durability required by the checklist, and exact correction rendering through the shipped why route."
+deterministic_witnesses = [
+  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "vigil::ha_correction_seam::correction_survives_daemon_restart",
+  "vigil::http_data_plane::http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent",
+]
+explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S7 full-suite receipt"
+
+[[asset]]
+path = "tests/ha-os-vm/bootstrap.sh"
+sha256 = "sha256:54ad3a87a6b62bef49d5166c909f69c73c31ca816d5814a4591dc0139233158e"
+kind = "shell-suite"
+lineage = "HA-OS bootstrap acceptance script containing TH-00."
+
+[[asset]]
+path = "tests/ha-os-vm/capture-frigate-metrics.sh"
+sha256 = "sha256:49804a2d0cf1ac24710b5052402aec6f6c75c7e79cf1d7eb7918eb848db1c4a5"
+kind = "shell-helper"
+lineage = "Frigate coexistence metrics helper consumed by the TH suite."
+
+[[asset]]
+path = "tests/ha-os-vm/ha-integration-smoke.sh"
+sha256 = "sha256:df27d4b3c3521158c4b12ad70c1415fbcf4959a21897ee2e7ca53d5c8ffadfef"
+kind = "shell-suite"
+lineage = "Home Assistant integration physical smoke and checklist-step runner."
+
+[[asset]]
+path = "tests/ha-os-vm/run-th-suite.sh"
+sha256 = "sha256:3a20fab76b471fbea8f2ef529b22d34cb0bfef9dd24b0713189cd573912a35d7"
+kind = "shell-suite"
+lineage = "Named TH-01 through TH-27 HA-OS physical acceptance suite."
+
+[[asset]]
+path = "tests/ha-os-vm/strace.Dockerfile"
+sha256 = "sha256:8e77c64c1ce7de24bd17f089601ba607be5ee5a7ada19e91993d28a1ac625bba"
+kind = "trace-image"
+lineage = "Test-only strace sidecar used by TH-23 for a real positive control and correction-writer syscall capture."
+
+[[asset]]
+path = "tests/ha-os-vm/browser-cross-origin-fetch.html"
+sha256 = "sha256:dda598e956e42f225105546b5250b9b91cc53ce5280331ccd92194e36a16e611"
+kind = "browser-harness"
+lineage = "Browser-origin review data-plane harness consumed by TH-26."
+
+[[asset]]
+path = "tests/ha-os-vm/farm-release-checklist.md"
+sha256 = "sha256:bc4ad7b87132f6743d271e01e2a0491a455c09f72d4d6bd33b9ea1ec5c7195b0"
+kind = "physical-checklist"
+lineage = "Physical release receipt checklist; registration is not a completed receipt."
+
+[[asset]]
+path = "tests/ha-os-vm/store_probe.rs"
+sha256 = "sha256:2b4fd62d97a06d454edf2824f195f4b81239cef061df78f9031ed69b1189c946"
+kind = "probe-source"
+lineage = "Static store probe source consumed by HA-OS acceptance."

@@ -42,6 +42,7 @@ fn packaging_docs_and_harness_surfaces() -> Vec<SurfaceTarget> {
         SurfaceTarget::File("addons/vigil/translations/en.yaml"),
         SurfaceTarget::File("addons/vigil/Dockerfile"),
         SurfaceTarget::File("Dockerfile"),
+        SurfaceTarget::File("Dockerfile.hardware"),
         SurfaceTarget::File(RELEASE_NOTES_PATH),
         SurfaceTarget::ShellScripts("tests/ha-os-vm"),
     ]
@@ -190,6 +191,7 @@ fn packaging_and_docs_surfaces_are_covered_by_the_cleanliness_scan() {
         "addons/vigil/translations/en.yaml",
         "addons/vigil/Dockerfile",
         "Dockerfile",
+        "Dockerfile.hardware",
         RELEASE_NOTES_PATH,
     ] {
         assert!(

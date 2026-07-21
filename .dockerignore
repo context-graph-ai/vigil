@@ -1,9 +1,9 @@
 *
 !Dockerfile
-!target/
-!target/x86_64-unknown-linux-musl/
-!target/x86_64-unknown-linux-musl/release/
-!target/x86_64-unknown-linux-musl/release/vigil
-!target/aarch64-unknown-linux-musl/
-!target/aarch64-unknown-linux-musl/release/
-!target/aarch64-unknown-linux-musl/release/vigil
+!dist/
+dist/**
+!dist/docker/
+!dist/docker/amd64/
+!dist/docker/amd64/vigil
+!dist/docker/arm64/
+!dist/docker/arm64/vigil

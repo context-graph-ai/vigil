@@ -1,0 +1,47 @@
+# Exact legacy source-text scanners. New files fail until they have reviewed
+# structural lineage or, preferably, behavioral/typed replacement evidence.
+version = 1
+
+[[file]]
+path = "crates/vigil/tests/addon_config_surface.rs"
+reason = "Legacy add-on YAML/help surface scanner; replace with the typed packaging contract checker."
+
+[[file]]
+path = "crates/vigil/tests/artifact_profile_honesty.rs"
+reason = "Legacy Docker/YAML/release-workflow scanner; retained until named image builds replace it."
+
+[[file]]
+path = "crates/vigil/tests/detection_accel_backend.rs"
+reason = "Mixed accelerated-backend behavior and existing live-wiring source parser; move the parser to the central structural checker."
+
+[[file]]
+path = "crates/vigil/tests/fabric_config_defaults.rs"
+reason = "Mixed behavioral and source-literal fabric config proof; split before removing this allowance."
+
+[[file]]
+path = "crates/vigil/tests/first_light_loop.rs"
+reason = "Accepted first-light no-runtime-oracle-download journey includes an existing oracle source ownership check."
+
+[[file]]
+path = "crates/vigil/tests/oss_cleanliness_scan.rs"
+reason = "Reviewed OSS leakage structural/adversarial scanner pending syntax-aware central replacement."
+
+[[file]]
+path = "crates/vigil/tests/probe_deadline_knob_surface.rs"
+reason = "Legacy add-on schema/help text proof pending typed configuration table replacement."
+
+[[file]]
+path = "crates/vigil/tests/runtime_packages_manifest.rs"
+reason = "Legacy package/Docker/shell parser pending typed manifest and container replacement evidence."
+
+[[file]]
+path = "crates/vigil/tests/source_scan_contract.rs"
+reason = "Reviewed source-structure regression collection pending behavioral or syntax-aware replacements."
+
+[[file]]
+path = "crates/vigil/tests/transport_purity.rs"
+reason = "Accepted transport-neutrality architecture guard pending syntax-aware central replacement."
+
+[[file]]
+path = "tests/acceptance/common.rs"
+reason = "Container acceptance stages the checked-in static Dockerfile and one host binary into an exact temporary context; the real container health, isolation, persistence, and shutdown probes provide behavioral evidence."

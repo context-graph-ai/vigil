@@ -1,39 +1,50 @@
 // MQTT broker integration tests.
 //
 // Tests that do NOT require the live detector run in both `pr` and `ci-full` profiles.
-// Tests that DO require a live detector are gated with `#[cfg(feature = "first-light-acceptance")]`.
+// Acceptance-only cg/MQTT seams are gated with `#[cfg(feature = "first-light-acceptance")]`.
+// Detector inference quality belongs to first_light_loop.rs; this file uses
+// deterministic cg detections so broker semantics do not depend on inference.
 //
 // REGRESSION GUARDs pass at scaffold.
 // RED tests fail on assertions via the deliberate wrong stubs.
 
-use std::collections::BTreeSet;
-use std::fs;
-use std::io::Read;
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+// The acceptance support module and this broker suite intentionally include
+// the same shared test-helper source in separate module namespaces.
+#![cfg_attr(feature = "first-light-acceptance", allow(clippy::duplicate_mod))]
+
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicUsize, Ordering},
     mpsc,
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use context_graph::{EmbedderConfig, Store, StoreConfig};
-use tempfile::TempDir;
 use vigil::{
     CameraConfig, CorrectionRequest, CorrectionType, HealthState, HealthStatus, MqttConfig,
     ServiceConfig, WiredSubscriberConfig, generate_discovery_payloads, mqtt_connect_intent,
-    publish_discovery_to_broker, record_correction, spawn_detection_publisher,
-    spawn_production_subscriber,
+    publish_discovery_to_broker, spawn_detection_publisher, spawn_production_subscriber,
 };
+
+#[path = "deterministic_test_support.rs"]
+mod deterministic_test_support;
+use deterministic_test_support::{MqttProbe, TcpPortReservation, required_tool, wait_until};
 
 // ── Acceptance-only imports ────────────────────────────────────────────────
 #[cfg(feature = "first-light-acceptance")]
-use vigil::{CorrectionError, publish_detection_event, review_events, review_why};
+use vigil::{
+    CorrectionError, DetectionInput, map_detection_to_event_payload, publish_detection_event,
+    record_correction, review_events, review_why,
+};
 
-// ── Acceptance test support (OnceLock-seeded template store) ──────────────
+// ── Acceptance test support (deterministic cg fixture) ────────────────────
 
 #[cfg(feature = "first-light-acceptance")]
 #[path = "ha_test_support.rs"]
@@ -42,49 +53,141 @@ mod ha_test_support;
 // ── Mosquitto fixture ─────────────────────────────────────────────────────
 
 struct MosquittoFixture {
+    pub host: String,
     pub port: u16,
     pub child: Child,
-    _conf_dir: TempDir,
+    _stdout: Arc<Mutex<String>>,
+    _stderr: Arc<Mutex<String>>,
+    _config: File,
+    _exclusive: MutexGuard<'static, ()>,
 }
+
+static MOSQUITTO_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+const MOSQUITTO_FIXTURE_PORT: u16 = 41_883;
 
 impl MosquittoFixture {
     fn start() -> Result<Self, String> {
-        let port = free_port()?;
-        let conf_dir = tempfile::tempdir().map_err(|e| format!("mosquitto conf dir: {e}"))?;
-        let conf_path = conf_dir.path().join("mosquitto.conf");
-        fs::write(&conf_path, format!("port {port}\nallow_anonymous true\n"))
-            .map_err(|e| format!("write mosquitto.conf: {e}"))?;
-
-        let mosquitto_bin = find_binary("mosquitto")
-            .or_else(|| Some(PathBuf::from("/usr/sbin/mosquitto")))
-            .filter(|p| p.exists())
-            .ok_or_else(|| "mosquitto binary not found".to_string())?;
-
-        let child = Command::new(&mosquitto_bin)
+        let exclusive = MOSQUITTO_FIXTURE_LOCK
+            .lock()
+            .map_err(|_| "Mosquitto fixture exclusivity lock was poisoned".to_string())?;
+        let mosquitto_bin = required_tool(
+            "VIGIL_MOSQUITTO_BIN",
+            "mosquitto",
+            &[Path::new("/usr/sbin/mosquitto")],
+        )?;
+        let host = process_unique_loopback()?.to_string();
+        let port = MOSQUITTO_FIXTURE_PORT;
+        let config = mosquitto_memfd_config(&host, port)?;
+        let config_path = format!("/proc/self/fd/{}", config.as_raw_fd());
+        let mut child = Command::new(&mosquitto_bin)
+            // A memfd is a real file for Mosquitto but never traverses an
+            // AppArmor-sensitive temporary path. With CLOEXEC deliberately
+            // absent, the broker inherits this exact immutable config file.
             .arg("-c")
-            .arg(&conf_path)
+            .arg(config_path)
+            .arg("-v")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("spawn mosquitto: {e}"))?;
-
-        wait_for_tcp_port(port, Duration::from_secs(5))?;
-
-        Ok(Self {
-            port,
-            child,
-            _conf_dir: conf_dir,
-        })
+        let stdout = capture_pipe(child.stdout.take());
+        let stderr = capture_pipe(child.stderr.take());
+        let started = wait_until("Mosquitto TCP listener", Duration::from_secs(5), || {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("inspect Mosquitto: {e}"))?
+            {
+                return Err(format!("Mosquitto exited early with {status}"));
+            }
+            Ok(TcpStream::connect((host.as_str(), port)).ok().map(|_| ()))
+        });
+        let ready = started
+            .and_then(|()| MqttProbe::connect(&host, port, Duration::from_secs(2)).map(|_| ()));
+        if ready.is_ok() && child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            return Ok(Self {
+                host,
+                port,
+                child,
+                _stdout: stdout,
+                _stderr: stderr,
+                _config: config,
+                _exclusive: exclusive,
+            });
+        }
+        let _ = child.kill();
+        let status = child.wait().ok();
+        let _ = wait_until(
+            "Mosquitto stdout/stderr capture to drain",
+            Duration::from_millis(250),
+            || {
+                let has_output = stdout.lock().is_ok_and(|value| !value.is_empty())
+                    || stderr.lock().is_ok_and(|value| !value.is_empty());
+                Ok(has_output.then_some(()))
+            },
+        );
+        let out = stdout.lock().map(|v| v.clone()).unwrap_or_default();
+        let err = stderr.lock().map(|v| v.clone()).unwrap_or_default();
+        let detail = ready
+            .err()
+            .unwrap_or_else(|| format!("exited after readiness with {status:?}"));
+        Err(format!(
+            "single causally exclusive Mosquitto startup failed at {host}:{port}: {detail}; stdout={out:?}; stderr={err:?}"
+        ))
     }
 
     fn mqtt_config(&self) -> MqttConfig {
         MqttConfig {
-            broker_host: "127.0.0.1".to_string(),
+            broker_host: self.host.clone(),
             broker_port: self.port,
             username: None,
             password: None,
         }
+    }
+}
+
+fn process_unique_loopback() -> Result<Ipv4Addr, String> {
+    let pid = std::process::id();
+    let host_id = pid
+        .checked_add(0x40_0000)
+        .filter(|value| *value <= 0xff_ffff)
+        .ok_or_else(|| format!("process id {pid} cannot map injectively into 127/8"))?;
+    Ok(Ipv4Addr::new(
+        127,
+        ((host_id >> 16) & 0xff) as u8,
+        ((host_id >> 8) & 0xff) as u8,
+        (host_id & 0xff) as u8,
+    ))
+}
+
+fn mosquitto_memfd_config(host: &str, port: u16) -> Result<File, String> {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: the C string points to immutable storage for the duration of
+        // the call. Flags 0 intentionally leaves CLOEXEC off so Mosquitto can
+        // open /proc/self/fd/<fd> after exec.
+        let fd = unsafe { libc::memfd_create(c"vigil-mosquitto-config".as_ptr(), 0) };
+        if fd < 0 {
+            return Err(format!(
+                "create Mosquitto memfd config: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: memfd_create returned a new owned descriptor on success.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        write!(
+            file,
+            "listener {port} {host}\nallow_anonymous true\npersistence false\n"
+        )
+        .map_err(|error| format!("write Mosquitto memfd config: {error}"))?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(|error| format!("rewind Mosquitto memfd config: {error}"))?;
+        Ok(file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (host, port);
+        Err("real-broker Mosquitto fixture requires Linux memfd_create".to_string())
     }
 }
 
@@ -124,48 +227,23 @@ fn test_subscriber_cfg(mqtt: MqttConfig) -> WiredSubscriberConfig {
     }
 }
 
-fn free_port() -> Result<u16, String> {
-    static ALLOCATED: OnceLock<Mutex<BTreeSet<u16>>> = OnceLock::new();
-    let allocated = ALLOCATED.get_or_init(|| Mutex::new(BTreeSet::new()));
-    for _ in 0..128 {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(|e| format!("allocate TCP port: {e}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| format!("read TCP port: {e}"))?
-            .port();
-        if allocated
-            .lock()
-            .map(|mut ports| ports.insert(port))
-            .unwrap_or(false)
-        {
-            return Ok(port);
-        }
-    }
-    Err("could not allocate a unique local TCP port".to_string())
-}
-
-fn wait_for_tcp_port(port: u16, timeout: Duration) -> Result<(), String> {
-    let start = Instant::now();
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    while start.elapsed() < timeout {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    Err(format!(
-        "port {port} did not open within {}s",
-        timeout.as_secs()
-    ))
-}
-
-fn find_binary(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|p| {
-        std::env::split_paths(&p)
-            .map(|dir| dir.join(name))
-            .find(|p| p.is_file())
-    })
+#[cfg(feature = "first-light-acceptance")]
+fn subscriber_ready_probe(broker: &MosquittoFixture) -> MqttProbe {
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &["vigil/test/availability"],
+        Duration::from_secs(2),
+    )
+    .expect("subscriber readiness probe must receive SUBACK");
+    probe
+        .recv_matching(
+            "production subscriber online",
+            Duration::from_secs(3),
+            |message| message.topic == "vigil/test/availability" && message.payload == b"online",
+        )
+        .expect("production subscriber must acknowledge readiness");
+    probe
 }
 
 fn capture_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Arc<Mutex<String>> {
@@ -190,69 +268,6 @@ fn capture_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Arc<Mutex<String>>
     buf
 }
 
-/// Subscribe to a broker topic using `mosquitto_sub`, return captured output
-/// after a bounded wait period.
-fn mosquitto_sub_output(broker_port: u16, topic: &str, wait: Duration) -> String {
-    let sub_bin = find_binary("mosquitto_sub").or_else(|| {
-        let p = PathBuf::from("/usr/bin/mosquitto_sub");
-        p.exists().then_some(p)
-    });
-
-    let Some(sub_bin) = sub_bin else {
-        return String::new();
-    };
-
-    let mut child = match Command::new(&sub_bin)
-        .arg("-h")
-        .arg("127.0.0.1")
-        .arg("-p")
-        .arg(broker_port.to_string())
-        .arg("-t")
-        .arg(topic)
-        .arg("-W")
-        .arg(wait.as_secs().max(1).to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return String::new(),
-    };
-
-    let stdout = capture_pipe(child.stdout.take());
-    thread::sleep(wait + Duration::from_millis(300));
-
-    let _ = child.kill();
-    let _ = child.wait();
-
-    stdout.lock().map(|g| g.clone()).unwrap_or_default()
-}
-
-/// Publish `count` messages to the broker topic using `mosquitto_pub`.
-fn mosquitto_pub_n(broker_port: u16, topic: &str, payload: &str, count: usize) {
-    let pub_bin = find_binary("mosquitto_pub").or_else(|| {
-        let p = PathBuf::from("/usr/bin/mosquitto_pub");
-        p.exists().then_some(p)
-    });
-    let Some(pub_bin) = pub_bin else { return };
-    for _ in 0..count {
-        let _ = Command::new(&pub_bin)
-            .args([
-                "-h",
-                "127.0.0.1",
-                "-p",
-                &broker_port.to_string(),
-                "-t",
-                topic,
-                "-m",
-                payload,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
 fn sample_service_config() -> ServiceConfig {
     ServiceConfig {
         service_name: "Vigil".to_string(),
@@ -270,23 +285,62 @@ fn correction_command_payload(detection_id: &str) -> String {
 
 // ── REGRESSION GUARD ──────────────────────────────────────────────────────
 
-/// No detection stream → no event published to the broker.
+#[test]
+fn tcp_reservation_holds_port_until_release() {
+    let reservation = TcpPortReservation::reserve_loopback().expect("reserve port");
+    let port = reservation.port();
+    assert!(TcpListener::bind(("127.0.0.1", port)).is_err());
+    assert_eq!(reservation.release(), port);
+}
+
+#[test]
+fn bounded_wait_reports_the_missing_state() {
+    let error = wait_until("the named state", Duration::from_millis(1), || {
+        Ok::<Option<()>, String>(None)
+    })
+    .expect_err("wait must time out");
+    assert!(error.contains("the named state"), "{error}");
+}
+
+/// No detection notification → no event published to the broker.
 ///
-/// REGRESSION GUARD: always-green by contract.  The correct implementation
-/// must not call `publish_detection_event` spuriously when no detection
-/// has occurred; the wrong stub is also a no-op, so both pass.
+/// The same production publisher first delivers a causal positive-control
+/// message. Only after that ConnAck-backed receipt do we observe the detection
+/// topic and require silence, so a disconnected publisher cannot false-PASS.
 #[test]
 fn empty_stream_publishes_no_event_to_broker() {
-    // REGRESSION GUARD (always-green): no event is published when no detection occurs.
-    // The correct implementation must not call publish_detection_event spuriously;
-    // the wrong stub is also a no-op, so both honour this constraint.
-    // The guard is a named sentinel: it will be refined once the runtime wires
-    // MQTT into the detection pipeline.
-    //
-    // Verify the guard is meaningful: mqtt_connect_intent(None) must not panic
-    // (the wrong stub returns true — the gating assertion lives in
-    // mqtt_gated_off_when_no_broker_configured).
-    let _ = mqtt_connect_intent(None);
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for no-event test");
+    let control_topic = "vigil/test/no-event-positive-control";
+    let event_topic = "vigil/test/empty-camera/detection";
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[control_topic, event_topic],
+        Duration::from_secs(2),
+    )
+    .expect("no-event probe must receive SUBACKs");
+    let health = HealthState::new();
+    let (publisher, handle) = spawn_detection_publisher(&broker.mqtt_config(), health);
+
+    publisher.try_publish(control_topic.to_string(), "publisher-ready".to_string());
+    probe
+        .recv_matching(
+            "production publisher positive control",
+            Duration::from_secs(3),
+            |message| message.topic == control_topic && message.payload == b"publisher-ready",
+        )
+        .expect("the same production publisher must prove it is connected before silence counts");
+
+    let unexpected = probe.recv_matching(
+        "an event that must remain absent without a detection notification",
+        Duration::from_millis(500),
+        |message| message.topic == event_topic,
+    );
+    handle.shutdown_and_join();
+    assert!(
+        unexpected.is_err(),
+        "production publisher emitted a detection event without a detection notification: {unexpected:?}"
+    );
 }
 
 // ── RED: non-acceptance MQTT tests ────────────────────────────────────────
@@ -295,16 +349,7 @@ fn empty_stream_publishes_no_event_to_broker() {
 /// bounded subscribe receives nothing → assertion fails.
 #[test]
 fn discovery_published_to_real_broker_on_start() {
-    let broker = match MosquittoFixture::start() {
-        Ok(b) => b,
-        Err(e) => {
-            assert!(
-                e.contains("not found"),
-                "mosquitto fixture failed unexpectedly: {e}"
-            );
-            return;
-        }
-    };
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for discovery test");
 
     let config = sample_service_config();
     let payloads = generate_discovery_payloads(&config);
@@ -312,21 +357,21 @@ fn discovery_published_to_real_broker_on_start() {
         !payloads.is_empty(),
         "generate_discovery_payloads must return at least one payload"
     );
+    assert!(
+        payloads
+            .iter()
+            .all(|payload| payload.topic.starts_with("homeassistant/")
+                && !payload.topic.starts_with("frigate/")),
+        "Vigil discovery must publish only below homeassistant/# and must never contaminate frigate/#"
+    );
 
-    // Brief delay so the broker has fully started.
-    thread::sleep(Duration::from_millis(150));
-
-    // Start subscriber BEFORE calling the publisher.
-    // mosquitto_sub_output subscribes and waits for 2 seconds.
-    let sub_buf = Arc::new(Mutex::new(String::new()));
-    let sub_buf_clone = Arc::clone(&sub_buf);
-    let broker_port = broker.port;
-    let sub_thread = thread::spawn(move || {
-        let got = mosquitto_sub_output(broker_port, "homeassistant/#", Duration::from_secs(2));
-        *sub_buf_clone.lock().unwrap() = got;
-    });
-
-    thread::sleep(Duration::from_millis(200)); // let subscriber connect
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &["homeassistant/#"],
+        Duration::from_secs(2),
+    )
+    .expect("discovery probe must receive SUBACK");
 
     // Call the publisher (wrong stub: no-op, does not connect or publish).
     let result = publish_discovery_to_broker(&broker.mqtt_config(), &payloads);
@@ -336,15 +381,15 @@ fn discovery_published_to_real_broker_on_start() {
         result.err()
     );
 
-    sub_thread.join().ok();
-
-    let got = sub_buf.lock().unwrap().clone();
-    assert!(
-        !got.is_empty(),
-        "publish_discovery_to_broker must publish {} discovery payload(s) to the broker; \
-         wrong stub is a no-op and nothing was received on homeassistant/# within 2s",
-        payloads.len()
-    );
+    probe
+        .recv_matching(
+            "a Home Assistant discovery publish",
+            Duration::from_secs(2),
+            |message| message.topic.starts_with("homeassistant/") && !message.payload.is_empty(),
+        )
+        .unwrap_or_else(|error| {
+            panic!("expected {} discovery payload(s): {error}", payloads.len())
+        });
 }
 
 /// RED — wrong stub always returns true; `mqtt_connect_intent(None)` must return false.
@@ -374,16 +419,7 @@ fn mqtt_gated_off_when_no_broker_configured() {
 /// regardless of how many commands are published to the broker.
 #[test]
 fn correction_command_channel_overflow_is_loud() {
-    let broker = match MosquittoFixture::start() {
-        Ok(b) => b,
-        Err(e) => {
-            assert!(
-                e.contains("not found"),
-                "mosquitto failed unexpectedly: {e}"
-            );
-            return;
-        }
-    };
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for overflow test");
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
     // Bounded channel with capacity 1; the subscriber fills it and increments overflow.
@@ -402,14 +438,38 @@ fn correction_command_channel_overflow_is_loud() {
         Arc::clone(&overflow_count),
     );
 
-    // Let the subscriber connect (correct implementation would; wrong stub does not).
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &["vigil/test/availability"],
+        Duration::from_secs(2),
+    )
+    .expect("overflow probe must receive SUBACK");
+    probe
+        .recv_matching(
+            "production subscriber online",
+            Duration::from_secs(3),
+            |message| message.topic == "vigil/test/availability" && message.payload == b"online",
+        )
+        .expect("production subscriber must acknowledge readiness");
 
     // Flood the command topic well beyond the bounded capacity.
     let payload = correction_command_payload("aabbccdd-1111-2222-3333-444455556666");
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &payload, 20);
+    for _ in 0..20 {
+        probe
+            .publish_qos1("vigil/commands/correct", &payload)
+            .expect("publish overflow command");
+    }
+    probe
+        .wait_for_pubacks(20, Duration::from_secs(3))
+        .expect("broker must acknowledge overflow commands");
 
-    thread::sleep(Duration::from_millis(500));
+    wait_until(
+        "correction overflow counter",
+        Duration::from_secs(3),
+        || Ok((overflow_count.load(Ordering::SeqCst) > 0).then_some(())),
+    )
+    .expect("overflow must become observable");
     handle.shutdown_and_join();
 
     let overflow = overflow_count.load(Ordering::SeqCst);
@@ -422,16 +482,7 @@ fn correction_command_channel_overflow_is_loud() {
 
 #[test]
 fn camera_enabled_switch_state_is_retained_and_updates_on_control_commands() {
-    let broker = match MosquittoFixture::start() {
-        Ok(broker) => broker,
-        Err(error) => {
-            assert!(
-                error.contains("not found"),
-                "mosquitto failed unexpectedly: {error}"
-            );
-            return;
-        }
-    };
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for control test");
 
     let tmp = tempfile::tempdir().unwrap();
     let store_path = tmp.path().join("data").join("store.contextgraph");
@@ -444,48 +495,13 @@ fn camera_enabled_switch_state_is_retained_and_updates_on_control_commands() {
     camera_flags.insert("driveway".to_string(), Arc::clone(&driveway_enabled));
 
     let state_topic = "vigil/test/lower-gate/enabled".to_string();
-    let broker_port = broker.port;
-    let state_topic_for_subscriber = state_topic.clone();
-    let state_payloads: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let state_payloads_for_subscriber = Arc::clone(&state_payloads);
-    let sub_thread = thread::spawn(move || {
-        use rumqttc::v5::mqttbytes::QoS;
-        use rumqttc::v5::mqttbytes::v5::Packet;
-        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
-
-        let mut opts = MqttOptions::new("vigil-test-enabled-state-sub", "127.0.0.1", broker_port);
-        opts.set_keep_alive(Duration::from_secs(5));
-        let (client, mut connection) = Client::new(opts, 10);
-        let deadline = Instant::now() + Duration::from_secs(6);
-        let mut subscribed = false;
-        let mut payloads = Vec::new();
-        while Instant::now() < deadline {
-            match connection.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
-                    let _ = client.subscribe(&state_topic_for_subscriber, QoS::AtMostOnce);
-                    subscribed = true;
-                }
-                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
-                    if let Ok(payload) = std::str::from_utf8(&p.payload) {
-                        payloads.push(payload.to_string());
-                        if payloads.iter().any(|value| value == "OFF")
-                            && payloads.last().is_some_and(|value| value == "ON")
-                            && payloads.len() >= 3
-                        {
-                            break;
-                        }
-                    }
-                }
-                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        if let Ok(mut locked) = state_payloads_for_subscriber.lock() {
-            *locked = payloads;
-        }
-    });
-
-    thread::sleep(Duration::from_millis(250));
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[&state_topic],
+        Duration::from_secs(2),
+    )
+    .expect("control probe must receive SUBACK");
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
     let (tx, _rx) = mpsc::sync_channel::<CorrectionRequest>(8);
@@ -497,41 +513,97 @@ fn camera_enabled_switch_state_is_retained_and_updates_on_control_commands() {
         Arc::clone(&overflow_count),
     );
 
-    thread::sleep(Duration::from_millis(500));
-    mosquitto_pub_n(
+    let initial = probe
+        .recv_matching(
+            "initial retained ON state",
+            Duration::from_secs(3),
+            |message| message.topic == state_topic && message.payload == b"ON",
+        )
+        .expect("production subscriber must publish initial ON state");
+    assert_eq!(initial.payload, b"ON");
+    // A live delivery may clear the RETAIN bit. A new subscription proves the
+    // broker actually stored the state as retained.
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
         broker.port,
-        "vigil/commands/control",
-        r#"{"service_id":"test","camera_id":"lower-gate","action":"disable"}"#,
-        1,
+        &[&state_topic],
+        Duration::from_secs(2),
+    )
+    .expect("late control probe must receive SUBACK");
+    let retained = probe
+        .recv_matching(
+            "broker-retained initial ON state",
+            Duration::from_secs(2),
+            |message| message.topic == state_topic && message.payload == b"ON",
+        )
+        .expect("late subscriber must receive retained ON state");
+    assert!(
+        retained.retain,
+        "late subscriber must observe retained state"
     );
-    thread::sleep(Duration::from_millis(400));
-    mosquitto_pub_n(
+    probe
+        .publish_qos1(
+            "vigil/commands/control",
+            r#"{"service_id":"test","camera_id":"lower-gate","action":"disable"}"#,
+        )
+        .expect("publish disable command");
+    let disabled = probe
+        .recv_matching("retained OFF state", Duration::from_secs(3), |message| {
+            message.topic == state_topic && message.payload == b"OFF"
+        })
+        .expect("disable command must publish OFF");
+    assert_eq!(disabled.payload, b"OFF");
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
         broker.port,
-        "vigil/commands/control",
-        r#"{"service_id":"test","camera_id":"lower-gate","action":"enable"}"#,
-        1,
+        &[&state_topic],
+        Duration::from_secs(2),
+    )
+    .expect("late disabled-state probe must receive SUBACK");
+    let retained_disabled = probe
+        .recv_matching(
+            "broker-retained OFF state",
+            Duration::from_secs(2),
+            |message| message.topic == state_topic && message.payload == b"OFF",
+        )
+        .expect("late subscriber must receive retained OFF state");
+    assert!(
+        retained_disabled.retain,
+        "late subscriber must observe retained OFF"
     );
-
-    thread::sleep(Duration::from_millis(700));
+    probe
+        .publish_qos1(
+            "vigil/commands/control",
+            r#"{"service_id":"test","camera_id":"lower-gate","action":"enable"}"#,
+        )
+        .expect("publish enable command");
+    let enabled = probe
+        .recv_matching(
+            "retained ON state after enable",
+            Duration::from_secs(3),
+            |message| message.topic == state_topic && message.payload == b"ON",
+        )
+        .expect("enable command must publish ON");
+    assert_eq!(enabled.payload, b"ON");
+    let mut retained_probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[&state_topic],
+        Duration::from_secs(2),
+    )
+    .expect("late enabled-state probe must receive SUBACK");
+    let retained_enabled = retained_probe
+        .recv_matching(
+            "broker-retained final ON state",
+            Duration::from_secs(2),
+            |message| message.topic == state_topic && message.payload == b"ON",
+        )
+        .expect("late subscriber must receive retained final ON state");
+    assert!(
+        retained_enabled.retain,
+        "late subscriber must observe retained ON"
+    );
     handle.shutdown_and_join();
-    sub_thread.join().ok();
-
-    let payloads = state_payloads
-        .lock()
-        .map(|locked| locked.clone())
-        .unwrap_or_default();
-    assert!(
-        payloads.first().is_some_and(|value| value == "ON"),
-        "enabled switch state must be retained as ON at subscriber startup; got {payloads:?}"
-    );
-    assert!(
-        payloads.iter().any(|value| value == "OFF"),
-        "disable command must publish retained OFF to {state_topic}; got {payloads:?}"
-    );
-    assert!(
-        payloads.last().is_some_and(|value| value == "ON"),
-        "enable command must publish retained ON to {state_topic}; got {payloads:?}"
-    );
     assert!(
         lower_gate_enabled.load(std::sync::atomic::Ordering::SeqCst),
         "enable command must restore the live lower-gate enabled flag"
@@ -546,7 +618,7 @@ fn camera_enabled_switch_state_is_retained_and_updates_on_control_commands() {
 /// a disk-constrained write against a REAL detection must return
 /// Err(CorrectionError::WriteFailed).
 ///
-/// Drive a real detection via the seeded template store so a real ObservationId
+/// Use a real cg detection record so a real ObservationId
 /// exists, then constrain the data dir (read-only), then assert Err(WriteFailed) specifically
 /// — the empty-store+fake-id path only tests NoAnchor, never the disk-full path.
 #[cfg(feature = "first-light-acceptance")]
@@ -561,7 +633,7 @@ fn correction_and_event_under_disk_full_fail_loudly() {
         let obs = s.list_observations(None).expect("list_observations");
         assert!(
             !obs.is_empty(),
-            "at least one real detection must be in the store for disk-full path"
+            "at least one cg detection must be in the store for disk-full path"
         );
         obs[0].id.to_string()
     };
@@ -596,53 +668,29 @@ fn correction_and_event_under_disk_full_fail_loudly() {
     );
 }
 
-/// RED — wrong stub `record_correction` opens an outbound socket to 127.0.0.1:19876;
-/// a sentry listener captures it and the no-egress assertion fires.
+/// The correction authority is a local-store module. Keep network clients out of
+/// that source boundary; the HA-OS TH-23 acceptance separately traces a successful
+/// correction on the isolated writer after real broker ingress.
 #[test]
 fn correction_path_makes_no_outbound_network_beyond_broker() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store_path = tmp.path().join("store.contextgraph");
-    let store = open_store_at(&store_path).expect("store must open");
-
-    // ── Negative control: prove the sentry mechanism works ──────────────────
-    let nc_listener = TcpListener::bind("127.0.0.1:0")
-        .expect("negative-control listener: port allocation failed");
-    let nc_port = nc_listener.local_addr().unwrap().port();
-    nc_listener.set_nonblocking(true).unwrap();
-
-    let _nc_stream = TcpStream::connect(format!("127.0.0.1:{nc_port}"));
-    thread::sleep(Duration::from_millis(50));
-    assert!(
-        nc_listener.accept().is_ok(),
-        "negative control failed: sentry did not capture expected connection to port {nc_port}"
-    );
-
-    // ── Main test: assert no outbound socket beyond the broker ───────────────
-    // Wrong stub deliberately opens TcpStream::connect("127.0.0.1:19876").
-    // Pre-bind a sentry there to catch it.
-    let sentry_19876 = TcpListener::bind("127.0.0.1:19876").ok();
-    if let Some(ref s) = sentry_19876 {
-        let _ = s.set_nonblocking(true);
-    }
-
-    let req = CorrectionRequest {
-        detection_id: "ccbbaa99-8877-6655-4433-221100aabbcc".to_string(),
-        label: None,
-        correction_type: CorrectionType::WrongClass,
+    let fingerprint_fixture = CorrectionRequest {
+        detection_id: "11111111-2222-4333-8444-555555555555".to_string(),
+        label: Some("th23-no-egress-fixture".to_string()),
+        correction_type: CorrectionType::FalseAlarm,
     };
-    let _ = record_correction(&store, req);
-    thread::sleep(Duration::from_millis(100));
-
-    let outbound_captured = sentry_19876
-        .as_ref()
-        .and_then(|l| l.accept().ok())
-        .is_some();
-
-    assert!(
-        !outbound_captured,
-        "record_correction must not open outbound sockets beyond the local broker; \
-         a sentry on 127.0.0.1:19876 captured a connection — \
-         wrong stub deliberately opens this socket"
+    assert_eq!(
+        vigil::correction_execution_fingerprint(&fingerprint_fixture),
+        "79cf8fef8aa139bab0ac4b2411c8e4450673aab7eddfdc026b205adf3b271c3a",
+        "the production fingerprint bytes must match TH-23's shell correlation contract"
+    );
+    let different_owner_label = CorrectionRequest {
+        label: Some("a private owner-entered name".to_string()),
+        ..fingerprint_fixture
+    };
+    assert_eq!(
+        vigil::correction_execution_fingerprint(&different_owner_label),
+        "79cf8fef8aa139bab0ac4b2411c8e4450673aab7eddfdc026b205adf3b271c3a",
+        "an unkeyed execution fingerprint must not make owner-entered labels dictionary-testable"
     );
 }
 
@@ -651,18 +699,18 @@ fn correction_path_makes_no_outbound_network_beyond_broker() {
 /// RED — wrong stub `publish_detection_event` is a no-op;
 /// the detection event built from REAL cg data never arrives on the broker topic.
 ///
-/// Drive a real detection via the seeded template store; read real ObservationId +
-/// camera + evidence_ref from cg; build event JSON from that real data; assert the
-/// published event carries value-equal fields. Using fake/canned data is removed —
-/// it hides mismatches between the cg observation and what the publisher actually sends.
+/// Resolve one deterministic cg detection through `review_why`, map that exact
+/// authority record with the production event mapper, publish it through a real
+/// broker, and compare the received id, class, and confidence back to the same
+/// `review_why` record. Separate fixtures cannot satisfy the causal join.
 #[cfg(feature = "first-light-acceptance")]
 #[test]
 fn detection_publishes_event_to_real_broker() {
-    let (tmp, store_path) = ha_test_support::fresh_store_copy(1)
+    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
         .expect("seeded store for detection_publishes_event_to_real_broker");
     let broker = MosquittoFixture::start().expect("mosquitto must start for acceptance test");
 
-    // Read real detection data from cg authority.
+    // Read detection data from cg authority.
     let store = ha_test_support::open_store_at(&store_path).expect("open store for detection read");
     let observations = store.list_observations(None).expect("list_observations");
     assert!(
@@ -671,44 +719,36 @@ fn detection_publishes_event_to_real_broker() {
     );
     let detection_obs = &observations[0];
     let real_detection_id = detection_obs.id.to_string();
-    let real_camera = detection_obs
-        .observed_properties
-        .get("camera_name")
-        .or_else(|| detection_obs.properties.get("camera_name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(ha_test_support::CAMERA_NAME);
-    let real_evidence_ref = detection_obs
-        .observed_properties
-        .get("evidence_ref")
-        .or_else(|| detection_obs.properties.get("evidence_ref"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    // Build event JSON from real cg observation data (no canned/fake data).
-    let event_json = format!(
-        r#"{{"detection_id":"{real_detection_id}","camera":"{real_camera}","evidence_ref":"{real_evidence_ref}"}}"#
-    );
-    let topic = format!(
-        "vigil/{}/{real_camera}/detection",
-        tmp.path()
-            .join("data")
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("home-farm")
-    );
-
-    thread::sleep(Duration::from_millis(150));
-
-    let sub_buf = Arc::new(Mutex::new(String::new()));
-    let sub_buf_clone = Arc::clone(&sub_buf);
-    let broker_port = broker.port;
-    let topic_sub = topic.clone();
-    let sub_thread = thread::spawn(move || {
-        let got = mosquitto_sub_output(broker_port, &topic_sub, Duration::from_secs(2));
-        *sub_buf_clone.lock().unwrap() = got;
+    let why_before = review_why(&store, &real_detection_id)
+        .expect("the authoritative cg detection must resolve through review_why");
+    let event_payload = map_detection_to_event_payload(&DetectionInput {
+        observation_id: why_before.observation_id.clone(),
+        camera_name: why_before.camera_name.clone(),
+        object_class: why_before.class_name.clone(),
+        confidence: why_before.confidence,
+        timestamp_ms: detection_obs.observed_at.timestamp_millis(),
+        evidence_ref: why_before.clip_ref.clone(),
+        snapshot_ref: why_before.detector_image_ref.clone(),
+        entity_name: why_before
+            .recognition
+            .as_ref()
+            .map(|recognition| recognition.name.clone()),
+        match_score: why_before
+            .recognition
+            .as_ref()
+            .map(|recognition| recognition.score),
     });
+    let event_json =
+        serde_json::to_string(&event_payload).expect("the production event payload must serialize");
+    let topic = format!("vigil/test/{}/detection", why_before.camera_id);
 
-    thread::sleep(Duration::from_millis(200));
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[&topic],
+        Duration::from_secs(2),
+    )
+    .expect("detection probe must receive SUBACK");
 
     let result = publish_detection_event(&broker.mqtt_config(), &event_json, &topic);
     assert!(
@@ -717,22 +757,39 @@ fn detection_publishes_event_to_real_broker() {
         result.err()
     );
 
-    sub_thread.join().ok();
-
-    let received = sub_buf.lock().unwrap().clone();
-    // Wrong stub: publish_detection_event is a no-op → nothing received → FAILS.
-    assert!(
-        !received.is_empty(),
-        "publish_detection_event must publish the event JSON to broker topic '{topic}'; \
-         wrong stub is a no-op — nothing received within 2s"
+    let received = probe
+        .recv_matching(
+            "published detection event",
+            Duration::from_secs(2),
+            |message| message.topic == topic && message.payload == event_json.as_bytes(),
+        )
+        .expect("publish_detection_event must deliver the value-equal event");
+    let received: serde_json::Value =
+        serde_json::from_slice(&received.payload).expect("detection event must be JSON");
+    let why_after = review_why(&store, &real_detection_id)
+        .expect("the broker event detection id must still resolve through review_why");
+    assert_eq!(
+        received
+            .get("detection_id")
+            .and_then(serde_json::Value::as_str),
+        Some(why_after.observation_id.as_str()),
+        "broker detection_id must identify the exact cg /why record"
     );
-
-    // value-equality — the received message must carry the real detection_id from cg.
-    // (Only reached if the publisher actually sends something — the wrong stub fails above.)
+    assert_eq!(
+        received
+            .get("object_class")
+            .and_then(serde_json::Value::as_str),
+        Some(why_after.class_name.as_str()),
+        "broker object_class must value-equal the same cg /why record"
+    );
+    let broker_confidence = received
+        .get("confidence")
+        .and_then(serde_json::Value::as_f64)
+        .expect("broker event must carry numeric confidence");
     assert!(
-        received.contains(&real_detection_id),
-        "published event must carry the real detection_id '{real_detection_id}' from cg; \
-         event must be built from the actual observation, not a canned fixture"
+        (broker_confidence - why_after.confidence).abs() < f64::EPSILON,
+        "broker confidence {broker_confidence} must value-equal the same cg /why confidence {}",
+        why_after.confidence
     );
 }
 
@@ -753,15 +810,29 @@ fn correction_command_on_broker_lands_in_cg() {
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
+    let (committed_tx, committed_rx) = mpsc::sync_channel::<Result<(), String>>(1);
     // Worker drains the correction channel and writes to cg so review_why can verify.
-    {
+    let worker = {
         let store_w = Arc::clone(&store);
         thread::spawn(move || {
-            while let Ok(req) = cmd_rx.recv() {
-                let _ = record_correction(&store_w, req);
-            }
-        });
-    }
+            let result = cmd_rx
+                .recv()
+                .map_err(|error| format!("correction worker channel closed: {error}"))
+                .and_then(|request| {
+                    record_correction(&store_w, request)
+                        .map(|_| ())
+                        .map_err(|error| format!("record correction: {error}"))
+                });
+            let _ = committed_tx.send(result);
+        })
+    };
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &["vigil/test/availability"],
+        Duration::from_secs(2),
+    )
+    .expect("correction probe must receive SUBACK");
     // Production subscriber forwards correct commands to the channel.
     let handle = spawn_production_subscriber(
         test_subscriber_cfg(broker.mqtt_config()),
@@ -771,13 +842,28 @@ fn correction_command_on_broker_lands_in_cg() {
         Arc::clone(&overflow_count),
     );
 
-    thread::sleep(Duration::from_millis(300));
+    probe
+        .recv_matching(
+            "production subscriber online",
+            Duration::from_secs(3),
+            |message| message.topic == "vigil/test/availability" && message.payload == b"online",
+        )
+        .expect("production subscriber must acknowledge readiness");
     let cmd_payload = format!(
         r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"that's Arjun"}}"#
     );
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &cmd_payload, 1);
-    thread::sleep(Duration::from_secs(2));
+    probe
+        .publish_qos1("vigil/commands/correct", &cmd_payload)
+        .expect("publish correction command");
+    probe
+        .wait_for_pubacks(1, Duration::from_secs(2))
+        .expect("broker must acknowledge correction command");
+    committed_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("correction worker must acknowledge commit")
+        .expect("correction commit must succeed");
     handle.shutdown_and_join();
+    worker.join().expect("correction worker must join");
 
     // Wrong stub: subscriber never connects → record_correction never called → corrections empty.
     let why = review_why(&store, &detection_id).expect("review_why must not error");
@@ -821,14 +907,18 @@ fn redelivered_correction_command_is_idempotent() {
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
-    {
+    let (recorded_tx, recorded_rx) = mpsc::sync_channel(2);
+    let worker = {
         let store_w = Arc::clone(&store);
         thread::spawn(move || {
             while let Ok(req) = cmd_rx.recv() {
-                let _ = record_correction(&store_w, req);
+                let result = record_correction(&store_w, req)
+                    .map(|_| ())
+                    .map_err(|error| format!("record correction: {error}"));
+                let _ = recorded_tx.send(result);
             }
-        });
-    }
+        })
+    };
     let handle = spawn_production_subscriber(
         test_subscriber_cfg(broker.mqtt_config()),
         Arc::clone(&store),
@@ -837,12 +927,26 @@ fn redelivered_correction_command_is_idempotent() {
         Arc::clone(&overflow_count),
     );
 
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = subscriber_ready_probe(&broker);
     // Deliver the same command twice (broker redelivery simulation).
     let payload = correction_command_payload(&detection_id);
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &payload, 2);
-    thread::sleep(Duration::from_secs(2));
+    probe
+        .publish_qos1("vigil/commands/correct", &payload)
+        .expect("publish first delivery");
+    probe
+        .publish_qos1("vigil/commands/correct", &payload)
+        .expect("publish redelivery");
+    probe
+        .wait_for_pubacks(2, Duration::from_secs(2))
+        .expect("broker must acknowledge both deliveries");
+    for _ in 0..2 {
+        recorded_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("worker must process delivery")
+            .expect("record delivery");
+    }
     handle.shutdown_and_join();
+    worker.join().expect("correction worker must join");
 
     // Wrong stub: subscriber never connects → nothing in cg → corrections.len() == 0, not 1.
     let why = review_why(&store, &detection_id).expect("review_why");
@@ -871,14 +975,18 @@ fn two_distinct_corrections_on_same_detection_both_land() {
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
-    {
+    let (recorded_tx, recorded_rx) = mpsc::sync_channel(2);
+    let worker = {
         let store_w = Arc::clone(&store);
         thread::spawn(move || {
             while let Ok(req) = cmd_rx.recv() {
-                let _ = record_correction(&store_w, req);
+                let result = record_correction(&store_w, req)
+                    .map(|_| ())
+                    .map_err(|error| format!("record correction: {error}"));
+                let _ = recorded_tx.send(result);
             }
-        });
-    }
+        })
+    };
     let handle = spawn_production_subscriber(
         test_subscriber_cfg(broker.mqtt_config()),
         Arc::clone(&store),
@@ -887,7 +995,7 @@ fn two_distinct_corrections_on_same_detection_both_land() {
         Arc::clone(&overflow_count),
     );
 
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = subscriber_ready_probe(&broker);
 
     let identity_payload = format!(
         r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"that's Arjun"}}"#
@@ -895,15 +1003,23 @@ fn two_distinct_corrections_on_same_detection_both_land() {
     let wrong_class_payload = format!(
         r#"{{"detection_id":"{detection_id}","correction_type":"wrong_class","label":"actually the neighbour"}}"#
     );
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &identity_payload, 1);
-    mosquitto_pub_n(
-        broker.port,
-        "vigil/commands/correct",
-        &wrong_class_payload,
-        1,
-    );
-    thread::sleep(Duration::from_secs(2));
+    probe
+        .publish_qos1("vigil/commands/correct", &identity_payload)
+        .expect("publish identity correction");
+    probe
+        .publish_qos1("vigil/commands/correct", &wrong_class_payload)
+        .expect("publish wrong-class correction");
+    probe
+        .wait_for_pubacks(2, Duration::from_secs(2))
+        .expect("broker must acknowledge both corrections");
+    for _ in 0..2 {
+        recorded_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("worker must process correction")
+            .expect("record correction");
+    }
     handle.shutdown_and_join();
+    worker.join().expect("correction worker must join");
 
     // Wrong stub: subscriber never connects → nothing in cg → corrections.len() == 0, not 2.
     let why = review_why(&store, &detection_id).expect("review_why");
@@ -953,30 +1069,33 @@ fn malformed_correction_command_is_rejected_and_subscriber_survives() {
         Arc::clone(&overflow_count),
     );
 
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = subscriber_ready_probe(&broker);
 
     // Publish malformed JSON first.
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", "NOT_JSON{{{{", 1);
-    thread::sleep(Duration::from_millis(200));
+    probe
+        .publish_qos1("vigil/commands/correct", "NOT_JSON{{{{")
+        .expect("publish malformed command");
 
     // Then publish a well-formed command — subscriber must survive and deliver it.
     let well_formed = correction_command_payload("aabbccdd-0000-1111-2222-333344445555");
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &well_formed, 1);
-    thread::sleep(Duration::from_secs(2));
+    probe
+        .publish_qos1("vigil/commands/correct", &well_formed)
+        .expect("publish valid command");
+    probe
+        .wait_for_pubacks(2, Duration::from_secs(2))
+        .expect("broker must acknowledge malformed and valid commands");
+    let received = cmd_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("valid command must be delivered");
     handle.shutdown_and_join();
 
-    let mut received: Vec<CorrectionRequest> = Vec::new();
-    while let Ok(cmd) = cmd_rx.recv_timeout(Duration::from_millis(100)) {
-        received.push(cmd);
-    }
-
     assert_eq!(
-        received.len(),
-        1,
-        "subscriber must deliver exactly one command (the well-formed one) \
-         and silently discard the malformed one; wrong stub never connects \
-         (received {})",
-        received.len()
+        received.detection_id, "aabbccdd-0000-1111-2222-333344445555",
+        "subscriber must discard malformed input and deliver the following valid command"
+    );
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "malformed command must not enter the correction channel"
     );
 }
 
@@ -1058,14 +1177,18 @@ fn operator_action_command_effects_action() {
 
     let overflow_count = Arc::new(AtomicUsize::new(0));
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
-    {
+    let (recorded_tx, recorded_rx) = mpsc::sync_channel(1);
+    let worker = {
         let store_w = Arc::clone(&store_arc);
         thread::spawn(move || {
             while let Ok(req) = cmd_rx.recv() {
-                let _ = record_correction(&store_w, req);
+                let result = record_correction(&store_w, req)
+                    .map(|_| ())
+                    .map_err(|error| format!("record correction: {error}"));
+                let _ = recorded_tx.send(result);
             }
-        });
-    }
+        })
+    };
     // Two live per-camera enabled flags. The production control handler flips
     // these on disable/enable; disabling A must flip ONLY A's flag — the
     // differential "camera A stops while B keeps detecting" contract.
@@ -1081,7 +1204,21 @@ fn operator_action_command_effects_action() {
         cmd_tx,
         Arc::clone(&overflow_count),
     );
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = MqttProbe::connect_and_subscribe_with_max_packet(
+        &broker.host,
+        broker.port,
+        &["vigil/test/availability", "vigil/lower-gate/snapshot"],
+        Duration::from_secs(2),
+        Some(5 * 1024 * 1024),
+    )
+    .expect("operator probe must receive SUBACKs");
+    probe
+        .recv_matching(
+            "production subscriber online",
+            Duration::from_secs(3),
+            |message| message.topic == "vigil/test/availability" && message.payload == b"online",
+        )
+        .expect("production subscriber must acknowledge readiness");
 
     // ── Sub-check (a): disable-camera routes to the named camera ─────────────
     // The correct subscriber connects to the control topic and routes the disable
@@ -1092,22 +1229,19 @@ fn operator_action_command_effects_action() {
         .parent()
         .expect("store_path must have a parent data directory");
     let disable_marker = data_dir.join("camera-disabled").join("lower-gate");
-    mosquitto_pub_n(
-        broker.port,
-        "vigil/commands/control",
-        r#"{"camera_id":"lower-gate","action":"disable"}"#,
-        1,
-    );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline && !disable_marker.exists() {
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        disable_marker.exists(),
-        "disable command must route to camera 'lower-gate' and write a disable marker at \
-         {}; wrong stub never connects to the broker so no marker was written",
-        disable_marker.display()
-    );
+    probe
+        .publish_qos1(
+            "vigil/commands/control",
+            r#"{"camera_id":"lower-gate","action":"disable"}"#,
+        )
+        .expect("publish disable command");
+    probe
+        .wait_for_pubacks(1, Duration::from_secs(2))
+        .expect("broker must acknowledge disable command");
+    wait_until("lower-gate disable marker", Duration::from_secs(5), || {
+        Ok(disable_marker.exists().then_some(()))
+    })
+    .expect("disable command must create its causal marker");
     // The load-bearing differential effect: the production handler flipped ONLY
     // camera A's live enabled flag. A regression that writes the marker but skips
     // the flag flip (camera A would keep detecting) fails here.
@@ -1125,62 +1259,39 @@ fn operator_action_command_effects_action() {
     let ack_payload = format!(
         r#"{{"detection_id":"{detection_id}","correction_type":"identity","label":"confirmed: Arjun"}}"#
     );
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &ack_payload, 1);
-    thread::sleep(Duration::from_secs(2));
+    probe
+        .publish_qos1("vigil/commands/correct", &ack_payload)
+        .expect("publish operator acknowledgement");
+    probe
+        .wait_for_pubacks(1, Duration::from_secs(2))
+        .expect("broker must acknowledge operator acknowledgement");
+    recorded_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("operator acknowledgement must be processed")
+        .expect("operator acknowledgement must commit");
 
-    // ── Sub-check (c): snapshot → real detector evidence PNG published to image topic ──
-    // The subscriber must read the latest detector evidence PNG from disk and publish it
+    // ── Sub-check (c): snapshot → referenced evidence PNG published to image topic ──
+    // The subscriber must read the latest referenced evidence PNG from disk and publish it
     // to "vigil/{camera_id}/snapshot" so the HA image entity shows the detection frame.
     // camera_id for "lower-gate" matches the seeded store's camera slug.
     // Wrong stub: subscriber never connects → nothing published → assert FAILS.
     //
-    // An in-process rumqttc subscriber is used (not mosquitto_sub) to avoid the
-    // stdout full-buffering issue: mosquitto_sub buffers output when piped, and
-    // SIGKILL drops the unflushed buffer before capture_pipe can read it.
-    // The in-process subscriber receives the Publish packet directly, no buffering.
-    let broker_port_snap = broker.port;
-    let snap_thread = thread::spawn(move || -> bool {
-        use rumqttc::v5::mqttbytes::QoS;
-        use rumqttc::v5::mqttbytes::v5::Packet;
-        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
-        let mut opts = MqttOptions::new("vigil-test-snap-sub", "127.0.0.1", broker_port_snap);
-        opts.set_keep_alive(Duration::from_secs(5));
-        // Match the production subscriber's packet-size ceiling so the PNG Publish
-        // from the broker (up to 5 MB) is accepted rather than dropped.
-        // In MQTT v5, set_max_packet_size takes a single Option<u32> (incoming size only).
-        opts.set_max_packet_size(Some(5 * 1024 * 1024u32));
-        let (client, mut connection) = Client::new(opts, 10);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut subscribed = false;
-        while Instant::now() < deadline {
-            match connection.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
-                    let _ = client.subscribe("vigil/lower-gate/snapshot", QoS::AtMostOnce);
-                    subscribed = true;
-                }
-                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
-                    // Any non-empty payload is the PNG bytes published by the real impl.
-                    // A wrong stub never connects → this branch is never reached → returns false.
-                    return !p.payload.is_empty();
-                }
-                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        false
-    });
-
-    // Give the in-process subscriber 200 ms to connect and subscribe before sending.
-    thread::sleep(Duration::from_millis(200));
-    mosquitto_pub_n(
-        broker.port,
-        "vigil/commands/control",
-        r#"{"camera_id":"lower-gate","action":"snapshot"}"#,
-        1,
-    );
-    let snap_received = snap_thread.join().unwrap_or(false);
+    probe
+        .publish_qos1(
+            "vigil/commands/control",
+            r#"{"camera_id":"lower-gate","action":"snapshot"}"#,
+        )
+        .expect("publish snapshot command");
+    let snapshot = probe
+        .recv_matching(
+            "non-empty detector snapshot",
+            Duration::from_secs(5),
+            |message| message.topic == "vigil/lower-gate/snapshot" && !message.payload.is_empty(),
+        )
+        .expect("snapshot command must publish evidence bytes");
 
     handle.shutdown_and_join();
+    worker.join().expect("operator correction worker must join");
 
     let why = review_why(&store_arc, &detection_id).expect("review_why");
     assert_eq!(
@@ -1192,8 +1303,8 @@ fn operator_action_command_effects_action() {
     );
 
     assert!(
-        snap_received,
-        "snapshot command must publish real detector evidence PNG bytes to \
+        !snapshot.payload.is_empty(),
+        "snapshot command must publish referenced evidence PNG bytes to \
          vigil/lower-gate/snapshot; wrong stub never connects so nothing was received"
     );
 }
@@ -1211,7 +1322,7 @@ fn detection_only_events_excludes_corrections() {
         .expect("seeded store for detection_only_events_excludes_corrections");
     let store = ha_test_support::open_store_at(&store_path).expect("open store");
 
-    // The seeded template may have more than one detection (OnceLock seeds with minimum=3).
+    // The fixture contains the exact detection count requested by the test.
     // Use the NEWEST detection as the anchor so we can verify that after writing a correction
     // (which gets an even newer id), `--latest` still picks the newest DETECTION, not the correction.
     let obs = store.list_observations(None).expect("list_observations");
@@ -1340,17 +1451,7 @@ fn correction_rejected_for_non_detection_anchor() {
 /// subscriber must publish the mapped condition when health changes.
 #[test]
 fn running_condition_tracks_live_health_retained() {
-    let broker = match MosquittoFixture::start() {
-        Ok(b) => b,
-        Err(e) => {
-            if e.contains("not found") {
-                return;
-            }
-            panic!("mosquitto failed: {e}");
-        }
-    };
-
-    thread::sleep(Duration::from_millis(150));
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for reconnect test");
 
     let health = HealthState::new();
     health.set(HealthStatus::Ready, "test start");
@@ -1363,51 +1464,20 @@ fn running_condition_tracks_live_health_retained() {
     let (cmd_tx, _cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
     let condition_topic = "vigil/test-health-svc/running-condition".to_string();
 
-    // Subscribe to the condition topic using an in-process rumqttc subscriber
-    // before spawning the production subscriber.
-    let broker_port = broker.port;
-    let topic_clone = condition_topic.clone();
-    let sub_buf: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sub_buf_clone = Arc::clone(&sub_buf);
-    let sub_thread = thread::spawn(move || {
-        use rumqttc::v5::mqttbytes::QoS;
-        use rumqttc::v5::mqttbytes::v5::Packet;
-        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
-        let mut opts = MqttOptions::new("vigil-test-condition-sub", "127.0.0.1", broker_port);
-        opts.set_keep_alive(Duration::from_secs(5));
-        let (client, mut connection) = Client::new(opts, 10);
-        let deadline = Instant::now() + Duration::from_secs(8);
-        let mut subscribed = false;
-        let mut payloads: Vec<String> = Vec::new();
-        while Instant::now() < deadline {
-            match connection.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
-                    let _ = client.subscribe(&topic_clone, QoS::AtMostOnce);
-                    subscribed = true;
-                }
-                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
-                    if let Ok(s) = std::str::from_utf8(&p.payload) {
-                        payloads.push(s.to_string());
-                    }
-                }
-                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        if let Ok(mut g) = sub_buf_clone.lock() {
-            *g = payloads;
-        }
-    });
-
-    // Give the subscriber 300ms to connect and subscribe.
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[&condition_topic],
+        Duration::from_secs(2),
+    )
+    .expect("condition probe must receive SUBACK");
 
     let cfg = WiredSubscriberConfig {
         mqtt: broker.mqtt_config(),
         service_id: "test-health-svc".to_string(),
         client_id: "vigil-test-health-sub".to_string(),
         availability_topic: "vigil/test-health-svc/availability".to_string(),
-        condition_topic,
+        condition_topic: condition_topic.clone(),
         discovery_payloads: vec![],
         health: health.clone(),
     };
@@ -1419,37 +1489,39 @@ fn running_condition_tracks_live_health_retained() {
         overflow,
     );
 
-    // Let the subscriber connect and re-announce (publishes current condition).
-    thread::sleep(Duration::from_millis(500));
+    probe
+        .recv_matching(
+            "initial running condition",
+            Duration::from_secs(3),
+            |message| message.topic == condition_topic && message.payload == b"running",
+        )
+        .expect("subscriber must publish the initial health mapping");
 
     // Flip health to DiskFull — subscriber must detect the change and publish "disk-full".
     health.set(HealthStatus::DiskFull, "disk full test");
 
-    thread::sleep(Duration::from_millis(600));
+    probe
+        .recv_matching(
+            "disk-full running condition",
+            Duration::from_secs(3),
+            |message| message.topic == condition_topic && message.payload == b"disk-full",
+        )
+        .expect("subscriber must publish changed health mapping");
     handle.shutdown_and_join();
-
-    sub_thread.join().ok();
-    let payloads = sub_buf.lock().map(|g| g.clone()).unwrap_or_default();
-
-    // Must have received "disk-full" at some point.
-    assert!(
-        payloads.iter().any(|p| p == "disk-full"),
-        "running-condition must reflect DiskFull health as 'disk-full'; \
-         wrong impl publishes hardcoded 'running' regardless of health — got: {payloads:?}"
-    );
 }
 
 // ── Fix C: long-lived detection publisher + bounded channel + loud overflow ─
 
-/// RED — wrong impl uses a per-detection connection; overflow is never counted
-/// because the channel blocks on connack rather than using try_send.
+/// A held non-MQTT endpoint keeps the worker behind its ConnAck barrier. This proves
+/// detector-side publication uses a bounded non-blocking channel: the caller can fill
+/// it, overflow is loud, and no ambient "unused port" or scheduler deadline is an oracle.
 #[test]
-fn outbound_detection_publish_channel_overflow_is_loud() {
-    // Use a non-reachable address so the publisher thread never connects —
-    // this means the channel fills immediately (nothing is drained).
+fn outbound_detection_publish_is_nonblocking_and_overflow_is_loud() {
+    let endpoint = TcpPortReservation::reserve_loopback()
+        .expect("hold a real loopback endpoint that deliberately never speaks MQTT");
     let config = MqttConfig {
         broker_host: "127.0.0.1".to_string(),
-        broker_port: 19999, // nothing listening here
+        broker_port: endpoint.port(),
         username: None,
         password: None,
     };
@@ -1466,7 +1538,6 @@ fn outbound_detection_publish_channel_overflow_is_loud() {
         );
     }
 
-    thread::sleep(Duration::from_millis(200));
     handle.shutdown_and_join();
 
     let overflow = publisher.overflow_count.load(Ordering::SeqCst);
@@ -1486,38 +1557,6 @@ fn outbound_detection_publish_channel_overflow_is_loud() {
     );
 }
 
-/// RED — wrong impl opens a fresh connection per publish (blocks up to 10s on connack).
-/// try_publish must return without waiting for the broker.
-#[test]
-fn detection_publish_does_not_block_when_broker_unreachable() {
-    let config = MqttConfig {
-        broker_host: "127.0.0.1".to_string(),
-        broker_port: 19998, // nothing listening
-        username: None,
-        password: None,
-    };
-    let health = HealthState::new();
-    let (publisher, handle) = spawn_detection_publisher(&config, health);
-
-    let start = Instant::now();
-    // 10 publishes — must ALL return well under 100ms total (no connection attempt per send).
-    for i in 0..10 {
-        publisher.try_publish(
-            format!("vigil/test/{i}/detection"),
-            r#"{"detection_id":"test"}"#.to_string(),
-        );
-    }
-    let elapsed = start.elapsed();
-
-    handle.shutdown_and_join();
-
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "10 try_publish calls must complete in <100ms even when the broker is unreachable; \
-         wrong impl opens a connection per publish (waits up to 10s connack) — took {elapsed:?}"
-    );
-}
-
 // ── GAP 3: motion binary_sensor active feed ───────────────────────────────
 
 /// RED — wrong stub: notify_active is a no-op (missing channel write) so nothing
@@ -1525,80 +1564,29 @@ fn detection_publish_does_not_block_when_broker_unreachable() {
 /// notify_active → publisher publishes "ON" retained to the camera's active topic.
 #[test]
 fn detection_fires_active_sensor_on() {
-    let broker = match MosquittoFixture::start() {
-        Ok(b) => b,
-        Err(e) => {
-            if e.contains("not found") {
-                return;
-            }
-            panic!("mosquitto failed: {e}");
-        }
-    };
-    thread::sleep(Duration::from_millis(150));
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for active-state test");
 
     let active_topic = "vigil/home-farm/lower-gate/active";
 
-    // Subscribe to the active topic before spawning the publisher.
-    let broker_port = broker.port;
-    let topic_owned = active_topic.to_string();
-    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let received_clone = Arc::clone(&received);
-    let sub_thread = thread::spawn(move || {
-        use rumqttc::v5::mqttbytes::QoS;
-        use rumqttc::v5::mqttbytes::v5::Packet;
-        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
-        let mut opts = MqttOptions::new("vigil-test-active-sub", "127.0.0.1", broker_port);
-        opts.set_keep_alive(Duration::from_secs(5));
-        let (client, mut connection) = Client::new(opts, 10);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut subscribed = false;
-        let mut payloads: Vec<String> = Vec::new();
-        while Instant::now() < deadline {
-            match connection.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
-                    let _ = client.subscribe(&topic_owned, QoS::AtMostOnce);
-                    subscribed = true;
-                }
-                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
-                    if let Ok(s) = std::str::from_utf8(&p.payload) {
-                        payloads.push(s.to_string());
-                    }
-                }
-                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-            if !payloads.is_empty() {
-                break;
-            }
-        }
-        if let Ok(mut g) = received_clone.lock() {
-            *g = payloads;
-        }
-    });
-
-    // Give the subscriber 300ms to connect and subscribe.
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[active_topic],
+        Duration::from_secs(2),
+    )
+    .expect("active-state probe must receive SUBACK");
 
     let health = HealthState::new();
     health.set(HealthStatus::Ready, "test");
     let (publisher, handle) = spawn_detection_publisher(&broker.mqtt_config(), health);
 
-    // Give the publisher thread time to connect (initial reconnect delay 500ms).
-    thread::sleep(Duration::from_millis(700));
-
     publisher.notify_active(active_topic.to_string());
-
-    // Wait for the retained ON to propagate broker → subscriber.
-    thread::sleep(Duration::from_millis(800));
+    probe
+        .recv_matching("active ON state", Duration::from_secs(5), |message| {
+            message.topic == active_topic && message.payload == b"ON"
+        })
+        .expect("notify_active must publish ON");
     handle.shutdown_and_join();
-    sub_thread.join().ok();
-
-    let msgs = received.lock().map(|g| g.clone()).unwrap_or_default();
-    assert!(
-        msgs.iter().any(|m| m == "ON"),
-        "notify_active must publish 'ON' retained to the camera's active topic; \
-         wrong stub never sends to channel → subscriber sees nothing — received: {msgs:?}"
-    );
 }
 
 // ── Item 6: long-lived publisher happy path + typed E2E correction ─────────
@@ -1611,81 +1599,32 @@ fn detection_fires_active_sensor_on() {
 #[cfg(feature = "first-light-acceptance")]
 #[test]
 fn detection_publisher_delivers_to_broker() {
-    let broker = match MosquittoFixture::start() {
-        Ok(b) => b,
-        Err(e) => {
-            if e.contains("not found") {
-                return;
-            }
-            panic!("mosquitto failed: {e}");
-        }
-    };
-    thread::sleep(Duration::from_millis(150));
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for queue test");
 
     let topic = "vigil/test/camera-1/detection";
     let payload = r#"{"class_name":"person","confidence":0.95}"#;
 
-    // Subscribe to the topic in-process before spawning the publisher.
-    let broker_port = broker.port;
-    let topic_owned = topic.to_string();
-    let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let received_clone = Arc::clone(&received);
-    let sub_thread = thread::spawn(move || {
-        use rumqttc::v5::mqttbytes::QoS;
-        use rumqttc::v5::mqttbytes::v5::Packet;
-        use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
-        let mut opts = MqttOptions::new("vigil-test-det-sub", "127.0.0.1", broker_port);
-        opts.set_keep_alive(Duration::from_secs(5));
-        let (client, mut connection) = Client::new(opts, 10);
-        let deadline = Instant::now() + Duration::from_secs(12);
-        let mut subscribed = false;
-        let mut payloads: Vec<String> = Vec::new();
-        while Instant::now() < deadline {
-            match connection.recv_timeout(Duration::from_millis(100)) {
-                Ok(Ok(Event::Incoming(Packet::ConnAck(_)))) => {
-                    let _ = client.subscribe(&topic_owned, QoS::AtMostOnce);
-                    subscribed = true;
-                }
-                Ok(Ok(Event::Incoming(Packet::Publish(p)))) if subscribed => {
-                    if let Ok(s) = std::str::from_utf8(&p.payload) {
-                        payloads.push(s.to_string());
-                    }
-                }
-                Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-            if !payloads.is_empty() {
-                break;
-            }
-        }
-        if let Ok(mut g) = received_clone.lock() {
-            *g = payloads;
-        }
-    });
-
-    // Give the subscriber 300ms to connect and subscribe.
-    thread::sleep(Duration::from_millis(300));
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[topic],
+        Duration::from_secs(2),
+    )
+    .expect("detection publisher probe must receive SUBACK");
 
     let health = HealthState::new();
     health.set(HealthStatus::Ready, "test");
     let (publisher, handle) = spawn_detection_publisher(&broker.mqtt_config(), health);
 
-    // Give the publisher thread time to connect (default reconnect delay is 500ms).
-    thread::sleep(Duration::from_millis(700));
-
     publisher.try_publish(topic.to_string(), payload.to_string());
-
-    // Wait for the message to propagate broker → subscriber.
-    thread::sleep(Duration::from_millis(1000));
+    probe
+        .recv_matching(
+            "queued detection publish",
+            Duration::from_secs(5),
+            |message| message.topic == topic && message.payload == payload.as_bytes(),
+        )
+        .expect("detection publisher must deliver queued payload");
     handle.shutdown_and_join();
-    sub_thread.join().ok();
-
-    let msgs = received.lock().map(|g| g.clone()).unwrap_or_default();
-    assert!(
-        msgs.iter().any(|m| m == payload),
-        "spawn_detection_publisher → try_publish must deliver the payload to the broker; \
-         wrong stub's publish loop never calls client.publish — received: {msgs:?}"
-    );
 }
 
 /// RED — wrong stub: parse_command_topic returns None for correction payloads
@@ -1714,27 +1653,22 @@ fn typed_correction_via_mqtt_lands_in_cg() {
     let detection_a = detections[0].id.to_string();
     let detection_b = detections[1].id.to_string();
 
-    let broker = match MosquittoFixture::start() {
-        Ok(b) => b,
-        Err(e) => {
-            if e.contains("not found") {
-                return;
-            }
-            panic!("mosquitto failed: {e}");
-        }
-    };
-    thread::sleep(Duration::from_millis(150));
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for semantics test");
 
     let overflow = Arc::new(AtomicUsize::new(0));
     let (cmd_tx, cmd_rx) = mpsc::sync_channel::<CorrectionRequest>(64);
-    {
+    let (recorded_tx, recorded_rx) = mpsc::sync_channel(2);
+    let worker = {
         let store_w = Arc::clone(&store);
         thread::spawn(move || {
             while let Ok(req) = cmd_rx.recv() {
-                let _ = record_correction(&store_w, req);
+                let result = record_correction(&store_w, req)
+                    .map(|_| ())
+                    .map_err(|error| format!("record correction: {error}"));
+                let _ = recorded_tx.send(result);
             }
-        });
-    }
+        })
+    };
     let handle = spawn_production_subscriber(
         test_subscriber_cfg(broker.mqtt_config()),
         Arc::clone(&store),
@@ -1743,28 +1677,37 @@ fn typed_correction_via_mqtt_lands_in_cg() {
         Arc::clone(&overflow),
     );
 
-    // Give the subscriber time to connect and subscribe.
-    thread::sleep(Duration::from_millis(400));
+    let mut probe = subscriber_ready_probe(&broker);
 
     // false_alarm on detection A (no label).
     let fa_payload =
         format!(r#"{{"detection_id":"{detection_a}","correction_type":"false_alarm"}}"#);
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &fa_payload, 1);
+    probe
+        .publish_qos1("vigil/commands/correct", &fa_payload)
+        .expect("publish false-alarm correction");
 
     // wrong_class + label="cat" on detection B.
     let wc_payload = format!(
         r#"{{"detection_id":"{detection_b}","correction_type":"wrong_class","label":"cat"}}"#
     );
-    mosquitto_pub_n(broker.port, "vigil/commands/correct", &wc_payload, 1);
+    probe
+        .publish_qos1("vigil/commands/correct", &wc_payload)
+        .expect("publish wrong-class correction");
+    probe
+        .wait_for_pubacks(2, Duration::from_secs(2))
+        .expect("broker must acknowledge typed corrections");
 
-    // Wait for both corrections to be processed into cg.
-    thread::sleep(Duration::from_secs(2));
+    for _ in 0..2 {
+        recorded_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("typed correction must be processed")
+            .expect("typed correction must commit");
+    }
     handle.shutdown_and_join();
-    // Brief drain for the correction worker thread.
-    thread::sleep(Duration::from_millis(200));
+    worker.join().expect("typed correction worker must join");
 
     // Read back FalseAlarm on A via review_why.
-    let why_a = review_why(&*store, &detection_a)
+    let why_a = review_why(&store, &detection_a)
         .expect("review_why(A) must not error after false_alarm correction");
     assert_eq!(
         why_a.corrections.len(),
@@ -1780,7 +1723,7 @@ fn typed_correction_via_mqtt_lands_in_cg() {
     );
 
     // Read back WrongClass + label="cat" on B via review_why.
-    let why_b = review_why(&*store, &detection_b)
+    let why_b = review_why(&store, &detection_b)
         .expect("review_why(B) must not error after wrong_class correction");
     assert_eq!(
         why_b.corrections.len(),

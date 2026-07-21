@@ -101,16 +101,16 @@ impl Drop for RuntimeProbe {
 #[cfg(not(feature = "detect-burn-wgpu"))]
 enum RuntimeStatsAttempt {
     Stats(String),
-    TransientPortCollision(String),
     NoStats(String),
 }
 
 #[cfg(not(feature = "detect-burn-wgpu"))]
-fn logs_show_transient_health_port_collision(logs: &str) -> bool {
-    let lower = logs.to_ascii_lowercase();
-    lower.contains("health port")
-        && lower.contains("bind failed")
-        && (lower.contains("address already in use") || lower.contains("os error 98"))
+fn test_health_port_receipt(logs: &str) -> Option<u16> {
+    logs.lines().find_map(|line| {
+        line.strip_prefix("test_health_port_receipt=bound address=127.0.0.1 port=")?
+            .parse()
+            .ok()
+    })
 }
 
 #[cfg(not(feature = "detect-burn-wgpu"))]
@@ -146,30 +146,17 @@ fn runtime_stats_text_from_real_runtime() -> Option<String> {
         model.display()
     );
 
-    let mut last_collision_logs = String::new();
-    for _attempt in 0..3 {
-        match runtime_stats_text_attempt(&clip, &model) {
-            RuntimeStatsAttempt::Stats(stats) => return Some(stats),
-            RuntimeStatsAttempt::TransientPortCollision(logs) => {
-                last_collision_logs = logs;
-                continue;
-            }
-            RuntimeStatsAttempt::NoStats(logs) => {
-                let published_stats = false;
-                assert!(
-                    published_stats,
-                    "runtime must publish detection acceleration into public stats and /health; logs:\n{logs}"
-                );
-                return None;
-            }
+    match runtime_stats_text_attempt(&clip, &model) {
+        RuntimeStatsAttempt::Stats(stats) => Some(stats),
+        RuntimeStatsAttempt::NoStats(logs) => {
+            let published_stats = false;
+            assert!(
+                published_stats,
+                "runtime must publish its test-gated health-port receipt and detection acceleration into public stats and /health; logs:\n{logs}"
+            );
+            None
         }
     }
-    let avoided_collision = false;
-    assert!(
-        avoided_collision,
-        "runtime stats probe could not avoid a transient health-port bind collision after retries; logs:\n{last_collision_logs}"
-    );
-    None
 }
 
 #[cfg(not(feature = "detect-burn-wgpu"))]
@@ -189,22 +176,6 @@ fn runtime_stats_text_attempt(clip: &Path, model: &Path) -> RuntimeStatsAttempt 
         create_data_dir.is_ok(),
         "runtime stats probe data dir must be writable"
     );
-    let health_port = ha_test_support::free_port();
-    assert!(
-        health_port.is_ok(),
-        "health port must be available for runtime stats probe"
-    );
-    let Ok(health_port) = health_port else {
-        return RuntimeStatsAttempt::NoStats(String::new());
-    };
-    let review_port = ha_test_support::free_port();
-    assert!(
-        review_port.is_ok(),
-        "review port must be available for runtime stats probe"
-    );
-    let Ok(review_port) = review_port else {
-        return RuntimeStatsAttempt::NoStats(String::new());
-    };
     let rtsp = ha_test_support::RtspFixture::start(clip);
     assert!(
         rtsp.is_ok(),
@@ -221,8 +192,8 @@ fn runtime_stats_text_attempt(clip: &Path, model: &Path) -> RuntimeStatsAttempt 
          detector_model_id = \"{}\"\ndetector_model_path = \"{}\"\ndetector_sample_frames = 1\n",
         ha_test_support::toml_path(&data_dir),
         ha_test_support::toml_path(&store_path),
-        health_port,
-        review_port,
+        0,
+        0,
         ha_test_support::toml_string(&rtsp.url),
         MODEL_ID,
         ha_test_support::toml_path(model),
@@ -233,12 +204,40 @@ fn runtime_stats_text_attempt(clip: &Path, model: &Path) -> RuntimeStatsAttempt 
         "runtime stats probe config must be writable"
     );
 
+    let ungated = Command::new(vigil_binary_path())
+        .arg("run")
+        .arg("--config")
+        .arg(&config_path)
+        .env_remove("VIGIL_TEST_EPHEMERAL_HEALTH_PORT")
+        .stdin(Stdio::null())
+        .output();
+    assert!(
+        ungated.is_ok(),
+        "ordinary runtime must execute the port-0 rejection probe"
+    );
+    let Ok(ungated) = ungated else {
+        return RuntimeStatsAttempt::NoStats(String::new());
+    };
+    let ungated_logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ungated.stdout),
+        String::from_utf8_lossy(&ungated.stderr)
+    );
+    assert!(
+        !ungated.status.success()
+            && ungated_logs.contains(
+                "health port 0 is reserved for VIGIL_TEST_EPHEMERAL_HEALTH_PORT=1 test probes"
+            ),
+        "ordinary production startup must reject an ungated ephemeral health port: {ungated_logs}"
+    );
+
     let spawn = Command::new(vigil_binary_path())
         .arg("run")
         .arg("--config")
         .arg(&config_path)
         .env("VIGIL_RTSP_RETRY_INITIAL_MS", "200")
         .env("VIGIL_RTSP_RETRY_MAX_MS", "1000")
+        .env("VIGIL_TEST_EPHEMERAL_HEALTH_PORT", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -255,37 +254,45 @@ fn runtime_stats_text_attempt(clip: &Path, model: &Path) -> RuntimeStatsAttempt 
         stderr,
     };
 
+    let health_port = match ha_test_support::wait_until(
+        "test-gated health server to publish its actual bound port",
+        Duration::from_secs(5),
+        || Ok(test_health_port_receipt(&runtime.logs())),
+    ) {
+        Ok(port) => port,
+        Err(error) => {
+            let logs = runtime.logs();
+            runtime.terminate();
+            return RuntimeStatsAttempt::NoStats(format!("{error}; logs:\n{logs}"));
+        }
+    };
+
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut latest_surfaces = None;
     while Instant::now() < deadline {
         let stats = read_public_stats(&data_dir);
         let health = read_health_endpoint(health_port);
         if let (Some(stats), Some(health)) = (stats, health) {
-            let has_detection_stats = public_surface_mentions_detection_receipt(&stats);
-            let has_detection_health = public_surface_mentions_detection_receipt(&health);
-            if has_detection_stats || has_detection_health {
+            let has_detection_stats = stats.contains("[detect.acceleration]");
+            let has_detection_health = health.contains("[detect.acceleration]");
+            if has_detection_stats && has_detection_health {
                 latest_surfaces = Some(format!(
                     "[runtime.stats]\n{stats}\n[runtime.health]\n{health}"
                 ));
                 break;
             }
         }
-        if ha_test_support::runtime_reached_pipeline_terminal_signal(&runtime.logs()) {
-            let stats = read_public_stats(&data_dir).unwrap_or_default();
-            let health = read_health_endpoint(health_port).unwrap_or_default();
-            latest_surfaces = Some(format!(
-                "[runtime.stats]\n{stats}\n[runtime.health]\n{health}"
-            ));
-            break;
-        }
+        // A pipeline-terminal log line is not the readiness contract under
+        // test. It can arrive between the two surface reads above and this log
+        // snapshot, in which case returning those stale reads makes the test
+        // race the synchronous receipt publication. Keep polling for the exact
+        // public receipt and use the deadline only as the fail-closed bound.
         std::thread::sleep(Duration::from_millis(100));
     }
     let logs = runtime.logs();
     runtime.terminate();
     if let Some(surfaces) = latest_surfaces {
         RuntimeStatsAttempt::Stats(surfaces)
-    } else if logs_show_transient_health_port_collision(&logs) {
-        RuntimeStatsAttempt::TransientPortCollision(logs)
     } else {
         RuntimeStatsAttempt::NoStats(logs)
     }
@@ -321,14 +328,6 @@ fn read_health_endpoint(port: u16) -> Option<String> {
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
     Some(response)
-}
-
-#[cfg(not(feature = "detect-burn-wgpu"))]
-fn public_surface_mentions_detection_receipt(surface: &str) -> bool {
-    surface.contains("detection-acceleration=")
-        || surface.contains("[detect.acceleration]")
-        || surface.contains("active-detector-backend=")
-        || surface.contains("backend_not_compiled")
 }
 
 #[cfg(not(feature = "detect-burn-wgpu"))]

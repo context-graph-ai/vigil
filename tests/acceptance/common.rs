@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Write};
@@ -554,6 +554,7 @@ impl DockerProbe {
                 .map(|output| output.status.success())
                 .unwrap_or(false),
             stdout: build.stdout,
+            container_logs: String::new(),
             healthcheck: inspect.map(output_combined_text).unwrap_or_default(),
         }
     }
@@ -611,6 +612,7 @@ impl DockerProbe {
 
         let _ = command_output("docker", ["rm", "-f", &name]);
         let mut output = build.stdout;
+        let mut container_logs = String::new();
         let started = command_output("docker", args)
             .map(|run| {
                 let success = run.status.success();
@@ -624,6 +626,7 @@ impl DockerProbe {
                 docker_available: true,
                 command_succeeded: false,
                 stdout: output,
+                container_logs,
                 healthcheck: String::new(),
             };
         }
@@ -638,7 +641,9 @@ impl DockerProbe {
         let live_runtime =
             ready && verify_container_live_store_and_health(&name, volume, &mut output);
         if let Some(logs) = command_output("docker", ["logs", &name]) {
-            output.push_str(&output_combined_text(logs));
+            let logs = output_combined_text(logs);
+            container_logs.push_str(&logs);
+            output.push_str(&logs);
         }
         let stopped = command_output("docker", ["stop", "--time", "10", &name])
             .map(|stop| {
@@ -654,58 +659,126 @@ impl DockerProbe {
             docker_available: true,
             command_succeeded: ready && live_runtime && stopped && clean_exit,
             stdout: output,
+            container_logs,
             healthcheck: String::new(),
         }
     }
 
     fn build_current_image(image: &str) -> DockerObservation {
+        static BUILDS: OnceLock<Mutex<BTreeMap<String, DockerObservation>>> = OnceLock::new();
+        let builds = BUILDS.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut builds = builds
+            .lock()
+            .expect("Docker image build cache lock poisoned");
+        if let Some(observation) = builds.get(image) {
+            return observation.clone();
+        }
+        let observation = Self::build_current_image_uncached(image);
+        builds.insert(image.to_string(), observation.clone());
+        observation
+    }
+
+    fn build_current_image_uncached(image: &str) -> DockerObservation {
         if !docker_available() {
             return DockerObservation::unavailable();
         }
         let mut stdout = String::new();
-        for args in [
-            vec!["build", "-p", "vigil", "--release"],
-            vec![
-                "build",
-                "-p",
-                "vigil",
-                "--release",
-                "--target",
-                "x86_64-unknown-linux-musl",
-            ],
-            vec![
-                "build",
-                "-p",
-                "vigil",
-                "--release",
-                "--target",
-                "aarch64-unknown-linux-musl",
-            ],
-        ] {
-            let Some(build) = command_output_in_dir(env!("CARGO"), args, &workspace_root()) else {
-                return DockerObservation {
-                    docker_available: true,
-                    command_succeeded: false,
-                    stdout: format!("{stdout}could not run cargo build before docker build\n"),
-                    healthcheck: String::new(),
-                };
+        let (target, docker_arch) = if cfg!(target_arch = "x86_64") {
+            ("x86_64-unknown-linux-musl", "amd64")
+        } else if cfg!(target_arch = "aarch64") {
+            ("aarch64-unknown-linux-musl", "arm64")
+        } else {
+            return DockerObservation {
+                docker_available: true,
+                command_succeeded: false,
+                stdout: format!(
+                    "container acceptance has no static image target for host architecture {}\n",
+                    std::env::consts::ARCH
+                ),
+                container_logs: String::new(),
+                healthcheck: String::new(),
             };
-            let success = build.status.success();
-            stdout.push_str(&output_combined_text(build));
-            if !success {
+        };
+        let cargo_args = [
+            "build",
+            "-p",
+            "vigil",
+            "--release",
+            "--target",
+            target,
+            "--features",
+            "fabric",
+        ];
+        let Some(build) = command_output_in_dir(env!("CARGO"), cargo_args, &workspace_root())
+        else {
+            return DockerObservation {
+                docker_available: true,
+                command_succeeded: false,
+                stdout: "could not run cargo build before docker build\n".to_string(),
+                container_logs: String::new(),
+                healthcheck: String::new(),
+            };
+        };
+        let success = build.status.success();
+        stdout.push_str(&output_combined_text(build));
+        if !success {
+            return DockerObservation {
+                docker_available: true,
+                command_succeeded: false,
+                stdout,
+                container_logs: String::new(),
+                healthcheck: String::new(),
+            };
+        }
+
+        let context = match tempfile::tempdir() {
+            Ok(context) => context,
+            Err(error) => {
+                stdout.push_str(&format!("create minimal Docker context: {error}\n"));
                 return DockerObservation {
                     docker_available: true,
                     command_succeeded: false,
                     stdout,
+                    container_logs: String::new(),
                     healthcheck: String::new(),
                 };
             }
+        };
+        let staged_dir = context.path().join("dist/docker").join(docker_arch);
+        let source_binary = workspace_root()
+            .join("target")
+            .join(target)
+            .join("release")
+            .join(binary_name("vigil"));
+        let staged = fs::create_dir_all(&staged_dir)
+            .and_then(|()| {
+                fs::copy(
+                    workspace_root().join("Dockerfile"),
+                    context.path().join("Dockerfile"),
+                )
+            })
+            .and_then(|_| fs::copy(&source_binary, staged_dir.join("vigil")));
+        if let Err(error) = staged {
+            stdout.push_str(&format!(
+                "stage exact Docker context from {}: {error}\n",
+                source_binary.display()
+            ));
+            return DockerObservation {
+                docker_available: true,
+                command_succeeded: false,
+                stdout,
+                container_logs: String::new(),
+                healthcheck: String::new(),
+            };
         }
-        let build = command_output_in_dir(
-            "docker",
-            ["build", "--pull=false", "-t", image, "."],
-            &workspace_root(),
-        );
+        let build = Command::new("docker")
+            .env("DOCKER_BUILDKIT", "0")
+            .args(["build", "--pull=false", "--build-arg"])
+            .arg(format!("TARGETARCH={docker_arch}"))
+            .args(["-t", image])
+            .arg(context.path())
+            .output()
+            .ok();
         if let Some(output) = build.as_ref() {
             stdout.push_str(&output_combined_text_ref(output));
         }
@@ -716,6 +789,7 @@ impl DockerProbe {
                 .map(|output| output.status.success())
                 .unwrap_or(false),
             stdout,
+            container_logs: String::new(),
             healthcheck: String::new(),
         }
     }
@@ -766,10 +840,15 @@ fn verify_container_live_store_and_health(name: &str, volume: &Path, output: &mu
     ok
 }
 
+#[derive(Clone)]
 pub(crate) struct DockerObservation {
     pub(crate) docker_available: bool,
     pub(crate) command_succeeded: bool,
     pub(crate) stdout: String,
+    /// Output emitted by the running container only. Build diagnostics stay
+    /// in `stdout` for failure reporting but cannot satisfy or fail runtime
+    /// isolation assertions.
+    pub(crate) container_logs: String,
     pub(crate) healthcheck: String,
 }
 
@@ -793,6 +872,7 @@ impl DockerObservation {
             docker_available: false,
             command_succeeded: false,
             stdout: String::new(),
+            container_logs: String::new(),
             healthcheck: String::new(),
         }
     }

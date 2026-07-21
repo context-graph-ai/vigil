@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "remove the no-work standing SyncClient push from ContextDB work_ledger::run_worker_loop",
+    "source_sha256": "sha256:09d8c6c4b860b7ad962613203640e5d9e6ec8cfd14c370eddcf5e43105bf4ed5",
+    "diff": ".config/test-estate-evidence/capability-fold/planted-fault.diff",
+    "diff_sha256": "sha256:4941eecc4a234cb0fb592ff969109f2cb44546b8b802d35732b10b20cb894600"
+  },
+  "removed": {
+    "test": "vigil::capability_delivery::hub_up_late_still_sees_worker_capability",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --release --features fabric --test capability_delivery hub_up_late_still_sees_worker_capability -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 36.57
+  },
+  "survivor": {
+    "test": "vigil::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_up_late",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --release --features fabric --test two_process_fabric two_real_processes_render_remote_detectors_line_hub_up_late -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 101.77
+  }
+}

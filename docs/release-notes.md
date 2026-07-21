@@ -20,6 +20,8 @@ detection honestly — the receipt names why on `/health`, `vigil stats`, and
 `vigil doctor acceleration`. The two add-on switches (`hardware_decoding`,
 `accelerated_detection`) default on.
 
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent artifact contract binds shipped GStreamer/Vulkan packages and achieved fallback reporting.` -->
+
 Measured on the Home Assistant OS test VM, the add-on's detection fell back to
 CPU at default settings — but that is a cold-start timing effect, not a
 capability limit. The VM's virtualized Intel iGPU (ADL-N Intel Graphics) is
@@ -31,6 +33,8 @@ while hardware video decode stays active. Raising the `detection_probe_deadline_
 add-on option past that compile time activates accelerated detection on the same
 VM.
 
+<!-- vigil-unenforced: classification=external-procedure; reason=`HAOS VM GPU timing and cold-shader behavior come from a measured physical run.` -->
+
 Shipping the Vulkan runtime (the loader plus the arch's GPU ICDs) adds about
 50 MB to each hardware image. The amd64 images ship the Intel and AMD Vulkan
 drivers so one image accelerates on either vendor's iGPU/GPU; the aarch64
@@ -38,8 +42,12 @@ images ship the AMD, Broadcom, Panfrost, and Freedreno drivers. The aarch64
 hardware image is build-proven only — no ARM hardware acceleration is promised
 until it is measured on a real board.
 
+<!-- vigil-unenforced: classification=external-procedure; reason=`Image-size and per-architecture driver contents require built-image inspection and measurement.` -->
+
 The `vigil-static-musl` artifact remains the software-only, statically
 linked build for hosts with no graphics device to map. Its download is
 unchanged: it reports the honest CPU/software fallback and its doctor output
 names the hardware image above as the upgrade path — it is not silently
 swapped for a hardware build.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent artifact contract binds static-musl software-only behavior and upgrade guidance.` -->

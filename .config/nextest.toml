@@ -4,6 +4,8 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 
 [profile.pr]
 default-filter = 'not (binary(first_light_loop) | binary(acceptance))'
+fail-fast = false
+retries = 0
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [profile.ci-full]
@@ -15,5 +17,4 @@ test-threads = 1
 
 [[profile.ci-full.overrides]]
 filter = 'binary(first_light_loop) | binary(acceptance)'
-retries = { count = 2, backoff = "fixed", delay = "5s" }
 slow-timeout = { period = "180s", terminate-after = 4 }

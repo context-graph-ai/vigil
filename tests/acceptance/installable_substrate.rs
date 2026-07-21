@@ -504,13 +504,19 @@ fn vigil_container_healthcheck_serves_ready_and_stops_cleanly() {
         failures.push("docker was not available for container runtime probe".to_string());
     }
     if !observation.command_succeeded {
-        failures.push(format!("local image {image} was not inspectable"));
+        failures.push(format!(
+            "local image {image} was not inspectable: {}",
+            observation.stdout
+        ));
     }
     if !observation.healthcheck_targets_health_endpoint() {
         failures.push("image healthcheck did not target /health".to_string());
     }
     if !runtime.command_succeeded {
-        failures.push("container did not serve health 200 and stop with exit 0".to_string());
+        failures.push(format!(
+            "container did not serve health 200 and stop with exit 0: {}",
+            runtime.stdout
+        ));
     }
 
     assert!(failures.is_empty(), "{}", failures.join("; "));
@@ -532,9 +538,12 @@ fn vigil_container_persistent_volume_reopens_same_store() {
         failures.push("docker was not available for volume probe".to_string());
     }
     if !first.command_succeeded || !second.command_succeeded {
-        failures.push("container volume runs did not both succeed".to_string());
+        failures.push(format!(
+            "container volume runs did not both succeed: first={} second={}",
+            first.stdout, second.stdout
+        ));
     }
-    if !second.stdout.contains("existing store") {
+    if !second.container_logs.contains("existing store") {
         failures.push("second container run did not report existing store open".to_string());
     }
     if before.is_none() || before != after {
@@ -566,15 +575,20 @@ fn vigil_container_first_start_health_succeeds_with_network_none() {
         failures.push("network-none image healthcheck did not target /health".to_string());
     }
     if !observation.command_succeeded {
-        failures.push(
-            "container did not reach healthy first start under network isolation".to_string(),
-        );
+        failures.push(format!(
+            "container did not reach healthy first start under network isolation: {}",
+            observation.stdout
+        ));
     }
     if !probe.opened {
         failures.push(probe.detail);
     }
     for forbidden in ["download", "huggingface", "dns", "outbound", "hosted"] {
-        if observation.stdout.to_ascii_lowercase().contains(forbidden) {
+        if observation
+            .container_logs
+            .to_ascii_lowercase()
+            .contains(forbidden)
+        {
             failures.push(format!(
                 "container logs contained offline-forbidden term {forbidden}"
             ));

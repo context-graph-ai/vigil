@@ -4,6 +4,7 @@
 #![cfg_attr(feature = "detect-burn-wgpu", recursion_limit = "256")]
 
 pub mod acceleration;
+mod clock;
 mod config;
 mod control_socket;
 pub mod correction;
@@ -33,9 +34,11 @@ mod supervisor;
 pub mod workgraph;
 mod yolox_detector;
 
+pub use clock::PersistedClock;
 pub use correction::{
     CorrectionError, CorrectionReceipt, CorrectionRequest, CorrectionType, EventRow, EventsView,
-    RecordedCorrection, ReviewError, WhyView, record_correction, review_events, review_why,
+    RecordedCorrection, ReviewError, WhyView, correction_execution_fingerprint, record_correction,
+    record_correction_with_clock, review_events, review_why,
 };
 pub use ha_discovery::{
     CameraConfig, CommandTopicMessage, DetectionInput, DiscoveryPayload, EventPayload, ParseError,
@@ -48,7 +51,9 @@ pub use ha_mqtt_tasks::{
     publish_discovery_to_broker, spawn_detection_publisher, spawn_production_subscriber,
 };
 pub use health::{HealthState, HealthStatus};
-pub use http_data_plane::{ReviewDataPlaneHandle, spawn_review_data_plane};
+pub use http_data_plane::{
+    ReviewDataPlaneHandle, spawn_review_data_plane, spawn_review_data_plane_with_clock,
+};
 pub use media_pipeline::{DecodedRgbFrame, VideoCodec};
 pub use privilege::{PrivilegeStep, privilege_drop_plan};
 

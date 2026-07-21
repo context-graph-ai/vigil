@@ -29,7 +29,7 @@ options:
   review_port: 8098
   detector_stationary_interval_secs: 30
   recognition_space_id: vigil_site_vision_v1
-  recognition_threshold: 0.6
+  recognition_threshold: 0.9
   recognition_covered_classes:
     - person
     - dog

@@ -53,8 +53,8 @@ build_artifacts() {
   setup_harness
   log "static musl builds"
   rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-  cargo build --release --target x86_64-unknown-linux-musl
-  cargo build --release --target aarch64-unknown-linux-musl
+  cargo build --release --target x86_64-unknown-linux-musl --features fabric
+  cargo build --release --target aarch64-unknown-linux-musl --features fabric
   file \
     target/x86_64-unknown-linux-musl/release/vigil \
     target/aarch64-unknown-linux-musl/release/vigil \

@@ -1,0 +1,242 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 111.904007445,
+          "process_status": "Success",
+          "argv": [
+            "/home/jcyriac/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--profile=release",
+            "--verbose",
+            "--package=vigil@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 8.666917867,
+          "process_status": "Success",
+          "argv": [
+            "/home/jcyriac/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--profile=release",
+            "--verbose",
+            "--package=vigil@0.1.0",
+            "--test",
+            "ha_mqtt_broker",
+            "--no-fail-fast"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/vigil/src/ha_mqtt_tasks.rs:590:9: replace DetectionPublisher::try_publish with ()",
+          "package": "vigil",
+          "file": "crates/vigil/src/ha_mqtt_tasks.rs",
+          "function": {
+            "function_name": "DetectionPublisher::try_publish",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 588,
+                "column": 5
+              },
+              "end": {
+                "line": 607,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 590,
+              "column": 9
+            },
+            "end": {
+              "line": 606,
+              "column": 10
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__vigil__src__ha_mqtt_tasks.rs_line_590_col_9.log",
+      "diff_path": "diff/crates__vigil__src__ha_mqtt_tasks.rs_line_590_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 10.78784296,
+          "process_status": "Success",
+          "argv": [
+            "/home/jcyriac/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--profile=release",
+            "--verbose",
+            "--package=vigil@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 8.616330678,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/jcyriac/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--profile=release",
+            "--verbose",
+            "--package=vigil@0.1.0",
+            "--test",
+            "ha_mqtt_broker",
+            "--no-fail-fast"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/vigil/src/ha_mqtt_tasks.rs:596:76: replace + with - in DetectionPublisher::try_publish",
+          "package": "vigil",
+          "file": "crates/vigil/src/ha_mqtt_tasks.rs",
+          "function": {
+            "function_name": "DetectionPublisher::try_publish",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 588,
+                "column": 5
+              },
+              "end": {
+                "line": 607,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 596,
+              "column": 76
+            },
+            "end": {
+              "line": 596,
+              "column": 77
+            }
+          },
+          "replacement": "-",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "MissedMutant",
+      "log_path": "log/crates__vigil__src__ha_mqtt_tasks.rs_line_596_col_76.log",
+      "diff_path": "diff/crates__vigil__src__ha_mqtt_tasks.rs_line_596_col_76.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 10.891465923,
+          "process_status": "Success",
+          "argv": [
+            "/home/jcyriac/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--profile=release",
+            "--verbose",
+            "--package=vigil@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 8.617191886,
+          "process_status": "Success",
+          "argv": [
+            "/home/jcyriac/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--profile=release",
+            "--verbose",
+            "--package=vigil@0.1.0",
+            "--test",
+            "ha_mqtt_broker",
+            "--no-fail-fast"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/vigil/src/ha_mqtt_tasks.rs:650:5: replace spawn_detection_publisher -> (Arc<DetectionPublisher>, DetectionPublisherHandle) with (Arc::new(Default::default()), Default::default())",
+          "package": "vigil",
+          "file": "crates/vigil/src/ha_mqtt_tasks.rs",
+          "function": {
+            "function_name": "spawn_detection_publisher",
+            "return_type": "-> (Arc<DetectionPublisher>, DetectionPublisherHandle)",
+            "span": {
+              "start": {
+                "line": 641,
+                "column": 1
+              },
+              "end": {
+                "line": 755,
+                "column": 2
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 650,
+              "column": 5
+            },
+            "end": {
+              "line": 754,
+              "column": 6
+            }
+          },
+          "replacement": "(Arc::new(Default::default()), Default::default())",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Unviable",
+      "log_path": "log/crates__vigil__src__ha_mqtt_tasks.rs_line_650_col_5.log",
+      "diff_path": "diff/crates__vigil__src__ha_mqtt_tasks.rs_line_650_col_5.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.754441653,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/home/jcyriac/.rustup/toolchains/1.94.0-x86_64-unknown-linux-gnu/bin/cargo",
+            "test",
+            "--no-run",
+            "--profile=release",
+            "--verbose",
+            "--package=vigil@0.1.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 3,
+  "missed": 1,
+  "caught": 1,
+  "timeout": 0,
+  "unviable": 1,
+  "success": 0,
+  "start_time": "2026-07-21T03:30:22.304737731Z",
+  "end_time": "2026-07-21T03:33:03.550308017Z",
+  "cargo_mutants_version": "27.1.0"
+}

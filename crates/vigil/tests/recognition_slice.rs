@@ -17,8 +17,8 @@ use context_graph::{
 };
 use vigil::recognition::{
     MatchOutcome, RecognitionConfig, class_is_covered, crop_png, entity_type_for_class,
-    forget_named_entity, map_bbox_to_frame, match_crop_for_class, match_vector_for_class,
-    open_store_with_embedder, record_enrollment, record_match_observation,
+    forget_named_entity, map_bbox_to_frame, match_crop_for_class, match_vector,
+    match_vector_for_class, open_store_with_embedder, record_enrollment, record_match_observation,
 };
 use vigil::{CorrectionRequest, CorrectionType, parse_command_topic, record_correction};
 
@@ -133,7 +133,9 @@ struct World {
 fn world(name: &str) -> World {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = open_store_with_embedder(
-        &dir.path().join(format!("{name}.db")),
+        &dir.path()
+            .join("created/by/open-store")
+            .join(format!("{name}.db")),
         SPACE,
         Arc::new(HashEmbedder),
     )
@@ -185,6 +187,31 @@ fn world(name: &str) -> World {
     }
 }
 
+fn create_same_name_decoy_in_other_context(
+    world: &World,
+    name: &str,
+) -> (context_graph::ContextId, context_graph::EntityId) {
+    let context = world
+        .store
+        .create_context(CreateContext {
+            name: format!("other-site-{name}"),
+            labels: Vec::new(),
+            properties: BTreeMap::new(),
+        })
+        .expect("other context");
+    let entity = world
+        .store
+        .create_entity(CreateEntity {
+            entity_type: EntityType::Person,
+            name: name.to_string(),
+            properties: BTreeMap::new(),
+            tags: vec!["cross-context-decoy".to_string()],
+            context_id: context.id,
+        })
+        .expect("same-name entity in other context");
+    (context.id, entity.id)
+}
+
 fn seed_detection(world: &World, class: &str) -> ObservationId {
     let id = ObservationId::new_v7();
     let evidence_id = context_graph::EvidenceId::new_v7();
@@ -196,7 +223,8 @@ fn seed_detection(world: &World, class: &str) -> ObservationId {
             context_id: world.context_id,
             observation_type: "detection".to_string(),
             source: "vigil".to_string(),
-            observed_at: chrono::Utc::now(),
+            observed_at: chrono::DateTime::from_timestamp_millis(1_700_000_000_000)
+                .expect("fixed recognition fixture timestamp is valid"),
             evidence: vec![EvidenceRef {
                 id: evidence_id,
                 observation_id: id,
@@ -279,11 +307,45 @@ fn bbox_maps_from_detector_space_to_original_frame_pixels() {
 fn bbox_mapping_clamps_to_frame_and_rejects_degenerate_boxes() {
     let clamped = map_bbox_to_frame("600,600,700,700", 640, 640, 1000, 1000)
         .expect("overhanging bbox clamps");
-    assert!(
-        clamped.0 + clamped.2 <= 1000 && clamped.1 + clamped.3 <= 1000,
-        "crop rect stays inside the frame, got {clamped:?}"
+    assert_eq!(
+        clamped,
+        (937, 937, 63, 63),
+        "overhanging coordinates clamp to the exact remaining frame extent"
     );
     assert!(map_bbox_to_frame("10,10,10,10", 640, 640, 1000, 1000).is_none());
+    assert!(map_bbox_to_frame("10,10,10,20", 640, 640, 1000, 1000).is_none());
+    assert!(map_bbox_to_frame("10,10,20,10", 640, 640, 1000, 1000).is_none());
+    for dimensions in [
+        (0, 640, 1000, 1000),
+        (640, 0, 1000, 1000),
+        (640, 640, 0, 1000),
+        (640, 640, 1000, 0),
+    ] {
+        assert!(
+            map_bbox_to_frame(
+                "10,10,20,20",
+                dimensions.0,
+                dimensions.1,
+                dimensions.2,
+                dimensions.3,
+            )
+            .is_none(),
+            "every zero detector/frame dimension must reject: {dimensions:?}"
+        );
+    }
+    assert_eq!(
+        map_bbox_to_frame("0,0,640,640", 640, 640, 1920, 1080),
+        Some((0, 0, 1920, 1080)),
+        "full detector extent maps exactly to the full source frame"
+    );
+    assert!(
+        map_bbox_to_frame("-20,10,-10,20", 640, 640, 1000, 1000).is_none(),
+        "a box clamped to zero width must reject even when height remains positive"
+    );
+    assert!(
+        map_bbox_to_frame("10,-20,20,-10", 640, 640, 1000, 1000).is_none(),
+        "a box clamped to zero height must reject even when width remains positive"
+    );
     assert!(map_bbox_to_frame("not-a-bbox", 640, 640, 1000, 1000).is_none());
 }
 
@@ -301,9 +363,20 @@ fn crop_png_extracts_the_requested_region() {
     }
     let marker = crop_png(&rgb, w, h, (50, 20, 40, 20)).expect("crop marker");
     let elsewhere = crop_png(&rgb, w, h, (120, 60, 40, 20)).expect("crop elsewhere");
+    let right_edge = crop_png(&rgb, w, h, (190, 0, 10, 1)).expect("right edge is inclusive");
+    let bottom_edge = crop_png(&rgb, w, h, (0, 90, 1, 10)).expect("bottom edge is inclusive");
     let decode = |bytes: &[u8]| image::load_from_memory(bytes).expect("decode").to_rgb8();
     assert!(decode(&marker).pixels().all(|p| p.0 == [255, 255, 255]));
     assert!(decode(&elsewhere).pixels().all(|p| p.0 == [0, 0, 0]));
+    assert_eq!(decode(&right_edge).dimensions(), (10, 1));
+    assert_eq!(decode(&bottom_edge).dimensions(), (1, 10));
+    assert!(crop_png(&rgb[..rgb.len() - 1], w, h, (0, 0, 1, 1)).is_err());
+    for invalid in [(190, 0, 11, 1), (0, 90, 1, 11), (0, 0, 0, 1), (0, 0, 1, 0)] {
+        assert!(
+            crop_png(&rgb, w, h, invalid).is_err(),
+            "invalid crop boundary must fail: {invalid:?}"
+        );
+    }
 }
 
 // ── Class routing ──────────────────────────────────────────────────────────
@@ -336,6 +409,7 @@ fn enroll_correction_creates_named_entity_and_later_sightings_match() {
         first.name.is_none(),
         "before enrollment the sighting is unknown, got {first:?}"
     );
+    let (_, decoy_id) = create_same_name_decoy_in_other_context(&world, "Arjun");
 
     // The owner marks the detection "Arjun" through the correction seam —
     // the same door the card and HTTP plane drive.
@@ -351,10 +425,20 @@ fn enroll_correction_creates_named_entity_and_later_sightings_match() {
     assert!(!receipt.correction_id.is_empty());
 
     let entities = world.store.list_entities(Default::default()).expect("list");
-    let person = entities
+    let people = entities
         .iter()
-        .find(|e| e.name == "Arjun")
-        .expect("first enroll creates the named entity");
+        .filter(|entity| entity.name == "Arjun")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        people.len(),
+        2,
+        "enrollment must create a site-local Arjun instead of reusing the same name from another context"
+    );
+    let person = people
+        .iter()
+        .find(|entity| entity.context_id == world.context_id)
+        .expect("first enroll creates the named entity in the detection context");
+    assert_ne!(person.id, decoy_id);
     assert_eq!(person.entity_type, EntityType::Person);
 
     // The next sighting (same subject ⇒ same crop bytes ⇒ same vector through
@@ -417,8 +501,8 @@ fn below_threshold_sighting_stays_unknown() {
 }
 
 #[test]
-fn medium_confidence_single_person_gallery_match_stays_unknown() {
-    let world = world("single-person-gallery-unknown");
+fn configured_recognition_threshold_is_honored_without_a_hidden_floor() {
+    let world = world("visible-recognition-threshold");
     let person_detection = seed_detection(&world, "person");
     record_match_observation(
         &world.store,
@@ -441,22 +525,50 @@ fn medium_confidence_single_person_gallery_match_stays_unknown() {
         .expect("enroll the person");
 
     // Regression seed: a different person/rider matched the only enrolled
-    // person at 0.8489186167. That score is useful
-    // provenance, but it is not decisive enough for automatic naming.
+    // person at 0.8489186167. The 0.90 default rejects it, while an operator
+    // who explicitly selects 0.60 gets the configured behavior—not a hidden
+    // 0.90 floor.
     let smoke_false_positive_score = 0.848_918_6f32;
     let probe = vector_with_cosine_to_axis(smoke_false_positive_score);
-    let outcome =
-        match_vector_for_class(&world.store, SPACE, world.context_id, &probe, 0.6, "person")
-            .expect("match runs");
+    let default_outcome = match_vector_for_class(
+        &world.store,
+        SPACE,
+        world.context_id,
+        &probe,
+        RecognitionConfig::default().match_threshold,
+        "person",
+    )
+    .expect("default-threshold match runs");
+    let configured_outcome = match_vector_for_class(
+        &world.store,
+        SPACE,
+        world.context_id,
+        &probe,
+        0.60,
+        "person",
+    )
+    .expect("configured-threshold match runs");
+    let exact_boundary = match_vector(&world.store, SPACE, world.context_id, &axis_vector(0), 1.0)
+        .expect("exact-threshold match runs");
 
     assert!(
-        outcome.name.is_none(),
-        "a one-person gallery match at the observed smoke false-positive score must stay unknown, got {outcome:?}"
+        default_outcome.name.is_none(),
+        "the 0.90 default must keep the observed smoke false-positive unknown, got {default_outcome:?}"
+    );
+    assert_eq!(
+        configured_outcome.name.as_deref(),
+        Some("Kiran"),
+        "an explicit 0.60 threshold must be honored without a hidden 0.90 floor"
+    );
+    assert_eq!(
+        exact_boundary.name.as_deref(),
+        Some("Kiran"),
+        "a score equal to the configured threshold is a match"
     );
     assert!(
-        (outcome.score - smoke_false_positive_score as f64).abs() < 1e-5,
+        (default_outcome.score - smoke_false_positive_score as f64).abs() < 1e-5,
         "the unknown outcome must preserve the nearest-neighbor score for review provenance, got {}",
-        outcome.score
+        default_outcome.score
     );
 }
 
@@ -490,6 +602,11 @@ fn match_records_observation_against_the_matched_entity_with_vector_and_score() 
         "the match observation is recorded AGAINST the matched entity"
     );
     assert!(match_obs.observed_properties.contains_key("score"));
+    let producer = &match_obs.evidence[0].producer;
+    assert_eq!(producer.system, "vigil");
+    assert_eq!(producer.model_name, "vision-embedder");
+    assert_eq!(producer.model_version, "1");
+    assert_eq!(producer.pipeline_version, "recognition-v1");
     assert!(
         match_obs
             .observed_properties
@@ -579,6 +696,31 @@ fn forget_removes_references_and_the_subject_reverts_to_unknown() {
     embed_match_record(&world, detection, &crop);
     record_enrollment(&world.store, &detection.to_string(), "Arjun", SPACE).expect("enroll");
 
+    let (other_context, other_entity) = create_same_name_decoy_in_other_context(&world, "Arjun");
+    world
+        .store
+        .enroll_entity_reference(
+            other_entity,
+            SPACE,
+            Some("other-context-reference".to_string()),
+            hash_vector(&crop),
+            producer(),
+        )
+        .expect("other context reference enrolls");
+
+    let removed_other = forget_named_entity(&world.store, "Arjun", Some(other_context))
+        .expect("context-scoped forget runs");
+    assert!(
+        removed_other >= 1,
+        "the selected context loses its reference"
+    );
+    let still_known = embed_match_record(&world, seed_detection(&world, "person"), &crop);
+    assert_eq!(
+        still_known.name.as_deref(),
+        Some("Arjun"),
+        "forgetting a same-name subject in another context must not erase this site's subject"
+    );
+
     let removed =
         forget_named_entity(&world.store, "Arjun", Some(world.context_id)).expect("forget runs");
     assert!(removed >= 1, "at least one reference removed");
@@ -603,7 +745,6 @@ fn event_payload_carries_the_entity_name_when_matched() {
         timestamp_ms: 1,
         evidence_ref: "vigil-edge:clip/x".to_string(),
         snapshot_ref: "vigil-edge:clip/y".to_string(),
-        zone: None,
         entity_name: Some("Arjun".to_string()),
         match_score: Some(0.93),
     });

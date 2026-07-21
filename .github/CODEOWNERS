@@ -1,0 +1,8 @@
+/xtask/src/test_estate.rs @lucidprogrammer
+/.config/test-*.toml @lucidprogrammer
+/.config/nextest*.toml @lucidprogrammer
+/.config/non-rust-test-*.toml @lucidprogrammer
+/.config/documentation-contracts.toml @lucidprogrammer
+/.github/CODEOWNERS @lucidprogrammer
+/.github/workflows/ci.yml @lucidprogrammer
+/tests/ha-os-vm/ @lucidprogrammer

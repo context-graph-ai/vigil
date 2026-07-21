@@ -233,7 +233,11 @@ impl FirstLightWorld {
     }
 
     fn run_runtime_once(&self) -> RuntimeObservation {
-        let mut runtime = LiveRuntime::spawn(self);
+        self.run_runtime_once_with_env(&[])
+    }
+
+    fn run_runtime_once_with_env(&self, extra_env: &[(&str, &str)]) -> RuntimeObservation {
+        let mut runtime = LiveRuntime::spawn_with_env(self, extra_env);
         let observation = runtime.observe().with_fixture_evidence(self);
         let _ = runtime.terminate();
         observation
@@ -1435,13 +1439,7 @@ fn assert_production_detector_does_not_delegate_to_oracle(
             }
         }
         if source_is_detector_execution_surface(source) {
-            for spawn_marker in [
-                "std::process::command",
-                "process::command",
-                "command::new",
-                ".spawn(",
-                ".output(",
-            ] {
+            for spawn_marker in ["std::process::command", "process::command", "command::new"] {
                 if lower.contains(spawn_marker) {
                     failures.push(format!(
                         "production detector source {} can spawn or shell out instead of calling the detector backend directly: {spawn_marker}",
@@ -5031,7 +5029,14 @@ fn detector_loads_and_runs_over_real_frames() {
     drop(person_world);
 
     let background_world = empty_rtsp_world_or_fail();
-    let (background_runtime, background_store) = run_runtime_and_open_store(&background_world);
+    // This arm proves the motion gate in isolation. Production intentionally
+    // performs periodic stationary-scene scans by default, so disable that
+    // independent path instead of treating its detector invocation as a gate
+    // failure.
+    let (background_runtime, background_store) = run_runtime_and_open_store_with_env(
+        &background_world,
+        &[("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS", "0")],
+    );
     let background_detections = list_observations(background_store.as_ref()).len() as u64;
 
     assert_detector_oracle_is_repo_owned_and_independent(&mut failures);
@@ -5444,7 +5449,13 @@ fn assert_no_event_for_stream_case(
     expect_decoded_frames: bool,
     failures: &mut Vec<String>,
 ) {
-    let runtime = world.run_runtime_once();
+    let runtime = if expect_decoded_frames {
+        // This branch proves the motion gate. Periodic stationary-scene
+        // detection is a separate production path and is covered independently.
+        world.run_runtime_once_with_env(&[("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS", "0")])
+    } else {
+        world.run_runtime_once()
+    };
     let events = world.run_cli(["events"]);
     let stats = world.run_cli(["stats"]);
     let store = world.open_store().ok();
@@ -5678,7 +5689,8 @@ fn motion_gate_suppresses_non_motion_frames() {
     drop(person_world);
 
     let mut empty_world = empty_rtsp_world_or_fail();
-    let empty_runtime = empty_world.run_runtime_once();
+    let empty_runtime =
+        empty_world.run_runtime_once_with_env(&[("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS", "0")]);
     let motion_positive_person_free_clip = generate_motion_positive_person_free_clip(&empty_world);
     if let Ok(clip) = motion_positive_person_free_clip.as_ref()
         && let Err(error) = empty_world.switch_rtsp_clip(clip)

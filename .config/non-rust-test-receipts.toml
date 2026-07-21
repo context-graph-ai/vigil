@@ -1,0 +1,3 @@
+# Exact reviewed transitions away from the immutable physical/non-Rust baseline.
+# Removals and status changes require an owner-ruling proof; pure additions do not.
+version = 1

@@ -63,6 +63,7 @@ fn run_detector_probe_inner(args: Vec<OsString>) -> Result<(), String> {
 fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     let boot_started = Instant::now();
     let config = config::load(args)?;
+    validate_compiled_capability_requests(config.fabric_ticket.is_some(), config.fabric_hub)?;
     privilege::prepare_runtime_user(&config.store_path)?;
     let mut shutdown = shutdown::install()?;
     let shutdown_flag = shutdown.flag();
@@ -368,11 +369,28 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                 let (correction_tx, correction_rx) =
                     std::sync::mpsc::sync_channel::<crate::correction::CorrectionRequest>(64);
                 let store_worker = Arc::new(store.handle.clone());
-                thread::spawn(move || {
-                    for req in correction_rx {
-                        let _ = crate::correction::record_correction(&store_worker, req);
-                    }
-                });
+                thread::Builder::new()
+                    // This name is also the physical HA-OS audit boundary: TH-23
+                    // attaches syscall tracing to this dedicated writer before it
+                    // publishes a correction. Keep the write isolated here so
+                    // camera, MQTT, and fabric traffic cannot create false egress
+                    // findings for the local correction path.
+                    .name("vigil-correct".to_string())
+                    .spawn(move || {
+                        for req in correction_rx {
+                            let fingerprint =
+                                crate::correction::correction_execution_fingerprint(&req);
+                            match crate::correction::record_correction(&store_worker, req) {
+                                Ok(_) => println!(
+                                    "correction_writer_receipt={fingerprint} status=landed"
+                                ),
+                                Err(_) => println!(
+                                    "correction_writer_receipt={fingerprint} status=failed"
+                                ),
+                            }
+                        }
+                    })
+                    .map_err(|error| format!("could not start correction writer: {error}"))?;
                 let subscriber = crate::ha_mqtt_tasks::spawn_production_subscriber(
                     sub_cfg,
                     Arc::new(store.handle.clone()),
@@ -422,6 +440,21 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     }
     server.join();
     drop(store);
+    Ok(())
+}
+
+fn validate_compiled_capability_requests(
+    fabric_ticket_configured: bool,
+    fabric_hub_requested: bool,
+) -> Result<(), String> {
+    #[cfg(not(feature = "fabric"))]
+    if fabric_ticket_configured || fabric_hub_requested {
+        return Err(
+            "fabric was configured, but this Vigil binary was built without the fabric capability; use an amd64/aarch64 normal release artifact or rebuild with --features fabric"
+                .to_string(),
+        );
+    }
+    let _ = (fabric_ticket_configured, fabric_hub_requested);
     Ok(())
 }
 
@@ -618,17 +651,18 @@ fn log_startup(config: &config::RuntimeConfig) {
 pub(crate) fn recognition_enabled_startup_line(
     recognition: &crate::recognition::RecognitionConfig,
 ) -> String {
-    format!(
+    let mut line = format!(
         "recognition_enabled=true space={} threshold={}",
         recognition.embedding_space_id, recognition.match_threshold
-    )
+    );
+    if recognition.match_threshold < 0.90 {
+        line.push_str(" accuracy_warning=below_recommended_default_0.9");
+    }
+    line
 }
 
 fn startup_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
+    crate::clock::unix_seconds()
 }
 
 fn display(path: &Path) -> String {
@@ -1103,7 +1137,7 @@ pub fn start_rtsp_probe(
                                 println!("detector_invocations={detector_total}");
                                 sleep_shutdown_aware(&shutdown, detector_work_delay);
                                 let detector_started = Instant::now();
-                                let detection_started_at = chrono::Utc::now();
+                                let detection_started_at = crate::clock::now_utc();
                                 // The SAME detection work identity created at enqueue.
                                 let detection_work =
                                     segment.detection_work.clone().unwrap_or_else(|| {
@@ -1702,7 +1736,7 @@ fn build_captured_segment(
     let motion_positive_frames = media_pipeline::motion_gate(&media)
         .motion_positive_frames
         .min(media.frame_count());
-    let observed_at = media.observed_at.unwrap_or_else(chrono::Utc::now);
+    let observed_at = media.observed_at.unwrap_or_else(crate::clock::now_utc);
     let stamp = startup_epoch();
     let sequence = CAPTURE_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     let nanos = SystemTime::now()
@@ -1737,7 +1771,7 @@ fn build_captured_segment(
             stream_sequence: sequence,
         },
         observed_at: Some(observed_at),
-        received_at: chrono::Utc::now(),
+        received_at: crate::clock::now_utc(),
         priority: if motion_positive_frames > 0 {
             crate::workgraph::WorkPriority::MOTION
         } else {
@@ -2207,7 +2241,7 @@ pub(crate) fn record_detected_events(
                 // Recognition: crop the sighting, embed it, match it against
                 // the site library, and record it into site memory. A failure
                 // here is loud but never drops the detection event.
-                let recognition_started_at = chrono::Utc::now();
+                let recognition_started_at = crate::clock::now_utc();
                 let recognition_attempt = recognition_embedder.map(|embedder| {
                     recognize_detection(
                         store,
@@ -2269,7 +2303,6 @@ pub(crate) fn record_detected_events(
                         timestamp_ms: segment.observed_at.timestamp_millis(),
                         evidence_ref: segment.source_ref.clone(),
                         snapshot_ref,
-                        zone: None,
                         entity_name,
                         match_score,
                     };
@@ -2910,6 +2943,25 @@ mod tests {
 
     #[test]
     fn runtime_detection_selection_seam_is_honest_for_this_artifact() {
+        assert!(
+            super::validate_compiled_capability_requests(false, false).is_ok(),
+            "an unconfigured optional capability must remain inert"
+        );
+        #[cfg(not(feature = "fabric"))]
+        for (ticket, hub) in [(true, false), (false, true), (true, true)] {
+            let error = super::validate_compiled_capability_requests(ticket, hub)
+                .expect_err("configured fabric must fail loudly in a non-fabric binary");
+            assert!(
+                error.contains("built without the fabric capability"),
+                "the operator error must name the missing compiled capability: {error}"
+            );
+        }
+        #[cfg(feature = "fabric")]
+        assert!(
+            super::validate_compiled_capability_requests(true, true).is_ok(),
+            "a feature-complete shipping binary must accept configured fabric intent"
+        );
+
         // Guard for the single detection-selection seam runtime now calls
         // (post-RED guard, not a criteria-coverage test): a future artifact
         // that compiles an accelerated detector backend without keeping this

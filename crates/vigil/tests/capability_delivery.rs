@@ -1,30 +1,13 @@
-//! Cross-machine capability DELIVERY (the S2 defect class): a worker whose
-//! push to the hub misses — because the hub is merely running late, or
-//! because it is never reachable at all — must not lose its capability
-//! forever, and a permanent miss must be a NAMED, greppable failure rather
-//! than silence.
+//! Cross-machine capability delivery failure (the S2 defect class): a worker
+//! whose push never reaches the hub must emit a named, greppable failure
+//! rather than losing the capability silently.
 //!
-//! Diagnosed at `fabric.rs:674` (`let _ = client.push().await;`, the
-//! `vigil-detector-<backend>` capability push) and the generic
-//! `contextdb_server::work_ledger::run_worker_loop`'s own one-shot startup
-//! push (`contextdb-server/src/work_ledger.rs:594`) it delegates into: once
-//! either push exhausts its own internal retry budget
-//! (`SyncClient::push` already retries a transient miss up to 5 attempts,
-//! backing off 0/500/1000/1500/2000ms ~= 5s total), nothing in the standing
-//! poll loop ever re-pushes the outstanding advertisement — the poll loop
-//! only pushes as a side effect of claiming work, and a cameraless worker
-//! with no submitted jobs never claims anything.
-//!
-//! `hub_up_late_still_sees_worker_capability`: the hub's own sync routing
-//! comes up strictly AFTER the worker's startup push has exhausted that
-//! internal retry budget — the worker must still end up advertising once
-//! the hub can finally receive it. RED today.
-//!
-//! `failed_capability_push_emits_named_error`: the hub is never reachable
-//! at all (a real, once-bound, now torn-down Iroh endpoint — a
-//! syntactically valid ticket nobody will ever answer). The worker's own
-//! log output must carry a NAMED, greppable line marking the capability
-//! push as failed. RED today: totally silent.
+//! The hub-up-late delivery contract remains in `two_process_fabric.rs`, where
+//! two real Vigil processes stay separated until both startup delivery
+//! attempts have expired and the shipped doctor surface proves standing
+//! re-delivery. A former 6.5-second test here was removed because routing
+//! could return while ContextDB's second startup push was still live, so it
+//! could pass without exercising the standing re-push it claimed to prove.
 
 #![cfg(feature = "fabric")]
 
@@ -32,156 +15,11 @@ use std::io::Read;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use contextdb_core::TenantId;
-use contextdb_engine::Database;
-use contextdb_engine::sync_types::{ConflictPolicies, ConflictPolicy};
-use contextdb_server::{PeerEndpoint, SyncServer, peer_bind_spec};
-
-use vigil::DecodedRgbFrame;
-use vigil::detector_workclass::{DetectorDetection, OrderedF64};
-use vigil::fabric::{FabricDetectorBackend, FabricRuntime};
-
-/// `fabric.rs`'s own `FABRIC_TENANT` const is private and documented there
-/// as a fixed, single-tenant value ("vigil-fabric") — every fabric node
-/// enrolls under it, so a hand-assembled hub in this test must use the same
-/// literal to land in the same tenant namespace.
-const FABRIC_TENANT: &str = "vigil-fabric";
-
-async fn within<F: std::future::Future>(fut: F) -> F::Output {
-    tokio::time::timeout(Duration::from_secs(30), fut)
-        .await
-        .expect("bounded fabric operation exceeded 30s")
-}
-
-struct SpyBackend {
-    tag: &'static str,
-}
-
-impl FabricDetectorBackend for SpyBackend {
-    fn backend_tag(&self) -> &str {
-        self.tag
-    }
-
-    fn model_sha256(&self) -> &str {
-        "spy-model-sha"
-    }
-
-    fn detect(
-        &self,
-        _frames: &[DecodedRgbFrame],
-        _clip_sha256: &str,
-        _sample_frames: usize,
-        _confidence_threshold: f64,
-    ) -> Result<Vec<DetectorDetection>, String> {
-        Ok(vec![DetectorDetection {
-            class_name: "person".to_string(),
-            confidence: OrderedF64(0.9),
-            bbox: "1,1,2,2".to_string(),
-            frame_index: 0,
-        }])
-    }
-}
-
-fn hub_capability_backend_for(db: &Database, node_id: &str) -> Option<String> {
-    let result = db
-        .execute(
-            "SELECT node_id, capability_id FROM work_capabilities",
-            &std::collections::HashMap::new(),
-        )
-        .ok()?;
-    let node_idx = result.columns.iter().position(|c| c == "node_id")?;
-    let capability_idx = result.columns.iter().position(|c| c == "capability_id")?;
-    result.rows.iter().find_map(|row| {
-        let contextdb_core::Value::Text(node) = &row[node_idx] else {
-            return None;
-        };
-        if node != node_id {
-            return None;
-        }
-        let contextdb_core::Value::Text(capability_id) = &row[capability_idx] else {
-            return None;
-        };
-        capability_id
-            .strip_prefix("vigil-detector-")
-            .map(str::to_string)
-    })
-}
-
-// ── T-late: the hub's sync routing arrives after the worker's own push has
-// already exhausted its internal retry budget ──────────────────────────────
-
-#[tokio::test]
-async fn hub_up_late_still_sees_worker_capability() {
-    let hub_dir = tempfile::tempdir().expect("hub identity dir");
-    let hub_identity_path = hub_dir.path().join("fabric-identity.key");
-    let bind_spec = peer_bind_spec(&hub_identity_path);
-    // A REAL, reachable endpoint (the handshake succeeds) is bound right
-    // now — its ticket is mintable immediately, independent of whether any
-    // `SyncServer` is yet attached to route sync requests against it.
-    let hub_endpoint = within(PeerEndpoint::bind(&bind_spec))
-        .await
-        .expect("bind the hub's real endpoint");
-    let ticket = hub_endpoint.ticket();
-
-    let worker_dir = tempfile::tempdir().expect("worker data dir");
-    let worker_runtime = within(FabricRuntime::start(
-        worker_dir.path(),
-        Some(&ticket),
-        false,
-    ))
-    .await
-    .expect("worker must enroll standalone against a syntactically valid ticket");
-
-    let backend = Arc::new(SpyBackend { tag: "burn-cpu" });
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let _worker_task = worker_runtime.spawn_worker_loop(backend, Arc::clone(&shutdown));
-
-    // Outlast `SyncClient::push`'s own internal retry budget (5 attempts,
-    // backing off 0/500/1000/1500/2000ms ~= 5s) with slack, so the
-    // swallowed-`Err` path (fabric.rs:674 and the generic worker loop's own
-    // startup push) is what is under test here, not that built-in retry.
-    tokio::time::sleep(Duration::from_millis(6_500)).await;
-
-    // The hub's sync routing comes up only now.
-    let hub_db = Arc::new(Database::open_memory());
-    contextdb_engine::work_ledger::install_work_ledger_schema(&hub_db)
-        .expect("install ledger schema on hub");
-    let server = Arc::new(SyncServer::with_transport(
-        hub_db.clone(),
-        hub_endpoint.transport(),
-        TenantId::from(FABRIC_TENANT),
-        ConflictPolicies::uniform(ConflictPolicy::LatestWins),
-    ));
-    let server_shutdown = Arc::new(AtomicBool::new(false));
-    let server_task = tokio::spawn({
-        let server = server.clone();
-        let server_shutdown = server_shutdown.clone();
-        async move { server.run_until(server_shutdown).await }
-    });
-
-    let worker_node_id = worker_runtime.node_id.clone();
-    within(async {
-        loop {
-            if hub_capability_backend_for(&hub_db, &worker_node_id).as_deref() == Some("burn-cpu") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await;
-
-    shutdown.store(true, Ordering::SeqCst);
-    server_shutdown.store(true, Ordering::SeqCst);
-    let _ = server_task.await;
-}
-
-// ── T-failed: the hub is never reachable — a named, greppable error, not
-// silence ────────────────────────────────────────────────────────────────
+use contextdb_server::{PeerEndpoint, peer_bind_spec};
 
 fn vigil_binary_path() -> PathBuf {
     if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {

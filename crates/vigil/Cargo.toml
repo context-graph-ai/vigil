@@ -27,6 +27,7 @@ burn-flex.workspace = true
 burn-store.workspace = true
 chrono.workspace = true
 context-graph.workspace = true
+contextdb-core.workspace = true
 cg-vision-embedder.workspace = true
 futures-util.workspace = true
 image.workspace = true
@@ -55,7 +56,6 @@ wgpu = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 contextdb-server = { workspace = true, optional = true }
 contextdb-engine = { workspace = true, optional = true }
-contextdb-core = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -76,7 +76,7 @@ first-light-acceptance = []
 # can submit/claim/execute `vigil.detector` jobs with other enrolled nodes.
 # Default-off: a build without this feature links no sync/iroh/ledger code
 # at all (today's behavior, byte-identical).
-fabric = ["dep:contextdb-server", "dep:contextdb-engine", "dep:contextdb-core"]
+fabric = ["dep:contextdb-server", "dep:contextdb-engine"]
 
 [dev-dependencies]
 tempfile.workspace = true

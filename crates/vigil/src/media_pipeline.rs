@@ -409,7 +409,7 @@ where
                 last_video_at = tokio::time::Instant::now();
                 let unit = assembler.assemble(
                     data,
-                    Some(Utc::now()),
+                    Some(crate::clock::now_utc()),
                     std::mem::take(&mut first_unit_of_session),
                     segment_counter,
                 );
@@ -493,7 +493,7 @@ where
                         decoded_frames.clear();
                         segment_started = true;
                         segment_counter += 1;
-                        segment_observed_at = Some(Utc::now());
+                        segment_observed_at = Some(crate::clock::now_utc());
                         segment_started_at = Some(last_video_at);
                     }
                     if !segment_started {

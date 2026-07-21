@@ -304,6 +304,8 @@ pub struct FabricRuntime {
     /// never the direct env fallback (options never become env vars; see
     /// `fabric_bring_up`'s call site).
     worker_lease_ms: Option<u64>,
+    /// Persisted ledger-time authority carried into async workers.
+    persisted_clock: crate::PersistedClock,
 }
 
 /// Default liveness TTL for a remote's advertised detector capability: a
@@ -429,6 +431,7 @@ impl FabricRuntime {
             enrollment_error,
             capability_liveness_ttl_ms: DEFAULT_CAPABILITY_LIVENESS_TTL_MS,
             worker_lease_ms: None,
+            persisted_clock: crate::PersistedClock::contextdb(),
         })
     }
 
@@ -451,6 +454,17 @@ impl FabricRuntime {
     pub fn with_worker_lease_ms(mut self, lease_ms: u64) -> Self {
         self.worker_lease_ms = Some(lease_ms);
         self
+    }
+
+    /// Carry an explicit persisted-time authority into all fabric workers.
+    pub fn with_persisted_clock(mut self, clock: crate::PersistedClock) -> Self {
+        self.persisted_clock = clock;
+        self
+    }
+
+    fn wall_now_ms(&self) -> i64 {
+        i64::try_from(self.persisted_clock.unix_millis())
+            .expect("fabric ledger milliseconds fit signed timestamp fields")
     }
 
     /// Whether this node has a usable fabric SERVING role (hub, or enrolled
@@ -542,7 +556,7 @@ impl FabricRuntime {
             &self.db,
             &self.node_id,
             &self.own_endpoint.ticket(),
-            wall_now_ms(),
+            self.wall_now_ms(),
         );
 
         let frames_blob_ref = crate::detector_workclass::FrameBlobRef::from_blob_hash(&hash);
@@ -573,7 +587,7 @@ impl FabricRuntime {
             contextdb_engine::work_ledger::InputRef::ledger_input(),
             contextdb_engine::work_ledger::InputRef::blob_ref(hash),
         ])
-        .submitted_at_ms(wall_now_ms());
+        .submitted_at_ms(self.wall_now_ms());
         if let Some(deadline_ms) = deadline_ms {
             builder = builder.deadline_ms(Some(deadline_ms));
         }
@@ -681,7 +695,7 @@ impl FabricRuntime {
                 .or_insert_with(|| (advertised_at, backend.to_string()));
         }
 
-        let now = wall_now_ms();
+        let now = self.wall_now_ms();
         let mut remotes = Vec::new();
         for (node, (_current_at, backend)) in current {
             // Liveness clock: the hub's last contact with this node (the
@@ -830,23 +844,18 @@ impl FabricRuntime {
         // construction that bypasses config resolution entirely (e.g. a
         // test driving `FabricRuntime::start` directly); (3) 300000ms,
         // byte-identical to this method's prior hardcoded literal.
-        let lease_duration_ms: u64 = self.worker_lease_ms.unwrap_or_else(|| {
-            std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(300_000)
-        });
         let config = contextdb_server::work_ledger::WorkerConfig {
             node_id,
             advertised_tags: advertised_tags.clone(),
             movement_policy: contextdb_engine::work_ledger::MovementPolicy {
                 auto_propagate: true,
             },
-            lease_duration_ms: lease_duration_ms as i64,
+            lease_duration_ms: resolved_worker_lease_duration_ms(self.worker_lease_ms),
             blob_service: Some(blob_service),
             defer_own_submissions_until_deadline: true,
             writes_are_canonical,
         };
+        let persisted_clock = self.persisted_clock.clone();
         tokio::spawn(async move {
             // Advertise THIS node's truthful detector capability under the
             // `vigil-detector-<backend>` id `remote_detector_capabilities`
@@ -863,7 +872,8 @@ impl FabricRuntime {
                 &config.node_id,
                 &capability_id,
                 &advertised_tags,
-                wall_now_ms(),
+                i64::try_from(persisted_clock.unix_millis())
+                    .expect("fabric capability milliseconds fit signed timestamp fields"),
             ) {
                 println!(
                     "fabric_capability_advertise_failed=true backend={backend_tag} error={error}"
@@ -897,6 +907,23 @@ impl FabricRuntime {
     }
 }
 
+/// Resolve the exact lease duration passed to ContextDB's standing worker.
+///
+/// Production normally supplies `configured` from the already-resolved Vigil
+/// configuration. The environment fallback supports direct `FabricRuntime`
+/// construction, and the final fallback preserves the historical five-minute
+/// lease. Kept as one production-used seam so config tests do not need a live
+/// Iroh hub merely to observe a value before it enters `WorkerConfig`.
+#[doc(hidden)]
+pub fn resolved_worker_lease_duration_ms(configured: Option<u64>) -> i64 {
+    configured.unwrap_or_else(|| {
+        std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300_000)
+    }) as i64
+}
+
 /// The same clip-hash algorithm the submitter uses
 /// (`runtime.rs::encoded_clip_sha256`): hash each encoded unit's raw bytes in
 /// order. Kept as a free function so both the submit path (implicitly, via
@@ -908,13 +935,6 @@ fn encoded_clip_sha256(units: &[Vec<u8>]) -> String {
         hasher.update(unit);
     }
     format!("{:x}", hasher.finalize())
-}
-
-fn wall_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or(0)
 }
 
 /// Result-join authority for offloaded detector work (criterion C4): remote
@@ -1435,7 +1455,8 @@ pub(crate) fn fabric_bring_up(
                 .iter()
                 .map(|remote| remote.node_id.clone())
                 .collect();
-            let steal_now_ms = wall_now_ms();
+            let steal_now_ms = i64::try_from(consumer_bundle.runtime.persisted_clock.unix_millis())
+                .expect("fabric steal milliseconds fit signed timestamp fields");
             let my_node_id = consumer_bundle.runtime.node_id.clone();
             for job_id in job_ids {
                 let result = match contextdb_engine::work_ledger::job_result(
@@ -1671,7 +1692,8 @@ pub(crate) fn try_offload_segment(
         crate::VideoCodec::H264 => crate::detector_workclass::WireVideoCodec::H264,
         crate::VideoCodec::H265 => crate::detector_workclass::WireVideoCodec::H265,
     };
-    let deadline_ms = wall_now_ms() + fabric.offload_policy_config.fallback_horizon_ms as i64;
+    let deadline_ms =
+        fabric.runtime.wall_now_ms() + fabric.offload_policy_config.fallback_horizon_ms as i64;
     fabric
         .tokio_handle
         .block_on(fabric.runtime.submit_detector_job(
@@ -1784,7 +1806,7 @@ fn apply_fabric_result(
         probe_result: None,
         fallback_reason: None,
         started_at: entry.detection_started_at,
-        ended_at: chrono::Utc::now(),
+        ended_at: fabric.runtime.persisted_clock.now_utc(),
         output_count: wire.detections.len() as u64,
         disposition: crate::workgraph::WorkDisposition::Completed,
     };

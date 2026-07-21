@@ -137,7 +137,6 @@ pub(crate) struct StoreBackedEventRow {
     pub(crate) confidence: f64,
     pub(crate) bbox: String,
     pub(crate) frame_index: u64,
-    pub(crate) zone: Option<String>,
     pub(crate) clip_ref: String,
     pub(crate) detector_image_ref: String,
 }
@@ -187,11 +186,6 @@ impl StoreBackedEventsResponse {
                     .get("frame_index")
                     .and_then(Value::as_u64)
                     .unwrap_or_default(),
-                zone: observation
-                    .observed_properties
-                    .get("zone")
-                    .and_then(Value::as_str)
-                    .map(ToString::to_string),
                 clip_ref: observation
                     .evidence
                     .first()

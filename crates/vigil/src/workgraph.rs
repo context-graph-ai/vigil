@@ -175,7 +175,7 @@ impl WorkEnvelope {
             media_item: self.media_item,
             ordering: self.ordering,
             observed_at: self.observed_at,
-            received_at: Utc::now(),
+            received_at: crate::clock::now_utc(),
             priority: self.priority,
             deadline: self.deadline,
             schema_version: self.schema_version,
@@ -514,7 +514,7 @@ impl StageAttempt {
         Self {
             work,
             backend: None,
-            started_at: Utc::now(),
+            started_at: crate::clock::now_utc(),
         }
     }
 
@@ -580,7 +580,7 @@ impl StageAttempt {
             probe_result: None,
             fallback_reason: None,
             started_at: self.started_at,
-            ended_at: Utc::now(),
+            ended_at: crate::clock::now_utc(),
             output_count,
             disposition,
         };

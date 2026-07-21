@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 const MANIFEST_PATH: &str = "addons/vigil/runtime-packages.yaml";
 const ADDON_DOCKERFILE_PATH: &str = "addons/vigil/Dockerfile";
-const GENERIC_DOCKERFILE_PATH: &str = "Dockerfile";
+const GENERIC_DOCKERFILE_PATH: &str = "Dockerfile.hardware";
+const STATIC_DOCKERFILE_PATH: &str = "Dockerfile";
 const RELEASE_NOTES_PATH: &str = "docs/release-notes.md";
 const VIGIL_CARGO_TOML_PATH: &str = "crates/vigil/Cargo.toml";
 
@@ -1075,6 +1076,7 @@ fn cargo_command_builds_vigil_hardware_binary(tokens: &[String]) -> bool {
     cargo_command_builds_or_installs_vigil(tokens)
         && cargo_feature_args_include_decode_gstreamer(tokens)
         && cargo_feature_args_include(tokens, "detect-burn-wgpu")
+        && cargo_feature_args_include(tokens, "fabric")
         && !tokens
             .iter()
             .any(|token| token.contains("unknown-linux-musl"))
@@ -1149,9 +1151,9 @@ fn assert_cargo_vigil_target_guard_rejects_other_outputs() {
 fn assert_cargo_shipped_binary_feature_guard_requires_accelerated_detection() {
     assert_accelerated_detection_is_not_a_default_cargo_feature();
     for command in [
-        "cargo build -p vigil --bin vigil --features decode-gstreamer,detect-burn-wgpu",
-        "cargo build -p vigil --bin vigil --features=decode-gstreamer,detect-burn-wgpu",
-        "cargo build -p vigil --bin vigil --features decode-gstreamer --features detect-burn-wgpu",
+        "cargo build -p vigil --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric",
+        "cargo build -p vigil --bin vigil --features=decode-gstreamer,detect-burn-wgpu,fabric",
+        "cargo build -p vigil --bin vigil --features decode-gstreamer --features detect-burn-wgpu --features fabric",
         "cargo build -p vigil --bin vigil --features decode-gstreamer --all-features",
     ] {
         assert!(
@@ -1162,9 +1164,9 @@ fn assert_cargo_shipped_binary_feature_guard_requires_accelerated_detection() {
 
     assert!(
         !cargo_command_builds_vigil_hardware_binary(&shell_tokens(
-            "cargo build -p vigil --bin vigil --features decode-gstreamer"
+            "cargo build -p vigil --bin vigil --features decode-gstreamer,detect-burn-wgpu"
         )),
-        "cargo provenance guard must reject a decode-only Vigil build for a hardware artifact: without detect-burn-wgpu the shipped binary cannot accelerate detection"
+        "cargo provenance guard must reject a Vigil hardware build without fabric: every production hardware binary must carry distributed compute, hardware decode, and accelerated detection together"
     );
 }
 
@@ -1465,7 +1467,7 @@ fn assert_stage_cargo_builds_are_decode_gstreamer(
                 saw_build = true;
                 assert!(
                     cargo_command_builds_vigil_hardware_binary(&tokens),
-                    "{label} every cargo build/install in the hardware source stage must use --features decode-gstreamer,detect-burn-wgpu so the shipped binary carries hardware decode AND the accelerated detector: {tokens:?}"
+                    "{label} every cargo build/install in the hardware source stage must use --features decode-gstreamer,detect-burn-wgpu,fabric so the shipped binary carries distributed compute, hardware decode, and accelerated detection together: {tokens:?}"
                 );
                 if let Some(source) = source {
                     assert!(
@@ -1625,6 +1627,54 @@ fn assert_stage_uses_decode_gstreamer_binary(
     }
     let mut saw_valid_copied_binary = false;
     for (source, stage_name, command) in copied_start_binaries {
+        if canonical_docker_path(&source) == "vigil" {
+            let Some(stage_name) = stage_name else {
+                panic!(
+                    "{label} must copy /vigil from the named deterministic production-binary export stage: {command}"
+                );
+            };
+            let export_stage = stages
+                .iter()
+                .find(|candidate| candidate.name.as_deref() == Some(stage_name.as_str()))
+                .unwrap_or_else(|| panic!("{label} copies /vigil from unknown stage {stage_name}"));
+            let forwards = export_stage
+                .commands
+                .iter()
+                .filter_map(|export_command| {
+                    let lower = export_command.trim_start().to_ascii_lowercase();
+                    if !lower.starts_with("copy ") {
+                        return None;
+                    }
+                    let paths = copy_or_add_paths(export_command);
+                    (paths.len() == 2 && canonical_docker_path(&paths[1]) == "vigil")
+                        .then(|| (paths[0].clone(), copied_stage_name(export_command)))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                forwards.len(),
+                1,
+                "{label} deterministic production-binary export stage must contain exactly one COPY to /vigil"
+            );
+            let (builder_source, builder_name) = &forwards[0];
+            assert!(
+                source_is_rust_target_vigil_binary(builder_source),
+                "{label} production-binary export must copy the Rust target/release/vigil output, not {builder_source}"
+            );
+            let builder_name = builder_name.as_ref().unwrap_or_else(|| {
+                panic!("{label} production-binary export must copy from a named builder stage")
+            });
+            let builder = stages
+                .iter()
+                .find(|candidate| candidate.name.as_deref() == Some(builder_name.as_str()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{label} production-binary export copies from unknown stage {builder_name}"
+                    )
+                });
+            assert_stage_cargo_builds_are_decode_gstreamer(builder, Some(builder_source), label);
+            saw_valid_copied_binary = true;
+            continue;
+        }
         assert!(
             source_is_rust_target_vigil_binary(&source),
             "{label} must copy the start binary from a Rust target vigil path produced by a decode-gstreamer build stage, not {source}: {command}"
@@ -2030,7 +2080,7 @@ fn assert_generic_dockerfile_binds_hardware_profile(
     // The runtime stage COPYs the binary from a named builder stage; the
     // accelerated-detection feature requirement is enforced against that
     // builder lineage by `assert_stage_uses_decode_gstreamer_binary` below,
-    // which now requires BOTH decode-gstreamer AND detect-burn-wgpu.
+    // which requires fabric, decode-gstreamer, and detect-burn-wgpu together.
     assert_profile_ships_vulkan_runtime(profile);
     assert_stage_uses_decode_gstreamer_binary(
         stages,
@@ -2148,18 +2198,11 @@ fn hardware_addon_image_carries_manifest_hardware_profile() {
             profile.detector_backend
         );
         assert_profile_ships_vulkan_runtime(profile);
-        // Home Assistant Supervisor builds an add-on from the add-on's own
-        // folder, so the shipped binary arrives STAGED by the release
-        // pipeline (`COPY vigil /usr/local/bin/vigil`) — a build recipe that
-        // compiles from source can never run there (the HA-OS harness's
-        // add-on guard also rejects any cargo/rustc use in this Dockerfile).
-        // For that staged shape the binary's accelerated-detector feature set
-        // is proven where it is observable — the owner smoke's feature-gate
-        // record and the in-container probe run — while this test pins the
-        // manifest packages (now including the Vulkan runtime), the recorded
-        // detector-backend truth, and the label above. A final stage that
-        // instead builds or copies from a build stage must carry the full
-        // provenance battery (which now requires detect-burn-wgpu).
+        // Home Assistant Supervisor's local add-on folder consumes a staged
+        // binary, so this definition alone cannot prove release provenance.
+        // The source-built release targets are checked below and CI is required
+        // to export those targets; an arbitrary `addons/vigil/vigil` file can
+        // therefore support local HAOS work but cannot satisfy release CI.
         if !final_stage_copies_external_staged_binary(final_stage) {
             assert_stage_uses_decode_gstreamer_binary(
                 &stages,
@@ -2167,6 +2210,13 @@ fn hardware_addon_image_carries_manifest_hardware_profile() {
                 &format!("final add-on Dockerfile stage for {}", profile.name),
             );
         }
+    }
+
+    let Some(release_stages) = load_generic_docker_stages() else {
+        return;
+    };
+    for profile in hardware_addon_profiles.values() {
+        assert_generic_dockerfile_binds_hardware_profile(&release_stages, profile);
     }
 }
 
@@ -2324,6 +2374,29 @@ fn release_notes_name_the_hardware_generic_docker_artifact() {
     let Some(stages) = load_generic_docker_stages() else {
         return;
     };
+    let static_dockerfile = fs::read_to_string(repo_root().join(STATIC_DOCKERFILE_PATH))
+        .expect("static Dockerfile must be readable");
+    let static_lower = static_dockerfile.to_ascii_lowercase();
+    assert!(
+        static_lower.contains("arg targetarch=amd64")
+            && static_dockerfile
+                .contains("COPY dist/docker/${TARGETARCH}/vigil /usr/local/bin/vigil"),
+        "static Dockerfile must select only the staged host/release artifact"
+    );
+    assert!(
+        !static_lower.contains("copy target")
+            && !static_lower.contains("copy .")
+            && !static_lower.contains("context-graph")
+            && !static_lower.contains("contextdb"),
+        "static Dockerfile must not admit Cargo targets, repository trees, or private sibling source"
+    );
+    assert!(
+        static_lower.contains("healthcheck")
+            && static_lower.contains("/health")
+            && static_lower.contains("entrypoint [\"/usr/local/bin/vigil\"]")
+            && static_lower.contains("cmd [\"run\"]"),
+        "static Dockerfile must preserve the shipped health and startup contract"
+    );
     for profile in generic_hardware_profiles.values() {
         assert_eq!(
             profile.decode_backend, "gstreamer",

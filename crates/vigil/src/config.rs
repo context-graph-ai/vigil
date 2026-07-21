@@ -299,7 +299,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         partial.detector_sample_frames.unwrap_or(5),
         "detector_sample_frames",
     )?;
-    let detector_stationary_interval_secs = partial.detector_stationary_interval_secs.unwrap_or(0);
+    let detector_stationary_interval_secs = partial.detector_stationary_interval_secs.unwrap_or(30);
     // Fabric knobs: absent ticket, hub embedding defaults off (criterion
     // C10 — every knob has a sane default, works with nothing provided).
     // Precedence CLI > env > options.json/fabric.toml — `partial.fabric_*`
@@ -391,7 +391,7 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         recognition.embedding_space_id = space;
     }
     if let Some(threshold) = partial.recognition_threshold {
-        recognition.match_threshold = threshold;
+        recognition.match_threshold = validate_recognition_threshold(threshold)?;
     }
     if let Some(classes) = partial.recognition_covered_classes {
         recognition.covered_classes = classes;
@@ -572,6 +572,16 @@ fn validate_confidence_threshold(value: f64) -> Result<f64, String> {
     } else {
         Err(format!(
             "detector_confidence_threshold must be between 0.0 and 1.0, got {value}"
+        ))
+    }
+}
+
+fn validate_recognition_threshold(value: f64) -> Result<f64, String> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "recognition_threshold must be between 0.0 and 1.0, got {value}"
         ))
     }
 }
@@ -878,7 +888,7 @@ fn default_options_json_path() -> PathBuf {
 }
 
 fn run_usage() -> String {
-    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--hardware-decoding BOOL] [--accelerated-detection BOOL] [--fabric-ticket TICKET] [--fabric-hub BOOL] [--fabric-allow-frame-offload BOOL] [--fabric-worker-lease-ms MS] [--fabric-fallback-horizon-ms MS]"
+    "Usage: vigil run [--config PATH] [--data-dir PATH] [--store-path PATH] [--health-port PORT] [--review-port PORT] [--site-name NAME] [--camera-name NAME] [--rtsp-url URL] [--live-rtsp-url URL] [--rtsp-username USER] [--rtsp-password PASSWORD] [--detector-model-id ID] [--detector-model-path PATH] [--detector-confidence-threshold FLOAT] [--detector-sample-frames N] [--detector-stationary-interval-secs N] [--recognition-weights-dir PATH] [--hardware-decoding BOOL] [--accelerated-detection BOOL] [--fabric-ticket TICKET] [--fabric-hub BOOL] [--fabric-allow-frame-offload BOOL] [--fabric-worker-lease-ms MS] [--fabric-fallback-horizon-ms MS]"
         .to_string()
 }
 
@@ -897,13 +907,156 @@ mod tests {
 
     #[test]
     fn review_port_cli_override_is_documented_and_loaded() {
-        assert!(run_usage().contains("--review-port PORT"));
+        let _guard = env_lock().lock().expect("env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _options_env = EnvVarGuard::set(
+            "VIGIL_TEST_OPTIONS_JSON",
+            tmp.path().join("absent-options.json"),
+        );
+        let _clean_env = [
+            "VIGIL_DATA_DIR",
+            "VIGIL_STORE_PATH",
+            "VIGIL_HEALTH_PORT",
+            "VIGIL_REVIEW_PORT",
+            "VIGIL_SITE_NAME",
+            "VIGIL_CAMERA_NAME",
+            "VIGIL_RTSP_URL",
+            "VIGIL_LIVE_RTSP_URL",
+            "VIGIL_RTSP_USERNAME",
+            "VIGIL_RTSP_PASSWORD",
+            "VIGIL_DETECTOR_MODEL_ID",
+            "VIGIL_DETECTOR_MODEL_PATH",
+            "VIGIL_RECOGNITION_WEIGHTS_DIR",
+            "VIGIL_RECOGNITION_SPACE_ID",
+            "VIGIL_RECOGNITION_THRESHOLD",
+            "VIGIL_DETECTOR_CONFIDENCE_THRESHOLD",
+            "VIGIL_DETECTOR_SAMPLE_FRAMES",
+            "VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS",
+            "VIGIL_SERVICE_ID",
+            "VIGIL_HARDWARE_DECODING",
+            "VIGIL_ACCELERATED_DETECTION",
+            "VIGIL_FABRIC_TICKET",
+            "VIGIL_FABRIC_HUB",
+            "VIGIL_FABRIC_ALLOW_FRAME_OFFLOAD",
+            "VIGIL_FABRIC_WORKER_LEASE_MS",
+            "VIGIL_FABRIC_FALLBACK_HORIZON_MS",
+            "MQTT_HOST",
+            "MQTT_PORT",
+            "MQTT_USER",
+            "MQTT_USERNAME",
+            "MQTT_PASSWORD",
+        ]
+        .map(EnvVarGuard::remove);
+        let usage = run_usage();
+        let cli_doc = include_str!("../../../docs/cli.md");
+        let table_start = cli_doc
+            .find("Common options:")
+            .expect("CLI doc has the Common options heading");
+        let table_end = cli_doc
+            .find("<!-- vigil-claim: `vigil.docs-cli.run-options-and-current-defaults` -->")
+            .expect("CLI doc has the run-options contract marker");
+        let run_options_table = &cli_doc[table_start..table_end];
+        for line in run_options_table
+            .lines()
+            .filter(|line| line.starts_with("| `--"))
+        {
+            let documented = line
+                .split('`')
+                .nth(1)
+                .expect("CLI table row has a backtick-delimited option");
+            assert!(
+                usage.contains(documented),
+                "documented run option {documented} is missing from the real usage surface"
+            );
+        }
         let config = load(vec![
             OsString::from("--review-port"),
             OsString::from("8765"),
+            OsString::from("--detector-stationary-interval-secs"),
+            OsString::from("30"),
         ])
-        .expect("review port CLI override loads");
+        .expect("documented CLI overrides load");
         assert_eq!(config.review_port, 8765);
+        assert_eq!(config.detector_stationary_interval_secs, 30);
+        let defaults = load(Vec::<OsString>::new()).expect("load documented default run config");
+        assert_eq!(
+            defaults.data_dir.file_name().and_then(|name| name.to_str()),
+            Some("vigil-data")
+        );
+        assert_eq!(
+            defaults.store_path,
+            defaults.data_dir.join("store.contextgraph")
+        );
+        assert!(defaults.rtsp_url.is_none());
+        assert!(defaults.rtsp_username.is_none());
+        assert!(defaults.rtsp_password.is_none());
+        assert!(defaults.detector_model_path.is_none());
+        assert!(!defaults.recognition.enabled);
+        assert!(defaults.fabric_ticket.is_none());
+
+        let detection_url = load(vec![
+            OsString::from("--rtsp-url"),
+            OsString::from("rtsp://camera.example/detection"),
+        ])
+        .expect("detection URL without a separate live URL loads");
+        assert!(
+            detection_url.cameras[0].live_rtsp_url.is_none(),
+            "config must preserve an omitted live URL so runtime can apply the documented detection-URL fallback"
+        );
+
+        for documented_default in [
+            "| `--config PATH` | Read a TOML configuration file | none |".to_string(),
+            "| `--data-dir PATH` | Runtime data root | `./vigil-data` |".to_string(),
+            "| `--store-path PATH` | Context Graph store | `<data-dir>/store.contextgraph` |".to_string(),
+            format!("| `--health-port PORT` | Health HTTP port | `{}` |", defaults.health_port),
+            format!("| `--review-port PORT` | Review HTTP port | `{}` |", defaults.review_port),
+            format!("| `--site-name NAME` | Site/context name | `{}` |", defaults.site_name),
+            format!("| `--camera-name NAME` | Single-camera name | `{}` |", defaults.camera_name),
+            "| `--rtsp-url URL` | Detection stream | none |".to_string(),
+            "| `--live-rtsp-url URL` | Separate Home Assistant live stream | detection URL |".to_string(),
+            "| `--rtsp-username USER` | RTSP username outside the URL | none |".to_string(),
+            "| `--rtsp-password PASSWORD` | RTSP password outside the URL | none |".to_string(),
+            format!("| `--detector-model-id ID` | Model identity written to provenance | `{}` |", defaults.detector_model_id),
+            "| `--detector-model-path PATH` | Detector weights path | artifact/config dependent |".to_string(),
+            format!("| `--detector-confidence-threshold FLOAT` | Keep detections at or above this value | `{}` |", defaults.detector_confidence_threshold),
+            format!("| `--detector-sample-frames N` | Frames sampled per segment | `{}` |", defaults.detector_sample_frames),
+            format!("| `--detector-stationary-interval-secs N` | Sampling interval for stationary scenes | `{}` |", defaults.detector_stationary_interval_secs),
+            "| `--recognition-weights-dir PATH` | Enable recognition with local weights | disabled |".to_string(),
+            format!("| `--hardware-decoding BOOL` | Request hardware-decode probing | `{}` |", defaults.hardware_decoding),
+            format!("| `--accelerated-detection BOOL` | Request accelerated-detector probing | `{}` |", defaults.accelerated_detection),
+            "| `--fabric-ticket TICKET` | Join an existing configured fabric | none |".to_string(),
+            format!("| `--fabric-hub BOOL` | Start the node as a fabric join point | `{}` |", defaults.fabric_hub),
+            format!("| `--fabric-allow-frame-offload BOOL` | Permit this node's detector work to move | `{}` |", defaults.fabric_allow_frame_offload),
+            format!("| `--fabric-worker-lease-ms MS` | Fabric worker lease setting | `{}` |", defaults.fabric_worker_lease_ms),
+            format!("| `--fabric-fallback-horizon-ms MS` | Remote-result wait setting | `{}` |", defaults.fabric_fallback_horizon_ms),
+        ] {
+            assert!(
+                run_options_table.contains(&documented_default),
+                "CLI defaults table diverged from runtime config: {documented_default}"
+            );
+        }
+
+        for (args, expected_error) in [
+            (
+                vec!["--detector-confidence-threshold", "-0.1"],
+                "detector_confidence_threshold must be between 0.0 and 1.0",
+            ),
+            (
+                vec!["--detector-sample-frames", "0"],
+                "detector_sample_frames must be between 1 and 64",
+            ),
+            (
+                vec!["--hardware-decoding", "sometimes"],
+                "--hardware-decoding must be true or false",
+            ),
+        ] {
+            let error = load(args.into_iter().map(OsString::from).collect())
+                .expect_err("documented invalid CLI value must fail");
+            assert!(
+                error.contains(expected_error),
+                "invalid CLI value must name its contract: expected {expected_error:?}, got {error:?}"
+            );
+        }
     }
 
     #[test]
@@ -955,8 +1108,15 @@ mod tests {
         let _weights_env = EnvVarGuard::remove("VIGIL_RECOGNITION_WEIGHTS_DIR");
         let _space_env = EnvVarGuard::remove("VIGIL_RECOGNITION_SPACE_ID");
         let _threshold_env = EnvVarGuard::remove("VIGIL_RECOGNITION_THRESHOLD");
+        let _stationary_env = EnvVarGuard::remove("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS");
 
         let config = load(Vec::<OsString>::new()).expect("load add-on options json");
+
+        assert_eq!(
+            crate::recognition::RecognitionConfig::default().match_threshold,
+            0.90,
+            "recognition's visible default must be the actual matching threshold"
+        );
 
         assert!(
             config.recognition.enabled,
@@ -982,8 +1142,34 @@ mod tests {
         );
         assert_eq!(
             crate::runtime::recognition_enabled_startup_line(&config.recognition),
-            "recognition_enabled=true space=vigil_site_vision_smoke threshold=0.73",
+            "recognition_enabled=true space=vigil_site_vision_smoke threshold=0.73 accuracy_warning=below_recommended_default_0.9",
             "the runtime startup line must expose that local add-on recognition is active"
+        );
+
+        fs::write(
+            &options_path,
+            serde_json::json!({
+                "data_dir": data_dir,
+                "recognition_threshold": 1.01
+            })
+            .to_string(),
+        )
+        .expect("write invalid recognition threshold");
+        let error = load(Vec::<OsString>::new()).expect_err("out-of-range threshold must fail");
+        assert!(
+            error.contains("recognition_threshold must be between 0.0 and 1.0"),
+            "invalid recognition threshold must fail with its field and accepted range, got {error}"
+        );
+
+        fs::write(
+            &options_path,
+            serde_json::json!({ "data_dir": data_dir }).to_string(),
+        )
+        .expect("write config with no stationary override");
+        let defaults = load(Vec::<OsString>::new()).expect("load shared deployment defaults");
+        assert_eq!(
+            defaults.detector_stationary_interval_secs, 30,
+            "standalone and add-on configuration must share the 30-second look-anyway default"
         );
     }
 

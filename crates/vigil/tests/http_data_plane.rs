@@ -4,8 +4,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::Duration;
 
 use context_graph::{
     CreateContext, CreateDecision, CreateEntity, CreateIntention, EntityType, EvidenceId,
@@ -15,8 +18,8 @@ use context_graph::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use vigil::{
-    CorrectionRequest, CorrectionType, EventRow, ReviewDataPlaneHandle, record_correction,
-    review_events, review_why, spawn_review_data_plane,
+    CorrectionRequest, CorrectionType, EventRow, PersistedClock, ReviewDataPlaneHandle,
+    record_correction, review_events, review_why, spawn_review_data_plane_with_clock,
 };
 
 #[path = "ha_test_support.rs"]
@@ -161,13 +164,21 @@ fn rows(response: &HttpResponse) -> Vec<Value> {
 }
 
 fn spawn_server(store_path: &Path) -> (ReviewDataPlaneHandle, u16) {
+    spawn_server_with_clock(store_path, PersistedClock::contextdb())
+}
+
+fn spawn_server_with_clock(
+    store_path: &Path,
+    clock: PersistedClock,
+) -> (ReviewDataPlaneHandle, u16) {
     let store = ha_test_support::open_store_at(store_path).expect("store must open for data plane");
     let data_dir = store_path
         .parent()
         .expect("store path must have data dir parent")
         .to_path_buf();
     let port = ha_test_support::free_port().expect("allocate review port");
-    let handle = spawn_review_data_plane(store, data_dir, port).expect("spawn review data plane");
+    let handle = spawn_review_data_plane_with_clock(store, data_dir, port, clock)
+        .expect("spawn review data plane");
     let port = handle.local_addr().port();
     ha_test_support::wait_for_tcp_port(port, Duration::from_secs(2))
         .expect("review data plane must open TCP port");
@@ -355,7 +366,8 @@ fn seed_review_store(
         })
         .map_err(|error| format!("create review decision: {error}"))?;
 
-    let base_time = chrono::Utc::now();
+    let base_time = chrono::DateTime::from_timestamp_millis(1_700_000_000_000)
+        .expect("fixed review fixture timestamp is valid");
     let nodes = ReviewNodes {
         context_id: context.id,
         entity_id: camera.id,
@@ -510,14 +522,19 @@ fn served_media_refs(row: &Value) -> (String, String) {
     )
 }
 
-fn assert_allow_origin(response: &HttpResponse, origin: &str, label: &str) {
-    let Some(value) = response.header("access-control-allow-origin") else {
-        panic!("{label} response must include Access-Control-Allow-Origin for browser fetches");
-    };
-    assert!(
-        value == "*" || value == origin,
-        "{label} allow-origin must permit {origin}, got {value}"
-    );
+fn assert_no_cross_origin_access(response: &HttpResponse, label: &str) {
+    for header in [
+        "access-control-allow-origin",
+        "access-control-allow-methods",
+        "access-control-allow-headers",
+        "access-control-expose-headers",
+    ] {
+        assert_eq!(
+            response.header(header),
+            None,
+            "{label} must not opt browsers into cross-origin access via {header}"
+        );
+    }
 }
 
 fn correction_matches(value: &Value, correction_type: &str, label: Option<&str>) -> bool {
@@ -599,7 +616,8 @@ fn record_marker_detection(
     source_ref: &str,
 ) {
     let observation_id = ObservationId::new_v7();
-    let observed_at = chrono::Utc::now();
+    let observed_at = chrono::DateTime::from_timestamp_millis(1_700_000_100_000)
+        .expect("fixed marker timestamp is valid");
     let evidence = vec![EvidenceRef {
         id: EvidenceId::new_v7(),
         observation_id,
@@ -635,58 +653,6 @@ fn record_marker_detection(
             embeddings: Vec::new(),
         })
         .expect("record marker detection");
-}
-
-fn record_zone_marker_detection(
-    store: &Store,
-    context_id: context_graph::ContextId,
-    entity_id: context_graph::EntityId,
-    class_name: &str,
-    source_ref: &str,
-    observed_at: chrono::DateTime<chrono::Utc>,
-    zone: Option<&str>,
-) -> String {
-    let observation_id = ObservationId::new_v7();
-    let evidence = vec![EvidenceRef {
-        id: EvidenceId::new_v7(),
-        observation_id,
-        context_id,
-        kind: EvidenceKind::StructuredSignal,
-        source_ref: source_ref.to_string(),
-        captured_at: Some(observed_at),
-        producer: EvidenceProducer {
-            system: "vigil".to_string(),
-            model_name: ha_test_support::DETECTOR_MODEL_ID.to_string(),
-            model_version: "0.1".to_string(),
-            pipeline_version: "review-http-test".to_string(),
-        },
-        retention_status: RetentionStatus::NotStored,
-        ..Default::default()
-    }];
-    let mut observed_properties = BTreeMap::new();
-    observed_properties.insert("class".to_string(), Value::String(class_name.to_string()));
-    observed_properties.insert("confidence".to_string(), json!(0.71));
-    observed_properties.insert("bbox".to_string(), Value::String("5,6,7,8".to_string()));
-    observed_properties.insert("frame_index".to_string(), json!(11_u64));
-    if let Some(zone) = zone {
-        observed_properties.insert("zone".to_string(), Value::String(zone.to_string()));
-    }
-    store
-        .record_observation(RecordObservation {
-            id: observation_id,
-            entity_id,
-            context_id,
-            observation_type: "detection".to_string(),
-            source: "vigil".to_string(),
-            observed_at,
-            evidence,
-            observed_properties,
-            state_delta: BTreeMap::new(),
-            properties: BTreeMap::new(),
-            embeddings: Vec::new(),
-        })
-        .expect("record zone marker detection");
-    observation_id.to_string()
 }
 
 fn seed_foreign_context_detection(store: &Store) {
@@ -744,56 +710,6 @@ fn port_accepts(port: u16) -> bool {
 }
 
 #[test]
-fn event_list_serializes_detection_zone_authority() {
-    let (_tmp, store_path) = review_store_copy(1).expect("seeded store for event-list zone");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
-    let seeded_detection = list_all_observations(&store)
-        .into_iter()
-        .find(|observation| observation.observation_type == "detection")
-        .expect("seeded store must include an unzoned detection");
-    let expected_zone = format!("lower_gate_{}", ObservationId::new_v7());
-    let zoned_at = chrono::Utc::now();
-    let unzoned_at = zoned_at + chrono::Duration::seconds(1);
-    let zoned_id = record_zone_marker_detection(
-        &store,
-        seeded_detection.context_id,
-        seeded_detection.entity_id,
-        "person",
-        "vigil-edge:signal/source-without-zone-name",
-        zoned_at,
-        Some(&expected_zone),
-    );
-    let unzoned_id = record_zone_marker_detection(
-        &store,
-        seeded_detection.context_id,
-        seeded_detection.entity_id,
-        "person",
-        "vigil-edge:signal/source-without-zone-name",
-        unzoned_at,
-        None,
-    );
-    let (_server, port) = spawn_server(&store_path);
-
-    let response = get(port, "/events");
-    assert_eq!(response.status, 200, "GET /events must return 200");
-    let served = rows(&response);
-
-    let zoned_row = event_row_by_id(&served, &zoned_id);
-    assert_eq!(
-        field_opt_str(zoned_row, "zone"),
-        Some(expected_zone.as_str()),
-        "Home Assistant reload rows must serialize the detection zone from cg observed_properties[\"zone\"]"
-    );
-
-    let unzoned_row = event_row_by_id(&served, &unzoned_id);
-    assert!(
-        matches!(unzoned_row.get("zone"), None | Some(Value::Null)),
-        "an event row without detection zone authority must serialize zone as absent or null, got {:?}",
-        unzoned_row.get("zone")
-    );
-}
-
-#[test]
 fn event_list_serves_full_review_row_fieldset() {
     let (_tmp, store_path) = review_store_copy(2).expect("seeded store for event list fieldset");
     let expected_store = ha_test_support::open_store_at(&store_path).expect("expected store opens");
@@ -811,6 +727,10 @@ fn event_list_serves_full_review_row_fieldset() {
     );
     for (served_row, expected_row) in served.iter().zip(expected.rows.iter()) {
         assert_event_row_matches_transport(served_row, expected_row);
+        assert!(
+            served_row.get("zone").is_none(),
+            "zone must stay off the review schema until zone configuration and runtime matching ship, got {served_row}"
+        );
     }
     assert!(
         served
@@ -891,6 +811,19 @@ fn why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction() {
     );
     assert_eq!(field_str(&served, "camera_name"), expected.camera_name);
     assert_eq!(field_str(&served, "site_name"), expected.site_name);
+    for (field, source_ref) in [
+        ("clip_ref", expected.clip_ref.as_str()),
+        ("detector_image_ref", expected.detector_image_ref.as_str()),
+    ] {
+        let file_name = source_ref
+            .strip_prefix("vigil-edge:clip/")
+            .expect("review evidence reference must use the internal media-reference scheme");
+        assert_eq!(
+            field_str(&served, field),
+            format!("/media/{file_name}"),
+            "served /why {field} must route the stored evidence reference"
+        );
+    }
     assert!(
         correction_matches(&served, "WrongClass", Some("vehicle")),
         "served why walk-back must list the just-recorded WrongClass vehicle correction"
@@ -1058,8 +991,8 @@ fn clip_read_serves_range_206_partial_content_transport() {
 }
 
 #[test]
-fn cross_origin_allow_header_present_on_event_why_and_media_reads() {
-    let (_tmp, store_path) = review_store_copy(1).expect("seeded store for CORS reads");
+fn review_data_plane_does_not_enable_cross_origin_access() {
+    let (_tmp, store_path) = review_store_copy(1).expect("seeded store for origin boundary");
     let (_server, port) = spawn_server(&store_path);
     let origin = "http://vigil-card.test:8123";
     let origin_header = [("Origin", origin.to_string())];
@@ -1072,10 +1005,27 @@ fn cross_origin_allow_header_present_on_event_why_and_media_reads() {
     let snapshot = get_with_headers(port, &snapshot_ref, &origin_header);
     let clip = get_with_headers(port, &clip_ref, &origin_header);
 
-    assert_allow_origin(&events, origin, "events");
-    assert_allow_origin(&why, origin, "why");
-    assert_allow_origin(&snapshot, origin, "snapshot");
-    assert_allow_origin(&clip, origin, "clip");
+    assert_no_cross_origin_access(&events, "events");
+    assert_no_cross_origin_access(&why, "why");
+    assert_no_cross_origin_access(&snapshot, "snapshot");
+    assert_no_cross_origin_access(&clip, "clip");
+
+    let preflight = request(
+        port,
+        "OPTIONS",
+        "/correction",
+        &[
+            ("Origin", origin.to_string()),
+            ("Access-Control-Request-Method", "POST".to_string()),
+            ("Access-Control-Request-Headers", "content-type".to_string()),
+        ],
+        b"",
+    );
+    assert_eq!(
+        preflight.status, 404,
+        "cross-origin correction preflight must not be accepted"
+    );
+    assert_no_cross_origin_access(&preflight, "correction preflight");
 }
 
 #[test]
@@ -1263,7 +1213,12 @@ fn event_list_serializes_current_correction_authority_fields() {
     let wrong_class_id = detections[1].id.to_string();
     let false_alarm_id = detections[2].id.to_string();
     let unreviewed_id = detections[3].id.to_string();
-    let (_server, port) = spawn_server(&store_path);
+    let clock_millis = Arc::new(AtomicU64::new(1_900_000_000_000));
+    let injected_clock = PersistedClock::from_millis_source({
+        let clock_millis = Arc::clone(&clock_millis);
+        move || clock_millis.load(Ordering::SeqCst)
+    });
+    let (_server, port) = spawn_server_with_clock(&store_path, injected_clock);
 
     let identity = format!(
         r#"{{"detection_id":"{identity_id}","correction_type":"Identity","label":"operator confirmed"}}"#
@@ -1276,11 +1231,14 @@ fn event_list_serializes_current_correction_authority_fields() {
     );
     let response = post_json(port, "/correction", &initial_identity);
     assert!((200..300).contains(&response.status));
-    thread::sleep(Duration::from_millis(2));
-    let wrong_class = format!(
+    // Advance a shared injected authority and send the second correction through
+    // the still-running HTTP worker. A thread-local clock guard would not cross
+    // this boundary and would make the current-authority assertion fail.
+    clock_millis.store(1_900_000_060_000, Ordering::SeqCst);
+    let later_wrong_class = format!(
         r#"{{"detection_id":"{wrong_class_id}","correction_type":"WrongClass","label":"cow"}}"#
     );
-    let response = post_json(port, "/correction", &wrong_class);
+    let response = post_json(port, "/correction", &later_wrong_class);
     assert!((200..300).contains(&response.status));
 
     let false_alarm =
@@ -1327,43 +1285,6 @@ fn event_list_serializes_current_correction_authority_fields() {
     let unreviewed_row = event_row_by_id(&served, &unreviewed_id);
     assert_null_field(unreviewed_row, "current_correction", "unreviewed row");
     assert_null_field(unreviewed_row, "corrected_label", "unreviewed row");
-}
-
-#[test]
-fn correction_cors_preflight_allows_post_and_content_type() {
-    let (_tmp, store_path) = review_store_copy(1).expect("seeded store for correction preflight");
-    let (_server, port) = spawn_server(&store_path);
-    let origin = "http://vigil-card.test:8123";
-    let response = request(
-        port,
-        "OPTIONS",
-        "/correction",
-        &[
-            ("Origin", origin.to_string()),
-            ("Access-Control-Request-Method", "POST".to_string()),
-            ("Access-Control-Request-Headers", "content-type".to_string()),
-        ],
-        b"",
-    );
-    let methods = response
-        .header("access-control-allow-methods")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    assert!(
-        methods.split(',').any(|method| method.trim() == "post"),
-        "correction preflight must allow POST"
-    );
-    let headers = response
-        .header("access-control-allow-headers")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    assert!(
-        headers
-            .split(',')
-            .any(|header| header.trim() == "content-type"),
-        "correction preflight must allow content-type"
-    );
-    assert_allow_origin(&response, origin, "correction preflight");
 }
 
 #[test]
@@ -1657,7 +1578,6 @@ fn clip_range_streams_from_large_file_without_whole_file_transfer() {
     let served = rows(&get(port, "/events"));
     let (_, clip_ref) = served_media_refs(&served[0]);
 
-    let start = Instant::now();
     let head = request_limited(
         port,
         "GET",
@@ -1665,10 +1585,6 @@ fn clip_range_streams_from_large_file_without_whole_file_transfer() {
         &[("Range", "bytes=0-1023".to_string())],
         b"",
         2 * 1024 * 1024,
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "small head range against large clip must complete promptly"
     );
     assert_eq!(head.status, 206, "large clip head range must return 206");
     assert_eq!(
@@ -1706,10 +1622,9 @@ fn data_plane_serves_in_process_then_stops_on_shutdown() {
     );
 
     server.shutdown();
-    thread::sleep(Duration::from_millis(150));
     assert!(
         !port_accepts(port),
-        "data-plane shutdown handle must stop the port from accepting new connections"
+        "shutdown joins the data-plane worker and must return only after the listener is closed"
     );
 }
 

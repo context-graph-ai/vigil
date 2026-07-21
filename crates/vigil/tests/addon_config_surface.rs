@@ -100,30 +100,20 @@ fn top_level_list_values(text: &str, section: &str) -> Vec<String> {
     values
 }
 
-fn device_component_is_broad(component: &str) -> bool {
-    let component = component.trim().trim_matches('"').trim_matches('\'');
-    component.is_empty()
-        || component == "/"
-        || component == "/dev"
-        || component == "/dev/"
-        || component == "/dev/dri"
-        || component == "/dev/dri/"
-        || component == "/host"
-        || component == "/mnt"
-        || component.contains('*')
-        || component.contains("..")
+fn is_render_node(path: &str) -> bool {
+    path.strip_prefix("/dev/dri/renderD")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn device_entry_is_narrow_graphics(entry: &str) -> bool {
-    let parts = entry.split(':').collect::<Vec<_>>();
-    let source = parts.first().copied().unwrap_or("").trim();
-    let destination = parts.get(1).copied().unwrap_or(source).trim();
-    if device_component_is_broad(source) || device_component_is_broad(destination) {
-        return false;
-    }
-    [source, destination]
-        .iter()
-        .any(|component| component.contains("/dev/dri/renderD"))
+    let mut parts = entry.split(':').map(str::trim);
+    let source = parts.next().unwrap_or("");
+    let destination = parts.next().unwrap_or("");
+    let permissions = parts.next().unwrap_or("");
+    parts.next().is_none()
+        && is_render_node(source)
+        && is_render_node(destination)
+        && permissions == "rwm"
 }
 
 fn translation_description(text: &str) -> Option<String> {
@@ -227,21 +217,44 @@ fn addon_config_maps_video_device_and_forbids_full_access() {
         Some(true),
         "add-on must not use full_access for acceleration device access"
     );
+    let privileged_scalar = top_level_scalar(&text, "privileged");
+    assert!(
+        privileged_scalar.as_deref().is_none_or(|value| {
+            value.is_empty() || value == "[]" || yaml_bool(value) == Some(false)
+        }),
+        "add-on must reject every nonempty scalar privileged grant, got {privileged_scalar:?}"
+    );
+    let privileged_list = top_level_list_values(&text, "privileged");
+    assert!(
+        privileged_list.is_empty(),
+        "add-on must reject every privileged capability list, got {privileged_list:?}"
+    );
+    assert_eq!(
+        top_level_bool(&text, "host_network"),
+        Some(true),
+        "fabric requires host networking so advertised dynamic QUIC endpoints are reachable"
+    );
+    assert_eq!(
+        top_level_bool(&text, "host_pid"),
+        Some(false),
+        "fabric networking does not authorize host PID namespace access"
+    );
+    assert_eq!(
+        top_level_bool(&text, "apparmor"),
+        Some(true),
+        "the narrow host-network/device grant must retain AppArmor confinement"
+    );
     let mapped_devices = top_level_list_values(&text, "devices");
+    assert!(
+        !mapped_devices.is_empty(),
+        "add-on must map at least one narrow /dev/dri/renderD* device; video: true alone is not the reviewed host-access boundary"
+    );
     for device in &mapped_devices {
         assert!(
             device_entry_is_narrow_graphics(device),
-            "add-on devices entry must be a narrow graphics device mapping, got {device}"
+            "add-on devices entry must be an exact /dev/dri/renderD<number>:/dev/dri/renderD<number>:rwm mapping, got {device}"
         );
     }
-    let maps_video = top_level_bool(&text, "video") == Some(true)
-        || mapped_devices
-            .iter()
-            .any(|device| device_entry_is_narrow_graphics(device));
-    assert!(
-        maps_video,
-        "add-on must expose video hardware via video: true or a narrow devices entry"
-    );
 }
 
 #[test]

@@ -22,14 +22,11 @@
 //!   render chain keeps working end to end across two processes.
 //!
 //! * `..._hub_up_late` — the worker enrolls against a valid ticket while the
-//!   hub's process is DOWN, so its one-shot startup push
-//!   (`fabric.rs:674 let _ = client.push().await`, delegating into
-//!   `work_ledger::run_worker_loop`'s own one-shot startup push) misses and is
-//!   swallowed; the hub then restarts on the SAME data dir (identity + sticky
-//!   port persisted beside it → the issued ticket stays valid and reachable).
-//!   Nothing on the worker's standing poll loop ever re-pushes the outstanding
-//!   advertisement, so the hub never learns the capability. RED today: the
-//!   hub's rendered `remote-detectors=` stays `-` forever.
+//!   hub's process is DOWN, so both startup delivery attempts expire; the hub
+//!   then restarts on the SAME data dir (identity + sticky port persisted
+//!   beside it, so the issued ticket stays valid and reachable). The standing
+//!   worker loop must re-push the outstanding advertisement, and the restarted
+//!   hub's shipped doctor surface must render the capability.
 
 #![cfg(feature = "fabric")]
 
@@ -384,7 +381,7 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
     );
 }
 
-// ── Arm B: hub up LATE (RED today — the one-shot push is swallowed) ────────
+// ── Arm B: hub up LATE (standing re-delivery guard) ───────────────────────
 
 #[test]
 fn two_real_processes_render_remote_detectors_line_hub_up_late() {
@@ -456,8 +453,8 @@ fn two_real_processes_render_remote_detectors_line_hub_up_late() {
     // the defect under test. Measured on this box: a 25s window still heals, a
     // 40s window is permanently lost. 55s puts the hub's return comfortably
     // AFTER the one-shot push has failed and its watermark stayed put, so the
-    // ONLY thing that could still deliver the capability is a re-push on the
-    // standing poll cadence — which is exactly what does not exist today.
+    // ONLY thing that can now deliver the capability is a re-push on the
+    // standing poll cadence — the exact recovery contract under test.
     thread::sleep(Duration::from_secs(55));
 
     // The hub's routing finally comes up, on the SAME data dir → same sticky

@@ -3918,6 +3918,9 @@ fn audit_dev_integration_workflow(content: &str, violations: &mut Vec<String>) {
             ".allow_force_pushes.enabled == false",
             ".required_linear_history.enabled == true",
             ".context == \"vigil/dev-closeout\" and (.app_id // 0) > 0",
+            "actions/workflows/dev-closeout.yml",
+            ".workflow_id == $workflow_id and .event == \"workflow_dispatch\"",
+            ".head_branch == \"dev\" and .head_sha == $dev_base_sha and .conclusion == \"success\"",
             "run-id: ${{ inputs.closeout_run_id }}",
             "name: dev-closeout-sources",
             "name: dev-closeout-impact",
@@ -6094,6 +6097,11 @@ jobs:
                 1,
             ),
             integration.replacen("(.app_id // 0) > 0", "(.app_id // 0) >= 0", 1),
+            integration.replacen(
+                ".workflow_id == $workflow_id",
+                ".workflow_id != $workflow_id",
+                1,
+            ),
             integration.replacen(".github/workflows/*", ".github/workflows/none", 1),
         ] {
             let mut weakened_violations = Vec::new();

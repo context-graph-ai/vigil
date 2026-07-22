@@ -78,6 +78,24 @@ jobs:
             exit 1
           }
 
+      - name: Require the receipt run to use the trusted dev closeout workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOSEOUT_RUN_ID: ${{ inputs.closeout_run_id }}
+          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
+        run: |
+          trusted_workflow_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/dev-closeout.yml" --jq '.id')"
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CLOSEOUT_RUN_ID}")"
+          jq -e \
+            --argjson workflow_id "$trusted_workflow_id" \
+            --arg dev_base_sha "$DEV_BASE_SHA" \
+            '.workflow_id == $workflow_id and .event == "workflow_dispatch" and
+             .head_branch == "dev" and .head_sha == $dev_base_sha and .conclusion == "success"' \
+            <<<"$run_json" >/dev/null || {
+            echo "closeout receipt did not come from the successful trusted dev workflow" >&2
+            exit 1
+          }
+
       - name: Download exact closeout source receipt
         uses: actions/download-artifact@v4
         with:

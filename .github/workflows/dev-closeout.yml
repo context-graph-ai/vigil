@@ -1,0 +1,892 @@
+name: Dev closeout qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      vigil_sha:
+        description: "Exact 40-character Vigil commit to qualify before fast-forwarding dev"
+        type: string
+        required: true
+      dev_base_sha:
+        description: "Exact current dev SHA which the candidate must contain"
+        type: string
+        required: true
+      context_graph_sha:
+        description: "Exact 40-character Context Graph dev commit used by this Vigil commit"
+        type: string
+        required: true
+      contextdb_sha:
+        description: "Exact 40-character ContextDB dev commit used by this Vigil commit"
+        type: string
+        required: true
+      cache_epoch:
+        description: "Explicit cache namespace; change for a measured cold run"
+        type: string
+        required: true
+        default: "dev-closeout-v1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vigil-dev-closeout-${{ inputs.vigil_sha }}-${{ inputs.context_graph_sha }}-${{ inputs.contextdb_sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 1
+  CARGO_PROFILE_TEST_DEBUG: 1
+  CARGO_BUILD_JOBS: 2
+  NEXTEST_TEST_THREADS: 2
+
+jobs:
+  exact-sources:
+    name: Verify exact closeout sources
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      vigil_sha: ${{ steps.identity.outputs.vigil_sha }}
+      context_graph_sha: ${{ steps.identity.outputs.context_graph_sha }}
+      contextdb_sha: ${{ steps.identity.outputs.contextdb_sha }}
+    steps:
+      - name: Reject branch names, tags, and abbreviated SHAs
+        env:
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
+          CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
+          CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+        run: |
+          for value in "$VIGIL_SHA" "$DEV_BASE_SHA" "$CONTEXT_GRAPH_SHA" "$CONTEXTDB_SHA"; do
+            [[ "$value" =~ ^[0-9a-fA-F]{40}$ ]] || {
+              echo "closeout requires four full 40-character hexadecimal commit SHAs" >&2
+              exit 1
+            }
+          done
+          test "$GITHUB_SHA" = "$VIGIL_SHA" || {
+            echo "dispatch the workflow from the exact Vigil candidate ref; workflow SHA $GITHUB_SHA differs from $VIGIL_SHA" >&2
+            exit 1
+          }
+
+      - name: Checkout exact Vigil commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.vigil_sha }}
+          fetch-depth: 0
+          path: vigil
+          persist-credentials: false
+
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ inputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ inputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+
+      - name: Prove immutable clean identities
+        id: identity
+        env:
+          EXPECTED_VIGIL_SHA: ${{ inputs.vigil_sha }}
+          EXPECTED_DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
+          EXPECTED_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
+          EXPECTED_CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+        run: |
+          vigil_sha="$(git -C vigil rev-parse HEAD)"
+          dev_sha="$(git -C vigil rev-parse origin/dev)"
+          context_graph_sha="$(git -C context-graph rev-parse HEAD)"
+          contextdb_sha="$(git -C contextdb rev-parse HEAD)"
+          test "$vigil_sha" = "$EXPECTED_VIGIL_SHA"
+          test "$dev_sha" = "$EXPECTED_DEV_BASE_SHA"
+          test "$(git -C vigil merge-base "$vigil_sha" "$dev_sha")" = "$dev_sha"
+          test "$context_graph_sha" = "$EXPECTED_CONTEXT_GRAPH_SHA"
+          test "$contextdb_sha" = "$EXPECTED_CONTEXTDB_SHA"
+          test -z "$(git -C vigil status --porcelain=v1)"
+          test -z "$(git -C context-graph status --porcelain=v1)"
+          test -z "$(git -C contextdb status --porcelain=v1)"
+          echo "vigil_sha=$vigil_sha" >> "$GITHUB_OUTPUT"
+          echo "context_graph_sha=$context_graph_sha" >> "$GITHUB_OUTPUT"
+          echo "contextdb_sha=$contextdb_sha" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg vigil_sha "$vigil_sha" \
+            --arg workflow_sha "$GITHUB_SHA" \
+            --arg dev_base_sha "$dev_sha" \
+            --arg context_graph_sha "$context_graph_sha" \
+            --arg contextdb_sha "$contextdb_sha" \
+            --arg cache_epoch "${{ inputs.cache_epoch }}" \
+            '{tier:"dev-closeout",workflow_sha:$workflow_sha,vigil_sha:$vigil_sha,dev_base_sha:$dev_base_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,cache_epoch:$cache_epoch,clean:true}' \
+            > dev-closeout-sources.json
+
+      - name: Upload exact source identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-sources
+          path: dev-closeout-sources.json
+          if-no-files-found: error
+          retention-days: 30
+
+  impact:
+    name: Classify the closeout from code changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: exact-sources
+    outputs:
+      install_expanded: ${{ steps.classify.outputs.install_expanded }}
+    steps:
+      - name: Checkout exact Vigil candidate and history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.exact-sources.outputs.vigil_sha }}
+          fetch-depth: 0
+          path: vigil
+          persist-credentials: false
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+      - name: Run the repository-owned impact classifier
+        id: classify
+        working-directory: vigil
+        run: |
+          cargo xtask closeout-impact \
+            --base "${{ inputs.dev_base_sha }}" \
+            --head "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --json target/closeout-impact.json
+          impact="$(jq -r '.impact' target/closeout-impact.json)"
+          case "$impact" in
+            ordinary) install_expanded=false ;;
+            install-expanded) install_expanded=true ;;
+            *) echo "unknown closeout impact: $impact" >&2; exit 1 ;;
+          esac
+          echo "install_expanded=$install_expanded" >> "$GITHUB_OUTPUT"
+      - name: Upload the code-derived impact receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-impact
+          path: vigil/target/closeout-impact.json
+          if-no-files-found: error
+          retention-days: 90
+
+  fast:
+    name: Default closeout lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: exact-sources
+    steps:
+      - name: Checkout exact Vigil commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.exact-sources.outputs.vigil_sha }}
+          path: vigil
+          persist-credentials: false
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install bounded runtime tools
+        run: |
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
+      - name: Restore closeout cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+          key: ${{ inputs.cache_epoch }}
+      - name: Set up the default runtime harness
+        working-directory: vigil
+        run: cargo xtask setup-runtime-harness
+      - name: Receipt formatting discipline
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane discipline \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-discipline-fmt.json \
+            -- cargo fmt --all --check
+      - name: Receipt lint discipline
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane discipline \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-discipline-clippy.json \
+            -- cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Receipt the exact default inventory
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane default \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-default-inventory.json \
+            -- cargo nextest list --locked --workspace -T json
+      - name: Materialize the default inventory for estate comparison
+        working-directory: vigil
+        run: cargo nextest list --locked --workspace -T json > target/nextest-default.json
+      - name: Receipt test-estate discipline
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane discipline \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-discipline-estate.json \
+            -- cargo xtask test-estate-check --nextest-json default=target/nextest-default.json
+      - name: Receipt default tests
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane default \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-default-tests.json \
+            -- cargo nextest run --locked --profile pr --workspace --test-threads 2
+      - name: Upload default closeout receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-receipt-fast
+          path: vigil/target/verify-receipts/dev-*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  features:
+    name: Feature closeout lane (${{ matrix.shape }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: exact-sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shape: decode
+            features: decode-gstreamer
+          - shape: detect
+            features: detect-burn-wgpu
+          - shape: combined
+            features: decode-gstreamer,detect-burn-wgpu
+          - shape: fabric
+            features: fabric
+          - shape: production
+            features: decode-gstreamer,detect-burn-wgpu,fabric
+    steps:
+      - name: Free hosted-runner build disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+      - name: Checkout exact Vigil commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.exact-sources.outputs.vigil_sha }}
+          path: vigil
+          persist-credentials: false
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install bounded feature tools
+        run: |
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          packages=(ffmpeg mosquitto mosquitto-clients)
+          if [[ "${{ matrix.features }}" == *decode-gstreamer* ]]; then
+            packages+=(libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev)
+          fi
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y "${packages[@]}"
+      - name: Restore closeout cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+          key: ${{ inputs.cache_epoch }}
+      - name: Set up the feature runtime harness
+        working-directory: vigil
+        run: cargo xtask setup-runtime-harness
+      - name: Receipt the registered feature inventory
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane feature \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt "target/verify-receipts/dev-feature-${{ matrix.shape }}-inventory.json" \
+            -- cargo nextest list --locked -p vigil --features "${{ matrix.features }}" -T json
+      - name: Materialize the feature inventory for estate comparison
+        working-directory: vigil
+        run: cargo nextest list --locked -p vigil --features "${{ matrix.features }}" -T json > "target/nextest-${{ matrix.shape }}.json"
+      - name: Receipt the feature estate comparison
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane discipline \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt "target/verify-receipts/dev-feature-${{ matrix.shape }}-estate.json" \
+            -- cargo xtask test-estate-check --nextest-json "${{ matrix.shape }}=target/nextest-${{ matrix.shape }}.json"
+      - name: Receipt feature tests
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane feature \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt "target/verify-receipts/dev-feature-${{ matrix.shape }}-tests.json" \
+            -- cargo nextest run --locked --profile pr -p vigil --features "${{ matrix.features }}" --test-threads 2
+      - name: Upload feature receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-receipt-feature-${{ matrix.shape }}
+          path: vigil/target/verify-receipts/dev-feature-${{ matrix.shape }}-*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  slow-preflight:
+    name: Build and freeze the slow estate once
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    needs: exact-sources
+    steps:
+      - name: Free hosted-runner build disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+      - name: Checkout exact Vigil commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.exact-sources.outputs.vigil_sha }}
+          path: vigil
+          persist-credentials: false
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Restore closeout cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+          key: ${{ inputs.cache_epoch }}
+      - name: Verify post-cache slow-build disk
+        run: |
+          mkdir -p vigil/target
+          du -sh vigil/target || true
+          target_kb="$(du -sk vigil/target | awk '{print $1}')"
+          available_kb="$(df --output=avail vigil/target | tail -n 1)"
+          effective_capacity_kb=$((available_kb + target_kb))
+          scratch_floor_kb=16777216
+          capacity_floor_kb=31457280
+          if [ "${available_kb}" -lt "${scratch_floor_kb}" ] || \
+             [ "${effective_capacity_kb}" -lt "${capacity_floor_kb}" ]; then
+            echo "slow archive requires 16 GiB free scratch and 30 GiB free-plus-cache capacity" >&2
+            exit 1
+          fi
+          df -h vigil/target
+      - name: Create the closeout archive staging directory
+        working-directory: vigil
+        run: mkdir -p target/closeout
+      - name: Receipt the one release-profile slow archive build
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane slow-preflight \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-slow-archive.json \
+            -- cargo nextest archive --locked --release --workspace --features first-light-acceptance,acceptance --archive-file target/closeout/nextest-slow.tar.zst
+      - name: Receipt the immutable slow inventory
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane slow-preflight \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-slow-inventory.json \
+            -- cargo nextest list --archive-file target/closeout/nextest-slow.tar.zst --workspace-remap "$PWD" -T json
+      - name: Materialize the slow inventory for estate comparison
+        working-directory: vigil
+        run: cargo nextest list --archive-file target/closeout/nextest-slow.tar.zst --workspace-remap "$PWD" -T json > target/nextest-slow.json
+      - name: Receipt the slow estate comparison
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane slow-preflight \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-slow-estate.json \
+            -- cargo xtask test-estate-check --nextest-json slow=target/nextest-slow.json
+      - name: Extract the one process binary built into the archive
+        working-directory: vigil
+        run: |
+          test -x target/release/vigil
+          install -m 0755 target/release/vigil target/closeout/vigil-acceptance-bin
+      - name: Upload the immutable archive and process binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-slow-archive
+          path: |
+            vigil/target/closeout/nextest-slow.tar.zst
+            vigil/target/closeout/vigil-acceptance-bin
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload slow preflight receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-receipt-slow-preflight
+          path: vigil/target/verify-receipts/dev-slow-*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  install-preflight:
+    name: Expanded install-binary and image preparation
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    needs: [exact-sources, impact]
+    if: needs.impact.outputs.install_expanded == 'true'
+    steps:
+      - name: Free hosted-runner build disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+      - name: Checkout exact Vigil commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.exact-sources.outputs.vigil_sha }}
+          path: vigil
+          persist-credentials: false
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+      - name: Restore closeout cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+          key: ${{ inputs.cache_epoch }}
+      - name: Verify post-cache install-build disk
+        run: |
+          mkdir -p vigil/target
+          du -sh vigil/target || true
+          target_kb="$(du -sk vigil/target | awk '{print $1}')"
+          available_kb="$(df --output=avail vigil/target | tail -n 1)"
+          effective_capacity_kb=$((available_kb + target_kb))
+          scratch_floor_kb=16777216
+          capacity_floor_kb=31457280
+          if [ "${available_kb}" -lt "${scratch_floor_kb}" ] || \
+             [ "${effective_capacity_kb}" -lt "${capacity_floor_kb}" ]; then
+            echo "expanded install preparation requires 16 GiB scratch and 30 GiB free-plus-cache capacity" >&2
+            exit 1
+          fi
+      - name: Receipt the musl harness setup
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane slow-preflight \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-install-setup.json \
+            -- cargo xtask setup-harness
+      - name: Add the host musl target
+        working-directory: vigil
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Receipt the one host-musl install binary
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane install-binary \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-install-binary.json \
+            -- cargo build --locked -p vigil --release --target x86_64-unknown-linux-musl --features fabric
+      - name: Stage the bounded install-smoke image context
+        working-directory: vigil
+        run: |
+          mkdir -p target/closeout/docker-context/dist/docker/amd64
+          install -m 0755 target/x86_64-unknown-linux-musl/release/vigil target/closeout/docker-context/dist/docker/amd64/vigil
+          install -m 0644 Dockerfile target/closeout/docker-context/Dockerfile
+          timeout --kill-after=30s 5m docker pull busybox:1.37.0-musl
+      - name: Receipt the one local install-smoke image build
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane install-image \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-install-image-build.json \
+            -- docker build --tag "vigil-closeout:${{ needs.exact-sources.outputs.vigil_sha }}" target/closeout/docker-context
+      - name: Receipt inspection of the built image
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane install-image \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-install-image-inspect.json \
+            -- docker image inspect "vigil-closeout:${{ needs.exact-sources.outputs.vigil_sha }}"
+      - name: Receipt the exact image handoff
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane install-image \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-install-image-save.json \
+            -- docker save --output target/closeout/vigil-acceptance-image.tar "vigil-closeout:${{ needs.exact-sources.outputs.vigil_sha }}"
+      - name: Upload the one prebuilt install-smoke image
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-install-image
+          path: vigil/target/closeout/vigil-acceptance-image.tar
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload expanded-install receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-receipt-install-preflight
+          path: vigil/target/verify-receipts/dev-install-*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  slow-shards:
+    name: Slow estate execution (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: [exact-sources, slow-preflight]
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout exact Vigil commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.exact-sources.outputs.vigil_sha }}
+          path: vigil
+          persist-credentials: false
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install bounded runtime tools
+        run: |
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
+      - name: Restore closeout cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+          key: ${{ inputs.cache_epoch }}
+      - name: Download the exact preflight archive
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-closeout-slow-archive
+          path: vigil/target/closeout
+      - name: Set up this shard's runtime harness
+        working-directory: vigil
+        run: cargo xtask setup-runtime-harness
+      - name: Execute only this archive shard and record its budget
+        working-directory: vigil
+        env:
+          VIGIL_ACCEPTANCE_BIN: ${{ github.workspace }}/vigil/target/closeout/vigil-acceptance-bin
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane slow-shard \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt "target/verify-receipts/dev-slow-${{ matrix.shard }}.json" \
+            -- cargo nextest run \
+              --archive-file target/closeout/nextest-slow.tar.zst \
+              --workspace-remap "$PWD" \
+              --profile ci-full \
+              --partition "hash:${{ matrix.shard }}/4" \
+              -E 'not test(vigil_container_)'
+      - name: Upload slow shard receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-receipt-slow-${{ matrix.shard }}
+          path: vigil/target/verify-receipts/dev-slow-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  install-smoke:
+    name: Prebuilt install-image smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [exact-sources, impact, slow-preflight, install-preflight]
+    if: needs.impact.outputs.install_expanded == 'true'
+    steps:
+      - name: Checkout exact Vigil commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.exact-sources.outputs.vigil_sha }}
+          path: vigil
+          persist-credentials: false
+      - name: Checkout exact Context Graph commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/context-graph
+          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          path: context-graph
+          token: ${{ secrets.CG_CI_TOKEN }}
+          persist-credentials: false
+      - name: Checkout exact ContextDB commit
+        uses: actions/checkout@v4
+        with:
+          repository: context-graph-ai/contextdb
+          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
+          path: contextdb
+          persist-credentials: false
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      - name: Restore closeout cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vigil
+          key: ${{ inputs.cache_epoch }}
+      - name: Download the exact preflight archive
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-closeout-slow-archive
+          path: vigil/target/closeout
+      - name: Download the one prebuilt install image
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-closeout-install-image
+          path: vigil/target/closeout
+      - name: Receipt loading the exact prebuilt install image
+        working-directory: vigil
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane install-image \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-install-image-load.json \
+            -- docker load --input target/closeout/vigil-acceptance-image.tar
+      - name: Run only the three install-image witnesses
+        working-directory: vigil
+        env:
+          VIGIL_ACCEPTANCE_BIN: ${{ github.workspace }}/vigil/target/closeout/vigil-acceptance-bin
+          VIGIL_ACCEPTANCE_IMAGE: vigil-closeout:${{ needs.exact-sources.outputs.vigil_sha }}
+        run: |
+          ./scripts/verify dev-closeout \
+            --lane install-smoke \
+            --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
+            --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
+            --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
+            --cache-state mixed \
+            --receipt target/verify-receipts/dev-slow-install.json \
+            -- cargo nextest run \
+              --archive-file target/closeout/nextest-slow.tar.zst \
+              --workspace-remap "$PWD" \
+              --profile ci-full \
+              -E 'test(vigil_container_)'
+      - name: Upload install-smoke receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-receipt-slow-install
+          path: |
+            vigil/target/verify-receipts/dev-slow-install.json
+            vigil/target/verify-receipts/dev-install-image-load.json
+          if-no-files-found: error
+          retention-days: 30
+
+  dev-closeout-gate:
+    name: Exact-SHA dev closeout receipt
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs: [exact-sources, impact, fast, features, slow-preflight, slow-shards, install-preflight, install-smoke]
+    steps:
+      - name: Require every closeout compartment
+        run: |
+          test "${{ needs.exact-sources.result }}" = "success"
+          test "${{ needs.impact.result }}" = "success"
+          test "${{ needs.fast.result }}" = "success"
+          test "${{ needs.features.result }}" = "success"
+          test "${{ needs.slow-preflight.result }}" = "success"
+          test "${{ needs.slow-shards.result }}" = "success"
+          if [ "${{ needs.impact.outputs.install_expanded }}" = true ]; then
+            test "${{ needs.install-preflight.result }}" = "success"
+            test "${{ needs.install-smoke.result }}" = "success"
+          else
+            test "${{ needs.install-preflight.result }}" = "skipped"
+            test "${{ needs.install-smoke.result }}" = "skipped"
+          fi
+      - name: Download all timing receipts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dev-closeout-receipt-*
+          path: receipts
+          merge-multiple: true
+      - name: Download the code-derived impact receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-closeout-impact
+          path: impact
+      - name: Prove the complete receipt set and create the merge receipt
+        env:
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+          CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
+          CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+        run: |
+          receipt_count="$(find receipts -type f -name '*.json' | wc -l)"
+          if [ "${{ needs.impact.outputs.install_expanded }}" = true ]; then
+            test "$receipt_count" -eq 34
+          else
+            test "$receipt_count" -eq 27
+          fi
+          for receipt in receipts/*.json; do
+            jq -e --arg vigil "$VIGIL_SHA" --arg cg "$CONTEXT_GRAPH_SHA" --arg db "$CONTEXTDB_SHA" \
+              '.vigil_sha == $vigil and .context_graph_sha == $cg and .contextdb_sha == $db' \
+              "$receipt" >/dev/null
+          done
+          find receipts -type f -name '*.json' -print0 | sort -z | xargs -0 sha256sum > dev-closeout-receipt.sha256
+          test "$(jq -r '.impact == \"install-expanded\"' impact/closeout-impact.json)" = "${{ needs.impact.outputs.install_expanded }}"
+          jq -n \
+            --arg vigil_sha "$VIGIL_SHA" \
+            --arg dev_base_sha "${{ inputs.dev_base_sha }}" \
+            --arg context_graph_sha "$CONTEXT_GRAPH_SHA" \
+            --arg contextdb_sha "$CONTEXTDB_SHA" \
+            --arg workflow_run "$GITHUB_RUN_ID" \
+            --argjson install_expanded "${{ needs.impact.outputs.install_expanded }}" \
+            '{tier:"dev-closeout",qualified:true,vigil_sha:$vigil_sha,dev_base_sha:$dev_base_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,workflow_run:$workflow_run,install_expanded:$install_expanded,fast_forward_only:true}' \
+            > dev-closeout-qualified.json
+      - name: Upload fast-forward merge receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-closeout-qualified-${{ inputs.vigil_sha }}
+          path: |
+            dev-closeout-qualified.json
+            dev-closeout-receipt.sha256
+            impact/closeout-impact.json
+          if-no-files-found: error
+          retention-days: 90

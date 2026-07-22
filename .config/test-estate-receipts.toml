@@ -739,3 +739,42 @@ zero_lost_detection = "This transition only adds the 30 existing guard self-test
 rationale = "The shared Rust collector now includes xtask/src/main.rs, eliminating the non-Rust audit's one-off extension and making every guard self-test subject to the same family and transition enforcement."
 reviewer = "Fermat independent recurrence-fix review, 2026-07-21: exact 30-test addition and before/after sorted-vector digests verified"
 proof = []
+
+[[transition]]
+id = "register-development-verification-compartment-guards"
+base_sha = "4e3020713317e041423c9d0f00b20f76d66b2939"
+before_vector_sha256 = "sha256:5d71d25fd09d096370c79eb08866e338129e90c2b9a1a04e766c0d370c4000e4"
+after_vector_sha256 = "sha256:cad3fd6d3a8af9084e1a9f89dda4479e05d1978d2e6e6732c8c96694268c1a7d"
+removed_tests = []
+added_tests = [
+  "xtask::closeout_impact::tests::cargo_docker_addon_runtime_and_acceptance_inputs_expand_install_proof",
+  "xtask::closeout_impact::tests::changing_classifier_rules_expands_its_own_closeout",
+  "xtask::closeout_impact::tests::deleting_build_substrate_cannot_bypass_expanded_classification",
+  "xtask::closeout_impact::tests::moving_and_invalid_refs_are_rejected",
+  "xtask::closeout_impact::tests::ordinary_source_change_stays_ordinary",
+  "xtask::closeout_impact::tests::renaming_build_substrate_cannot_bypass_expanded_classification",
+  "xtask::closeout_impact::tests::target_specific_rust_change_expands_install_proof",
+  "xtask::closeout_impact::tests::unknown_top_level_build_like_file_fails_closed",
+  "xtask::test_estate::tests::compartmented_workflows_reject_cross_tier_work_and_manual_downgrades",
+  "xtask::verify::tests::arbitrary_nextest_lane_is_forcibly_bounded_once",
+  "xtask::verify::tests::cache_labels_must_match_pre_command_target_state",
+  "xtask::verify::tests::cargo_build_size_excludes_harness_receipts_closeout_and_markers",
+  "xtask::verify::tests::change_requires_registered_shape_filter_expectation_and_cache_state",
+  "xtask::verify::tests::closeout_lane_rejects_an_arbitrary_command",
+  "xtask::verify::tests::closeout_rejects_dirty_dependency_inputs",
+  "xtask::verify::tests::closeout_requires_full_shas_registered_lane_and_command",
+  "xtask::verify::tests::default_and_feature_lanes_accept_only_their_registered_inventories",
+  "xtask::verify::tests::dev_lanes_reject_release_and_cross_target_builds",
+  "xtask::verify::tests::install_lanes_are_local_smoke_inputs_not_release_artifact_exports",
+  "xtask::verify::tests::install_smoke_runs_only_container_identities_once_from_the_archive",
+  "xtask::verify::tests::only_full_hex_commit_ids_are_accepted",
+  "xtask::verify::tests::parses_linux_memory_bytes",
+  "xtask::verify::tests::red_accepts_only_nextest_test_failure_not_build_failure",
+  "xtask::verify::tests::registered_list_command_becomes_bounded_filtered_run",
+  "xtask::verify::tests::slow_shards_run_only_the_frozen_archive_without_build_selection",
+]
+surviving_tests = []
+zero_lost_detection = "This transition only adds 25 adversarial verifier, workflow-compartment, and impact-classifier tests; it removes no identity and therefore cannot lose existing fault detection."
+rationale = "The new execution compartments are code-owned only if their verifier, classifier, and workflow boundaries are themselves part of the governed test vector."
+reviewer = "Cicero independent pure-addition review, 2026-07-22: exact 25-test addition, sorted identities, chained before/after vector digests, empty removals, and all 25 focused executions verified; no prior identity or fault detection was removed."
+proof = []

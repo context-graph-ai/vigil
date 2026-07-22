@@ -587,6 +587,52 @@ tests = [
 ]
 
 [[contract]]
+id = "closeout-impact-classification-enforcement"
+lineage = "Development closeout compartment: repository-owned diff rules decide when install and container proof is mandatory, including deletion, rename, platform, and classifier self-change bypasses."
+sources = [
+  "xtask/src/closeout_impact.rs",
+]
+evidence_kind = "structural"
+gate = "pull-request"
+tests = [
+  "xtask::closeout_impact::tests::cargo_docker_addon_runtime_and_acceptance_inputs_expand_install_proof",
+  "xtask::closeout_impact::tests::changing_classifier_rules_expands_its_own_closeout",
+  "xtask::closeout_impact::tests::deleting_build_substrate_cannot_bypass_expanded_classification",
+  "xtask::closeout_impact::tests::moving_and_invalid_refs_are_rejected",
+  "xtask::closeout_impact::tests::ordinary_source_change_stays_ordinary",
+  "xtask::closeout_impact::tests::renaming_build_substrate_cannot_bypass_expanded_classification",
+  "xtask::closeout_impact::tests::target_specific_rust_change_expands_install_proof",
+  "xtask::closeout_impact::tests::unknown_top_level_build_like_file_fails_closed",
+]
+
+[[contract]]
+id = "verification-command-and-receipt-enforcement"
+lineage = "Development verification compartments: the checked-in verifier constrains exact selections, exact source identities, resource bounds, cache honesty, archive consumers, and release-only commands."
+sources = [
+  "xtask/src/verify.rs",
+]
+evidence_kind = "structural"
+gate = "pull-request"
+tests = [
+  "xtask::verify::tests::arbitrary_nextest_lane_is_forcibly_bounded_once",
+  "xtask::verify::tests::cache_labels_must_match_pre_command_target_state",
+  "xtask::verify::tests::cargo_build_size_excludes_harness_receipts_closeout_and_markers",
+  "xtask::verify::tests::change_requires_registered_shape_filter_expectation_and_cache_state",
+  "xtask::verify::tests::closeout_lane_rejects_an_arbitrary_command",
+  "xtask::verify::tests::closeout_rejects_dirty_dependency_inputs",
+  "xtask::verify::tests::closeout_requires_full_shas_registered_lane_and_command",
+  "xtask::verify::tests::default_and_feature_lanes_accept_only_their_registered_inventories",
+  "xtask::verify::tests::dev_lanes_reject_release_and_cross_target_builds",
+  "xtask::verify::tests::install_lanes_are_local_smoke_inputs_not_release_artifact_exports",
+  "xtask::verify::tests::install_smoke_runs_only_container_identities_once_from_the_archive",
+  "xtask::verify::tests::only_full_hex_commit_ids_are_accepted",
+  "xtask::verify::tests::parses_linux_memory_bytes",
+  "xtask::verify::tests::red_accepts_only_nextest_test_failure_not_build_failure",
+  "xtask::verify::tests::registered_list_command_becomes_bounded_filtered_run",
+  "xtask::verify::tests::slow_shards_run_only_the_frozen_archive_without_build_selection",
+]
+
+[[contract]]
 id = "test-estate-guard-self-enforcement"
 lineage = "The test-estate guard's own adversarial fixtures enforce inventory, transition, CI, documentation, nondeterminism, and schema invariants."
 sources = [
@@ -602,6 +648,7 @@ tests = [
   "xtask::test_estate::tests::ci_rejects_cargo_targets_on_tmpfs_even_with_disk_capacity",
   "xtask::test_estate::tests::ci_topology_accepts_required_shapes_and_discipline",
   "xtask::test_estate::tests::ci_topology_rejects_removed_shape_cli_retry_and_missing_guard",
+  "xtask::test_estate::tests::compartmented_workflows_reject_cross_tier_work_and_manual_downgrades",
   "xtask::test_estate::tests::contract_paragraph_coverage_requires_binding_or_strict_unenforced_reason",
   "xtask::test_estate::tests::deleting_a_registry_identity_without_a_receipt_fails",
   "xtask::test_estate::tests::documentation_contract_accepts_exact_reviewed_mapping",

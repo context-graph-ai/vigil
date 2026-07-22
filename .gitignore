@@ -1,4 +1,5 @@
 /target
+/.vigil-tools-target
 /tests/fixtures/.cache
 /addons/vigil/vigil
 *.swp

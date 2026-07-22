@@ -1,128 +1,105 @@
-name: CI
+name: Change qualification
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
-  push:
-    branches: [main, dev]
-  schedule:
-    - cron: "17 3 * * *"
-  workflow_dispatch:
-    inputs:
-      full:
-        description: "Run slow tests and produce amd64/arm64 artifacts"
-        type: boolean
-        required: true
-        default: true
-      context_graph_ref:
-        description: "Exact Context Graph branch, tag, or commit to test"
-        type: string
-        required: true
-        default: "dev"
-      contextdb_ref:
-        description: "Exact ContextDB branch, tag, or commit to test"
-        type: string
-        required: true
-        default: "dev"
-      cache_epoch:
-        description: "Cache namespace: use a new value for a measured cold run and reuse it once for the paired warm run"
-        type: string
-        required: false
-        default: "rolling"
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vigil-change-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 1
   CARGO_PROFILE_TEST_DEBUG: 1
+  CARGO_BUILD_JOBS: 2
+  NEXTEST_TEST_THREADS: 2
 
 jobs:
   private-dependency-boundary:
     name: Private dependency boundary
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
-      - name: Reject untrusted fork execution before private source checkout
-        if: >-
-          github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name != github.repository
+      - name: Reject fork code before any credential is available
+        if: github.event.pull_request.head.repo.full_name != github.repository
         run: |
-          echo "Vigil currently depends on the private Context Graph source tree." >&2
-          echo "Fork code is never run with a private-source credential; a maintainer must test the exact commit from a trusted branch." >&2
+          echo "Vigil's dependency checkout is restricted to trusted branches." >&2
+          echo "Fork code is not run with CG_CI_TOKEN; a maintainer must qualify the exact commit from a trusted branch." >&2
           exit 1
-      - name: Confirm trusted repository context
-        if: >-
-          github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name == github.repository
-        run: echo "Trusted repository context may use the private dependency credential."
+
+      - name: Confirm trusted pull-request source
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: echo "Trusted pull-request code may resolve the private dependency boundary."
 
   source-revisions:
-    name: Resolve source revisions once
+    name: Resolve dependency SHAs once
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     needs: private-dependency-boundary
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository
     outputs:
       context_graph_sha: ${{ steps.revisions.outputs.context_graph_sha }}
       contextdb_sha: ${{ steps.revisions.outputs.contextdb_sha }}
     steps:
-      - name: Checkout context-graph revision
+      - name: Resolve Context Graph dev
         uses: actions/checkout@v4
         with:
           repository: context-graph-ai/context-graph
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.context_graph_ref || 'dev' }}
+          ref: dev
           path: context-graph
           token: ${{ secrets.CG_CI_TOKEN }}
           persist-credentials: false
 
-      - name: Checkout contextdb revision
+      - name: Resolve ContextDB dev
         uses: actions/checkout@v4
         with:
           repository: context-graph-ai/contextdb
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.contextdb_ref || 'dev' }}
+          ref: dev
           path: contextdb
           persist-credentials: false
 
-      - name: Record immutable revisions
+      - name: Record immutable dependency revisions
         id: revisions
         run: |
           context_graph_sha="$(git -C context-graph rev-parse HEAD)"
           contextdb_sha="$(git -C contextdb rev-parse HEAD)"
+          test "${#context_graph_sha}" -eq 40
+          test "${#contextdb_sha}" -eq 40
           echo "context_graph_sha=${context_graph_sha}" >> "$GITHUB_OUTPUT"
           echo "contextdb_sha=${contextdb_sha}" >> "$GITHUB_OUTPUT"
           jq -n \
             --arg vigil_sha "$GITHUB_SHA" \
-            --arg vigil_ref "$GITHUB_REF" \
             --arg context_graph_sha "$context_graph_sha" \
             --arg contextdb_sha "$contextdb_sha" \
-            --arg cache_epoch "${{ inputs.cache_epoch || 'rolling' }}" \
-            --arg event "$GITHUB_EVENT_NAME" \
-            '{vigil_sha:$vigil_sha,vigil_ref:$vigil_ref,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,cache_epoch:$cache_epoch,event:$event}' \
-            > source-revisions.json
+            '{tier:"change",vigil_sha:$vigil_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha}' \
+            > change-source-revisions.json
 
-      - name: Upload source revision receipt
+      - name: Upload immutable source receipt
         uses: actions/upload-artifact@v4
         with:
-          name: source-revisions
-          path: source-revisions.json
+          name: change-source-revisions
+          path: change-source-revisions.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 14
 
-  fast:
-    name: Fast PR lane
+  change:
+    name: Default change gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: source-revisions
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - name: Checkout vigil
+      - name: Checkout exact Vigil change
         uses: actions/checkout@v4
         with:
           path: vigil
           persist-credentials: false
 
-      - name: Checkout context-graph
+      - name: Checkout exact Context Graph dependency
         uses: actions/checkout@v4
         with:
           repository: context-graph-ai/context-graph
@@ -131,7 +108,7 @@ jobs:
           token: ${{ secrets.CG_CI_TOKEN }}
           persist-credentials: false
 
-      - name: Checkout contextdb
+      - name: Checkout exact ContextDB dependency
         uses: actions/checkout@v4
         with:
           repository: context-graph-ai/contextdb
@@ -142,513 +119,50 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Install MQTT test tools
+      - name: Install bounded runtime test tools
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
 
-      - name: Rust cache
+      - name: Restore the trusted change cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: vigil
-          key: ${{ inputs.cache_epoch || 'rolling' }}
+          key: change-v1
 
-      - name: Setup runtime process harness
+      - name: Set up the default runtime harness
         working-directory: vigil
         run: cargo xtask setup-runtime-harness
 
-      - name: Format
+      - name: Check formatting
         working-directory: vigil
         run: cargo fmt --all --check
 
-      - name: Clippy
+      - name: Lint default workspace targets
         working-directory: vigil
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: Enumerate default test identities
+      - name: Enumerate the exact default estate
         working-directory: vigil
-        run: cargo nextest list --workspace -T json > target/nextest-default.json
+        run: cargo nextest list --locked --workspace -T json > target/nextest-default.json
 
-      - name: Test-estate discipline
+      - name: Enforce the test estate and default inventory
         working-directory: vigil
         run: cargo xtask test-estate-check --nextest-json default=target/nextest-default.json
 
-      - name: Fast tests
+      - name: Run default tests
         working-directory: vigil
-        run: cargo nextest run --profile pr --workspace
+        run: cargo nextest run --locked --profile pr --workspace --test-threads 2
 
-      - name: Debug build
-        working-directory: vigil
-        run: cargo build --workspace
-
-  feature-lanes:
-    name: Feature lane ${{ matrix.features }}
+  change-gate:
+    name: Change qualification receipt
     runs-on: ubuntu-latest
-    needs: source-revisions
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - shape: decode
-            features: decode-gstreamer
-          - shape: detect
-            features: detect-burn-wgpu
-          - shape: combined
-            features: decode-gstreamer,detect-burn-wgpu
-          - shape: fabric
-            features: fabric
-          - shape: production
-            features: decode-gstreamer,detect-burn-wgpu,fabric
-    steps:
-      - name: Free hosted-runner build disk
-        run: |
-          df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h
-
-      - name: Checkout vigil
-        uses: actions/checkout@v4
-        with:
-          path: vigil
-          persist-credentials: false
-
-      - name: Checkout context-graph
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.source-revisions.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-
-      - name: Checkout contextdb
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.source-revisions.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Install MQTT test tools
-        run: |
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          packages=(ffmpeg mosquitto mosquitto-clients)
-          if [[ "${{ matrix.features }}" == *decode-gstreamer* ]]; then
-            packages+=(libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev)
-          fi
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y "${packages[@]}"
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vigil
-          key: ${{ inputs.cache_epoch || 'rolling' }}
-
-      - name: Setup runtime process harness
-        working-directory: vigil
-        run: cargo xtask setup-runtime-harness
-
-      - name: Verify post-cache feature-build disk
-        run: |
-          mkdir -p vigil/target
-          du -sh vigil/target || true
-          target_kb="$(du -sk vigil/target | awk '{print $1}')"
-          available_kb="$(df --output=avail vigil/target | tail -n 1)"
-          effective_capacity_kb=$((available_kb + target_kb))
-          scratch_floor_kb=16777216
-          capacity_floor_kb=31457280
-          if [ "${available_kb}" -lt "${scratch_floor_kb}" ] || \
-             [ "${effective_capacity_kb}" -lt "${capacity_floor_kb}" ]; then
-            echo "feature lane requires 16 GiB free scratch and 30 GiB free-plus-cache capacity; found ${available_kb} KiB free and ${target_kb} KiB cached" >&2
-            exit 1
-          fi
-          df -h vigil/target
-
-      - name: Feature-shape tests
-        working-directory: vigil
-        run: cargo nextest run --profile pr -p vigil --features ${{ matrix.features }}
-
-      - name: Enumerate and freeze feature-shape identities
-        working-directory: vigil
-        run: |
-          cargo nextest list -p vigil --features ${{ matrix.features }} -T json > target/nextest-${{ matrix.shape }}.json
-          cargo xtask test-estate-check --nextest-json ${{ matrix.shape }}=target/nextest-${{ matrix.shape }}.json
-
-  test-estate-gate:
-    name: PR test-estate gate
-    runs-on: ubuntu-latest
+    timeout-minutes: 2
     if: always()
-    needs: [private-dependency-boundary, fast, feature-lanes]
+    needs: [private-dependency-boundary, source-revisions, change]
     steps:
-      - name: Require all per-change test-estate lanes
+      - name: Require the trusted default gate
         run: |
-          test "${{ needs.fast.result }}" = "success"
-          test "${{ needs.feature-lanes.result }}" = "success"
           test "${{ needs.private-dependency-boundary.result }}" = "success"
-
-  full-tests:
-    name: Full slow lane shard ${{ matrix.shard }}
-    runs-on: ubuntu-latest
-    needs: [test-estate-gate, source-revisions]
-    if: >-
-      github.event_name == 'push' ||
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.full) ||
-      contains(github.event.pull_request.labels.*.name, 'ci-full')
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    steps:
-      - name: Free hosted-runner disk
-        run: |
-          df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Checkout vigil
-        uses: actions/checkout@v4
-        with:
-          path: vigil
-          persist-credentials: false
-
-      - name: Checkout context-graph
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.source-revisions.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-
-      - name: Checkout contextdb
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.source-revisions.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vigil
-          key: ${{ inputs.cache_epoch || 'rolling' }}
-
-      - name: Verify post-cache full-build disk
-        run: |
-          mkdir -p vigil/target
-          du -sh vigil/target || true
-          target_kb="$(du -sk vigil/target | awk '{print $1}')"
-          available_kb="$(df --output=avail vigil/target | tail -n 1)"
-          effective_capacity_kb=$((available_kb + target_kb))
-          scratch_floor_kb=16777216
-          capacity_floor_kb=31457280
-          if [ "${available_kb}" -lt "${scratch_floor_kb}" ] || \
-             [ "${effective_capacity_kb}" -lt "${capacity_floor_kb}" ]; then
-            echo "full lane requires 16 GiB free scratch and 30 GiB free-plus-cache capacity; found ${available_kb} KiB free and ${target_kb} KiB cached" >&2
-            exit 1
-          fi
-          df -h vigil/target
-
-      - name: Add musl targets
-        working-directory: vigil
-        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-
-      - name: Install system test tools
-        run: |
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
-
-      - name: Setup RTSP and musl harness
-        working-directory: vigil
-        run: cargo xtask setup-harness
-
-      - name: Pull Docker base images
-        run: docker pull busybox:1.37.0-musl
-
-      - name: Pre-build release binaries
-        working-directory: vigil
-        run: |
-          cargo build -p vigil --release --features fabric
-          cargo build -p vigil --release --target x86_64-unknown-linux-musl --features fabric
-          cargo build -p vigil --release --target aarch64-unknown-linux-musl --features fabric
-
-      - name: Enumerate and freeze slow-lane identities
-        working-directory: vigil
-        run: |
-          cargo nextest list --workspace --features first-light-acceptance,acceptance -T json > target/nextest-slow.json
-          cargo xtask test-estate-check --nextest-json slow=target/nextest-slow.json
-
-      - name: Full tests
-        working-directory: vigil
-        run: >
-          cargo nextest run --release --profile ci-full --workspace
-          --features first-light-acceptance,acceptance
-          --partition hash:${{ matrix.shard }}/4
-
-  static-musl:
-    name: Static musl builds
-    runs-on: ubuntu-latest
-    needs: [full-tests, source-revisions]
-    if: >-
-      github.event_name == 'push' ||
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.full) ||
-      contains(github.event.pull_request.labels.*.name, 'ci-full')
-    steps:
-      - name: Free hosted-runner disk
-        run: |
-          df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Checkout vigil
-        uses: actions/checkout@v4
-        with:
-          path: vigil
-          persist-credentials: false
-
-      - name: Checkout context-graph
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.source-revisions.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-
-      - name: Checkout contextdb
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.source-revisions.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vigil
-          key: ${{ inputs.cache_epoch || 'rolling' }}
-
-      - name: Verify post-cache static-build disk
-        run: |
-          mkdir -p vigil/target
-          du -sh vigil/target || true
-          target_kb="$(du -sk vigil/target | awk '{print $1}')"
-          available_kb="$(df --output=avail vigil/target | tail -n 1)"
-          effective_capacity_kb=$((available_kb + target_kb))
-          scratch_floor_kb=16777216
-          capacity_floor_kb=31457280
-          if [ "${available_kb}" -lt "${scratch_floor_kb}" ] || \
-             [ "${effective_capacity_kb}" -lt "${capacity_floor_kb}" ]; then
-            echo "static build requires 16 GiB free scratch and 30 GiB free-plus-cache capacity; found ${available_kb} KiB free and ${target_kb} KiB cached" >&2
-            exit 1
-          fi
-          df -h vigil/target
-
-      - name: Add musl targets
-        working-directory: vigil
-        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-
-      - name: Install system test tools
-        run: |
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
-
-      - name: Setup RTSP and musl harness
-        working-directory: vigil
-        run: cargo xtask setup-harness
-
-      - name: Build x86_64 static binary
-        working-directory: vigil
-        run: cargo build --release --target x86_64-unknown-linux-musl --features fabric
-
-      - name: Build aarch64 static binary
-        working-directory: vigil
-        run: cargo build --release --target aarch64-unknown-linux-musl --features fabric
-
-      - name: Upload static binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: vigil-static-musl
-          path: |
-            vigil/target/x86_64-unknown-linux-musl/release/vigil
-            vigil/target/aarch64-unknown-linux-musl/release/vigil
-
-  docker:
-    name: Multi-arch Docker build
-    runs-on: ubuntu-latest
-    needs: static-musl
-    if: >-
-      github.event_name == 'push' ||
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && inputs.full) ||
-      contains(github.event.pull_request.labels.*.name, 'ci-full')
-    steps:
-      - name: Checkout vigil
-        uses: actions/checkout@v4
-        with:
-          path: vigil
-          persist-credentials: false
-
-      - name: Download static binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: vigil-static-musl
-          path: vigil/dist/downloaded
-
-      - name: Stage the exact static-image inputs
-        working-directory: vigil
-        run: |
-          mkdir -p dist/docker/amd64 dist/docker/arm64
-          x86="$(find dist/downloaded -path '*/x86_64-unknown-linux-musl/release/vigil' -type f -print -quit)"
-          arm="$(find dist/downloaded -path '*/aarch64-unknown-linux-musl/release/vigil' -type f -print -quit)"
-          test -n "${x86}"
-          test -n "${arm}"
-          install -m 0755 "${x86}" dist/docker/amd64/vigil
-          install -m 0755 "${arm}" dist/docker/arm64/vigil
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build multi-arch image
-        working-directory: vigil
-        run: docker buildx build --platform linux/amd64,linux/arm64 .
-
-  hardware-images:
-    name: Hardware image build (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    needs: [test-estate-gate, source-revisions]
-    if: >-
-      (github.event_name == 'push' ||
-       github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && inputs.full) ||
-       contains(github.event.pull_request.labels.*.name, 'ci-full')) &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-            platform: amd64
-            binary_target: vigil-hw-binary-amd64
-            generic_target: vigil-generic-docker-hw-amd64
-            addon_target: vigil-addon-hw-amd64
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            platform: arm64
-            binary_target: vigil-hw-binary-arm64
-            generic_target: vigil-generic-docker-hw-arm64
-            addon_target: vigil-addon-hw-aarch64
-    steps:
-      - name: Free hosted-runner build disk
-        run: |
-          df -h
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          docker system prune -af || true
-          df -h
-
-      - name: Checkout vigil
-        uses: actions/checkout@v4
-        with:
-          path: vigil
-          persist-credentials: false
-
-      - name: Checkout context-graph
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.source-revisions.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-
-      - name: Checkout contextdb
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.source-revisions.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
-
-      - name: Verify hardware-build disk
-        run: |
-          available_kb="$(df --output=avail . | tail -n 1)"
-          if [ "${available_kb}" -lt 31457280 ]; then
-            echo "hardware image build requires at least 30 GiB free; found ${available_kb} KiB" >&2
-            exit 1
-          fi
-          df -h .
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Export the exact production binary and both install images
-        run: |
-          set -o pipefail
-          output_dir="vigil/dist/production/${{ matrix.arch }}"
-          mkdir -p "${output_dir}/binary"
-          build_target() {
-            local target="$1"
-            local output="$2"
-            local cache_to=()
-            if [ "$#" -ge 3 ]; then
-              cache_to=(--cache-to "$3")
-            fi
-            tar \
-              --exclude='*/target' \
-              --exclude='*/target/**' \
-              --exclude='*/.git' \
-              --exclude='*/.git/**' \
-              --exclude='*/tests/fixtures/.cache' \
-              --exclude='*/tests/fixtures/.cache/**' \
-              -cf - vigil context-graph contextdb |
-              docker buildx build "${cache_to[@]}" \
-                --platform linux/${{ matrix.platform }} \
-                --target "${target}" \
-                --file vigil/Dockerfile.hardware \
-                --cache-from type=gha,scope=vigil-hw-${{ matrix.arch }}-${{ inputs.cache_epoch || 'rolling' }} \
-                --output "${output}" \
-                -
-          }
-          build_target \
-            "${{ matrix.binary_target }}" \
-            "type=local,dest=${output_dir}/binary"
-          build_target \
-            "${{ matrix.generic_target }}" \
-            "type=oci,dest=${output_dir}/vigil-generic-docker-hw-${{ matrix.arch }}.oci.tar"
-          build_target \
-            "${{ matrix.addon_target }}" \
-            "type=oci,dest=${output_dir}/vigil-addon-hw-${{ matrix.arch }}.oci.tar" \
-            "type=gha,mode=max,scope=vigil-hw-${{ matrix.arch }}-${{ inputs.cache_epoch || 'rolling' }}"
-          test -x "${output_dir}/binary/vigil"
-          test -s "${output_dir}/vigil-generic-docker-hw-${{ matrix.arch }}.oci.tar"
-          test -s "${output_dir}/vigil-addon-hw-${{ matrix.arch }}.oci.tar"
-
-      - name: Upload the feature-complete production artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: vigil-production-${{ matrix.arch }}
-          if-no-files-found: error
-          path: |
-            vigil/dist/production/${{ matrix.arch }}/binary/vigil
-            vigil/dist/production/${{ matrix.arch }}/vigil-generic-docker-hw-${{ matrix.arch }}.oci.tar
-            vigil/dist/production/${{ matrix.arch }}/vigil-addon-hw-${{ matrix.arch }}.oci.tar
+          test "${{ needs.source-revisions.result }}" = "success"
+          test "${{ needs.change.result }}" = "success"

@@ -128,6 +128,14 @@ free_port_helpers = 0
 elapsed_calls = 1
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
+[[file]]
+path = "xtask/src/verify.rs"
+sleeps = 1
+raw_clocks = 2
+free_port_helpers = 0
+elapsed_calls = 2
+reason = "The verifier measures command wall time, per-step time, and process-tree memory; these clocks and the 100 ms sampler interval produce receipts and never decide whether product behavior passes."
+
 [[site]]
 path = "crates/vigil/tests/boot_readiness.rs"
 scope = "boot_prints_phase_markers"
@@ -1599,3 +1607,37 @@ kind = "elapsed_call"
 fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: start . elapsed ()
+[[site]]
+path = "xtask/src/verify.rs"
+scope = "run"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "A monotonic timestamp measures the complete verified command for its receipt; pass or fail comes only from the child command and verifier contract."
+
+[[site]]
+path = "xtask/src/verify.rs"
+scope = "run"
+kind = "elapsed_call"
+fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
+reason = "Elapsed wall time is reported as the measured development budget and is never an elapsed-time pass threshold."
+
+[[site]]
+path = "xtask/src/verify.rs"
+scope = "run_step"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "A monotonic timestamp attributes cost to each command step in the receipt; it does not synchronize product behavior."
+
+[[site]]
+path = "xtask/src/verify.rs"
+scope = "run_step"
+kind = "elapsed_call"
+fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
+reason = "Per-step elapsed time exposes the component that consumed the budget and is not a test oracle."
+
+[[site]]
+path = "xtask/src/verify.rs"
+scope = "sample_process_tree"
+kind = "sleep"
+fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
+reason = "The telemetry thread samples process-tree memory every 100 ms until the child exits; this interval neither advances nor observes product state."

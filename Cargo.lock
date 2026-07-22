@@ -1330,6 +1330,7 @@ dependencies = [
 name = "contextdb-core"
 version = "1.0.0"
 dependencies = [
+ "rand 0.9.4",
  "roaring",
  "serde",
  "serde_json",

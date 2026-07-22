@@ -205,7 +205,7 @@ jobs:
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
       - name: Set up runtime fixtures without restoring a Rust cache
         working-directory: vigil
-        run: cargo xtask setup-runtime-harness
+        run: ./scripts/verify workflow --step runtime-harness
       - name: Verify clean default source behavior
         working-directory: vigil
         run: |
@@ -216,7 +216,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state cold \
             --receipt target/verify-receipts/release-source.json \
-            -- cargo nextest run --locked --profile pr --workspace --test-threads 2
+            --step tests
       - name: Upload clean qualification receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -280,7 +280,7 @@ jobs:
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
       - name: Set up exact musl toolchains
         working-directory: vigil
-        run: cargo xtask setup-harness
+        run: ./scripts/verify workflow --step setup-harness
       - name: Add exact Rust target libraries
         working-directory: vigil
         run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
@@ -294,7 +294,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state cold \
             --receipt target/verify-receipts/release-static-amd64.json \
-            -- cargo build --locked --release --target x86_64-unknown-linux-musl --features fabric
+            --step amd64
       - name: Build and receipt arm64 static binary
         working-directory: vigil
         run: |
@@ -305,7 +305,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/release-static-arm64.json \
-            -- cargo build --locked --release --target aarch64-unknown-linux-musl --features fabric
+            --step arm64
       - name: Upload exact static binaries and receipts
         if: always()
         uses: actions/upload-artifact@v4

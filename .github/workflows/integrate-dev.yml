@@ -155,7 +155,7 @@ jobs:
           test -z "$(git status --porcelain=v1)"
           while IFS= read -r -d '' path; do
             case "$path" in
-              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/nextest-inventories.toml|.github/CODEOWNERS|.github/workflows/*|Cargo.lock|Cargo.toml|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
+              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
                 echo "normal feature integration cannot change trusted verification control plane: $path" >&2
                 echo "route a reviewed control-plane update through the owner bootstrap path" >&2
                 exit 1

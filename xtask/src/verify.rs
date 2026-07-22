@@ -3,11 +3,14 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use serde::Serialize;
 
@@ -40,10 +43,22 @@ pub(crate) fn run(args: &[OsString]) -> Result<(), String> {
         println!("{}", usage());
         return Ok(());
     }
-    let options = Options::parse(args)?;
     let root = super::repo_root()?;
     let started = Instant::now();
     let (lock, queue_wait, launcher) = ResourceLock::acquire(&root)?;
+
+    if args.first().and_then(|arg| arg.to_str()) == Some("workflow") {
+        let result = run_workflow_entrypoint(&root, &args[1..]);
+        drop(lock);
+        return result;
+    }
+    if args.iter().any(|arg| arg == "--rehearse") {
+        let result = run_closeout_rehearsal(&root, args);
+        drop(lock);
+        return result;
+    }
+
+    let options = Options::parse(args)?;
 
     let identities = RepoIdentities::read(&root)?;
     options.validate_identities(&identities)?;
@@ -52,7 +67,7 @@ pub(crate) fn run(args: &[OsString]) -> Result<(), String> {
     validate_cache_state(&options.cache_state, resources_before.cargo_build_bytes)?;
     let observed_cache_state = observed_cache_state(resources_before.cargo_build_bytes);
     let environment = EnvironmentReceipt::read();
-    let step = run_step(&root, command)?;
+    let step = run_step(&root, command, options.output_path(&root).as_deref())?;
     let command_verdict = options.verdict(&step);
     let identities_after = RepoIdentities::read(&root)?;
     let source_verdict = options.validate_unchanged(&identities, &identities_after);
@@ -183,6 +198,8 @@ struct Options {
     context_graph_sha: Option<String>,
     contextdb_sha: Option<String>,
     receipt: Option<PathBuf>,
+    step: Option<String>,
+    shard: Option<String>,
     lane_command: Vec<String>,
 }
 
@@ -205,6 +222,8 @@ impl Options {
             context_graph_sha: None,
             contextdb_sha: None,
             receipt: None,
+            step: None,
+            shard: None,
             lane_command: Vec::new(),
         };
 
@@ -250,6 +269,8 @@ impl Options {
                         return Err("--receipt was supplied more than once".to_string());
                     }
                 }
+                "--step" => set_once(&mut options.step, value, argument)?,
+                "--shard" => set_once(&mut options.shard, value, argument)?,
                 _ => return Err(format!("unknown verify option `{argument}`\n{}", usage())),
             }
         }
@@ -275,6 +296,8 @@ impl Options {
                     || self.vigil_sha.is_some()
                     || self.context_graph_sha.is_some()
                     || self.contextdb_sha.is_some()
+                    || self.step.is_some()
+                    || self.shard.is_some()
                     || !self.lane_command.is_empty()
                 {
                     return Err(
@@ -284,7 +307,7 @@ impl Options {
                 }
             }
             Tier::DevCloseout | Tier::Release => {
-                if self.shape.is_some() || self.filter.is_some() || self.expect.is_some() {
+                if self.filter.is_some() || self.expect.is_some() {
                     return Err(
                         "closeout and release tiers accept --lane, not change-test options"
                             .to_string(),
@@ -311,12 +334,27 @@ impl Options {
                     let sha = require_nonempty(sha, name)?;
                     validate_sha(sha).map_err(|error| format!("{name}: {error}"))?;
                 }
-                if self.lane_command.is_empty() {
+                if self.lane_command.is_empty() && self.step.is_none() {
                     return Err(
-                        "a closeout/release lane requires `-- COMMAND [ARG]...`".to_string()
+                        "a closeout/release lane requires --step NAME or `-- COMMAND [ARG]...`"
+                            .to_string(),
                     );
                 }
-                validate_lane_command(self.tier, lane, &self.lane_command)?;
+                if !self.lane_command.is_empty() && self.step.is_some() {
+                    return Err(
+                        "--step and an explicit lane command are mutually exclusive".to_string()
+                    );
+                }
+                if self.step.is_some() {
+                    validate_named_lane_step(self.tier, lane, self)?;
+                } else {
+                    if self.shape.is_some() || self.shard.is_some() {
+                        return Err(
+                            "--shape and --shard are only accepted with a named --step".to_string()
+                        );
+                    }
+                    validate_lane_command(self.tier, lane, &self.lane_command)?;
+                }
             }
         }
         Ok(())
@@ -390,7 +428,14 @@ impl Options {
                 self.shape.as_deref().expect("validated shape"),
                 self.filter.as_deref().expect("validated filter"),
             ),
-            Tier::DevCloseout | Tier::Release => Ok(bound_nextest(self.lane_command.clone())),
+            Tier::DevCloseout | Tier::Release => {
+                let command = if self.step.is_some() {
+                    named_lane_command(root, self)?
+                } else {
+                    self.lane_command.clone()
+                };
+                Ok(ensure_locked(bound_nextest(command)))
+            }
         }
     }
 
@@ -398,6 +443,26 @@ impl Options {
         self.lane
             .as_deref()
             .map(|lane| lane_command_contract(self.tier, lane).expect("validated lane"))
+    }
+
+    fn output_path(&self, root: &Path) -> Option<PathBuf> {
+        match (
+            self.tier,
+            self.lane.as_deref(),
+            self.step.as_deref(),
+            self.shape.as_deref(),
+        ) {
+            (Tier::DevCloseout, Some("default"), Some("inventory"), _) => {
+                Some(root.join("target/nextest-default.json"))
+            }
+            (Tier::DevCloseout, Some("feature"), Some("inventory"), Some(shape)) => {
+                Some(root.join(format!("target/nextest-{shape}.json")))
+            }
+            (Tier::DevCloseout, Some("slow-preflight"), Some("inventory"), _) => {
+                Some(root.join("target/nextest-slow.json"))
+            }
+            _ => None,
+        }
     }
 
     fn verdict(&self, step: &StepReceipt) -> Result<(), String> {
@@ -445,7 +510,566 @@ impl Options {
 }
 
 fn usage() -> String {
-    "usage:\n  scripts/verify change --shape NAME --filter EXPR --expect red|green --cache-state STATE [--receipt PATH]\n  scripts/verify dev-closeout --lane NAME --vigil-sha SHA --context-graph-sha SHA --contextdb-sha SHA --cache-state STATE [--receipt PATH] -- COMMAND [ARG]...\n  scripts/verify release --lane NAME --vigil-sha SHA --context-graph-sha SHA --contextdb-sha SHA --cache-state STATE [--receipt PATH] -- COMMAND [ARG]...".to_string()
+    "usage:\n  scripts/verify change --shape NAME --filter EXPR --expect red|green --cache-state STATE [--receipt PATH]\n  scripts/verify dev-closeout --rehearse\n  scripts/verify dev-closeout --lane NAME --step NAME --vigil-sha SHA --context-graph-sha SHA --contextdb-sha SHA --cache-state STATE [--shape NAME] [--shard N] [--receipt PATH]\n  scripts/verify release --lane NAME --step NAME --vigil-sha SHA --context-graph-sha SHA --contextdb-sha SHA --cache-state STATE [--receipt PATH]\n  scripts/verify workflow --step NAME [OPTION VALUE]...".to_string()
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
+fn run_workflow_entrypoint(root: &Path, args: &[OsString]) -> Result<(), String> {
+    if args.len() < 2 || args[0] != "--step" {
+        return Err("usage: scripts/verify workflow --step NAME [OPTION VALUE]...".to_string());
+    }
+    let step = args[1]
+        .to_str()
+        .ok_or_else(|| "workflow step must be valid UTF-8".to_string())?;
+    let extra = &args[2..];
+    match step {
+        "runtime-harness" if extra.is_empty() => super::setup_runtime_harness(),
+        "setup-harness" if extra.is_empty() => super::setup_harness(),
+        "closeout-impact" => super::closeout_impact::run(extra),
+        "fmt" if extra.is_empty() => run_success(
+            root,
+            strings(&[
+                "cargo",
+                "fmt",
+                "-p",
+                "vigil",
+                "-p",
+                "xtask",
+                "-p",
+                "vigil-acceptance",
+                "--check",
+            ]),
+            None,
+        ),
+        "clippy" if extra.is_empty() => run_success(
+            root,
+            strings(&[
+                "cargo",
+                "clippy",
+                "--locked",
+                "--workspace",
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ]),
+            None,
+        ),
+        "default-inventory" if extra.is_empty() => run_success(
+            root,
+            registered_list_command(root, "default")?,
+            Some(&root.join("target/nextest-default.json")),
+        ),
+        "default-estate" if extra.is_empty() => super::test_estate::check(&[
+            OsString::from("--nextest-json"),
+            OsString::from("default=target/nextest-default.json"),
+        ]),
+        "default-tests" if extra.is_empty() => {
+            run_success(root, registered_run_command(root, "default")?, None)
+        }
+        _ => Err(format!("unknown or malformed workflow step `{step}`")),
+    }
+}
+
+fn run_success(root: &Path, argv: Vec<String>, stdout_path: Option<&Path>) -> Result<(), String> {
+    let step = run_step(root, ensure_locked(argv), stdout_path)?;
+    if step.exit_code == Some(0) {
+        Ok(())
+    } else {
+        Err(format!(
+            "workflow entrypoint `{}` failed with {}",
+            step.argv.join(" "),
+            display_code(step.exit_code)
+        ))
+    }
+}
+
+fn run_closeout_rehearsal(root: &Path, args: &[OsString]) -> Result<(), String> {
+    if args != [OsString::from("dev-closeout"), OsString::from("--rehearse")] {
+        return Err("usage: scripts/verify dev-closeout --rehearse".to_string());
+    }
+
+    super::setup_runtime_harness()?;
+    run_success(
+        root,
+        strings(&[
+            "cargo",
+            "fmt",
+            "-p",
+            "vigil",
+            "-p",
+            "xtask",
+            "-p",
+            "vigil-acceptance",
+            "--check",
+        ]),
+        None,
+    )?;
+    run_success(
+        root,
+        registered_list_command(root, "default")?,
+        Some(&root.join("target/nextest-default.json")),
+    )?;
+    super::test_estate::check(&[
+        OsString::from("--nextest-json"),
+        OsString::from("default=target/nextest-default.json"),
+    ])?;
+    run_success(root, registered_run_command(root, "default")?, None)?;
+
+    let closeout = root.join("target/closeout");
+    fs::create_dir_all(&closeout)
+        .map_err(|error| format!("create closeout directory {}: {error}", closeout.display()))?;
+    let archive = closeout.join("nextest-slow.tar.zst");
+    run_success(
+        root,
+        strings(&[
+            "cargo",
+            "nextest",
+            "archive",
+            "--locked",
+            "--release",
+            "--workspace",
+            "--features",
+            "first-light-acceptance,acceptance",
+            "--archive-file",
+            "target/closeout/nextest-slow.tar.zst",
+        ]),
+        None,
+    )?;
+    run_success(
+        root,
+        vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "list".to_string(),
+            "--archive-file".to_string(),
+            archive.display().to_string(),
+            "--workspace-remap".to_string(),
+            root.display().to_string(),
+            "-T".to_string(),
+            "json".to_string(),
+        ],
+        Some(&root.join("target/nextest-slow.json")),
+    )?;
+    super::test_estate::check(&[
+        OsString::from("--nextest-json"),
+        OsString::from("slow=target/nextest-slow.json"),
+    ])?;
+
+    let restored = rehearse_archive_handoff(root, &archive)?;
+    let restored_archive = restored.join("nextest-slow.tar.zst");
+    let restored_binary = restored.join("vigil-acceptance-bin");
+    let mut slow = Command::new("cargo");
+    slow.current_dir(root)
+        .env("CARGO_BUILD_JOBS", DEFAULT_BUILD_JOBS)
+        .env("VIGIL_ACCEPTANCE_BIN", &restored_binary)
+        .args([
+            "nextest",
+            "run",
+            "--archive-file",
+            restored_archive
+                .to_str()
+                .ok_or_else(|| "restored archive path is not UTF-8".to_string())?,
+            "--workspace-remap",
+            root.to_str()
+                .ok_or_else(|| "workspace path is not UTF-8".to_string())?,
+            "--profile",
+            "ci-full",
+            "-E",
+            "not test(vigil_container_)",
+        ]);
+    let status = slow
+        .status()
+        .map_err(|error| format!("run one-pass slow archive rehearsal: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "one-pass slow archive rehearsal failed with {status}"
+        ));
+    }
+    Ok(())
+}
+
+fn rehearse_archive_handoff(root: &Path, archive: &Path) -> Result<PathBuf, String> {
+    let boundary = root.join("target/closeout/rehearsal-handoff");
+    if boundary.exists() {
+        fs::remove_dir_all(&boundary)
+            .map_err(|error| format!("clear prior rehearsal handoff: {error}"))?;
+    }
+    let staged = boundary.join("staged");
+    let restored = boundary.join("restored");
+    fs::create_dir_all(&staged).map_err(|error| format!("create handoff staging: {error}"))?;
+    fs::create_dir_all(&restored).map_err(|error| format!("create handoff restore: {error}"))?;
+    fs::copy(archive, staged.join("nextest-slow.tar.zst"))
+        .map_err(|error| format!("stage slow archive: {error}"))?;
+    let source_binary = root.join("target/release/vigil");
+    let staged_binary = staged.join("vigil-acceptance-bin");
+    fs::copy(&source_binary, &staged_binary).map_err(|error| {
+        format!(
+            "stage archive-built binary {}: {error}",
+            source_binary.display()
+        )
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&staged_binary, fs::Permissions::from_mode(0o644))
+        .map_err(|error| format!("strip staged binary mode: {error}"))?;
+
+    let transfer = boundary.join("artifact.tar");
+    command_success(
+        Command::new("tar")
+            .arg("-cf")
+            .arg(&transfer)
+            .arg("-C")
+            .arg(&staged)
+            .arg("."),
+        "create mode-stripped artifact boundary",
+    )?;
+    command_success(
+        Command::new("tar")
+            .arg("-xf")
+            .arg(&transfer)
+            .arg("-C")
+            .arg(&restored)
+            .arg("--no-same-permissions"),
+        "restore mode-stripped artifact boundary",
+    )?;
+
+    let restored_binary = restored.join("vigil-acceptance-bin");
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(&restored_binary)
+            .map_err(|error| format!("inspect restored binary mode: {error}"))?
+            .permissions()
+            .mode();
+        if mode & 0o111 != 0 {
+            return Err(format!(
+                "artifact rehearsal did not strip the executable mode: observed {mode:o}"
+            ));
+        }
+        fs::set_permissions(&restored_binary, fs::Permissions::from_mode(0o755))
+            .map_err(|error| format!("restore executable mode: {error}"))?;
+    }
+    let output = Command::new(&restored_binary)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("spawn restored archive-built binary: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "restored archive-built binary failed to spawn: {}",
+            output.status
+        ));
+    }
+    Ok(restored)
+}
+
+fn command_success(command: &mut Command, label: &str) -> Result<(), String> {
+    let status = command
+        .status()
+        .map_err(|error| format!("{label}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{label} failed with {status}"))
+    }
+}
+
+fn validate_named_lane_step(tier: Tier, lane: &str, options: &Options) -> Result<(), String> {
+    let step = options.step.as_deref().expect("named step");
+    let accepted = match (tier, lane, step) {
+        (Tier::DevCloseout, "discipline", "fmt" | "clippy" | "estate-default") => {
+            options.shape.is_none() && options.shard.is_none()
+        }
+        (Tier::DevCloseout, "discipline", "estate-feature") => {
+            options.shape.as_deref().is_some_and(is_feature_shape) && options.shard.is_none()
+        }
+        (Tier::DevCloseout, "default", "inventory" | "tests") => {
+            options.shape.is_none() && options.shard.is_none()
+        }
+        (Tier::DevCloseout, "feature", "inventory" | "tests") => {
+            options.shape.as_deref().is_some_and(is_feature_shape) && options.shard.is_none()
+        }
+        (
+            Tier::DevCloseout,
+            "slow-preflight",
+            "archive" | "inventory" | "estate" | "setup-harness",
+        ) => options.shape.is_none() && options.shard.is_none(),
+        (Tier::DevCloseout, "slow-shard", "tests") => {
+            options.shape.is_none()
+                && options
+                    .shard
+                    .as_deref()
+                    .is_some_and(|shard| matches!(shard.parse::<u8>(), Ok(1..=4)))
+        }
+        (Tier::DevCloseout, "install-binary", "build")
+        | (Tier::DevCloseout, "install-smoke", "tests")
+        | (Tier::DevCloseout, "install-image", "build" | "inspect" | "save" | "load")
+        | (Tier::Release, "source", "tests")
+        | (Tier::Release, "static", "amd64" | "arm64") => {
+            options.shape.is_none() && options.shard.is_none()
+        }
+        _ => false,
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err(format!(
+            "named step `{step}` with shape {:?} and shard {:?} is not registered for the `{lane}` lane",
+            options.shape, options.shard
+        ))
+    }
+}
+
+fn is_feature_shape(shape: &str) -> bool {
+    matches!(
+        shape,
+        "decode" | "detect" | "combined" | "fabric" | "production"
+    )
+}
+
+fn named_lane_command(root: &Path, options: &Options) -> Result<Vec<String>, String> {
+    let lane = options.lane.as_deref().expect("validated lane");
+    let step = options.step.as_deref().expect("validated step");
+    let command = match (options.tier, lane, step) {
+        (Tier::DevCloseout, "discipline", "fmt") => strings(&[
+            "cargo",
+            "fmt",
+            "-p",
+            "vigil",
+            "-p",
+            "xtask",
+            "-p",
+            "vigil-acceptance",
+            "--check",
+        ]),
+        (Tier::DevCloseout, "discipline", "clippy") => strings(&[
+            "cargo",
+            "clippy",
+            "--locked",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        (Tier::DevCloseout, "discipline", "estate-default") => strings(&[
+            "cargo",
+            "xtask",
+            "test-estate-check",
+            "--nextest-json",
+            "default=target/nextest-default.json",
+        ]),
+        (Tier::DevCloseout, "discipline", "estate-feature") => {
+            let shape = options.shape.as_deref().expect("validated feature shape");
+            vec![
+                "cargo".to_string(),
+                "xtask".to_string(),
+                "test-estate-check".to_string(),
+                "--nextest-json".to_string(),
+                format!("{shape}=target/nextest-{shape}.json"),
+            ]
+        }
+        (Tier::DevCloseout, "slow-preflight", "estate") => strings(&[
+            "cargo",
+            "xtask",
+            "test-estate-check",
+            "--nextest-json",
+            "slow=target/nextest-slow.json",
+        ]),
+        (Tier::DevCloseout, "default", "inventory") => registered_list_command(root, "default")?,
+        (Tier::DevCloseout, "default", "tests") => registered_run_command(root, "default")?,
+        (Tier::DevCloseout, "feature", "inventory") => {
+            registered_list_command(root, options.shape.as_deref().expect("validated shape"))?
+        }
+        (Tier::DevCloseout, "feature", "tests") => {
+            registered_run_command(root, options.shape.as_deref().expect("validated shape"))?
+        }
+        (Tier::DevCloseout, "slow-preflight", "archive") => strings(&[
+            "cargo",
+            "nextest",
+            "archive",
+            "--locked",
+            "--release",
+            "--workspace",
+            "--features",
+            "first-light-acceptance,acceptance",
+            "--archive-file",
+            "target/closeout/nextest-slow.tar.zst",
+        ]),
+        (Tier::DevCloseout, "slow-preflight", "inventory") => vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "list".to_string(),
+            "--archive-file".to_string(),
+            "target/closeout/nextest-slow.tar.zst".to_string(),
+            "--workspace-remap".to_string(),
+            root.display().to_string(),
+            "-T".to_string(),
+            "json".to_string(),
+        ],
+        (Tier::DevCloseout, "slow-preflight", "setup-harness") => {
+            strings(&["cargo", "xtask", "setup-harness"])
+        }
+        (Tier::DevCloseout, "slow-shard", "tests") => vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+            "--archive-file".to_string(),
+            "target/closeout/nextest-slow.tar.zst".to_string(),
+            "--workspace-remap".to_string(),
+            root.display().to_string(),
+            "--profile".to_string(),
+            "ci-full".to_string(),
+            "--partition".to_string(),
+            format!(
+                "hash:{}/4",
+                options.shard.as_deref().expect("validated shard")
+            ),
+            "-E".to_string(),
+            "not test(vigil_container_)".to_string(),
+        ],
+        (Tier::DevCloseout, "install-binary", "build") => strings(&[
+            "cargo",
+            "build",
+            "--locked",
+            "-p",
+            "vigil",
+            "--release",
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "--features",
+            "fabric",
+        ]),
+        (Tier::DevCloseout, "install-image", image_step) => {
+            let sha = options.vigil_sha.as_deref().expect("validated sha");
+            let tag = format!("vigil-closeout:{sha}");
+            match image_step {
+                "build" => vec![
+                    "docker".to_string(),
+                    "build".to_string(),
+                    "--tag".to_string(),
+                    tag,
+                    "target/closeout/docker-context".to_string(),
+                ],
+                "inspect" => vec![
+                    "docker".to_string(),
+                    "image".to_string(),
+                    "inspect".to_string(),
+                    tag,
+                ],
+                "save" => vec![
+                    "docker".to_string(),
+                    "save".to_string(),
+                    "--output".to_string(),
+                    "target/closeout/vigil-acceptance-image.tar".to_string(),
+                    tag,
+                ],
+                "load" => strings(&[
+                    "docker",
+                    "load",
+                    "--input",
+                    "target/closeout/vigil-acceptance-image.tar",
+                ]),
+                _ => unreachable!(),
+            }
+        }
+        (Tier::DevCloseout, "install-smoke", "tests") => vec![
+            "cargo".to_string(),
+            "nextest".to_string(),
+            "run".to_string(),
+            "--archive-file".to_string(),
+            "target/closeout/nextest-slow.tar.zst".to_string(),
+            "--workspace-remap".to_string(),
+            root.display().to_string(),
+            "--profile".to_string(),
+            "ci-full".to_string(),
+            "-E".to_string(),
+            "test(vigil_container_)".to_string(),
+        ],
+        (Tier::Release, "source", "tests") => registered_run_command(root, "default")?,
+        (Tier::Release, "static", architecture) => strings(&[
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--target",
+            if architecture == "amd64" {
+                "x86_64-unknown-linux-musl"
+            } else {
+                "aarch64-unknown-linux-musl"
+            },
+            "--features",
+            "fabric",
+        ]),
+        _ => unreachable!("validated named lane step"),
+    };
+    validate_lane_command(options.tier, lane, &command)?;
+    Ok(command)
+}
+
+fn registered_list_command(root: &Path, shape: &str) -> Result<Vec<String>, String> {
+    let registry = fs::read_to_string(root.join(".config/nextest-inventories.toml"))
+        .map_err(|error| format!("read nextest shape registry: {error}"))?;
+    let registry: toml::Value = toml::from_str(&registry)
+        .map_err(|error| format!("parse nextest shape registry: {error}"))?;
+    let command = registry
+        .get("shape")
+        .and_then(toml::Value::as_array)
+        .and_then(|shapes| {
+            shapes.iter().find_map(|entry| {
+                (entry.get("name").and_then(toml::Value::as_str) == Some(shape))
+                    .then(|| entry.get("command").and_then(toml::Value::as_str))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| format!("nextest shape `{shape}` is not registered"))?;
+    let argv = command
+        .split_ascii_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !matches_prefix(&argv, &["cargo", "nextest", "list"]) {
+        return Err(format!(
+            "registered shape `{shape}` is not a nextest list command"
+        ));
+    }
+    Ok(ensure_locked(argv))
+}
+
+fn registered_run_command(root: &Path, shape: &str) -> Result<Vec<String>, String> {
+    let mut argv = registered_list_command(root, shape)?;
+    argv[2] = "run".to_string();
+    if let Some(index) = argv.iter().position(|argument| argument == "-T") {
+        argv.drain(index..=(index + 1));
+    }
+    argv.extend([
+        "--profile".to_string(),
+        "pr".to_string(),
+        "--test-threads".to_string(),
+        DEFAULT_TEST_THREADS.to_string(),
+    ]);
+    Ok(argv)
+}
+
+fn ensure_locked(mut argv: Vec<String>) -> Vec<String> {
+    let needs_lock = matches!(
+        argv.get(0..2)
+            .map(|items| [items[0].as_str(), items[1].as_str()]),
+        Some(["cargo", "build" | "check" | "test" | "clippy"])
+    ) || (matches_prefix(&argv, &["cargo", "nextest", "run"])
+        && !has_option(&argv, "--archive-file"))
+        || matches_prefix(&argv, &["cargo", "nextest", "list"])
+            && !has_option(&argv, "--archive-file")
+        || matches_prefix(&argv, &["cargo", "nextest", "archive"]);
+    if needs_lock && !has_option(&argv, "--locked") {
+        let insert_at = if argv.get(1).map(String::as_str) == Some("nextest") {
+            3
+        } else {
+            2
+        };
+        argv.insert(insert_at, "--locked".to_string());
+    }
+    argv
 }
 
 fn set_once(slot: &mut Option<String>, value: &str, option: &str) -> Result<(), String> {
@@ -553,7 +1177,7 @@ fn nextest_run_from_list(command: &str, filter: &str) -> Result<Vec<String>, Str
         "--test-threads".to_string(),
         DEFAULT_TEST_THREADS.to_string(),
     ]);
-    Ok(argv)
+    Ok(ensure_locked(argv))
 }
 
 fn bound_nextest(argv: Vec<String>) -> Vec<String> {
@@ -809,7 +1433,11 @@ fn option_values<'a>(argv: &'a [String], long: &str, short: &str) -> Vec<&'a str
     values
 }
 
-fn run_step(root: &Path, argv: Vec<String>) -> Result<StepReceipt, String> {
+fn run_step(
+    root: &Path,
+    argv: Vec<String>,
+    stdout_path: Option<&Path>,
+) -> Result<StepReceipt, String> {
     let program = argv
         .first()
         .ok_or_else(|| "verification step has no program".to_string())?;
@@ -818,6 +1446,15 @@ fn run_step(root: &Path, argv: Vec<String>) -> Result<StepReceipt, String> {
     let mut command = Command::new(program);
     command.args(&argv[1..]).current_dir(root);
     command.env("CARGO_BUILD_JOBS", DEFAULT_BUILD_JOBS);
+    if let Some(path) = stdout_path {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create verification output directory: {error}"))?;
+        }
+        let file = fs::File::create(path)
+            .map_err(|error| format!("create verification output {}: {error}", path.display()))?;
+        command.stdout(Stdio::from(file));
+    }
     let measurement = measured_status(&mut command)
         .map_err(|error| format!("run verification step `{program}`: {error}"))?;
     let status = measurement.status;
@@ -1954,6 +2591,7 @@ mod tests {
                 "cargo",
                 "nextest",
                 "run",
+                "--locked",
                 "-p",
                 "vigil",
                 "--features",
@@ -1971,6 +2609,32 @@ mod tests {
             .into_iter()
             .map(|value| value.into_string().expect("UTF-8"))
             .collect::<Vec<_>>()
+        );
+        for command in [
+            strings(&["cargo", "build", "--workspace"]),
+            strings(&["cargo", "check", "--workspace"]),
+            strings(&["cargo", "test", "--workspace"]),
+            strings(&["cargo", "nextest", "list", "--workspace"]),
+            strings(&["cargo", "nextest", "run", "--workspace"]),
+            strings(&["cargo", "nextest", "archive", "--workspace"]),
+        ] {
+            let locked = ensure_locked(command);
+            assert_eq!(
+                locked
+                    .iter()
+                    .filter(|argument| *argument == "--locked")
+                    .count(),
+                1,
+                "source-building verification command was not locked: {locked:?}"
+            );
+        }
+        let already_locked = ensure_locked(strings(&["cargo", "test", "--locked", "--workspace"]));
+        assert_eq!(
+            already_locked
+                .iter()
+                .filter(|argument| *argument == "--locked")
+                .count(),
+            1
         );
     }
 

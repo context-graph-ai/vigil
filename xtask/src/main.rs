@@ -50,7 +50,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
 /// lanes. The full harness also prepares cross-musl Zig linkers; making the
 /// cheap runtime subset explicit keeps fast CI from relying on a stale cached
 /// MediaMTX binary without paying the cross-build setup cost.
-fn setup_runtime_harness() -> Result<(), String> {
+pub(crate) fn setup_runtime_harness() -> Result<(), String> {
     let repo_root = repo_root()?;
     let fixture_dir = repo_root.join("tests/fixtures/video");
     let cache_dir = repo_root.join("tests/fixtures/.cache");
@@ -101,7 +101,7 @@ fn setup_runtime_harness() -> Result<(), String> {
     Ok(())
 }
 
-fn setup_harness() -> Result<(), String> {
+pub(crate) fn setup_harness() -> Result<(), String> {
     let repo_root = repo_root()?;
     let fixture_dir = repo_root.join("tests/fixtures/video");
     let cache_dir = repo_root.join("tests/fixtures/.cache");

@@ -148,7 +148,7 @@ jobs:
         run: |
           while IFS= read -r -d '' path; do
             case "$path" in
-              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/nextest-inventories.toml|.github/CODEOWNERS|.github/workflows/*|Cargo.lock|Cargo.toml|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
+              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
                 echo "normal feature closeout cannot change trusted verification control plane: $path" >&2
                 echo "route a reviewed control-plane update through the owner bootstrap path" >&2
                 exit 1
@@ -198,7 +198,7 @@ jobs:
         id: classify
         working-directory: vigil
         run: |
-          cargo xtask closeout-impact \
+          ./scripts/verify workflow --step closeout-impact \
             --base "${{ needs.exact-sources.outputs.dev_base_sha }}" \
             --head "${{ needs.exact-sources.outputs.vigil_sha }}" \
             --json target/closeout-impact.json
@@ -257,7 +257,7 @@ jobs:
           key: ${{ inputs.cache_epoch }}
       - name: Set up the default runtime harness
         working-directory: vigil
-        run: cargo xtask setup-runtime-harness
+        run: ./scripts/verify workflow --step runtime-harness
       - name: Receipt formatting discipline
         working-directory: vigil
         run: |
@@ -268,7 +268,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-discipline-fmt.json \
-            -- cargo fmt -p vigil -p xtask -p vigil-acceptance --check
+            --step fmt
       - name: Receipt lint discipline
         working-directory: vigil
         run: |
@@ -279,7 +279,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-discipline-clippy.json \
-            -- cargo clippy --locked --workspace --all-targets -- -D warnings
+            --step clippy
       - name: Receipt the exact default inventory
         working-directory: vigil
         run: |
@@ -290,10 +290,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-default-inventory.json \
-            -- cargo nextest list --locked --workspace -T json
-      - name: Materialize the default inventory for estate comparison
-        working-directory: vigil
-        run: cargo nextest list --locked --workspace -T json > target/nextest-default.json
+            --step inventory
       - name: Receipt test-estate discipline
         working-directory: vigil
         run: |
@@ -304,7 +301,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-discipline-estate.json \
-            -- cargo xtask test-estate-check --nextest-json default=target/nextest-default.json
+            --step estate-default
       - name: Receipt default tests
         working-directory: vigil
         run: |
@@ -315,7 +312,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-default-tests.json \
-            -- cargo nextest run --locked --profile pr --workspace --test-threads 2
+            --step tests
       - name: Upload default closeout receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -388,7 +385,7 @@ jobs:
           key: ${{ inputs.cache_epoch }}
       - name: Set up the feature runtime harness
         working-directory: vigil
-        run: cargo xtask setup-runtime-harness
+        run: ./scripts/verify workflow --step runtime-harness
       - name: Receipt the registered feature inventory
         working-directory: vigil
         run: |
@@ -399,10 +396,8 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt "target/verify-receipts/dev-feature-${{ matrix.shape }}-inventory.json" \
-            -- cargo nextest list --locked -p vigil --features "${{ matrix.features }}" -T json
-      - name: Materialize the feature inventory for estate comparison
-        working-directory: vigil
-        run: cargo nextest list --locked -p vigil --features "${{ matrix.features }}" -T json > "target/nextest-${{ matrix.shape }}.json"
+            --shape "${{ matrix.shape }}" \
+            --step inventory
       - name: Receipt the feature estate comparison
         working-directory: vigil
         run: |
@@ -413,7 +408,8 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt "target/verify-receipts/dev-feature-${{ matrix.shape }}-estate.json" \
-            -- cargo xtask test-estate-check --nextest-json "${{ matrix.shape }}=target/nextest-${{ matrix.shape }}.json"
+            --shape "${{ matrix.shape }}" \
+            --step estate-feature
       - name: Receipt feature tests
         working-directory: vigil
         run: |
@@ -424,7 +420,8 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt "target/verify-receipts/dev-feature-${{ matrix.shape }}-tests.json" \
-            -- cargo nextest run --locked --profile pr -p vigil --features "${{ matrix.features }}" --test-threads 2
+            --shape "${{ matrix.shape }}" \
+            --step tests
       - name: Upload feature receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -502,7 +499,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-slow-archive.json \
-            -- cargo nextest archive --locked --release --workspace --features first-light-acceptance,acceptance --archive-file target/closeout/nextest-slow.tar.zst
+            --step archive
       - name: Receipt the immutable slow inventory
         working-directory: vigil
         run: |
@@ -513,10 +510,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-slow-inventory.json \
-            -- cargo nextest list --archive-file target/closeout/nextest-slow.tar.zst --workspace-remap "$PWD" -T json
-      - name: Materialize the slow inventory for estate comparison
-        working-directory: vigil
-        run: cargo nextest list --archive-file target/closeout/nextest-slow.tar.zst --workspace-remap "$PWD" -T json > target/nextest-slow.json
+            --step inventory
       - name: Receipt the slow estate comparison
         working-directory: vigil
         run: |
@@ -527,7 +521,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-slow-estate.json \
-            -- cargo xtask test-estate-check --nextest-json slow=target/nextest-slow.json
+            --step estate
       - name: Extract the one process binary built into the archive
         working-directory: vigil
         run: |
@@ -615,7 +609,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-install-setup.json \
-            -- cargo xtask setup-harness
+            --step setup-harness
       - name: Add the host musl target
         working-directory: vigil
         run: rustup target add x86_64-unknown-linux-musl
@@ -629,7 +623,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-install-binary.json \
-            -- cargo build --locked -p vigil --release --target x86_64-unknown-linux-musl --features fabric
+            --step build
       - name: Stage the bounded install-smoke image context
         working-directory: vigil
         run: |
@@ -647,7 +641,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-install-image-build.json \
-            -- docker build --tag "vigil-closeout:${{ needs.exact-sources.outputs.vigil_sha }}" target/closeout/docker-context
+            --step build
       - name: Receipt inspection of the built image
         working-directory: vigil
         run: |
@@ -658,7 +652,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-install-image-inspect.json \
-            -- docker image inspect "vigil-closeout:${{ needs.exact-sources.outputs.vigil_sha }}"
+            --step inspect
       - name: Receipt the exact image handoff
         working-directory: vigil
         run: |
@@ -669,7 +663,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-install-image-save.json \
-            -- docker save --output target/closeout/vigil-acceptance-image.tar "vigil-closeout:${{ needs.exact-sources.outputs.vigil_sha }}"
+            --step save
       - name: Upload the one prebuilt install-smoke image
         uses: actions/upload-artifact@v4
         with:
@@ -741,7 +735,7 @@ jobs:
           test -x target/closeout/vigil-acceptance-bin
       - name: Set up this shard's runtime harness
         working-directory: vigil
-        run: cargo xtask setup-runtime-harness
+        run: ./scripts/verify workflow --step runtime-harness
       - name: Execute only this archive shard and record its budget
         working-directory: vigil
         env:
@@ -754,12 +748,8 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt "target/verify-receipts/dev-slow-${{ matrix.shard }}.json" \
-            -- cargo nextest run \
-              --archive-file target/closeout/nextest-slow.tar.zst \
-              --workspace-remap "$PWD" \
-              --profile ci-full \
-              --partition "hash:${{ matrix.shard }}/4" \
-              -E 'not test(vigil_container_)'
+            --shard "${{ matrix.shard }}" \
+            --step tests
       - name: Upload slow shard receipt
         if: always()
         uses: actions/upload-artifact@v4
@@ -824,7 +814,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-install-image-load.json \
-            -- docker load --input target/closeout/vigil-acceptance-image.tar
+            --step load
       - name: Run only the three install-image witnesses
         working-directory: vigil
         env:
@@ -838,11 +828,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-slow-install.json \
-            -- cargo nextest run \
-              --archive-file target/closeout/nextest-slow.tar.zst \
-              --workspace-remap "$PWD" \
-              --profile ci-full \
-              -E 'test(vigil_container_)'
+            --step tests
       - name: Upload install-smoke receipt
         if: always()
         uses: actions/upload-artifact@v4

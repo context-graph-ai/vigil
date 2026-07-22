@@ -133,27 +133,27 @@ jobs:
 
       - name: Set up the default runtime harness
         working-directory: vigil
-        run: cargo xtask setup-runtime-harness
+        run: ./scripts/verify workflow --step runtime-harness
 
       - name: Check formatting
         working-directory: vigil
-        run: cargo fmt -p vigil -p xtask -p vigil-acceptance --check
+        run: ./scripts/verify workflow --step fmt
 
       - name: Lint default workspace targets
         working-directory: vigil
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: ./scripts/verify workflow --step clippy
 
       - name: Enumerate the exact default estate
         working-directory: vigil
-        run: cargo nextest list --locked --workspace -T json > target/nextest-default.json
+        run: ./scripts/verify workflow --step default-inventory
 
       - name: Enforce the test estate and default inventory
         working-directory: vigil
-        run: cargo xtask test-estate-check --nextest-json default=target/nextest-default.json
+        run: ./scripts/verify workflow --step default-estate
 
       - name: Run default tests
         working-directory: vigil
-        run: cargo nextest run --locked --profile pr --workspace --test-threads 2
+        run: ./scripts/verify workflow --step default-tests
 
   change-gate:
     name: Change qualification receipt

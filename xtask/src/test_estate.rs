@@ -3407,6 +3407,14 @@ fn audit_ci_config(root: &Path, violations: &mut Vec<String>) -> Result<(), Stri
     let release = read_workflow("release-qualification.yml")?;
     audit_ci_compartments(&change, &closeout, &release, violations);
     audit_dev_integration_workflow(&integration, violations);
+    for (name, workflow) in [
+        ("ci.yml", &change),
+        ("dev-closeout.yml", &closeout),
+        ("integrate-dev.yml", &integration),
+        ("release-qualification.yml", &release),
+    ] {
+        audit_workflow_compiler_thinness(name, workflow, violations);
+    }
     let launcher_path = root.join("scripts/verify");
     let launcher = fs::read_to_string(&launcher_path)
         .map_err(|error| format!("read {}: {error}", launcher_path.display()))?;
@@ -3580,10 +3588,10 @@ fn audit_ci_compartments(
             "github.event.pull_request.head.repo.full_name != github.repository",
             "token: ${{ secrets.CG_CI_TOKEN }}",
             "persist-credentials: false",
-            "cargo nextest list --locked --workspace -T json > target/nextest-default.json",
-            "cargo xtask test-estate-check --nextest-json default=target/nextest-default.json",
-            "cargo nextest run --locked --profile pr --workspace --test-threads 2",
-            "cargo clippy --locked --workspace --all-targets -- -D warnings",
+            "./scripts/verify workflow --step default-inventory",
+            "./scripts/verify workflow --step default-estate",
+            "./scripts/verify workflow --step default-tests",
+            "./scripts/verify workflow --step clippy",
             "name: Change qualification receipt",
         ],
         violations,
@@ -3624,24 +3632,24 @@ fn audit_ci_compartments(
             "git -C vigil merge-base \"$vigil_sha\" \"$dev_sha\"",
             "normal feature closeout cannot change trusted verification control plane",
             ".github/workflows/*",
-            "Cargo.lock|Cargo.toml",
+            ".config/dev-closeout-impact.toml|.config/nextest.toml",
             "xtask/*",
             "read -r -d '' path",
             "--name-only --no-renames -z --diff-filter=ACDMRTUXB",
-            "cargo xtask closeout-impact",
+            "./scripts/verify workflow --step closeout-impact",
             "./scripts/verify dev-closeout",
-            "cargo fmt -p vigil -p xtask -p vigil-acceptance --check",
+            "--step fmt",
             "jq -r '.impact'",
             "install-expanded",
             "--cache-state mixed",
             "if: needs.impact.outputs.install_expanded == 'true'",
-            "--nextest-json \"${{ matrix.shape }}=target/nextest-${{ matrix.shape }}.json\"",
+            "--shape \"${{ matrix.shape }}\"",
             "--lane slow-preflight",
-            "cargo nextest archive --locked --release --workspace --features first-light-acceptance,acceptance",
+            "--step archive",
             "--lane slow-shard",
-            "-E 'not test(vigil_container_)'",
+            "--shard \"${{ matrix.shard }}\"",
             "--lane install-smoke",
-            "-E 'test(vigil_container_)'",
+            "--step tests",
             "VIGIL_ACCEPTANCE_BIN:",
             "chmod 0755 target/closeout/vigil-acceptance-bin",
             "VIGIL_ACCEPTANCE_IMAGE:",
@@ -3666,7 +3674,9 @@ fn audit_ci_compartments(
     }
     if closeout_verified
         .iter()
-        .filter(|line| line.starts_with("-- cargo nextest archive "))
+        .filter(|invocation| {
+            invocation.contains("--lane slow-preflight") && invocation.ends_with("--step archive")
+        })
         .count()
         != 1
     {
@@ -3694,7 +3704,9 @@ fn audit_ci_compartments(
     }
     if closeout_verified
         .iter()
-        .filter(|line| line.starts_with("-- docker build --tag \"vigil-closeout:"))
+        .filter(|invocation| {
+            invocation.contains("--lane install-image") && invocation.ends_with("--step build")
+        })
         .count()
         != 1
     {
@@ -3735,8 +3747,8 @@ fn audit_ci_compartments(
             "test ! -e vigil/target",
             "--cache-state cold",
             "--cache-state mixed",
-            "--target x86_64-unknown-linux-musl --features fabric",
-            "--target aarch64-unknown-linux-musl --features fabric",
+            "--step amd64",
+            "--step arm64",
             "vigil-static-fallback.oci.tar",
             "vigil-hw-binary-amd64",
             "vigil-hw-binary-arm64",
@@ -3811,6 +3823,53 @@ fn workflow_run_command_lines(scripts: &[Vec<String>]) -> Vec<String> {
     scripts.iter().flatten().cloned().collect()
 }
 
+fn audit_workflow_compiler_thinness(name: &str, content: &str, violations: &mut Vec<String>) {
+    let active = active_workflow_text(content);
+    for script in workflow_run_scripts(&active) {
+        for line in script {
+            let compiler = directly_invoked_rust_tool(&line);
+            if let Some(compiler) = compiler {
+                violations.push(format!(
+                    "workflow `{name}` invokes `{compiler}` directly in `{line}`; Rust commands must be repository-owned scripts/verify entrypoints"
+                ));
+            }
+        }
+    }
+}
+
+fn directly_invoked_rust_tool(line: &str) -> Option<&'static str> {
+    let normalized = line
+        .replace("&&", "\n")
+        .replace("||", "\n")
+        .replace([';', '|'], "\n");
+    for segment in normalized.lines() {
+        let words = segment
+            .split_ascii_whitespace()
+            .map(|word| word.trim_matches(['\'', '"', '\\']))
+            .collect::<Vec<_>>();
+        let mut index = 0;
+        while index < words.len()
+            && (words[index] == "--"
+                || words[index] == "env"
+                || words[index] == "sudo"
+                || words[index] == "command"
+                || words[index].contains('='))
+        {
+            index += 1;
+        }
+        let Some(program) = words.get(index).copied() else {
+            continue;
+        };
+        if let Some(tool) = ["cargo", "rustc", "rustfmt", "cargo-nextest"]
+            .into_iter()
+            .find(|tool| *tool == program)
+        {
+            return Some(tool);
+        }
+    }
+    None
+}
+
 fn verified_workflow_commands(
     tier: &str,
     scripts: &[Vec<String>],
@@ -3840,9 +3899,9 @@ fn verified_workflow_commands(
             let body = &script[launcher_position + 1..end];
             let Some(relative_command) = body
                 .iter()
-                .position(|line| line.starts_with("-- cargo ") || line.starts_with("-- docker "))
+                .position(|line| line.starts_with("--step ") || line.starts_with("-- docker "))
             else {
-                violations.push(format!("{tier} verifier invocation has no exact command"));
+                violations.push(format!("{tier} verifier invocation has no named step"));
                 continue;
             };
             let command_index = launcher_position + 1 + relative_command;
@@ -3867,10 +3926,10 @@ fn verified_workflow_commands(
                 continue;
             }
             consumed_command_starts.insert(command_index);
-            commands.push(script[command_index].clone());
+            commands.push(body.join(" ").replace(" \\", ""));
         }
         for (index, line) in script.iter().enumerate() {
-            if (line.starts_with("-- cargo ") || line.starts_with("-- docker "))
+            if (line.starts_with("--step ") || line.starts_with("-- docker "))
                 && !consumed_command_starts.contains(&index)
             {
                 violations.push(format!(
@@ -3938,7 +3997,7 @@ fn audit_dev_integration_workflow(content: &str, violations: &mut Vec<String>) {
             "git merge-base \"$DEV_BASE_SHA\" \"$VIGIL_SHA\"",
             "normal feature integration cannot change trusted verification control plane",
             ".github/workflows/*",
-            "Cargo.lock|Cargo.toml",
+            ".config/dev-closeout-impact.toml|.config/nextest.toml",
             "xtask/*",
             "read -r -d '' path",
             "--name-only --no-renames -z --diff-filter=ACDMRTUXB",
@@ -6000,6 +6059,28 @@ jobs:
         audit_ci_compartments(change, closeout, release, &mut accepted);
         assert!(accepted.is_empty(), "{accepted:?}");
 
+        for (name, workflow) in [
+            ("ci.yml", change),
+            ("dev-closeout.yml", closeout),
+            ("release-qualification.yml", release),
+        ] {
+            let mut thinness = Vec::new();
+            audit_workflow_compiler_thinness(name, workflow, &mut thinness);
+            assert!(thinness.is_empty(), "{thinness:?}");
+        }
+        let planted_direct_compiler = format!(
+            "{change}\njobs:\n  planted-direct-compiler:\n    steps:\n      - run: cargo test --locked\n"
+        );
+        let mut direct_compiler_violations = Vec::new();
+        audit_workflow_compiler_thinness(
+            "ci.yml",
+            &planted_direct_compiler,
+            &mut direct_compiler_violations,
+        );
+        assert!(direct_compiler_violations.iter().any(|item| {
+            item.contains("invokes `cargo` directly") && item.contains("scripts/verify")
+        }));
+
         let expensive_change = format!(
             "{change}\njobs:\n  planted-heavy-change:\n    steps:\n      - run: cargo nextest archive\n"
         );
@@ -6011,8 +6092,11 @@ jobs:
                 .any(|item| item.contains("cheap default-shape"))
         );
 
-        let downgraded_closeout =
-            closeout.replacen("cargo xtask closeout-impact", "echo bypass", 1);
+        let downgraded_closeout = closeout.replacen(
+            "./scripts/verify workflow --step closeout-impact",
+            "echo bypass",
+            1,
+        );
         let mut downgraded = Vec::new();
         audit_ci_compartments(change, &downgraded_closeout, release, &mut downgraded);
         assert!(
@@ -6020,8 +6104,11 @@ jobs:
                 .iter()
                 .any(|item| item.contains("closeout-impact"))
         );
-        let self_qualifying_closeout =
-            closeout.replacen("Cargo.lock|Cargo.toml", "Cargo.none|Cargo.none", 1);
+        let self_qualifying_closeout = closeout.replacen(
+            ".config/dev-closeout-impact.toml|.config/nextest.toml",
+            "Cargo.none|Cargo.none",
+            1,
+        );
         let mut self_qualifying_violations = Vec::new();
         audit_ci_compartments(
             change,
@@ -6032,13 +6119,9 @@ jobs:
         assert!(
             self_qualifying_violations
                 .iter()
-                .any(|item| item.contains("Cargo.lock|Cargo.toml"))
+                .any(|item| item.contains(".config/dev-closeout-impact.toml|.config/nextest.toml"))
         );
-        let archive_decoy = closeout.replacen(
-            "-- cargo nextest archive",
-            "echo '-- cargo nextest archive'",
-            1,
-        );
+        let archive_decoy = closeout.replacen("--step archive", "--step archive-decoy", 1);
         let mut archive_decoy_violations = Vec::new();
         audit_ci_compartments(
             change,
@@ -6116,7 +6199,11 @@ jobs:
                 1,
             ),
             integration.replacen(".github/workflows/*", ".github/workflows/none", 1),
-            integration.replacen("Cargo.lock|Cargo.toml", "Cargo.none|Cargo.none", 1),
+            integration.replacen(
+                ".config/dev-closeout-impact.toml|.config/nextest.toml",
+                "Cargo.none|Cargo.none",
+                1,
+            ),
             integration.replacen("--name-only --no-renames -z", "--name-only", 1),
         ] {
             let mut weakened_violations = Vec::new();

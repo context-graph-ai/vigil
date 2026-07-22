@@ -166,11 +166,12 @@ jobs:
       - name: Fast-forward dev without a bypass or force update
         env:
           GH_TOKEN: ${{ github.token }}
+          CG_CI_TOKEN: ${{ secrets.CG_CI_TOKEN }}
           VIGIL_SHA: ${{ inputs.vigil_sha }}
           CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
           CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
         run: |
-          test "$(gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$CONTEXT_GRAPH_SHA" || {
+          test "$(GH_TOKEN="$CG_CI_TOKEN" gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$CONTEXT_GRAPH_SHA" || {
             echo "Context Graph dev moved after closeout; qualify the current dependency tuple" >&2
             exit 1
           }

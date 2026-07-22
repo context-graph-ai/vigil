@@ -101,7 +101,7 @@ jobs:
       - name: Prove immutable clean identities
         id: identity
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CG_CI_TOKEN }}
           EXPECTED_VIGIL_SHA: ${{ inputs.vigil_sha }}
           EXPECTED_DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
           EXPECTED_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}

@@ -895,7 +895,7 @@ jobs:
               "$receipt" >/dev/null
           done
           find receipts -type f -name '*.json' -print0 | sort -z | xargs -0 sha256sum > dev-closeout-receipt.sha256
-          test "$(jq -r '.impact == \"install-expanded\"' impact/closeout-impact.json)" = "${{ needs.impact.outputs.install_expanded }}"
+          test "$(jq -r '.impact == "install-expanded"' impact/closeout-impact.json)" = "${{ needs.impact.outputs.install_expanded }}"
           jq -n \
             --arg vigil_sha "$VIGIL_SHA" \
             --arg dev_base_sha "${{ needs.exact-sources.outputs.dev_base_sha }}" \

@@ -2,7 +2,6 @@
 /xtask/src/verify.rs @lucidprogrammer
 /xtask/src/closeout_impact.rs @lucidprogrammer
 /scripts/verify @lucidprogrammer
-/scripts/integrate-dev @lucidprogrammer
 /.config/test-*.toml @lucidprogrammer
 /.config/nextest*.toml @lucidprogrammer
 /.config/non-rust-test-*.toml @lucidprogrammer
@@ -11,6 +10,7 @@
 /.github/CODEOWNERS @lucidprogrammer
 /.github/workflows/ci.yml @lucidprogrammer
 /.github/workflows/dev-closeout.yml @lucidprogrammer
+/.github/workflows/integrate-dev.yml @lucidprogrammer
 /.github/workflows/release-qualification.yml @lucidprogrammer
 /AGENTS.md @lucidprogrammer
 /tests/ha-os-vm/ @lucidprogrammer

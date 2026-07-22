@@ -35,7 +35,6 @@ exact = [
 id = "verification-and-build-setup"
 exact = [
   ".config/dev-closeout-impact.toml",
-  "scripts/integrate-dev",
   "scripts/verify",
 ]
 prefix = [".github/workflows/", "xtask/"]

@@ -14,10 +14,10 @@ substitute a handwritten chain of Cargo, nextest, Docker, or cross-build command
   shape named by the work. RED must be a matched test failure, never a compile failure, timeout,
   harness failure, or zero-test success. Re-run the same selection for GREEN. Do not launch the full
   CI or release build for intermediate test and implementation commits.
-- `dev-closeout` runs once on the reviewed final commit before it enters `dev`. Keep the feature
-  pull request in draft while it changes; marking that pull request ready for review triggers
-  closeout on its exact head and exact dependency commits. Any source/tree change invalidates the
-  result. A successful candidate enters `dev` only by fast-forward.
+- `dev-closeout` runs once on the reviewed final commit before it enters `dev`. It is manually
+  dispatched from trusted `dev`, while its inputs name the exact feature and dependency commits to
+  test. Any source/tree change invalidates the result. A successful candidate enters `dev` only by
+  fast-forward.
 - `release` is the owner's clean `main` qualification. It consumes exact known-good dependency
   commits and creates the complete amd64/arm64 release artifacts. It is not a development gate.
 
@@ -39,29 +39,34 @@ run warm or cold.
 
 ## Commit and closeout sequence
 
-Create a draft pull request from the feature branch to `dev` when the branch is first pushed. Each
-RED commit must have a valid local `scripts/verify change ... --expect red` receipt for the plan's
-exact selection. Each implementation commit runs the same selection with `--expect green`. Every
-push updates the draft pull request and GitHub runs the cheap default-shape change gate on that exact
-commit. The full feature matrix, slow archive, containers, and release artifacts do not run per
-commit.
+Each RED commit must have a valid local `scripts/verify change ... --expect red` receipt for the
+plan's exact selection. Each implementation commit runs the same selection with `--expect green`.
+Keep the intentionally RED commit local, then push the RED/GREEN pair to a draft pull request
+targeting `dev`; GitHub runs one cheap default-shape gate at the green checkpoint. Later green
+checkpoints may be pushed while work continues. The full feature matrix, slow archive, containers,
+and release artifacts do not run per commit or per push.
 
 After implementation and independent review, make the tree clean, settle commit history, update the
-branch against the current `dev`, and mark the pull request ready for review. That single transition
-starts exact-head closeout. After it succeeds, run `scripts/integrate-dev RUN_ID`; the script verifies
-the source, impact, and final receipts, confirms `dev` has not moved, and performs a non-forcing
-fast-forward push. If any commit changed, return the pull request to draft before pushing, then mark
-it ready again after review. A new head has no closeout status, so protected `dev` rejects it.
+branch against the current `dev`, and record exact Vigil, Context Graph, and ContextDB commits.
+Dispatch `dev-closeout.yml` with `--ref dev` and those exact inputs. After it succeeds, dispatch
+`integrate-dev.yml` with `--ref dev`, the same tuple, and the closeout run ID. The trusted integration
+workflow verifies the receipts, confirms `dev` has not moved, and performs a non-forcing ref update.
+Any later commit or dependency change requires a new review and closeout.
 
-`dev` protection must require exact-head statuses `vigil/change` and `vigil/dev-closeout`, reject
-force pushes, and permit checked fast-forwards. `scripts/integrate-dev` refuses to
-push when that protection is absent. `main` is not involved in feature development or `dev`
-closeout; it is only the release line.
+During pre-release development, GitHub's default branch is `dev`; this makes trusted manual workflow
+dispatch independent of `main` and makes new pull requests target the integration line by default.
+`dev` protection must enforce administrators, require linear history and the app-bound exact-head
+status `vigil/dev-closeout`, reject force pushes, and permit the receipt-bound workflow's checked
+fast-forward. The integration workflow refuses to update `dev` when that protection is absent.
+`main` remains the release line.
 
-GitHub selects pull-request workflow definitions from target `dev`, not from an unmerged workflow
-edit on the feature branch. A change to this verification machinery therefore needs independent
-local review before its one-time fast-forward into `dev`; enable or change protection only after
-the governing workflow is present there. This bootstrap never requires `main`.
+A feature branch can modify the pull-request workflow that tests it, so a PR check is development
+feedback, not integration authority. Only the manual workflows dispatched from `dev` can publish
+the required status or update `dev`. Normal feature integration rejects changes to that trusted
+control plane, including workflows, verifier/guard code, protected nextest configuration, and
+`AGENTS.md`. Such changes use the separately reviewed owner bootstrap path. This initial
+compartmentalization is that one-time bootstrap: fast-forward it into `dev` before enabling the new
+protection. It never requires `main`.
 
 Merging `dev` to `main`, tagging, publishing, and promoting artifacts remain owner-authorized release
 actions. Development closeout never grants that authority.

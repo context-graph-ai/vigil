@@ -1,0 +1,163 @@
+name: Integrate exact qualified commit into dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      vigil_sha:
+        description: "Exact qualified Vigil commit"
+        type: string
+        required: true
+      dev_base_sha:
+        description: "Exact dev commit named by the qualification"
+        type: string
+        required: true
+      context_graph_sha:
+        description: "Exact Context Graph commit named by the qualification"
+        type: string
+        required: true
+      contextdb_sha:
+        description: "Exact ContextDB commit named by the qualification"
+        type: string
+        required: true
+      closeout_run_id:
+        description: "Successful dev-closeout workflow run for this exact tuple"
+        type: string
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: vigil-dev-integration
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    name: Receipt-bound fast-forward into dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require the trusted dev workflow and immutable inputs
+        env:
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
+          CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
+          CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+          CLOSEOUT_RUN_ID: ${{ inputs.closeout_run_id }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/dev"
+          test "$GITHUB_SHA" = "$DEV_BASE_SHA"
+          for value in "$VIGIL_SHA" "$DEV_BASE_SHA" "$CONTEXT_GRAPH_SHA" "$CONTEXTDB_SHA"; do
+            [[ "$value" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          done
+          [[ "$CLOSEOUT_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+
+      - name: Require dev as the repository default during pre-release development
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')" = dev || {
+            echo "trusted development dispatch requires dev to be the repository default branch" >&2
+            exit 1
+          }
+
+      - name: Require non-bypassable exact-status branch protection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          protection="$(gh api "repos/${GITHUB_REPOSITORY}/branches/dev/protection")"
+          jq -e '
+            .enforce_admins.enabled == true and
+            .allow_force_pushes.enabled == false and
+            .required_linear_history.enabled == true and
+            any(.required_status_checks.checks[]?;
+              .context == "vigil/dev-closeout" and (.app_id // 0) > 0)
+          ' <<<"$protection" >/dev/null || {
+            echo "dev must enforce linear history and the app-bound vigil/dev-closeout status for administrators" >&2
+            exit 1
+          }
+
+      - name: Download exact closeout source receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-closeout-sources
+          path: closeout/source
+          run-id: ${{ inputs.closeout_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download exact closeout impact receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-closeout-impact
+          path: closeout/impact
+          run-id: ${{ inputs.closeout_run_id }}
+          github-token: ${{ github.token }}
+      - name: Download exact closeout qualification receipt
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-closeout-qualified-${{ inputs.vigil_sha }}
+          path: closeout/final
+          run-id: ${{ inputs.closeout_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate receipt tuple and successful qualification
+        env:
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
+          CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
+          CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+          CLOSEOUT_RUN_ID: ${{ inputs.closeout_run_id }}
+        run: |
+          jq -e --arg vigil "$VIGIL_SHA" --arg base "$DEV_BASE_SHA" --arg cg "$CONTEXT_GRAPH_SHA" --arg db "$CONTEXTDB_SHA" \
+            '.tier == "dev-closeout" and .clean == true and .vigil_sha == $vigil and .dev_base_sha == $base and .context_graph_sha == $cg and .contextdb_sha == $db' \
+            closeout/source/dev-closeout-sources.json >/dev/null
+          jq -e --arg vigil "$VIGIL_SHA" --arg base "$DEV_BASE_SHA" \
+            '.head == $vigil and .base == $base and (.impact == "ordinary" or .impact == "install-expanded")' \
+            closeout/impact/closeout-impact.json >/dev/null
+          jq -e --arg vigil "$VIGIL_SHA" --arg base "$DEV_BASE_SHA" --arg cg "$CONTEXT_GRAPH_SHA" --arg db "$CONTEXTDB_SHA" --arg run "$CLOSEOUT_RUN_ID" \
+            '.qualified == true and .fast_forward_only == true and .vigil_sha == $vigil and .dev_base_sha == $base and .context_graph_sha == $cg and .contextdb_sha == $db and .workflow_run == $run' \
+            closeout/final/dev-closeout-qualified.json >/dev/null
+
+      - name: Checkout exact qualified candidate and current dev
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.vigil_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove current dev, ancestry, and immutable verification control plane
+        env:
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
+        run: |
+          git fetch --no-tags origin dev
+          test "$(git rev-parse HEAD)" = "$VIGIL_SHA"
+          test "$(git rev-parse origin/dev)" = "$DEV_BASE_SHA"
+          test "$(git merge-base "$DEV_BASE_SHA" "$VIGIL_SHA")" = "$DEV_BASE_SHA"
+          test -z "$(git status --porcelain=v1)"
+          while IFS= read -r path; do
+            case "$path" in
+              .cargo/config.toml|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/nextest-inventories.toml|.github/CODEOWNERS|.github/workflows/*|AGENTS.md|scripts/verify|tests/convergence-smoke.sh|xtask/*)
+                echo "normal feature integration cannot change trusted verification control plane: $path" >&2
+                echo "route a reviewed control-plane update through the owner bootstrap path" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git diff --name-only --diff-filter=ACDMRTUXB "$DEV_BASE_SHA" "$VIGIL_SHA")
+
+      - name: Fast-forward dev without a bypass or force update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/dev" \
+            --method PATCH \
+            --field sha="$VIGIL_SHA" \
+            --field force=false >/dev/null
+
+      - name: Verify the remote ref reached only the qualified commit
+        env:
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+        run: |
+          git fetch --no-tags origin dev
+          test "$(git rev-parse origin/dev)" = "$VIGIL_SHA"

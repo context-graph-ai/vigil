@@ -2,10 +2,12 @@ name: Change qualification
 
 on:
   pull_request:
+    branches: [dev]
     types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
+  statuses: write
 
 concurrency:
   group: vigil-change-${{ github.event.pull_request.number }}
@@ -166,3 +168,15 @@ jobs:
           test "${{ needs.private-dependency-boundary.result }}" = "success"
           test "${{ needs.source-revisions.result }}" = "success"
           test "${{ needs.change.result }}" = "success"
+      - name: Attach the successful change gate to the exact feature commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            --method POST \
+            --field state=success \
+            --field context=vigil/change \
+            --field description='Cheap per-commit Vigil change gate passed' \
+            --field target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >/dev/null

@@ -1,35 +1,16 @@
 name: Dev closeout qualification
 
 on:
-  workflow_dispatch:
-    inputs:
-      vigil_sha:
-        description: "Exact 40-character Vigil commit to qualify before fast-forwarding dev"
-        type: string
-        required: true
-      dev_base_sha:
-        description: "Exact current dev SHA which the candidate must contain"
-        type: string
-        required: true
-      context_graph_sha:
-        description: "Exact 40-character Context Graph dev commit used by this Vigil commit"
-        type: string
-        required: true
-      contextdb_sha:
-        description: "Exact 40-character ContextDB dev commit used by this Vigil commit"
-        type: string
-        required: true
-      cache_epoch:
-        description: "Explicit cache namespace; change for a measured cold run"
-        type: string
-        required: true
-        default: "dev-closeout-v1"
+  pull_request:
+    branches: [dev]
+    types: [ready_for_review]
 
 permissions:
   contents: read
+  statuses: write
 
 concurrency:
-  group: vigil-dev-closeout-${{ inputs.vigil_sha }}-${{ inputs.context_graph_sha }}-${{ inputs.contextdb_sha }}
+  group: vigil-dev-closeout-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: false
 
 env:
@@ -47,59 +28,57 @@ jobs:
     timeout-minutes: 5
     outputs:
       vigil_sha: ${{ steps.identity.outputs.vigil_sha }}
+      dev_base_sha: ${{ steps.identity.outputs.dev_base_sha }}
       context_graph_sha: ${{ steps.identity.outputs.context_graph_sha }}
       contextdb_sha: ${{ steps.identity.outputs.contextdb_sha }}
     steps:
-      - name: Reject branch names, tags, and abbreviated SHAs
+      - name: Require an exact same-repository feature head targeting dev
         env:
-          VIGIL_SHA: ${{ inputs.vigil_sha }}
-          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
-          CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
-          CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+          VIGIL_SHA: ${{ github.event.pull_request.head.sha }}
+          DEV_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
-          for value in "$VIGIL_SHA" "$DEV_BASE_SHA" "$CONTEXT_GRAPH_SHA" "$CONTEXTDB_SHA"; do
+          test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" || {
+            echo "development closeout does not execute fork code" >&2
+            exit 1
+          }
+          for value in "$VIGIL_SHA" "$DEV_BASE_SHA"; do
             [[ "$value" =~ ^[0-9a-fA-F]{40}$ ]] || {
-              echo "closeout requires four full 40-character hexadecimal commit SHAs" >&2
+              echo "closeout requires exact feature-head and dev-base commits" >&2
               exit 1
             }
           done
-          test "$GITHUB_SHA" = "$VIGIL_SHA" || {
-            echo "dispatch the workflow from the exact Vigil candidate ref; workflow SHA $GITHUB_SHA differs from $VIGIL_SHA" >&2
-            exit 1
-          }
 
       - name: Checkout exact Vigil commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.vigil_sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           path: vigil
           persist-credentials: false
 
-      - name: Checkout exact Context Graph commit
+      - name: Resolve Context Graph dev to an exact commit
         uses: actions/checkout@v4
         with:
           repository: context-graph-ai/context-graph
-          ref: ${{ inputs.context_graph_sha }}
+          ref: dev
           path: context-graph
           token: ${{ secrets.CG_CI_TOKEN }}
           persist-credentials: false
 
-      - name: Checkout exact ContextDB commit
+      - name: Resolve ContextDB dev to an exact commit
         uses: actions/checkout@v4
         with:
           repository: context-graph-ai/contextdb
-          ref: ${{ inputs.contextdb_sha }}
+          ref: dev
           path: contextdb
           persist-credentials: false
 
       - name: Prove immutable clean identities
         id: identity
         env:
-          EXPECTED_VIGIL_SHA: ${{ inputs.vigil_sha }}
-          EXPECTED_DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
-          EXPECTED_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
-          EXPECTED_CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+          EXPECTED_VIGIL_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_DEV_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           vigil_sha="$(git -C vigil rev-parse HEAD)"
           dev_sha="$(git -C vigil rev-parse origin/dev)"
@@ -108,21 +87,20 @@ jobs:
           test "$vigil_sha" = "$EXPECTED_VIGIL_SHA"
           test "$dev_sha" = "$EXPECTED_DEV_BASE_SHA"
           test "$(git -C vigil merge-base "$vigil_sha" "$dev_sha")" = "$dev_sha"
-          test "$context_graph_sha" = "$EXPECTED_CONTEXT_GRAPH_SHA"
-          test "$contextdb_sha" = "$EXPECTED_CONTEXTDB_SHA"
           test -z "$(git -C vigil status --porcelain=v1)"
           test -z "$(git -C context-graph status --porcelain=v1)"
           test -z "$(git -C contextdb status --porcelain=v1)"
           echo "vigil_sha=$vigil_sha" >> "$GITHUB_OUTPUT"
+          echo "dev_base_sha=$dev_sha" >> "$GITHUB_OUTPUT"
           echo "context_graph_sha=$context_graph_sha" >> "$GITHUB_OUTPUT"
           echo "contextdb_sha=$contextdb_sha" >> "$GITHUB_OUTPUT"
           jq -n \
             --arg vigil_sha "$vigil_sha" \
-            --arg workflow_sha "$GITHUB_SHA" \
+            --arg workflow_sha "$vigil_sha" \
             --arg dev_base_sha "$dev_sha" \
             --arg context_graph_sha "$context_graph_sha" \
             --arg contextdb_sha "$contextdb_sha" \
-            --arg cache_epoch "${{ inputs.cache_epoch }}" \
+            --arg cache_epoch "dev-closeout-v2" \
             '{tier:"dev-closeout",workflow_sha:$workflow_sha,vigil_sha:$vigil_sha,dev_base_sha:$dev_base_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,cache_epoch:$cache_epoch,clean:true}' \
             > dev-closeout-sources.json
 
@@ -169,7 +147,7 @@ jobs:
         working-directory: vigil
         run: |
           cargo xtask closeout-impact \
-            --base "${{ inputs.dev_base_sha }}" \
+            --base "${{ needs.exact-sources.outputs.dev_base_sha }}" \
             --head "${{ needs.exact-sources.outputs.vigil_sha }}" \
             --json target/closeout-impact.json
           impact="$(jq -r '.impact' target/closeout-impact.json)"
@@ -224,7 +202,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: vigil
-          key: ${{ inputs.cache_epoch }}
+          key: dev-closeout-v2
       - name: Set up the default runtime harness
         working-directory: vigil
         run: cargo xtask setup-runtime-harness
@@ -355,7 +333,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: vigil
-          key: ${{ inputs.cache_epoch }}
+          key: dev-closeout-v2
       - name: Set up the feature runtime harness
         working-directory: vigil
         run: cargo xtask setup-runtime-harness
@@ -443,7 +421,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: vigil
-          key: ${{ inputs.cache_epoch }}
+          key: dev-closeout-v2
       - name: Verify post-cache slow-build disk
         run: |
           mkdir -p vigil/target
@@ -560,7 +538,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: vigil
-          key: ${{ inputs.cache_epoch }}
+          key: dev-closeout-v2
       - name: Verify post-cache install-build disk
         run: |
           mkdir -p vigil/target
@@ -698,7 +676,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: vigil
-          key: ${{ inputs.cache_epoch }}
+          key: dev-closeout-v2
       - name: Download the exact preflight archive
         uses: actions/download-artifact@v4
         with:
@@ -768,7 +746,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: vigil
-          key: ${{ inputs.cache_epoch }}
+          key: dev-closeout-v2
       - name: Download the exact preflight archive
         uses: actions/download-artifact@v4
         with:
@@ -854,9 +832,9 @@ jobs:
           path: impact
       - name: Prove the complete receipt set and create the merge receipt
         env:
-          VIGIL_SHA: ${{ inputs.vigil_sha }}
-          CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
-          CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+          VIGIL_SHA: ${{ needs.exact-sources.outputs.vigil_sha }}
+          CONTEXT_GRAPH_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          CONTEXTDB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
         run: |
           receipt_count="$(find receipts -type f -name '*.json' | wc -l)"
           if [ "${{ needs.impact.outputs.install_expanded }}" = true ]; then
@@ -873,7 +851,7 @@ jobs:
           test "$(jq -r '.impact == \"install-expanded\"' impact/closeout-impact.json)" = "${{ needs.impact.outputs.install_expanded }}"
           jq -n \
             --arg vigil_sha "$VIGIL_SHA" \
-            --arg dev_base_sha "${{ inputs.dev_base_sha }}" \
+            --arg dev_base_sha "${{ needs.exact-sources.outputs.dev_base_sha }}" \
             --arg context_graph_sha "$CONTEXT_GRAPH_SHA" \
             --arg contextdb_sha "$CONTEXTDB_SHA" \
             --arg workflow_run "$GITHUB_RUN_ID" \
@@ -883,10 +861,22 @@ jobs:
       - name: Upload fast-forward merge receipt
         uses: actions/upload-artifact@v4
         with:
-          name: dev-closeout-qualified-${{ inputs.vigil_sha }}
+          name: dev-closeout-qualified-${{ needs.exact-sources.outputs.vigil_sha }}
           path: |
             dev-closeout-qualified.json
             dev-closeout-receipt.sha256
             impact/closeout-impact.json
           if-no-files-found: error
           retention-days: 90
+      - name: Attach successful closeout to the exact feature commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.exact-sources.outputs.vigil_sha }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            --method POST \
+            --field state=success \
+            --field context=vigil/dev-closeout \
+            --field description='Exact-head Vigil development closeout passed' \
+            --field target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            >/dev/null

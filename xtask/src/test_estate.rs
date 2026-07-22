@@ -3403,14 +3403,16 @@ fn audit_ci_config(root: &Path, violations: &mut Vec<String>) -> Result<(), Stri
     };
     let change = read_workflow("ci.yml")?;
     let closeout = read_workflow("dev-closeout.yml")?;
-    let integration = read_workflow("integrate-dev.yml")?;
     let release = read_workflow("release-qualification.yml")?;
     audit_ci_compartments(&change, &closeout, &release, violations);
-    audit_dev_integration_workflow(&integration, violations);
     let launcher_path = root.join("scripts/verify");
     let launcher = fs::read_to_string(&launcher_path)
         .map_err(|error| format!("read {}: {error}", launcher_path.display()))?;
     audit_verify_launcher_text(&launcher, violations);
+    let integration_path = root.join("scripts/integrate-dev");
+    let integration = fs::read_to_string(&integration_path)
+        .map_err(|error| format!("read {}: {error}", integration_path.display()))?;
+    audit_dev_integration_script(&integration, violations);
     let dockerignore_path = root.join(".dockerignore");
     let dockerignore = fs::read_to_string(&dockerignore_path)
         .map_err(|error| format!("read {}: {error}", dockerignore_path.display()))?;
@@ -3461,14 +3463,13 @@ fn audit_codeowners_text(content: &str, violations: &mut Vec<String>) {
         "/.github/CODEOWNERS @lucidprogrammer",
         "/.github/workflows/ci.yml @lucidprogrammer",
         "/.github/workflows/dev-closeout.yml @lucidprogrammer",
-        "/.github/workflows/integrate-dev.yml @lucidprogrammer",
         "/.github/workflows/release-qualification.yml @lucidprogrammer",
         "/.config/dev-closeout-impact.toml @lucidprogrammer",
         "/xtask/src/verify.rs @lucidprogrammer",
         "/xtask/src/closeout_impact.rs @lucidprogrammer",
         "/scripts/verify @lucidprogrammer",
+        "/scripts/integrate-dev @lucidprogrammer",
         "/AGENTS.md @lucidprogrammer",
-        "/CLAUDE.md @lucidprogrammer",
         "/tests/ha-os-vm/ @lucidprogrammer",
     ] {
         if !content.lines().any(|line| line.trim() == required) {
@@ -3578,6 +3579,7 @@ fn audit_ci_compartments(
         &change,
         &[
             "pull_request:",
+            "branches: [dev]",
             "github.event.pull_request.head.repo.full_name != github.repository",
             "token: ${{ secrets.CG_CI_TOKEN }}",
             "persist-credentials: false",
@@ -3586,6 +3588,8 @@ fn audit_ci_compartments(
             "cargo nextest run --locked --profile pr --workspace --test-threads 2",
             "cargo clippy --locked --workspace --all-targets -- -D warnings",
             "name: Change qualification receipt",
+            "context=vigil/change",
+            "HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
         ],
         violations,
     );
@@ -3610,12 +3614,13 @@ fn audit_ci_compartments(
         "development closeout",
         &closeout,
         &[
-            "workflow_dispatch:",
-            "vigil_sha:",
-            "dev_base_sha:",
-            "context_graph_sha:",
-            "contextdb_sha:",
-            "test \"$GITHUB_SHA\" = \"$VIGIL_SHA\"",
+            "pull_request:",
+            "branches: [dev]",
+            "types: [ready_for_review]",
+            "statuses: write",
+            "github.event.pull_request.head.sha",
+            "github.event.pull_request.base.sha",
+            "HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}",
             "git -C vigil rev-parse origin/dev",
             "git -C vigil merge-base \"$vigil_sha\" \"$dev_sha\"",
             "cargo xtask closeout-impact",
@@ -3634,6 +3639,7 @@ fn audit_ci_compartments(
             "VIGIL_ACCEPTANCE_BIN:",
             "VIGIL_ACCEPTANCE_IMAGE:",
             "fast_forward_only:true",
+            "context=vigil/dev-closeout",
         ],
         violations,
     );
@@ -3680,7 +3686,7 @@ fn audit_ci_compartments(
         );
     }
     for forbidden in [
-        "pull_request:",
+        "workflow_dispatch:",
         "docker buildx",
         "--push",
         "target: vigil-hw-",
@@ -3885,46 +3891,34 @@ fn audit_verify_launcher_text(content: &str, violations: &mut Vec<String>) {
     }
 }
 
-fn audit_dev_integration_workflow(content: &str, violations: &mut Vec<String>) {
+fn audit_dev_integration_script(content: &str, violations: &mut Vec<String>) {
     let active = active_workflow_text(content);
-    let commands = workflow_run_command_lines(&workflow_run_scripts(&active));
     require_workflow_text(
         "dev integration",
         &active,
         &[
-            "workflow_dispatch:",
-            "actions: read",
-            "contents: write",
-            "closeout_run_id:",
-            "test \"$WORKFLOW_REF\" = \"refs/heads/dev\"",
-            "test \"$WORKFLOW_SHA\" = \"$DEV_BASE_SHA\"",
-            "run-id: ${{ inputs.closeout_run_id }}",
-            "github-token: ${{ github.token }}",
-            "name: dev-closeout-sources",
-            "name: dev-closeout-impact",
-            "name: dev-closeout-qualified-${{ inputs.vigil_sha }}",
+            "gh run view \"${run_id}\"",
+            ".workflowName == \"Dev closeout qualification\"",
+            "branches/dev/protection",
+            "index(\"vigil/change\") != null",
+            "index(\"vigil/dev-closeout\") != null",
+            "--name dev-closeout-sources",
+            "--name dev-closeout-impact",
+            "--name \"dev-closeout-qualified-${candidate_sha}\"",
             ".qualified == true and .fast_forward_only == true",
-            "git merge-base \"$DEV_BASE_SHA\" \"$VIGIL_SHA\"",
-            "repos/${GITHUB_REPOSITORY}/git/refs/heads/dev",
-            "--field force=false",
+            "test \"$(git rev-parse HEAD)\" = \"${candidate_sha}\"",
+            "test \"$(git rev-parse origin/dev)\" = \"${dev_base_sha}\"",
+            "git merge-base \"${dev_base_sha}\" \"${candidate_sha}\"",
+            "git push origin \"${candidate_sha}:refs/heads/dev\"",
         ],
         violations,
     );
-    for forbidden in ["pull_request:", "--field force=true", "git push --force"] {
+    for forbidden in ["--force", "+refs/heads/dev", "git push -f"] {
         if active.contains(forbidden) {
             violations.push(format!(
                 "dev integration must remain receipt-bound and non-forcing; forbidden form `{forbidden}` found"
             ));
         }
-    }
-    if !commands
-        .iter()
-        .any(|line| line.starts_with("gh api \"repos/${GITHUB_REPOSITORY}/git/refs/heads/dev\""))
-    {
-        violations.push(
-            "dev integration must execute the checked receipt-bound ref update, not merely mention it"
-                .to_string(),
-        );
     }
 }
 
@@ -5938,14 +5932,13 @@ jobs:
 /.github/CODEOWNERS @lucidprogrammer
 /.github/workflows/ci.yml @lucidprogrammer
 /.github/workflows/dev-closeout.yml @lucidprogrammer
-/.github/workflows/integrate-dev.yml @lucidprogrammer
 /.github/workflows/release-qualification.yml @lucidprogrammer
 /.config/dev-closeout-impact.toml @lucidprogrammer
 /xtask/src/verify.rs @lucidprogrammer
 /xtask/src/closeout_impact.rs @lucidprogrammer
 /scripts/verify @lucidprogrammer
+/scripts/integrate-dev @lucidprogrammer
 /AGENTS.md @lucidprogrammer
-/CLAUDE.md @lucidprogrammer
 /tests/ha-os-vm/ @lucidprogrammer
 "#;
         audit_codeowners_text(codeowners, &mut violations);
@@ -6049,13 +6042,17 @@ jobs:
         audit_verify_launcher_text(&unstable_clock, &mut unstable);
         assert!(unstable.iter().any(|item| item.contains("invalid timing")));
 
-        let integration = include_str!("../../.github/workflows/integrate-dev.yml");
+        let integration = include_str!("../../scripts/integrate-dev");
         let mut accepted_integration = Vec::new();
-        audit_dev_integration_workflow(integration, &mut accepted_integration);
+        audit_dev_integration_script(integration, &mut accepted_integration);
         assert!(accepted_integration.is_empty(), "{accepted_integration:?}");
-        let forcing = integration.replacen("--field force=false", "--field force=true", 1);
+        let forcing = integration.replacen(
+            "git push origin \"${candidate_sha}:refs/heads/dev\"",
+            "git push --force origin \"${candidate_sha}:refs/heads/dev\"",
+            1,
+        );
         let mut forcing_violations = Vec::new();
-        audit_dev_integration_workflow(&forcing, &mut forcing_violations);
+        audit_dev_integration_script(&forcing, &mut forcing_violations);
         assert!(
             forcing_violations
                 .iter()

@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'usage: scripts/integrate-dev CLOSEOUT_RUN_ID\n' >&2
+}
+
+if [[ "$#" -ne 1 || ! "$1" =~ ^[0-9]+$ ]]; then
+  usage
+  exit 2
+fi
+
+for command in gh git jq mktemp; do
+  command -v "${command}" >/dev/null || {
+    printf 'required command is unavailable: %s\n' "${command}" >&2
+    exit 1
+  }
+done
+
+run_id="$1"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+test -z "$(git status --porcelain=v1)" || {
+  printf 'integration requires a clean Vigil worktree\n' >&2
+  exit 1
+}
+
+repository="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+run_json="$(gh run view "${run_id}" --repo "${repository}" --json conclusion,event,workflowName,url)"
+jq -e '
+  .conclusion == "success" and
+  .event == "pull_request" and
+  .workflowName == "Dev closeout qualification"
+' <<<"${run_json}" >/dev/null || {
+  printf 'run %s is not a successful pull-request development closeout\n' "${run_id}" >&2
+  exit 1
+}
+
+protection="$(gh api "repos/${repository}/branches/dev/protection")" || {
+  printf 'dev branch protection is missing; refusing an unenforced integration\n' >&2
+  exit 1
+}
+jq -e '
+  (.allow_force_pushes.enabled == false) and
+  ([.required_status_checks.contexts[]?, .required_status_checks.checks[]?.context] |
+    index("vigil/change") != null) and
+  ([.required_status_checks.contexts[]?, .required_status_checks.checks[]?.context] |
+    index("vigil/dev-closeout") != null)
+' <<<"${protection}" >/dev/null || {
+  printf 'dev protection must reject force pushes and require both development gates\n' >&2
+  exit 1
+}
+
+receipt_dir="$(mktemp -d "${TMPDIR:-/tmp}/vigil-dev-integration.XXXXXX")"
+trap 'rm -rf -- "${receipt_dir}"' EXIT
+gh run download "${run_id}" --repo "${repository}" \
+  --name dev-closeout-sources --dir "${receipt_dir}/source"
+
+source_receipt="${receipt_dir}/source/dev-closeout-sources.json"
+candidate_sha="$(jq -er '.vigil_sha' "${source_receipt}")"
+dev_base_sha="$(jq -er '.dev_base_sha' "${source_receipt}")"
+context_graph_sha="$(jq -er '.context_graph_sha' "${source_receipt}")"
+contextdb_sha="$(jq -er '.contextdb_sha' "${source_receipt}")"
+
+for value in "${candidate_sha}" "${dev_base_sha}" "${context_graph_sha}" "${contextdb_sha}"; do
+  [[ "${value}" =~ ^[0-9a-fA-F]{40}$ ]] || {
+    printf 'closeout receipt contains a non-exact commit identity\n' >&2
+    exit 1
+  }
+done
+
+gh run download "${run_id}" --repo "${repository}" \
+  --name dev-closeout-impact --dir "${receipt_dir}/impact"
+gh run download "${run_id}" --repo "${repository}" \
+  --name "dev-closeout-qualified-${candidate_sha}" --dir "${receipt_dir}/final"
+
+jq -e --arg candidate "${candidate_sha}" --arg base "${dev_base_sha}" \
+  '.head == $candidate and .base == $base and (.impact == "ordinary" or .impact == "install-expanded")' \
+  "${receipt_dir}/impact/closeout-impact.json" >/dev/null
+jq -e \
+  --arg candidate "${candidate_sha}" \
+  --arg base "${dev_base_sha}" \
+  --arg cg "${context_graph_sha}" \
+  --arg db "${contextdb_sha}" \
+  --arg run "${run_id}" \
+  '.qualified == true and .fast_forward_only == true and .vigil_sha == $candidate and
+   .dev_base_sha == $base and .context_graph_sha == $cg and .contextdb_sha == $db and
+   .workflow_run == $run' \
+  "${receipt_dir}/final/dev-closeout-qualified.json" >/dev/null
+
+test "$(git rev-parse HEAD)" = "${candidate_sha}" || {
+  printf 'worktree HEAD is not the exact qualified commit %s\n' "${candidate_sha}" >&2
+  exit 1
+}
+git fetch --no-tags origin dev
+test "$(git rev-parse origin/dev)" = "${dev_base_sha}" || {
+  printf 'dev moved after closeout; update the branch and qualify the new head\n' >&2
+  exit 1
+}
+test "$(git merge-base "${dev_base_sha}" "${candidate_sha}")" = "${dev_base_sha}" || {
+  printf 'qualified candidate is not a fast-forward of its recorded dev base\n' >&2
+  exit 1
+}
+
+git push origin "${candidate_sha}:refs/heads/dev"
+git fetch --no-tags origin dev
+test "$(git rev-parse origin/dev)" = "${candidate_sha}"
+printf 'dev advanced to exact qualified commit %s\n' "${candidate_sha}"

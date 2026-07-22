@@ -33,7 +33,11 @@ exact = [
 
 [[install_expanded]]
 id = "verification-and-build-setup"
-exact = [".config/dev-closeout-impact.toml", "scripts/verify"]
+exact = [
+  ".config/dev-closeout-impact.toml",
+  "scripts/integrate-dev",
+  "scripts/verify",
+]
 prefix = [".github/workflows/", "xtask/"]
 
 # An unfamiliar root-level file whose name looks like build, packaging,

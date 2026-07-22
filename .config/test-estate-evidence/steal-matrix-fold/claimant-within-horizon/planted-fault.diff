@@ -1,0 +1,13 @@
+--- a/crates/vigil/src/offload_policy.rs
++++ b/crates/vigil/src/offload_policy.rs
+@@ -204,9 +204,7 @@
+     let Some(deadline_ms) = deadline_ms else {
+         return false;
+     };
+-    if now_ms <= deadline_ms {
+-        return false;
+-    }
++    let _ = now_ms;
+     !live_capability_node_ids
+         .iter()
+         .any(|node_id| node_id == claimant_node_id)

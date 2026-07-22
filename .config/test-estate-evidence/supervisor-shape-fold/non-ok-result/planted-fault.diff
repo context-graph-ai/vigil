@@ -1,0 +1,13 @@
+--- a/crates/vigil/src/supervisor.rs
++++ b/crates/vigil/src/supervisor.rs
+@@ -195,9 +195,7 @@
+ /// This is a pure function — testable without network I/O.
+ pub(crate) fn parse_supervisor_mqtt_response(json: &str) -> Option<MqttConfig> {
+     let resp: SupervisorMqttResponse = serde_json::from_str(json).ok()?;
+-    if resp.result.as_deref() != Some("ok") {
+-        return None;
+-    }
++    let _ = &resp.result;
+     let data = resp.data?;
+     let host = data.host.filter(|h| !h.is_empty())?;
+     Some(MqttConfig {

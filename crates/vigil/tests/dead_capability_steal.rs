@@ -70,51 +70,80 @@ async fn within<F: std::future::Future>(fut: F) -> F::Output {
 // Pure decision: horizon AND capability-liveness, together.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn dead_claimant_past_deadline_is_stolen() {
-    // Deadline elapsed AND the claimant absent from the live set → steal.
-    assert!(should_steal_stranded_claim(
-        T0 + HORIZON + 1,
-        Some(T0 + HORIZON),
-        "node-dead",
-        &["node-other".to_string()],
-    ));
+struct DecisionRow {
+    name: &'static str,
+    rationale: &'static str,
+    now: i64,
+    deadline: Option<i64>,
+    claimant: &'static str,
+    live_set: &'static [&'static str],
+    expected: bool,
 }
 
 #[test]
-fn slow_but_alive_claimant_is_never_stolen() {
-    // Deadline long elapsed, but the claimant is STILL re-advertising (present
-    // in the live set) → never stolen. This is the anti-lease-cap guard:
-    // liveness, not the clock, decides.
-    assert!(!should_steal_stranded_claim(
-        T0 + 10 * MINUTE,
-        Some(T0 + HORIZON),
-        "node-slow",
-        &["node-slow".to_string(), "node-other".to_string()],
-    ));
-}
+fn should_steal_stranded_claim_decision_matrix() {
+    let rows: &[DecisionRow] = &[
+        DecisionRow {
+            name: "dead_claimant_past_deadline_is_stolen",
+            rationale: "deadline elapsed AND the claimant absent from the live set → steal",
+            now: T0 + HORIZON + 1,
+            deadline: Some(T0 + HORIZON),
+            claimant: "node-dead",
+            live_set: &["node-other"],
+            expected: true,
+        },
+        DecisionRow {
+            name: "slow_but_alive_claimant_is_never_stolen",
+            rationale: "deadline long elapsed, but the claimant is STILL re-advertising \
+                        (present in the live set) → never stolen; this is the \
+                        anti-lease-cap guard: liveness, not the clock, decides",
+            now: T0 + 10 * MINUTE,
+            deadline: Some(T0 + HORIZON),
+            claimant: "node-slow",
+            live_set: &["node-slow", "node-other"],
+            expected: false,
+        },
+        DecisionRow {
+            name: "claimant_within_horizon_is_not_stolen",
+            rationale: "claimant dead, but the horizon has NOT elapsed yet → do not steal",
+            now: T0 + 1,
+            deadline: Some(T0 + HORIZON),
+            claimant: "node-dead",
+            live_set: &[],
+            expected: false,
+        },
+        DecisionRow {
+            name: "deadlineless_job_is_never_stolen",
+            rationale: "a job with no fallback deadline is not an offload job → never \
+                        stolen, however dead the (nonexistent) claimant",
+            now: T0 + 10 * MINUTE,
+            deadline: None,
+            claimant: "node-dead",
+            live_set: &[],
+            expected: false,
+        },
+    ];
 
-#[test]
-fn claimant_within_horizon_is_not_stolen() {
-    // Claimant dead, but the horizon has NOT elapsed yet → do not steal.
-    assert!(!should_steal_stranded_claim(
-        T0 + 1,
-        Some(T0 + HORIZON),
-        "node-dead",
-        &[],
-    ));
-}
+    let mut failures: Vec<String> = Vec::new();
+    for row in rows {
+        let live_set: Vec<String> = row.live_set.iter().map(|s| s.to_string()).collect();
+        let actual = should_steal_stranded_claim(row.now, row.deadline, row.claimant, &live_set);
+        if actual != row.expected {
+            failures.push(format!(
+                "row `{}` failed: {}\n    inputs: now={} deadline={:?} claimant={:?} live_set={:?}\n    expected={} actual={}",
+                row.name, row.rationale, row.now, row.deadline, row.claimant, row.live_set, row.expected, actual
+            ));
+        }
+    }
 
-#[test]
-fn deadlineless_job_is_never_stolen() {
-    // A job with no fallback deadline is not an offload job → never stolen,
-    // however dead the (nonexistent) claimant.
-    assert!(!should_steal_stranded_claim(
-        T0 + 10 * MINUTE,
-        None,
-        "node-dead",
-        &[],
-    ));
+    if !failures.is_empty() {
+        panic!(
+            "{} of {} should_steal_stranded_claim decision-matrix rows failed:\n{}",
+            failures.len(),
+            rows.len(),
+            failures.join("\n")
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

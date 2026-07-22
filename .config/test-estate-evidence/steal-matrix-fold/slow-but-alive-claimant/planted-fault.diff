@@ -1,0 +1,14 @@
+--- a/crates/vigil/src/offload_policy.rs
++++ b/crates/vigil/src/offload_policy.rs
+@@ -207,9 +207,8 @@
+     if now_ms <= deadline_ms {
+         return false;
+     }
+-    !live_capability_node_ids
+-        .iter()
+-        .any(|node_id| node_id == claimant_node_id)
++    let _ = (claimant_node_id, live_capability_node_ids);
++    true
+ }
+ 
+ /// Render one remote-detection provenance line (criterion C7): every

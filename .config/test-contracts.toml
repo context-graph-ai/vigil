@@ -231,14 +231,11 @@ tests = [
   "vigil::capability_lifecycle::a_restarted_worker_renders_only_its_current_backend", # crates/vigil/tests/capability_lifecycle.rs
   "vigil::capability_lifecycle::offload_routes_to_the_live_worker_never_a_dead_one", # crates/vigil/tests/capability_lifecycle.rs
   "vigil::capability_lifecycle::only_a_dead_worker_means_no_offload", # crates/vigil/tests/capability_lifecycle.rs
-  "vigil::dead_capability_steal::claimant_within_horizon_is_not_stolen", # crates/vigil/tests/dead_capability_steal.rs
-  "vigil::dead_capability_steal::dead_claimant_past_deadline_is_stolen", # crates/vigil/tests/dead_capability_steal.rs
   "vigil::dead_capability_steal::dead_worker_steal_reclaims_locally_with_named_receipt", # crates/vigil/tests/dead_capability_steal.rs
-  "vigil::dead_capability_steal::deadlineless_job_is_never_stolen", # crates/vigil/tests/dead_capability_steal.rs
   "vigil::dead_capability_steal::foreign_node_never_steals", # crates/vigil/tests/dead_capability_steal.rs
   "vigil::dead_capability_steal::own_self_reclaimed_claim_is_never_stolen", # crates/vigil/tests/dead_capability_steal.rs
   "vigil::dead_capability_steal::result_before_steal_makes_steal_a_noop", # crates/vigil/tests/dead_capability_steal.rs
-  "vigil::dead_capability_steal::slow_but_alive_claimant_is_never_stolen", # crates/vigil/tests/dead_capability_steal.rs
+  "vigil::dead_capability_steal::should_steal_stranded_claim_decision_matrix", # crates/vigil/tests/dead_capability_steal.rs
   "vigil::detector_worker::worker_advertises_truthful_backend_claims_materializes_runs_records_once", # crates/vigil/tests/detector_worker.rs
   "vigil::fabric_enrollment::main_prints_join_instruction_and_malformed_ticket_names_fix", # crates/vigil/tests/fabric_enrollment.rs
   "vigil::fabric_worker_lease_knob::explicit_fabric_worker_lease_ms_flows_into_the_claimed_lease_deadline", # crates/vigil/tests/fabric_worker_lease_knob.rs
@@ -538,10 +535,7 @@ tests = [
   "vigil::supervisor::tests::is_flow_create_entry_true_on_create_entry_type", # crates/vigil/src/supervisor.rs
   "vigil::supervisor::tests::parse_flow_id_extracts_from_valid_response", # crates/vigil/src/supervisor.rs
   "vigil::supervisor::tests::parse_flow_id_returns_none_on_missing_field", # crates/vigil/src/supervisor.rs
-  "vigil::supervisor::tests::parse_supervisor_mqtt_response_empty_host_returns_none", # crates/vigil/src/supervisor.rs
-  "vigil::supervisor::tests::parse_supervisor_mqtt_response_malformed_json_returns_none", # crates/vigil/src/supervisor.rs
-  "vigil::supervisor::tests::parse_supervisor_mqtt_response_missing_host_returns_none", # crates/vigil/src/supervisor.rs
-  "vigil::supervisor::tests::parse_supervisor_mqtt_response_non_ok_result_returns_none", # crates/vigil/src/supervisor.rs
+  "vigil::supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape", # crates/vigil/src/supervisor.rs
   "vigil::supervisor::tests::parse_supervisor_mqtt_response_valid", # crates/vigil/src/supervisor.rs
 ]
 

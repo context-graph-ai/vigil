@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "drop the capability-liveness guard so a still-advertising slow claimant is stolen from on the clock alone",
+    "source_sha256": "sha256:b8381c52bb61bf02fc56ee2ae55ba5ddcf47e90e682a86df3e328c16590fb253",
+    "diff": ".config/test-estate-evidence/steal-matrix-fold/slow-but-alive-claimant/planted-fault.diff",
+    "diff_sha256": "sha256:3d895779d7e3b371c3744ac6a285ebd46934d65a5b14c8864f847cbc9491e5aa"
+  },
+  "removed": {
+    "test": "vigil::dead_capability_steal::slow_but_alive_claimant_is_never_stolen",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal slow_but_alive_claimant_is_never_stolen -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.99
+  },
+  "survivor": {
+    "test": "vigil::dead_capability_steal::should_steal_stranded_claim_decision_matrix",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal should_steal_stranded_claim_decision_matrix -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.94
+  }
+}

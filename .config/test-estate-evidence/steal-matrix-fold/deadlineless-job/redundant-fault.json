@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "treat a job with no fallback deadline as infinitely overdue instead of as a non-offload job",
+    "source_sha256": "sha256:b8381c52bb61bf02fc56ee2ae55ba5ddcf47e90e682a86df3e328c16590fb253",
+    "diff": ".config/test-estate-evidence/steal-matrix-fold/deadlineless-job/planted-fault.diff",
+    "diff_sha256": "sha256:3588d3cf50a48f79b2b5e7790614172fcfb8f59cc3c39406a95814695a10adef"
+  },
+  "removed": {
+    "test": "vigil::dead_capability_steal::deadlineless_job_is_never_stolen",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal deadlineless_job_is_never_stolen -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.88
+  },
+  "survivor": {
+    "test": "vigil::dead_capability_steal::should_steal_stranded_claim_decision_matrix",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal should_steal_stranded_claim_decision_matrix -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.93
+  }
+}

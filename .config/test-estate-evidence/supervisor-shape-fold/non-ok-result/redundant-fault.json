@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "stop checking the Supervisor result field so an error response is parsed as a usable broker config",
+    "source_sha256": "sha256:d86b5c3742144b9a29fd81e5e13f775dd67d4b3d5fd3df740e62686b97b6fd1d",
+    "diff": ".config/test-estate-evidence/supervisor-shape-fold/non-ok-result/planted-fault.diff",
+    "diff_sha256": "sha256:667bc61150cc88326b303ed51aa7298cb44a9efaec711c59785c73a2ef6e59f2"
+  },
+  "removed": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_non_ok_result_returns_none",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_non_ok_result_returns_none -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.68
+  },
+  "survivor": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.66
+  }
+}

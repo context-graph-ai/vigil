@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "shift the fallback-horizon comparison by one millisecond so a claim exactly one ms past its deadline is no longer stolen",
+    "source_sha256": "sha256:b8381c52bb61bf02fc56ee2ae55ba5ddcf47e90e682a86df3e328c16590fb253",
+    "diff": ".config/test-estate-evidence/steal-matrix-fold/dead-claimant-past-deadline/planted-fault.diff",
+    "diff_sha256": "sha256:3ec8f27ef32a32dbcb20b130e597ad532e17019992cf72e90468a434750a2bb3"
+  },
+  "removed": {
+    "test": "vigil::dead_capability_steal::dead_claimant_past_deadline_is_stolen",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal dead_claimant_past_deadline_is_stolen -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.88
+  },
+  "survivor": {
+    "test": "vigil::dead_capability_steal::should_steal_stranded_claim_decision_matrix",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal should_steal_stranded_claim_decision_matrix -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.89
+  }
+}

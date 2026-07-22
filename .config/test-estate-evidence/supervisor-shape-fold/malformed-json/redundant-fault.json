@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "fall back to a fabricated ok-response when the Supervisor body is not valid JSON",
+    "source_sha256": "sha256:d86b5c3742144b9a29fd81e5e13f775dd67d4b3d5fd3df740e62686b97b6fd1d",
+    "diff": ".config/test-estate-evidence/supervisor-shape-fold/malformed-json/planted-fault.diff",
+    "diff_sha256": "sha256:69d67bcad1d3409fc9f5b03e0e0cddfced57bf42b3a452e751fa1aa0f5148492"
+  },
+  "removed": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_malformed_json_returns_none",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_malformed_json_returns_none -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.69
+  },
+  "survivor": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.69
+  }
+}

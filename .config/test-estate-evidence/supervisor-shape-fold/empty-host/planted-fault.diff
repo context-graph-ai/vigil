@@ -1,0 +1,11 @@
+--- a/crates/vigil/src/supervisor.rs
++++ b/crates/vigil/src/supervisor.rs
+@@ -199,7 +199,7 @@
+         return None;
+     }
+     let data = resp.data?;
+-    let host = data.host.filter(|h| !h.is_empty())?;
++    let host = data.host?;
+     Some(MqttConfig {
+         broker_host: host,
+         broker_port: data.port.unwrap_or(1883),

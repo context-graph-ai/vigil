@@ -232,37 +232,49 @@ mod tests {
     }
 
     #[test]
-    fn parse_supervisor_mqtt_response_missing_host_returns_none() {
-        let json = r#"{"result":"ok","data":{"port":1883}}"#;
-        assert!(
-            parse_supervisor_mqtt_response(json).is_none(),
-            "missing host must return None — no broker to connect to"
-        );
-    }
+    fn parse_supervisor_mqtt_response_rejects_every_invalid_shape() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "missing_host",
+                r#"{"result":"ok","data":{"port":1883}}"#,
+                "missing host must return None — no broker to connect to",
+            ),
+            (
+                "empty_host",
+                r#"{"result":"ok","data":{"host":"","port":1883}}"#,
+                "empty host must return None",
+            ),
+            (
+                "non_ok_result",
+                r#"{"result":"error","data":{"host":"core-mosquitto"}}"#,
+                "non-ok result must return None",
+            ),
+            (
+                "malformed_json",
+                "not json",
+                "malformed JSON must return None — graceful fallback",
+            ),
+        ];
 
-    #[test]
-    fn parse_supervisor_mqtt_response_empty_host_returns_none() {
-        let json = r#"{"result":"ok","data":{"host":"","port":1883}}"#;
-        assert!(
-            parse_supervisor_mqtt_response(json).is_none(),
-            "empty host must return None"
-        );
-    }
+        let failures: Vec<String> = cases
+            .iter()
+            .filter_map(|(name, json, reason)| {
+                if parse_supervisor_mqtt_response(json).is_none() {
+                    None
+                } else {
+                    Some(format!(
+                        "case `{name}` wrongly accepted input {json:?} — {reason}"
+                    ))
+                }
+            })
+            .collect();
 
-    #[test]
-    fn parse_supervisor_mqtt_response_non_ok_result_returns_none() {
-        let json = r#"{"result":"error","data":{"host":"core-mosquitto"}}"#;
         assert!(
-            parse_supervisor_mqtt_response(json).is_none(),
-            "non-ok result must return None"
-        );
-    }
-
-    #[test]
-    fn parse_supervisor_mqtt_response_malformed_json_returns_none() {
-        assert!(
-            parse_supervisor_mqtt_response("not json").is_none(),
-            "malformed JSON must return None — graceful fallback"
+            failures.is_empty(),
+            "{} of {} invalid-shape cases were wrongly accepted:\n{}",
+            failures.len(),
+            cases.len(),
+            failures.join("\n")
         );
     }
 

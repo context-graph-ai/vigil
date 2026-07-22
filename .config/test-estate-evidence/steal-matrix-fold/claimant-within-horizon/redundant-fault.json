@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "remove the fallback-horizon check entirely so a dead claimant is stolen from before its deadline elapses",
+    "source_sha256": "sha256:b8381c52bb61bf02fc56ee2ae55ba5ddcf47e90e682a86df3e328c16590fb253",
+    "diff": ".config/test-estate-evidence/steal-matrix-fold/claimant-within-horizon/planted-fault.diff",
+    "diff_sha256": "sha256:8bd2284ff0d5eb43aa8ec7a9ac38cc2721c7f6b9448934caeb8dd93610e2c3a1"
+  },
+  "removed": {
+    "test": "vigil::dead_capability_steal::claimant_within_horizon_is_not_stolen",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal claimant_within_horizon_is_not_stolen -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.95
+  },
+  "survivor": {
+    "test": "vigil::dead_capability_steal::should_steal_stranded_claim_decision_matrix",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test dead_capability_steal should_steal_stranded_claim_decision_matrix -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.97
+  }
+}

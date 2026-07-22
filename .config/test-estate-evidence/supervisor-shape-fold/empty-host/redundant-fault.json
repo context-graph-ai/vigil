@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "drop the empty-string host filter so a blank broker host is accepted as a real one",
+    "source_sha256": "sha256:d86b5c3742144b9a29fd81e5e13f775dd67d4b3d5fd3df740e62686b97b6fd1d",
+    "diff": ".config/test-estate-evidence/supervisor-shape-fold/empty-host/planted-fault.diff",
+    "diff_sha256": "sha256:02ce6769260e14e19a53b7815c88d8a5a51436ba114dc9ff7f69bac0f6eb15d4"
+  },
+  "removed": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_empty_host_returns_none",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_empty_host_returns_none -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.66
+  },
+  "survivor": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.66
+  }
+}

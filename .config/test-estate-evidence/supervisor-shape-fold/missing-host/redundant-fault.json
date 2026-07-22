@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "substitute a fabricated broker host when the Supervisor response carries no host at all",
+    "source_sha256": "sha256:d86b5c3742144b9a29fd81e5e13f775dd67d4b3d5fd3df740e62686b97b6fd1d",
+    "diff": ".config/test-estate-evidence/supervisor-shape-fold/missing-host/planted-fault.diff",
+    "diff_sha256": "sha256:1666f2b0a82194b235b7a14011f79eb48a8e87be34e87d1c08121ef9d44fb87b"
+  },
+  "removed": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_missing_host_returns_none",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_missing_host_returns_none -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.64
+  },
+  "survivor": {
+    "test": "vigil::supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.65
+  }
+}

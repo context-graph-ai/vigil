@@ -1,0 +1,20 @@
+--- a/crates/vigil/src/supervisor.rs
++++ b/crates/vigil/src/supervisor.rs
+@@ -194,7 +194,16 @@
+ /// Returns None if the response is missing, has a non-"ok" result, or lacks a host.
+ /// This is a pure function — testable without network I/O.
+ pub(crate) fn parse_supervisor_mqtt_response(json: &str) -> Option<MqttConfig> {
+-    let resp: SupervisorMqttResponse = serde_json::from_str(json).ok()?;
++    let resp: SupervisorMqttResponse =
++        serde_json::from_str(json).unwrap_or(SupervisorMqttResponse {
++            result: Some("ok".to_string()),
++            data: Some(SupervisorMqttData {
++                host: Some("fallback-host".to_string()),
++                port: None,
++                username: None,
++                password: None,
++            }),
++        });
+     if resp.result.as_deref() != Some("ok") {
+         return None;
+     }

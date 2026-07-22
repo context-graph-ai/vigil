@@ -91,10 +91,10 @@ impl FabricDetectorBackend for SpyBackend {
 // ── T1: subprocess (the bug lives in runtime.rs process bring-up) ─────────
 
 fn vigil_binary_path() -> PathBuf {
-    if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
         return PathBuf::from(path);
     }
     workspace_root()

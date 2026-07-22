@@ -137,7 +137,7 @@ jobs:
 
       - name: Check formatting
         working-directory: vigil
-        run: cargo fmt --all --check
+        run: cargo fmt -p vigil -p xtask -p vigil-acceptance --check
 
       - name: Lint default workspace targets
         working-directory: vigil

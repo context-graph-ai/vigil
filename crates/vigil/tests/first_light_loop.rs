@@ -2734,8 +2734,9 @@ fn detector_subprocess_timeout() -> Duration {
 }
 
 fn detector_oracle_binary_path() -> PathBuf {
-    option_env!("CARGO_BIN_EXE_yolox-burn-oracle")
+    std::env::var_os("CARGO_BIN_EXE_yolox-burn-oracle")
         .map(PathBuf::from)
+        .or_else(|| option_env!("CARGO_BIN_EXE_yolox-burn-oracle").map(PathBuf::from))
         .unwrap_or_else(|| {
             vigil_binary_path()
                 .parent()
@@ -3190,10 +3191,10 @@ fn rtsp_port(rtsp_url: &str) -> Option<u16> {
 }
 
 fn vigil_binary_path() -> PathBuf {
-    if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
         return PathBuf::from(path);
     }
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
         return PathBuf::from(path);
     }
     workspace_root()

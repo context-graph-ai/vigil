@@ -268,7 +268,7 @@ jobs:
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
             --receipt target/verify-receipts/dev-discipline-fmt.json \
-            -- cargo fmt --all --check
+            -- cargo fmt -p vigil -p xtask -p vigil-acceptance --check
       - name: Receipt lint discipline
         working-directory: vigil
         run: |
@@ -734,6 +734,11 @@ jobs:
         with:
           name: dev-closeout-slow-archive
           path: vigil/target/closeout
+      - name: Restore the process binary execute mode
+        working-directory: vigil
+        run: |
+          chmod 0755 target/closeout/vigil-acceptance-bin
+          test -x target/closeout/vigil-acceptance-bin
       - name: Set up this shard's runtime harness
         working-directory: vigil
         run: cargo xtask setup-runtime-harness

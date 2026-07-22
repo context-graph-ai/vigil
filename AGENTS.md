@@ -37,17 +37,19 @@ state from the application build outputs present before each command and must st
 queue time, wall time, memory, and disk use before a budget is claimed. A caller cannot label a CI
 run warm or cold.
 
-## Commit and closeout sequence
+## Development and closeout sequence
 
-Each RED commit must have a valid local `scripts/verify change ... --expect red` receipt for the
-plan's exact selection. Each implementation commit runs the same selection with `--expect green`.
-Keep the intentionally RED commit local, then push the RED/GREEN pair to a draft pull request
-targeting `dev`; GitHub runs one cheap default-shape gate at the green checkpoint. Later green
-checkpoints may be pushed while work continues. The full feature matrix, slow archive, containers,
-and release artifacts do not run per commit or per push.
+Use `scripts/verify change` at useful local checkpoints: first to prove the intended test really
+fails with `--expect red`, then to prove the selected behavior with `--expect green`. These checks do
+not prescribe Git history. Work may remain uncommitted, use one commit, or use several commits; an
+agent is not required to push intermediate work or create a pull request while developing. If a
+branch is pushed, the pull-request workflow provides additional cheap default-shape feedback. The
+full feature matrix, slow archive, containers, and release artifacts do not run in the local edit
+cycle.
 
-After implementation and independent review, make the tree clean, settle commit history, update the
-branch against the current `dev`, and record exact Vigil, Context Graph, and ContextDB commits.
+Only closeout requires a remote identity. After implementation and independent review, make the
+tree clean, settle whatever commit history the work needs, push the final candidate, update it
+against the current `dev`, and record exact Vigil, Context Graph, and ContextDB commits.
 Dispatch `dev-closeout.yml` with `--ref dev` and those exact inputs. After it succeeds, dispatch
 `integrate-dev.yml` with `--ref dev`, the same tuple, and the closeout run ID. The trusted integration
 workflow verifies the receipts, confirms `dev` has not moved, and performs a non-forcing ref update.

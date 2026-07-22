@@ -153,21 +153,31 @@ jobs:
           test "$(git rev-parse origin/dev)" = "$DEV_BASE_SHA"
           test "$(git merge-base "$DEV_BASE_SHA" "$VIGIL_SHA")" = "$DEV_BASE_SHA"
           test -z "$(git status --porcelain=v1)"
-          while IFS= read -r path; do
+          while IFS= read -r -d '' path; do
             case "$path" in
-              .cargo/config.toml|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/nextest-inventories.toml|.github/CODEOWNERS|.github/workflows/*|AGENTS.md|scripts/verify|tests/convergence-smoke.sh|xtask/*)
+              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/nextest-inventories.toml|.github/CODEOWNERS|.github/workflows/*|AGENTS.md|Cargo.lock|Cargo.toml|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
                 echo "normal feature integration cannot change trusted verification control plane: $path" >&2
                 echo "route a reviewed control-plane update through the owner bootstrap path" >&2
                 exit 1
                 ;;
             esac
-          done < <(git diff --name-only --diff-filter=ACDMRTUXB "$DEV_BASE_SHA" "$VIGIL_SHA")
+          done < <(git diff --name-only --no-renames -z --diff-filter=ACDMRTUXB "$DEV_BASE_SHA" "$VIGIL_SHA")
 
       - name: Fast-forward dev without a bypass or force update
         env:
           GH_TOKEN: ${{ github.token }}
           VIGIL_SHA: ${{ inputs.vigil_sha }}
+          CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
+          CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
         run: |
+          test "$(gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$CONTEXT_GRAPH_SHA" || {
+            echo "Context Graph dev moved after closeout; qualify the current dependency tuple" >&2
+            exit 1
+          }
+          test "$(gh api repos/context-graph-ai/contextdb/git/ref/heads/dev --jq '.object.sha')" = "$CONTEXTDB_SHA" || {
+            echo "ContextDB dev moved after closeout; qualify the current dependency tuple" >&2
+            exit 1
+          }
           gh api "repos/${GITHUB_REPOSITORY}/git/refs/heads/dev" \
             --method PATCH \
             --field sha="$VIGIL_SHA" \

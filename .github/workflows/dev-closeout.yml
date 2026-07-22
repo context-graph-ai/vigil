@@ -101,6 +101,7 @@ jobs:
       - name: Prove immutable clean identities
         id: identity
         env:
+          GH_TOKEN: ${{ github.token }}
           EXPECTED_VIGIL_SHA: ${{ inputs.vigil_sha }}
           EXPECTED_DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
           EXPECTED_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
@@ -115,6 +116,14 @@ jobs:
           test "$(git -C vigil merge-base "$vigil_sha" "$dev_sha")" = "$dev_sha"
           test "$context_graph_sha" = "$EXPECTED_CONTEXT_GRAPH_SHA"
           test "$contextdb_sha" = "$EXPECTED_CONTEXTDB_SHA"
+          test "$(gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$context_graph_sha" || {
+            echo "Context Graph dev moved; dispatch with its current exact commit" >&2
+            exit 1
+          }
+          test "$(gh api repos/context-graph-ai/contextdb/git/ref/heads/dev --jq '.object.sha')" = "$contextdb_sha" || {
+            echo "ContextDB dev moved; dispatch with its current exact commit" >&2
+            exit 1
+          }
           test -z "$(git -C vigil status --porcelain=v1)"
           test -z "$(git -C context-graph status --porcelain=v1)"
           test -z "$(git -C contextdb status --porcelain=v1)"
@@ -137,15 +146,15 @@ jobs:
           VIGIL_SHA: ${{ inputs.vigil_sha }}
           DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
         run: |
-          while IFS= read -r path; do
+          while IFS= read -r -d '' path; do
             case "$path" in
-              .cargo/config.toml|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/nextest-inventories.toml|.github/CODEOWNERS|.github/workflows/*|AGENTS.md|scripts/verify|tests/convergence-smoke.sh|xtask/*)
+              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/nextest-inventories.toml|.github/CODEOWNERS|.github/workflows/*|AGENTS.md|Cargo.lock|Cargo.toml|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
                 echo "normal feature closeout cannot change trusted verification control plane: $path" >&2
                 echo "route a reviewed control-plane update through the owner bootstrap path" >&2
                 exit 1
                 ;;
             esac
-          done < <(git -C vigil diff --name-only --diff-filter=ACDMRTUXB "$DEV_BASE_SHA" "$VIGIL_SHA")
+          done < <(git -C vigil diff --name-only --no-renames -z --diff-filter=ACDMRTUXB "$DEV_BASE_SHA" "$VIGIL_SHA")
 
       - name: Upload exact source identity
         uses: actions/upload-artifact@v4

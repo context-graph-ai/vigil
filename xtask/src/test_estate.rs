@@ -3618,11 +3618,16 @@ fn audit_ci_compartments(
             "statuses: write",
             "test \"$GITHUB_REF\" = \"refs/heads/dev\"",
             "test \"$GITHUB_SHA\" = \"$DEV_BASE_SHA\"",
+            "repos/context-graph-ai/context-graph/git/ref/heads/dev",
+            "repos/context-graph-ai/contextdb/git/ref/heads/dev",
             "git -C vigil rev-parse origin/dev",
             "git -C vigil merge-base \"$vigil_sha\" \"$dev_sha\"",
             "normal feature closeout cannot change trusted verification control plane",
             ".github/workflows/*",
+            "Cargo.lock|Cargo.toml",
             "xtask/*",
+            "read -r -d '' path",
+            "--name-only --no-renames -z --diff-filter=ACDMRTUXB",
             "cargo xtask closeout-impact",
             "./scripts/verify dev-closeout",
             "jq -r '.impact'",
@@ -3929,7 +3934,12 @@ fn audit_dev_integration_workflow(content: &str, violations: &mut Vec<String>) {
             "git merge-base \"$DEV_BASE_SHA\" \"$VIGIL_SHA\"",
             "normal feature integration cannot change trusted verification control plane",
             ".github/workflows/*",
+            "Cargo.lock|Cargo.toml",
             "xtask/*",
+            "read -r -d '' path",
+            "--name-only --no-renames -z --diff-filter=ACDMRTUXB",
+            "repos/context-graph-ai/context-graph/git/ref/heads/dev",
+            "repos/context-graph-ai/contextdb/git/ref/heads/dev",
             "repos/${GITHUB_REPOSITORY}/git/refs/heads/dev",
             "--field force=false",
         ],
@@ -6008,7 +6018,7 @@ jobs:
                 .any(|item| item.contains("closeout-impact"))
         );
         let self_qualifying_closeout =
-            closeout.replacen(".github/workflows/*", ".github/workflows/none", 1);
+            closeout.replacen("Cargo.lock|Cargo.toml", "Cargo.none|Cargo.none", 1);
         let mut self_qualifying_violations = Vec::new();
         audit_ci_compartments(
             change,
@@ -6019,7 +6029,7 @@ jobs:
         assert!(
             self_qualifying_violations
                 .iter()
-                .any(|item| item.contains(".github/workflows/*"))
+                .any(|item| item.contains("Cargo.lock|Cargo.toml"))
         );
         let archive_decoy = closeout.replacen(
             "-- cargo nextest archive",
@@ -6103,6 +6113,8 @@ jobs:
                 1,
             ),
             integration.replacen(".github/workflows/*", ".github/workflows/none", 1),
+            integration.replacen("Cargo.lock|Cargo.toml", "Cargo.none|Cargo.none", 1),
+            integration.replacen("--name-only --no-renames -z", "--name-only", 1),
         ] {
             let mut weakened_violations = Vec::new();
             audit_dev_integration_workflow(&weakened, &mut weakened_violations);

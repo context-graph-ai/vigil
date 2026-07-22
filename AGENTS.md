@@ -58,6 +58,11 @@ force pushes, and permit checked fast-forwards. `scripts/integrate-dev` refuses 
 push when that protection is absent. `main` is not involved in feature development or `dev`
 closeout; it is only the release line.
 
+GitHub selects pull-request workflow definitions from target `dev`, not from an unmerged workflow
+edit on the feature branch. A change to this verification machinery therefore needs independent
+local review before its one-time fast-forward into `dev`; enable or change protection only after
+the governing workflow is present there. This bootstrap never requires `main`.
+
 Merging `dev` to `main`, tagging, publishing, and promoting artifacts remain owner-authorized release
 actions. Development closeout never grants that authority.
 

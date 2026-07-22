@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+git_common_dir="$(git -C "${repo_root}" rev-parse --git-common-dir)"
+if [[ "${git_common_dir}" != /* ]]; then
+  git_common_dir="${repo_root}/${git_common_dir}"
+fi
+lock_path="${git_common_dir}/vigil-verify.lock"
+
+exec 9>"${lock_path}"
+now_ms() {
+  local nanoseconds
+  nanoseconds="$(date +%s%N)"
+  printf '%s\n' "$(( nanoseconds / 1000000 ))"
+}
+
+path_bytes() {
+  if [[ -e "$1" ]]; then
+    du -sb "$1" | awk '{print $1}'
+  else
+    printf '0\n'
+  fi
+}
+
+available_bytes() {
+  df --output=avail -B1 "$1" | tail -n 1 | tr -d ' '
+}
+
+queue_started_ms="$(now_ms)"
+if ! flock -n 9; then
+  printf 'Vigil compile resource is busy; waiting for the repository-wide lease at %s\n' "${lock_path}" >&2
+  flock 9
+fi
+queue_wait_ms=$(( $(now_ms) - queue_started_ms ))
+
+bootstrap_target_bytes_before="$(path_bytes "${repo_root}/.vigil-tools-target")"
+bootstrap_disk_available_before="$(available_bytes "${repo_root}")"
+bootstrap_started_ms="$(now_ms)"
+time_receipt="$(mktemp "${TMPDIR:-/tmp}/vigil-verify-bootstrap.XXXXXX")"
+trap 'rm -f "${time_receipt}"' EXIT
+/usr/bin/time -f '%M' -o "${time_receipt}" \
+  env CARGO_BUILD_JOBS=2 \
+  cargo build --locked --target-dir "${repo_root}/.vigil-tools-target" -p xtask \
+  --manifest-path "${repo_root}/Cargo.toml"
+bootstrap_wall_ms=$(( $(now_ms) - bootstrap_started_ms ))
+read -r bootstrap_max_rss_kib < "${time_receipt}"
+bootstrap_max_rss_bytes=$(( bootstrap_max_rss_kib * 1024 ))
+bootstrap_target_bytes_after="$(path_bytes "${repo_root}/.vigil-tools-target")"
+bootstrap_disk_available_after="$(available_bytes "${repo_root}")"
+rm -f "${time_receipt}"
+trap - EXIT
+
+cd "${repo_root}"
+exec env \
+  VIGIL_VERIFY_LOCK_FD=9 \
+  VIGIL_VERIFY_QUEUE_WAIT_MS="${queue_wait_ms}" \
+  VIGIL_VERIFY_BOOTSTRAP_WALL_MS="${bootstrap_wall_ms}" \
+  VIGIL_VERIFY_BOOTSTRAP_MAX_RSS_BYTES="${bootstrap_max_rss_bytes}" \
+  VIGIL_VERIFY_BOOTSTRAP_TARGET_BYTES_BEFORE="${bootstrap_target_bytes_before}" \
+  VIGIL_VERIFY_BOOTSTRAP_TARGET_BYTES_AFTER="${bootstrap_target_bytes_after}" \
+  VIGIL_VERIFY_BOOTSTRAP_DISK_AVAILABLE_BEFORE="${bootstrap_disk_available_before}" \
+  VIGIL_VERIFY_BOOTSTRAP_DISK_AVAILABLE_AFTER="${bootstrap_disk_available_after}" \
+  CARGO_BUILD_JOBS=2 \
+  "${repo_root}/.vigil-tools-target/debug/xtask" verify "$@"

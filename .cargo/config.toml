@@ -1,5 +1,7 @@
 [alias]
-xtask = "run -p xtask --"
+# Keep the verifier/bootstrap binary outside the measured Cargo target. This makes a true cold
+# receipt possible: the verifier starts before application/test compilation has populated /target.
+xtask = "run --target-dir .vigil-tools-target -p xtask --"
 test-first-light = "nextest run --release --profile ci-full --workspace --features first-light-acceptance,acceptance -E=binary(first_light_loop)"
 test-acceptance = "nextest run --release --profile ci-full --workspace --features first-light-acceptance,acceptance -E=binary(acceptance)"
 test-ci-full = "nextest run --release --profile ci-full --workspace --features first-light-acceptance,acceptance"

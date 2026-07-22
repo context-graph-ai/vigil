@@ -41,7 +41,3 @@ reason = "Reviewed source-structure regression collection pending behavioral or 
 [[file]]
 path = "crates/vigil/tests/transport_purity.rs"
 reason = "Accepted transport-neutrality architecture guard pending syntax-aware central replacement."
-
-[[file]]
-path = "tests/acceptance/common.rs"
-reason = "Container acceptance stages the checked-in static Dockerfile and one host binary into an exact temporary context; the real container health, isolation, persistence, and shutdown probes provide behavioral evidence."

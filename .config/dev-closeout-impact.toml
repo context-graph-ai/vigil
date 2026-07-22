@@ -1,0 +1,75 @@
+rule_version = 1
+
+# These rules decide whether development closeout must also prove the shipped
+# install/container shapes. They are deliberately repository-owned: callers
+# cannot pass a flag that downgrades an install-expanded change to ordinary.
+
+[[install_expanded]]
+id = "workspace-build-graph"
+exact = ["Cargo.lock", "rust-toolchain", "rust-toolchain.toml"]
+prefix = [".cargo/"]
+basename = ["Cargo.toml", "build.rs"]
+
+[[install_expanded]]
+id = "native-build-input"
+basename = ["CMakeLists.txt", "Makefile"]
+suffix = [".c", ".cc", ".cpp", ".h", ".hpp", ".proto"]
+
+[[install_expanded]]
+id = "container-and-addon"
+exact = [".dockerignore"]
+prefix = ["addons/"]
+basename = ["runtime-packages.yaml"]
+basename_prefix = ["Dockerfile", "Containerfile"]
+
+[[install_expanded]]
+id = "install-acceptance-harness"
+exact = [
+  "tests/acceptance/common.rs",
+  "tests/acceptance/installable_substrate.rs",
+  "tests/convergence-smoke.sh",
+  "tests/setup-rtsp-harness.sh",
+]
+
+[[install_expanded]]
+id = "verification-and-build-setup"
+exact = [
+  ".config/dev-closeout-impact.toml",
+  "scripts/verify",
+]
+prefix = [".github/workflows/", "xtask/"]
+
+# An unfamiliar root-level file whose name looks like build, packaging,
+# container, release, image, or artifact substrate fails closed. Adding a real
+# exception requires changing and reviewing this config, not a command flag.
+[unknown_top_level]
+name_fragments = [
+  "artifact",
+  "build",
+  "container",
+  "deploy",
+  "dist",
+  "docker",
+  "image",
+  "install",
+  "package",
+  "publish",
+  "release",
+]
+
+# A normal Rust source path can still change whether the shipped musl or CPU
+# architecture builds compile. Only changed lines are scanned; ordinary
+# behavior edits remain ordinary.
+[platform_sensitive_diff]
+suffixes = [".rs"]
+markers = [
+  "target_arch",
+  "target_env",
+  "target_family",
+  "target_os",
+  "cfg(unix)",
+  "cfg!(unix)",
+  "cfg(linux)",
+  "cfg!(linux)",
+  "musl",
+]

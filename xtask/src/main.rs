@@ -6,7 +6,9 @@ use std::process::{Command, ExitCode};
 
 use sha2::{Digest, Sha256};
 
+mod closeout_impact;
 mod test_estate;
+mod verify;
 
 const PERSON_SHA: &str = "a65415f0da868f59014777ace1b702f6d7c6274c18e5af3e344cf710c37526ea";
 const EMPTY_SHA: &str = "2d4c35233e497d1c81d2a08187e856b5aba84acaf4f10cb47ccd33b9b5edee63";
@@ -35,8 +37,10 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         }
         Some("test-contract-proposal") => test_estate::propose_test_contracts(&args[1..]),
         Some("test-baseline-proposal") => test_estate::propose_test_baseline(&args[1..]),
+        Some("closeout-impact") => closeout_impact::run(&args[1..]),
+        Some("verify") => verify::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask <setup-harness|setup-runtime-harness|test-estate-check [--docs PATH] [--nextest-json SHAPE=PATH]...|test-estate-proposal|documentation-contract-proposal [--docs PATH]|test-contract-proposal|test-baseline-proposal [--root PATH]>"
+            "usage: cargo xtask <setup-harness|setup-runtime-harness|test-estate-check [--docs PATH] [--nextest-json SHAPE=PATH]...|test-estate-proposal|documentation-contract-proposal [--docs PATH]|test-contract-proposal|test-baseline-proposal [--root PATH]|closeout-impact --base SHA --head SHA --json PATH|verify <change|dev-closeout|release> ...>"
                 .to_string(),
         ),
     }

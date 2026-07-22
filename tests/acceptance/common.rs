@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -20,21 +20,12 @@ pub(crate) struct VigilBinary {
 
 impl VigilBinary {
     pub(crate) fn new() -> Self {
-        if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
-            return Self {
-                path: PathBuf::from(path),
-            };
-        }
-        if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
-            return Self {
-                path: PathBuf::from(path),
-            };
-        }
-        let path = workspace_root()
-            .join("target")
-            .join("debug")
-            .join(binary_name("vigil"));
-        ensure_vigil_binary();
+        let path = resolve_vigil_binary(
+            std::env::var_os("VIGIL_ACCEPTANCE_BIN"),
+            std::env::var_os("CARGO_BIN_EXE_vigil"),
+            option_env!("CARGO_BIN_EXE_vigil"),
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
         Self { path }
     }
 
@@ -44,6 +35,41 @@ impl VigilBinary {
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+fn resolve_vigil_binary(
+    acceptance_binary: Option<OsString>,
+    cargo_runtime_binary: Option<OsString>,
+    cargo_build_binary: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = acceptance_binary {
+        return require_binary("VIGIL_ACCEPTANCE_BIN", PathBuf::from(path));
+    }
+    if let Some(path) = cargo_runtime_binary {
+        return require_binary("CARGO_BIN_EXE_vigil", PathBuf::from(path));
+    }
+    if let Some(path) = cargo_build_binary {
+        return require_binary("CARGO_BIN_EXE_vigil", PathBuf::from(path));
+    }
+    Err("acceptance requires a prebuilt Vigil executable; set VIGIL_ACCEPTANCE_BIN to the exact binary under test (archive runners must point it at the extracted nextest artifact)".to_string())
+}
+
+fn require_binary(source: &str, path: PathBuf) -> Result<PathBuf, String> {
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "{source} points to missing Vigil executable {}; acceptance never builds artifacts inside a test process",
+            path.display()
+        ))
+    }
+}
+
+fn resolve_acceptance_image(image: Option<String>) -> Result<String, String> {
+    match image.map(|image| image.trim().to_string()) {
+        Some(image) if !image.is_empty() => Ok(image),
+        _ => Err("container acceptance requires a prebuilt image; set VIGIL_ACCEPTANCE_IMAGE to the exact image tag or digest under test".to_string()),
     }
 }
 
@@ -532,10 +558,14 @@ pub(crate) struct StoreIdentity {
 pub(crate) struct DockerProbe;
 
 impl DockerProbe {
+    pub(crate) fn image() -> String {
+        resolve_acceptance_image(std::env::var("VIGIL_ACCEPTANCE_IMAGE").ok())
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
     pub(crate) fn image_healthcheck(image: &str) -> DockerObservation {
-        let build = Self::build_current_image(image);
-        if !build.command_succeeded {
-            return build;
+        if !docker_available() {
+            return DockerObservation::unavailable();
         }
         let inspect = command_output(
             "docker",
@@ -553,7 +583,10 @@ impl DockerProbe {
                 .as_ref()
                 .map(|output| output.status.success())
                 .unwrap_or(false),
-            stdout: build.stdout,
+            stdout: inspect
+                .as_ref()
+                .map(output_combined_text_ref)
+                .unwrap_or_default(),
             container_logs: String::new(),
             healthcheck: inspect.map(output_combined_text).unwrap_or_default(),
         }
@@ -573,9 +606,9 @@ impl DockerProbe {
         host_port: Option<u16>,
         network_none: bool,
     ) -> DockerObservation {
-        let build = Self::build_current_image(image);
-        if !build.command_succeeded {
-            return build;
+        let image_inspection = Self::inspect_prebuilt_image(image);
+        if !image_inspection.command_succeeded {
+            return image_inspection;
         }
         let name = unique_container_name();
         let volume_arg = format!("{}:/data", volume.display());
@@ -611,7 +644,7 @@ impl DockerProbe {
         args.extend([image, "run"]);
 
         let _ = command_output("docker", ["rm", "-f", &name]);
-        let mut output = build.stdout;
+        let mut output = image_inspection.stdout;
         let mut container_logs = String::new();
         let started = command_output("docker", args)
             .map(|run| {
@@ -664,131 +697,21 @@ impl DockerProbe {
         }
     }
 
-    fn build_current_image(image: &str) -> DockerObservation {
-        static BUILDS: OnceLock<Mutex<BTreeMap<String, DockerObservation>>> = OnceLock::new();
-        let builds = BUILDS.get_or_init(|| Mutex::new(BTreeMap::new()));
-        let mut builds = builds
-            .lock()
-            .expect("Docker image build cache lock poisoned");
-        if let Some(observation) = builds.get(image) {
-            return observation.clone();
-        }
-        let observation = Self::build_current_image_uncached(image);
-        builds.insert(image.to_string(), observation.clone());
-        observation
-    }
-
-    fn build_current_image_uncached(image: &str) -> DockerObservation {
+    fn inspect_prebuilt_image(image: &str) -> DockerObservation {
         if !docker_available() {
             return DockerObservation::unavailable();
         }
-        let mut stdout = String::new();
-        let (target, docker_arch) = if cfg!(target_arch = "x86_64") {
-            ("x86_64-unknown-linux-musl", "amd64")
-        } else if cfg!(target_arch = "aarch64") {
-            ("aarch64-unknown-linux-musl", "arm64")
-        } else {
-            return DockerObservation {
-                docker_available: true,
-                command_succeeded: false,
-                stdout: format!(
-                    "container acceptance has no static image target for host architecture {}\n",
-                    std::env::consts::ARCH
-                ),
-                container_logs: String::new(),
-                healthcheck: String::new(),
-            };
-        };
-        let cargo_args = [
-            "build",
-            "-p",
-            "vigil",
-            "--release",
-            "--target",
-            target,
-            "--features",
-            "fabric",
-        ];
-        let Some(build) = command_output_in_dir(env!("CARGO"), cargo_args, &workspace_root())
-        else {
-            return DockerObservation {
-                docker_available: true,
-                command_succeeded: false,
-                stdout: "could not run cargo build before docker build\n".to_string(),
-                container_logs: String::new(),
-                healthcheck: String::new(),
-            };
-        };
-        let success = build.status.success();
-        stdout.push_str(&output_combined_text(build));
-        if !success {
-            return DockerObservation {
-                docker_available: true,
-                command_succeeded: false,
-                stdout,
-                container_logs: String::new(),
-                healthcheck: String::new(),
-            };
-        }
-
-        let context = match tempfile::tempdir() {
-            Ok(context) => context,
-            Err(error) => {
-                stdout.push_str(&format!("create minimal Docker context: {error}\n"));
-                return DockerObservation {
-                    docker_available: true,
-                    command_succeeded: false,
-                    stdout,
-                    container_logs: String::new(),
-                    healthcheck: String::new(),
-                };
-            }
-        };
-        let staged_dir = context.path().join("dist/docker").join(docker_arch);
-        let source_binary = workspace_root()
-            .join("target")
-            .join(target)
-            .join("release")
-            .join(binary_name("vigil"));
-        let staged = fs::create_dir_all(&staged_dir)
-            .and_then(|()| {
-                fs::copy(
-                    workspace_root().join("Dockerfile"),
-                    context.path().join("Dockerfile"),
-                )
-            })
-            .and_then(|_| fs::copy(&source_binary, staged_dir.join("vigil")));
-        if let Err(error) = staged {
-            stdout.push_str(&format!(
-                "stage exact Docker context from {}: {error}\n",
-                source_binary.display()
-            ));
-            return DockerObservation {
-                docker_available: true,
-                command_succeeded: false,
-                stdout,
-                container_logs: String::new(),
-                healthcheck: String::new(),
-            };
-        }
-        let build = Command::new("docker")
-            .env("DOCKER_BUILDKIT", "0")
-            .args(["build", "--pull=false", "--build-arg"])
-            .arg(format!("TARGETARCH={docker_arch}"))
-            .args(["-t", image])
-            .arg(context.path())
-            .output()
-            .ok();
-        if let Some(output) = build.as_ref() {
-            stdout.push_str(&output_combined_text_ref(output));
-        }
+        let inspect = command_output("docker", ["image", "inspect", image]);
         DockerObservation {
             docker_available: true,
-            command_succeeded: build
+            command_succeeded: inspect
                 .as_ref()
                 .map(|output| output.status.success())
                 .unwrap_or(false),
-            stdout,
+            stdout: inspect
+                .as_ref()
+                .map(output_combined_text_ref)
+                .unwrap_or_else(|| format!("could not inspect prebuilt image {image}\n")),
             container_logs: String::new(),
             healthcheck: String::new(),
         }
@@ -1200,18 +1123,6 @@ fn parse_stat_ppid(stat: &str) -> Option<u32> {
     stat[close + 2..].split_whitespace().nth(1)?.parse().ok()
 }
 
-fn ensure_vigil_binary() {
-    static BUILD_ONCE: OnceLock<()> = OnceLock::new();
-    BUILD_ONCE.get_or_init(|| {
-        let status = Command::new(env!("CARGO"))
-            .current_dir(workspace_root())
-            .args(["build", "-p", "vigil", "--bin", "vigil"])
-            .status()
-            .expect("cargo build -p vigil --bin vigil should run");
-        assert!(status.success(), "cargo build -p vigil --bin vigil failed");
-    });
-}
-
 fn command_status<I, S>(program: &str, args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -1236,18 +1147,6 @@ where
     S: AsRef<OsStr>,
 {
     Command::new(program).args(args).output().ok()
-}
-
-fn command_output_in_dir<I, S>(program: &str, args: I, dir: &Path) -> Option<Output>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    Command::new(program)
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .ok()
 }
 
 fn output_combined_text(output: Output) -> String {
@@ -1416,20 +1315,15 @@ fn escape_toml_path(path: &Path) -> String {
     path.display().to_string().replace('\\', "\\\\")
 }
 
-fn binary_name(binary: &str) -> String {
-    if cfg!(windows) {
-        format!("{binary}.exe")
-    } else {
-        binary.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{direct_child_target_is_safe, free_port, network_line_is_outbound, workspace_root};
+    use super::{
+        direct_child_target_is_safe, free_port, network_line_is_outbound, resolve_acceptance_image,
+        resolve_vigil_binary, workspace_root,
+    };
 
     #[test]
     fn free_port_allocates_unique_ports_within_acceptance_process() {
@@ -1494,6 +1388,12 @@ mod tests {
         ];
         let allowed_libc_kill_path = root.join("tests/acceptance/common.rs");
         let libc_kill = ["libc", "::", "kill", "("].concat();
+        let artifact_build_patterns = [
+            ["env!(\"", "CARGO", "\")"].concat(),
+            ["Command::new(\"", "cargo", "\")"].concat(),
+            ["command_output(\"", "cargo", "\""].concat(),
+            ["\"docker\", [\"", "build", "\""].concat(),
+        ];
         let mut libc_kill_locations = Vec::new();
         let mut violations = Vec::new();
 
@@ -1506,19 +1406,58 @@ mod tests {
                 }
             }
             if source.contains(&libc_kill) {
-                libc_kill_locations.push(path);
+                libc_kill_locations.push(path.clone());
+            }
+            for pattern in &artifact_build_patterns {
+                if source.contains(pattern) {
+                    violations.push(format!(
+                        "{} invokes an artifact builder inside a test process: {pattern}",
+                        path.display()
+                    ));
+                }
             }
         }
 
         assert!(
             violations.is_empty(),
-            "acceptance cleanup must not contain wildcard/process-group kill paths:\n{}",
+            "acceptance tests must not contain unsafe cleanup or nested artifact builds:\n{}",
             violations.join("\n")
         );
         assert_eq!(
             libc_kill_locations,
-            vec![allowed_libc_kill_path],
+            vec![allowed_libc_kill_path.clone()],
             "raw signal syscalls must stay centralized in the positive direct-child cleanup helper"
+        );
+        let artifacts = tempfile::tempdir().expect("artifact resolver tempdir");
+        let explicit = artifacts.path().join("explicit-vigil");
+        let cargo = artifacts.path().join("cargo-vigil");
+        fs::write(&explicit, b"explicit").expect("write explicit fixture");
+        fs::write(&cargo, b"cargo").expect("write Cargo fixture");
+        assert_eq!(
+            resolve_vigil_binary(
+                Some(explicit.clone().into_os_string()),
+                Some(cargo.into_os_string()),
+                None,
+            )
+            .expect("explicit acceptance binary"),
+            explicit,
+            "VIGIL_ACCEPTANCE_BIN must override Cargo-provided paths for relocated archives"
+        );
+        let missing = artifacts.path().join("missing-vigil");
+        let error = resolve_vigil_binary(Some(missing.into_os_string()), None, None)
+            .expect_err("missing explicit artifact must fail closed");
+        assert!(
+            error.contains("never builds artifacts inside a test process"),
+            "missing artifact error must explain the no-build contract: {error}"
+        );
+        assert_eq!(
+            resolve_acceptance_image(Some("  vigil:test-sha  ".to_string()))
+                .expect("explicit image"),
+            "vigil:test-sha"
+        );
+        assert!(
+            resolve_acceptance_image(Some(String::new())).is_err(),
+            "an empty prebuilt image identity must fail closed"
         );
     }
 

@@ -491,10 +491,10 @@ fn vigil_standalone_idle_rss_stays_below_100mb_without_growth() {
 
 #[test]
 fn vigil_container_healthcheck_serves_ready_and_stops_cleanly() {
-    let image = "vigil:local";
-    let observation = DockerProbe::image_healthcheck(image);
+    let image = DockerProbe::image();
+    let observation = DockerProbe::image_healthcheck(&image);
     let volume = TempDir::new().expect("tempdir");
-    let runtime = DockerProbe::run_volume_probe(image, volume.path());
+    let runtime = DockerProbe::run_volume_probe(&image, volume.path());
     let mut failures = Vec::new();
 
     if !observation.docker_available {
@@ -524,12 +524,12 @@ fn vigil_container_healthcheck_serves_ready_and_stops_cleanly() {
 
 #[test]
 fn vigil_container_persistent_volume_reopens_same_store() {
-    let image = "vigil:local";
+    let image = DockerProbe::image();
     let volume = TempDir::new().expect("tempdir");
     let store_path = volume.path().join("store.contextgraph");
-    let first = DockerProbe::run_volume_probe(image, volume.path());
+    let first = DockerProbe::run_volume_probe(&image, volume.path());
     let before = StoreProbe::new(&store_path).identity();
-    let second = DockerProbe::run_volume_probe(image, volume.path());
+    let second = DockerProbe::run_volume_probe(&image, volume.path());
     let after = StoreProbe::new(&store_path).identity();
     let probe = StoreProbe::new(&store_path).open_existing();
     let mut failures = Vec::new();
@@ -560,10 +560,10 @@ fn vigil_container_persistent_volume_reopens_same_store() {
 
 #[test]
 fn vigil_container_first_start_health_succeeds_with_network_none() {
-    let image = "vigil:local";
+    let image = DockerProbe::image();
     let volume = TempDir::new().expect("tempdir");
-    let healthcheck = DockerProbe::image_healthcheck(image);
-    let observation = DockerProbe::run_network_none_probe(image, volume.path());
+    let healthcheck = DockerProbe::image_healthcheck(&image);
+    let observation = DockerProbe::run_network_none_probe(&image, volume.path());
     let store_path = volume.path().join("store.contextgraph");
     let probe = StoreProbe::new(&store_path).open_existing();
     let mut failures = Vec::new();

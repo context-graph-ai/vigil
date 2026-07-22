@@ -125,28 +125,38 @@ fn vigil_standalone_first_start_opens_local_context_graph_store() {
 
     match VigilProcess::spawn_network_traced(&binary, &config_path, env_port) {
         Ok(mut process) => {
+            let spawned_pid = pid_of(&process);
             if !process
                 .health()
                 .wait_for_status(200, Duration::from_secs(2))
             {
                 failures.push("health did not reach 200 on env-selected port".to_string());
             }
-            let health_owner = process.health().listener_owned_by_pid(pid_of(&process));
+            let health_owner = process.health().listener_owned_by_process_tree(spawned_pid);
             if !health_owner.owned {
-                failures.push(health_owner.detail);
+                failures.push(health_owner.detail.clone());
             }
             let live_lock = StoreProbe::new(&store_path).live_lock_held();
             if !live_lock.locked {
                 failures.push(live_lock.detail);
             }
-            let live_file = StoreProbe::new(&store_path).live_database_file_open(pid_of(&process));
-            if !live_file.open {
-                failures.push(live_file.detail);
+            let live_file =
+                StoreProbe::new(&store_path).live_database_file_open_by_process_tree(spawned_pid);
+            if !live_file.owned {
+                failures.push(live_file.detail.clone());
             }
             let contention =
-                StoreProbe::new(&store_path).public_open_blocked_by_process(pid_of(&process));
-            if !contention.blocked {
-                failures.push(contention.detail);
+                StoreProbe::new(&store_path).public_open_blocked_by_process_tree(spawned_pid);
+            if !contention.owned {
+                failures.push(contention.detail.clone());
+            }
+            if health_owner.owner_pid != live_file.owner_pid
+                || live_file.owner_pid != contention.owner_pid
+            {
+                failures.push(format!(
+                    "health listener, open store file, and store lock were not held by the same process; health={:?}, file={:?}, lock={:?}",
+                    health_owner.owner_pid, live_file.owner_pid, contention.owner_pid
+                ));
             }
             if HealthProbe::new(toml_port).status() == Some(200) {
                 failures.push("TOML health port won over environment override".to_string());

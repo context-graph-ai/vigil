@@ -360,6 +360,32 @@ impl HealthProbe {
             ),
         }
     }
+
+    pub(crate) fn listener_owned_by_process_tree(
+        &self,
+        root_pid: u32,
+    ) -> ProcessTreeOwnerProbeResult {
+        let inodes = listening_socket_inodes(self.address.port());
+        if inodes.is_empty() {
+            return ProcessTreeOwnerProbeResult::failure(format!(
+                "no listening socket inode found for health port {}",
+                self.address.port()
+            ));
+        }
+        let owners = processes_with_fd(|entry| {
+            fs::read_link(entry).ok().is_some_and(|target| {
+                let target = target.to_string_lossy();
+                inodes
+                    .iter()
+                    .any(|inode| target.as_ref() == format!("socket:[{inode}]"))
+            })
+        });
+        process_tree_owner_result(
+            root_pid,
+            owners,
+            format!("health port {} listener", self.address.port()),
+        )
+    }
 }
 
 pub(crate) struct StoreProbe {
@@ -483,6 +509,38 @@ impl StoreProbe {
         }
     }
 
+    pub(crate) fn live_database_file_open_by_process_tree(
+        &self,
+        root_pid: u32,
+    ) -> ProcessTreeOwnerProbeResult {
+        let Ok(expected_metadata) = fs::metadata(&self.path) else {
+            return ProcessTreeOwnerProbeResult::failure(format!(
+                "store path was not statable: {}",
+                self.path.display()
+            ));
+        };
+        let owners = processes_with_fd(|entry| {
+            #[cfg(unix)]
+            {
+                fs::metadata(entry).ok().is_some_and(|metadata| {
+                    metadata.dev() == expected_metadata.dev()
+                        && metadata.ino() == expected_metadata.ino()
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                fs::read_link(entry)
+                    .ok()
+                    .is_some_and(|target| target == self.path)
+            }
+        });
+        process_tree_owner_result(
+            root_pid,
+            owners,
+            format!("store database file {}", self.path.display()),
+        )
+    }
+
     pub(crate) fn public_open_blocked_by_process(&self, pid: u32) -> StoreContentionProbeResult {
         let config = StoreConfig {
             db_path: self.path.clone(),
@@ -518,6 +576,44 @@ impl StoreProbe {
             }
         }
     }
+
+    pub(crate) fn public_open_blocked_by_process_tree(
+        &self,
+        root_pid: u32,
+    ) -> ProcessTreeOwnerProbeResult {
+        let config = StoreConfig {
+            db_path: self.path.clone(),
+            default_text_embedder: Some(EmbedderConfig::disabled()),
+            ..StoreConfig::default()
+        };
+        match Store::open(config) {
+            Ok(store) => ProcessTreeOwnerProbeResult::failure(format!(
+                "public Store::open unexpectedly succeeded while process tree {root_pid} should hold {}",
+                store.db_path().display()
+            )),
+            Err(error) => match &error {
+                context_graph::CgError::StoreLocked { holder_pid, .. } => {
+                    let holder_pid = *holder_pid;
+                    if process_is_or_descendant(root_pid, holder_pid) {
+                        ProcessTreeOwnerProbeResult {
+                            owned: true,
+                            owner_pid: Some(holder_pid),
+                            detail: format!(
+                                "public Store::open was blocked by pid {holder_pid} in spawned process tree {root_pid}"
+                            ),
+                        }
+                    } else {
+                        ProcessTreeOwnerProbeResult::failure(format!(
+                            "public Store::open contention holder pid {holder_pid} was not spawned pid {root_pid} or its descendant: {error:?}"
+                        ))
+                    }
+                }
+                _ => ProcessTreeOwnerProbeResult::failure(format!(
+                    "public Store::open contention result was not StoreLocked: {error:?}"
+                )),
+            },
+        }
+    }
 }
 
 pub(crate) struct StoreProbeResult {
@@ -543,6 +639,22 @@ pub(crate) struct StoreContentionProbeResult {
 pub(crate) struct HealthOwnerProbeResult {
     pub(crate) owned: bool,
     pub(crate) detail: String,
+}
+
+pub(crate) struct ProcessTreeOwnerProbeResult {
+    pub(crate) owned: bool,
+    pub(crate) owner_pid: Option<u32>,
+    pub(crate) detail: String,
+}
+
+impl ProcessTreeOwnerProbeResult {
+    fn failure(detail: String) -> Self {
+        Self {
+            owned: false,
+            owner_pid: None,
+            detail,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1083,6 +1195,67 @@ fn process_parent_id(pid: u32) -> Option<u32> {
     fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
         .and_then(|stat| parse_stat_ppid(&stat))
+}
+
+fn process_is_or_descendant(root_pid: u32, candidate_pid: u32) -> bool {
+    let mut current = candidate_pid;
+    let mut visited = BTreeSet::new();
+    loop {
+        if current == root_pid {
+            return true;
+        }
+        if current <= 1 || !visited.insert(current) {
+            return false;
+        }
+        let Some(parent) = process_parent_id(current) else {
+            return false;
+        };
+        current = parent;
+    }
+}
+
+fn processes_with_fd(mut matches: impl FnMut(&Path) -> bool) -> Vec<u32> {
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut owners = processes
+        .flatten()
+        .filter_map(|process| {
+            let pid = process.file_name().to_string_lossy().parse::<u32>().ok()?;
+            let fds = fs::read_dir(process.path().join("fd")).ok()?;
+            fds.flatten()
+                .any(|entry| matches(&entry.path()))
+                .then_some(pid)
+        })
+        .collect::<Vec<_>>();
+    owners.sort_unstable();
+    owners.dedup();
+    owners
+}
+
+fn process_tree_owner_result(
+    root_pid: u32,
+    owners: Vec<u32>,
+    resource: String,
+) -> ProcessTreeOwnerProbeResult {
+    match owners.as_slice() {
+        [owner_pid] if process_is_or_descendant(root_pid, *owner_pid) => {
+            ProcessTreeOwnerProbeResult {
+                owned: true,
+                owner_pid: Some(*owner_pid),
+                detail: format!(
+                    "{resource} is owned exactly once by pid {owner_pid} in spawned process tree {root_pid}"
+                ),
+            }
+        }
+        [owner_pid] => ProcessTreeOwnerProbeResult::failure(format!(
+            "{resource} owner pid {owner_pid} was not spawned pid {root_pid} or its descendant"
+        )),
+        [] => ProcessTreeOwnerProbeResult::failure(format!("{resource} had no owning process")),
+        _ => ProcessTreeOwnerProbeResult::failure(format!(
+            "{resource} had multiple owning processes {owners:?}; expected exactly one"
+        )),
+    }
 }
 
 fn descendant_pids(root: u32) -> Vec<u32> {

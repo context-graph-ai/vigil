@@ -21,6 +21,18 @@ const DEFAULT_EVENT_LIMIT: usize = 100;
 const MAX_CORRECTION_BODY_BYTES: usize = 64 * 1024;
 const MAX_REVIEW_DATA_PLANE_MEDIA_HANDLERS: usize = 16;
 
+// ── Published HTTP route surface ───────────────────────────────────────────
+//
+// These path strings are the caller-facing contract on this in-process
+// review data plane — a Home Assistant automation or browser script may
+// bind to them directly. Renaming one is a deliberate, reviewed change to a
+// published identifier, not a routine refactor — see
+// `crates/vigil/tests/http_route_contract.rs`.
+pub const EVENTS_ROUTE: &str = "/events";
+pub const WHY_ROUTE_PREFIX: &str = "/why/";
+pub const CORRECTION_ROUTE: &str = "/correction";
+pub const MEDIA_ROUTE_PREFIX: &str = "/media/";
+
 struct ShutdownAwareReader<R> {
     inner: R,
     shutdown: Arc<AtomicBool>,
@@ -193,7 +205,7 @@ fn is_media_request(request: &Request) -> bool {
             .split('?')
             .next()
             .unwrap_or(request.url())
-            .starts_with("/media/")
+            .starts_with(MEDIA_ROUTE_PREFIX)
 }
 
 fn join_finished_handlers(handlers: &mut Vec<JoinHandle<()>>) {
@@ -220,10 +232,10 @@ fn handle_request(mut request: Request, store: Arc<Store>, clock: &PersistedCloc
     let raw_url = request.url().to_string();
     let path = raw_url.split('?').next().unwrap_or(raw_url.as_str());
     let response = match (&method, path) {
-        (Method::Get, "/events") => events_response(&store, &raw_url),
-        (Method::Get, path) if path.starts_with("/why/") => why_response(&store, path),
-        (Method::Post, "/correction") => correction_response(&store, &mut request, clock),
-        (Method::Post, "/events") => json_error(405, "method_not_allowed"),
+        (Method::Get, EVENTS_ROUTE) => events_response(&store, &raw_url),
+        (Method::Get, path) if path.starts_with(WHY_ROUTE_PREFIX) => why_response(&store, path),
+        (Method::Post, CORRECTION_ROUTE) => correction_response(&store, &mut request, clock),
+        (Method::Post, EVENTS_ROUTE) => json_error(405, "method_not_allowed"),
         _ => json_error(404, "not_found"),
     };
     let _ = request.respond(response);
@@ -276,7 +288,7 @@ fn event_row_json(row: &EventRow) -> Value {
 }
 
 fn why_response(store: &Store, path: &str) -> Response<Box<dyn Read + Send>> {
-    let detection_id = path.trim_start_matches("/why/");
+    let detection_id = path.trim_start_matches(WHY_ROUTE_PREFIX);
     if detection_id.is_empty() || detection_id == "--latest" {
         return json_error(404, "not_found");
     }
@@ -476,7 +488,7 @@ fn media_response(
 }
 
 fn media_file_name(path: &str) -> Option<String> {
-    let encoded = path.strip_prefix("/media/")?;
+    let encoded = path.strip_prefix(MEDIA_ROUTE_PREFIX)?;
     let decoded = percent_decode(encoded)?;
     if decoded.is_empty()
         || decoded.contains('/')
@@ -495,7 +507,7 @@ fn media_route(source_ref: &str) -> String {
     source_ref
         .strip_prefix("vigil-edge:clip/")
         .filter(|name| !name.is_empty() && !name.contains('/'))
-        .map(|name| format!("/media/{}", percent_encode_path_segment(name)))
+        .map(|name| format!("{MEDIA_ROUTE_PREFIX}{}", percent_encode_path_segment(name)))
         .unwrap_or_default()
 }
 

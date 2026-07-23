@@ -5,6 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+/// The liveness-probe route. The Home Assistant Supervisor watchdog and any
+/// external monitor polls this path; renaming it is a deliberate, reviewed
+/// change to a published identifier, not a routine refactor — see
+/// `crates/vigil/tests/http_route_contract.rs`.
+pub const HEALTH_PATH: &str = "/health";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HealthStatus {
     Starting,
@@ -16,7 +22,10 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
-    pub(crate) fn as_u16(self) -> u16 {
+    /// A stable numeric code for this status. Used by an integration adapter
+    /// to detect a health change worth re-announcing without comparing the
+    /// enum variant directly.
+    pub fn as_u16(self) -> u16 {
         match self {
             Self::Starting => 0,
             Self::Ready => 1,
@@ -113,6 +122,9 @@ impl HealthServer {
     /// fabric-join lines `vigil stats`/`vigil doctor` do (criterion C7) —
     /// read from the live snapshot, never re-derived, so the three surfaces
     /// structurally cannot disagree.
+    // VIGIL_TEST_EPHEMERAL_HEALTH_PORT is an enumerated, reviewed test-only
+    // read (`environment_read_surface.baseline.txt`), not an ad-hoc one.
+    #[allow(clippy::disallowed_methods)]
     pub(crate) fn bind(
         port: u16,
         state: HealthState,
@@ -188,7 +200,7 @@ fn handle_client(
         .flatten();
     let method = request_parts.next().unwrap_or("");
     let path = request_parts.next().unwrap_or("/");
-    if path != "/health" {
+    if path != HEALTH_PATH {
         write_response(&mut stream, 404, r#"{"status":"not_found"}"#);
         return;
     }

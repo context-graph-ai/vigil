@@ -1,0 +1,7 @@
+constructed_media_example=/media/golden-fixture.png
+constructed_why_example=/why/00000000-0000-0000-0000-000000000001
+correction_route=/correction
+events_route=/events
+health_route=/health
+media_route_prefix=/media/
+why_route_prefix=/why/

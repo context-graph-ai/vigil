@@ -1,0 +1,13 @@
+active_topic=vigil/vigil-golden-service/golden-camera-alpha/active
+button_command_topic=vigil/commands/control
+control_command_topic_const=vigil/commands/control
+correction_command_topic_const=vigil/commands/correct
+detection_topic=vigil/vigil-golden-service/golden-camera-alpha/detection
+enabled_state_topic_fn=vigil/vigil-golden-service/golden-camera-alpha/enabled
+home_assistant_status_topic_const=homeassistant/status
+image_topic=vigil/golden-camera-alpha/snapshot
+running_condition_topic_fn=vigil/vigil_golden_service/running-condition
+service_availability_topic_fn=vigil/vigil-golden-service/availability
+snapshot_topic_fn=vigil/golden-camera-alpha/snapshot
+switch_command_topic=vigil/commands/control
+switch_state_topic=vigil/vigil-golden-service/golden-camera-alpha/enabled

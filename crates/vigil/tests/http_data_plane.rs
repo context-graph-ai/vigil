@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -18,143 +17,14 @@ use context_graph::{
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use vigil::{
-    CorrectionRequest, CorrectionType, EventRow, PersistedClock, ReviewDataPlaneHandle,
-    record_correction, review_events, review_why, spawn_review_data_plane_with_clock,
+    CORRECTION_ROUTE, CorrectionRequest, CorrectionType, EVENTS_ROUTE, EventRow,
+    MEDIA_ROUTE_PREFIX, PersistedClock, ReviewDataPlaneHandle, WHY_ROUTE_PREFIX, record_correction,
+    review_events, review_why, spawn_review_data_plane_with_clock,
 };
 
-#[path = "ha_test_support.rs"]
-mod ha_test_support;
-
-#[derive(Debug)]
-struct HttpResponse {
-    status: u16,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
-}
-
-impl HttpResponse {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .get(&name.to_ascii_lowercase())
-            .map(String::as_str)
-    }
-
-    fn body_text(&self) -> String {
-        String::from_utf8_lossy(&self.body).to_string()
-    }
-}
-
-fn request(
-    port: u16,
-    method: &str,
-    path: &str,
-    headers: &[(&str, String)],
-    body: &[u8],
-) -> HttpResponse {
-    request_limited(port, method, path, headers, body, usize::MAX)
-}
-
-fn request_limited(
-    port: u16,
-    method: &str,
-    path: &str,
-    headers: &[(&str, String)],
-    body: &[u8],
-    max_body_bytes: usize,
-) -> HttpResponse {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
-        .expect("data-plane port must accept TCP connections");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .expect("set read timeout");
-    let request_path = if path.is_empty() { "/" } else { path };
-    let mut wire = format!(
-        "{method} {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n"
-    );
-    for (name, value) in headers {
-        wire.push_str(name);
-        wire.push_str(": ");
-        wire.push_str(value);
-        wire.push_str("\r\n");
-    }
-    if !body.is_empty() {
-        wire.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    wire.push_str("\r\n");
-    stream
-        .write_all(wire.as_bytes())
-        .expect("write HTTP request headers");
-    if !body.is_empty() {
-        stream.write_all(body).expect("write HTTP request body");
-    }
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-
-    let mut raw = Vec::new();
-    let mut buf = [0_u8; 8192];
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                raw.extend_from_slice(&buf[..n]);
-                if raw.len() > max_body_bytes.saturating_add(16_384) {
-                    break;
-                }
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                break;
-            }
-            Err(error) => panic!("read HTTP response: {error}"),
-        }
-    }
-    parse_response(&raw, max_body_bytes)
-}
-
-fn parse_response(raw: &[u8], max_body_bytes: usize) -> HttpResponse {
-    let split = raw
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .expect("HTTP response must include header/body delimiter");
-    let head = String::from_utf8_lossy(&raw[..split]);
-    let mut lines = head.lines();
-    let status_line = lines
-        .next()
-        .expect("HTTP response must include status line");
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .expect("HTTP status line must include status code")
-        .parse::<u16>()
-        .expect("HTTP status code must be numeric");
-    let headers = lines
-        .filter_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let body_start = split + 4;
-    let body_end = raw.len().min(body_start.saturating_add(max_body_bytes));
-    HttpResponse {
-        status,
-        headers,
-        body: raw[body_start..body_end].to_vec(),
-    }
-}
-
-fn json_body(response: &HttpResponse) -> Value {
-    serde_json::from_slice(&response.body).unwrap_or_else(|error| {
-        panic!(
-            "response body must be JSON, status={} body={} error={error}",
-            response.status,
-            response.body_text()
-        )
-    })
-}
+#[path = "deterministic_fixture_support.rs"]
+mod deterministic_fixture_support;
+use deterministic_fixture_support::{HttpResponse, get, json_body, request, request_limited};
 
 fn rows(response: &HttpResponse) -> Vec<Value> {
     match json_body(response) {
@@ -171,22 +41,23 @@ fn spawn_server_with_clock(
     store_path: &Path,
     clock: PersistedClock,
 ) -> (ReviewDataPlaneHandle, u16) {
-    let store = ha_test_support::open_store_at(store_path).expect("store must open for data plane");
+    // Held open until the moment of spawn, not released early — a released
+    // port is a race another process can steal before this one binds it.
+    let port_reservation = deterministic_fixture_support::TcpPortReservation::reserve_loopback()
+        .expect("reserve review port");
+    let store = deterministic_fixture_support::open_store_at(store_path)
+        .expect("store must open for data plane");
     let data_dir = store_path
         .parent()
         .expect("store path must have data dir parent")
         .to_path_buf();
-    let port = ha_test_support::free_port().expect("allocate review port");
+    let port = port_reservation.release();
     let handle = spawn_review_data_plane_with_clock(store, data_dir, port, clock)
         .expect("spawn review data plane");
     let port = handle.local_addr().port();
-    ha_test_support::wait_for_tcp_port(port, Duration::from_secs(2))
+    deterministic_fixture_support::wait_for_tcp_port(port, Duration::from_secs(2))
         .expect("review data plane must open TCP port");
     (handle, port)
-}
-
-fn get(port: u16, path: &str) -> HttpResponse {
-    request(port, "GET", path, &[], b"")
 }
 
 fn get_with_headers(port: u16, path: &str, headers: &[(&str, String)]) -> HttpResponse {
@@ -296,7 +167,7 @@ fn review_store_copy(minimum_observations: usize) -> Result<(TempDir, PathBuf), 
     fs::create_dir_all(data_dir.join("clips"))
         .map_err(|error| format!("create review clips dir: {error}"))?;
     let store_path = data_dir.join("store.contextgraph");
-    let store = ha_test_support::open_store_at(&store_path)?;
+    let store = deterministic_fixture_support::open_store_at(&store_path)?;
     seed_review_store(&store, &data_dir, minimum_observations.max(1))?;
     Ok((tmp, store_path))
 }
@@ -308,7 +179,7 @@ fn seed_review_store(
 ) -> Result<(), String> {
     let context = store
         .create_context(CreateContext {
-            name: ha_test_support::SITE_NAME.to_string(),
+            name: deterministic_fixture_support::SITE_NAME.to_string(),
             labels: vec!["site".to_string()],
             properties: BTreeMap::new(),
         })
@@ -321,7 +192,7 @@ fn seed_review_store(
     let camera = store
         .create_entity(CreateEntity {
             entity_type: EntityType::Device,
-            name: ha_test_support::CAMERA_NAME.to_string(),
+            name: deterministic_fixture_support::CAMERA_NAME.to_string(),
             properties: camera_properties,
             tags: vec!["camera".to_string()],
             context_id: context.id,
@@ -330,7 +201,7 @@ fn seed_review_store(
     let intention = store
         .create_intention(CreateIntention {
             id: None,
-            description: format!("watch {}", ha_test_support::CAMERA_NAME),
+            description: format!("watch {}", deterministic_fixture_support::CAMERA_NAME),
             status: IntentionStatus::Active,
             origin: IntentionOrigin::Agent,
             context_id: context.id,
@@ -342,16 +213,19 @@ fn seed_review_store(
     let mut decision_properties = BTreeMap::new();
     decision_properties.insert(
         "model_id".to_string(),
-        Value::String(ha_test_support::DETECTOR_MODEL_ID.to_string()),
+        Value::String(deterministic_fixture_support::DETECTOR_MODEL_ID.to_string()),
     );
     decision_properties.insert(
         "threshold".to_string(),
-        json!(ha_test_support::DETECTOR_THRESHOLD),
+        json!(deterministic_fixture_support::DETECTOR_THRESHOLD),
     );
     let decision = store
         .create_decision(CreateDecision {
             decision_type: "detector_config".to_string(),
-            description: format!("Run local detector for {}", ha_test_support::CAMERA_NAME),
+            description: format!(
+                "Run local detector for {}",
+                deterministic_fixture_support::CAMERA_NAME
+            ),
             reasoning: Vec::new(),
             confidence: Some(0.5),
             intention_ids: vec![intention.id],
@@ -415,7 +289,7 @@ fn seed_review_detection(
     let image_ref = format!("vigil-edge:clip/{image_name}");
     let producer = EvidenceProducer {
         system: "vigil".to_string(),
-        model_name: ha_test_support::DETECTOR_MODEL_ID.to_string(),
+        model_name: deterministic_fixture_support::DETECTOR_MODEL_ID.to_string(),
         model_version: "0.1".to_string(),
         pipeline_version: "review-http-test".to_string(),
     };
@@ -712,7 +586,8 @@ fn port_accepts(port: u16) -> bool {
 #[test]
 fn event_list_serves_full_review_row_fieldset() {
     let (_tmp, store_path) = review_store_copy(2).expect("seeded store for event list fieldset");
-    let expected_store = ha_test_support::open_store_at(&store_path).expect("expected store opens");
+    let expected_store =
+        deterministic_fixture_support::open_store_at(&store_path).expect("expected store opens");
     let (_server, port) = spawn_server(&store_path);
 
     let response = get(port, "/events");
@@ -741,7 +616,7 @@ fn event_list_serves_full_review_row_fieldset() {
     assert!(
         served
             .iter()
-            .any(|row| field_str(row, "camera_name") == ha_test_support::CAMERA_NAME),
+            .any(|row| field_str(row, "camera_name") == deterministic_fixture_support::CAMERA_NAME),
         "seeded camera must be visible in the served event list"
     );
     assert!(
@@ -768,7 +643,7 @@ fn event_list_serves_full_review_row_fieldset() {
 #[test]
 fn why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for why walk-back");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let detection_id = first_detection_id(&store);
     record_correction(
         &store,
@@ -845,7 +720,8 @@ fn why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction() {
 fn snapshot_read_serves_image_bytes_with_image_content_type() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for snapshot read");
     let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let expected_store = ha_test_support::open_store_at(&store_path).expect("expected store opens");
+    let expected_store =
+        deterministic_fixture_support::open_store_at(&store_path).expect("expected store opens");
     let (snapshot_path, _) = first_expected_media_paths(&expected_store, &data_dir);
     let (_server, port) = spawn_server(&store_path);
 
@@ -889,7 +765,8 @@ fn large_media_reads_use_fixed_content_length_not_chunked_transfer() {
     let (_tmp, store_path) =
         review_store_copy(1).expect("seeded store for large media fixed-length read");
     let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let expected_store = ha_test_support::open_store_at(&store_path).expect("expected store opens");
+    let expected_store =
+        deterministic_fixture_support::open_store_at(&store_path).expect("expected store opens");
     let (snapshot_path, clip_path) = first_expected_media_paths(&expected_store, &data_dir);
     let mut large_snapshot = PNG_BYTES.to_vec();
     large_snapshot.extend((0..(64 * 1024)).map(|offset| (offset % 251) as u8));
@@ -938,7 +815,8 @@ fn large_media_reads_use_fixed_content_length_not_chunked_transfer() {
 fn clip_read_serves_range_206_partial_content_transport() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for clip range read");
     let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let expected_store = ha_test_support::open_store_at(&store_path).expect("expected store opens");
+    let expected_store =
+        deterministic_fixture_support::open_store_at(&store_path).expect("expected store opens");
     let (_, clip_path) = first_expected_media_paths(&expected_store, &data_dir);
     let clip_bytes = fs::read(&clip_path).expect("read expected clip bytes");
     assert!(
@@ -1032,7 +910,8 @@ fn review_data_plane_does_not_enable_cross_origin_access() {
 fn media_reference_from_event_list_resolves_to_media_bytes() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for media ref resolution");
     let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let expected_store = ha_test_support::open_store_at(&store_path).expect("expected store opens");
+    let expected_store =
+        deterministic_fixture_support::open_store_at(&store_path).expect("expected store opens");
     let (snapshot_path, clip_path) = first_expected_media_paths(&expected_store, &data_dir);
     let (_server, port) = spawn_server(&store_path);
 
@@ -1072,7 +951,7 @@ fn media_reference_from_event_list_resolves_to_media_bytes() {
 #[test]
 fn http_correction_post_lands_through_record_correction_seam() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for HTTP correction");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let detection_id = first_detection_id(&store);
     let count_before = list_all_observations(&store).len();
     let (server, port) = spawn_server(&store_path);
@@ -1086,7 +965,8 @@ fn http_correction_post_lands_through_record_correction_seam() {
     drop(store);
     server.shutdown();
 
-    let fresh_store = ha_test_support::open_store_at(&store_path).expect("fresh store reopens");
+    let fresh_store =
+        deterministic_fixture_support::open_store_at(&store_path).expect("fresh store reopens");
     let observations_after = list_all_observations(&fresh_store);
     assert_eq!(
         observations_after.len(),
@@ -1111,7 +991,7 @@ fn http_correction_post_lands_through_record_correction_seam() {
 fn http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent() {
     let (_tmp, store_path) =
         review_store_copy(1).expect("seeded store for labelled HTTP correction");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let detection_id = first_detection_id(&store);
     let (_server, port) = spawn_server(&store_path);
 
@@ -1199,7 +1079,7 @@ fn http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent()
 fn event_list_serializes_current_correction_authority_fields() {
     let (_tmp, store_path) =
         review_store_copy(4).expect("seeded store for event-list correction authority fields");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let mut detections = list_all_observations(&store)
         .into_iter()
         .filter(|observation| observation.observation_type == "detection")
@@ -1291,7 +1171,7 @@ fn event_list_serializes_current_correction_authority_fields() {
 fn pruned_media_returns_clean_not_found_while_event_still_lists_and_walks_back() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for pruned media");
     let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let detection_id = first_detection_id(&store);
     let (snapshot_path, clip_path) = first_expected_media_paths(&store, &data_dir);
     fs::remove_file(snapshot_path).expect("delete snapshot to simulate retention");
@@ -1329,7 +1209,7 @@ fn pruned_media_returns_clean_not_found_while_event_still_lists_and_walks_back()
 #[test]
 fn event_list_does_not_leak_foreign_context_events() {
     let (_tmp, store_path) = review_store_copy(2).expect("seeded store for context isolation");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     seed_foreign_context_detection(&store);
     let (_server, port) = spawn_server(&store_path);
 
@@ -1368,7 +1248,7 @@ fn event_list_does_not_leak_foreign_context_events() {
 #[test]
 fn event_list_ordering_matches_review_events_newest_first() {
     let (_tmp, store_path) = review_store_copy(3).expect("seeded store for event ordering");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let (_server, port) = spawn_server(&store_path);
 
     let response = get(port, "/events");
@@ -1416,7 +1296,7 @@ fn why_unknown_or_malformed_detection_id_returns_not_found() {
 #[test]
 fn media_read_for_event_with_no_media_returns_not_found() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for no-media event");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     seed_no_media_detection_in_review_context(&store);
     let (_server, port) = spawn_server(&store_path);
 
@@ -1448,7 +1328,7 @@ fn media_read_for_event_with_no_media_returns_not_found() {
 fn clip_unsatisfiable_range_returns_416_with_content_range_star() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for unsatisfiable range");
     let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let (_, clip_path) = first_expected_media_paths(&store, &data_dir);
     let clip_size = fs::metadata(&clip_path).expect("clip metadata").len();
     let (_server, port) = spawn_server(&store_path);
@@ -1506,7 +1386,7 @@ fn media_path_traversal_rejected_serves_no_out_of_tree_bytes() {
 #[test]
 fn correction_post_bad_payload_or_unknown_id_and_bad_method_return_4xx_not_5xx() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for correction bad input");
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let count_before = list_all_observations(&store).len();
     let (_server, port) = spawn_server(&store_path);
 
@@ -1531,7 +1411,8 @@ fn correction_post_bad_payload_or_unknown_id_and_bad_method_return_4xx_not_5xx()
         "unknown correction id must return 4xx, not {}",
         unknown.status
     );
-    let fresh = ha_test_support::open_store_at(&store_path).expect("fresh store opens");
+    let fresh =
+        deterministic_fixture_support::open_store_at(&store_path).expect("fresh store opens");
     assert_eq!(
         list_all_observations(&fresh).len(),
         count_before,
@@ -1552,7 +1433,7 @@ fn correction_post_bad_payload_or_unknown_id_and_bad_method_return_4xx_not_5xx()
 fn clip_range_streams_from_large_file_without_whole_file_transfer() {
     let (_tmp, store_path) = review_store_copy(1).expect("seeded store for large clip range");
     let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let store = ha_test_support::open_store_at(&store_path).expect("store opens");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store opens");
     let (_, clip_path) = first_expected_media_paths(&store, &data_dir);
 
     let large_len = 256_u64 * 1024 * 1024;
@@ -1628,78 +1509,56 @@ fn data_plane_serves_in_process_then_stops_on_shutdown() {
     );
 }
 
-struct ChildGuard {
-    child: Child,
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 #[test]
-fn health_liveness_still_serves_alongside_data_plane_in_single_binary() {
-    let (_tmp, store_path) = review_store_copy(1).expect("seeded store for binary coexistence");
-    let data_dir = store_path.parent().expect("data dir").to_path_buf();
-    let config_tmp = tempfile::TempDir::new().expect("config tempdir");
-    let config_path = config_tmp.path().join("vigil-review-coexistence.toml");
-    let health_port = ha_test_support::free_port().expect("health port");
-    let review_port = ha_test_support::free_port().expect("review port");
-    fs::write(
-        &config_path,
-        format!(
-            "data_dir = \"{}\"\nstore_path = \"{}\"\nhealth_port = {}\nreview_port = {}\ncameras = []\n",
-            ha_test_support::toml_path(&data_dir),
-            ha_test_support::toml_path(&store_path),
-            health_port,
-            review_port,
-        ),
-    )
-    .expect("write config");
+fn frozen_route_constants_are_what_production_actually_dispatches_on() {
+    // `crates/vigil/tests/http_route_contract.rs` pins the byte value of each
+    // route constant against a checked-in golden. This test proves the other
+    // half: that the constant is not merely declared but is the exact string
+    // production dispatches on — a literal reintroduced into `handle_request`
+    // beside an unused constant would pass the golden and fail here.
+    let (_tmp, store_path) =
+        review_store_copy(1).expect("seeded store for route-constant wiring proof");
+    let (_server, port) = spawn_server(&store_path);
 
-    let child = Command::new(ha_test_support::vigil_binary_path())
-        .arg("run")
-        .arg("--config")
-        .arg(&config_path)
-        .env("VIGIL_DATA_DIR", &data_dir)
-        .env("VIGIL_STORE_PATH", &store_path)
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", review_port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn vigil run");
-    let _guard = ChildGuard { child };
-
-    ha_test_support::wait_for_tcp_port(health_port, Duration::from_secs(10))
-        .expect("health port must open");
-    ha_test_support::wait_for_tcp_port(review_port, Duration::from_secs(10))
-        .expect("review port must open");
-
-    let health = get(health_port, "/health");
-    assert!(
-        matches!(health.status, 200 | 503),
-        "health endpoint must return liveness status, got {}",
-        health.status
+    let events = get(port, EVENTS_ROUTE);
+    assert_eq!(
+        events.status, 200,
+        "EVENTS_ROUTE must be the exact string production dispatches on"
     );
-    let health_json = json_body(&health);
-    assert!(
-        health_json.get("status").is_some(),
-        "/health must return its status JSON shape"
+    let served = rows(&events);
+    let detection_id = field_str(&served[0], "observation_id");
+
+    let why = get(port, &format!("{WHY_ROUTE_PREFIX}{detection_id}"));
+    assert_eq!(
+        why.status, 200,
+        "WHY_ROUTE_PREFIX must be the exact prefix production dispatches on"
+    );
+    assert_eq!(
+        field_str(&json_body(&why), "observation_id"),
+        detection_id,
+        "WHY_ROUTE_PREFIX route must resolve to the requested detection"
     );
 
-    let events = get(review_port, "/events");
-    assert_eq!(events.status, 200, "review data plane must serve /events");
-    let events_json = json_body(&events);
-    assert!(
-        events_json.as_array().is_some(),
-        "/events must be distinguishable from /health by returning an event row list"
+    let correction = post_json(
+        port,
+        CORRECTION_ROUTE,
+        &format!(r#"{{"detection_id":"{detection_id}","correction_type":"FalseAlarm"}}"#),
     );
     assert!(
-        events_json.get("status").is_none(),
-        "/events must not hijack the /health status JSON shape"
+        (200..300).contains(&correction.status),
+        "CORRECTION_ROUTE must be the exact string production dispatches on, got {}",
+        correction.status
+    );
+
+    let (snapshot_ref, _clip_ref) = served_media_refs(&served[0]);
+    assert!(
+        snapshot_ref.starts_with(MEDIA_ROUTE_PREFIX),
+        "served media reference must use the exact prefix production dispatches on, got \
+         {snapshot_ref}"
+    );
+    let media = get(port, &snapshot_ref);
+    assert_eq!(
+        media.status, 200,
+        "MEDIA_ROUTE_PREFIX must be the exact prefix production dispatches on"
     );
 }

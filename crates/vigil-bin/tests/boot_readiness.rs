@@ -24,38 +24,16 @@
 #![cfg(feature = "fabric")]
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-fn vigil_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
-        return PathBuf::from(path);
-    }
-    workspace_root()
-        .join("target")
-        .join("debug")
-        .join(if cfg!(windows) { "vigil.exe" } else { "vigil" })
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("allocate local TCP port");
-    listener.local_addr().expect("read local TCP port").port()
-}
+#[path = "../../vigil/tests/deterministic_fixture_support.rs"]
+mod deterministic_fixture_support;
+use deterministic_fixture_support::{capture_pipe, free_port, vigil_binary_path, workspace_root};
 
 /// The repo's real detector model fixture — staging it makes the node's
 /// detector actually LOADABLE (advertisement requires an executable
@@ -66,28 +44,6 @@ fn fixture_model_path() -> PathBuf {
         .join("fixtures")
         .join("models")
         .join("yolox-tiny-coco.pth")
-}
-
-fn capture_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Arc<Mutex<String>> {
-    let logs = Arc::new(Mutex::new(String::new()));
-    if let Some(mut pipe) = pipe {
-        let captured = Arc::clone(&logs);
-        thread::spawn(move || {
-            let mut buffer = [0_u8; 4096];
-            loop {
-                match pipe.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if let Ok(mut logs) = captured.lock() {
-                            logs.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-    logs
 }
 
 struct Node {
@@ -123,7 +79,10 @@ fn spawn_hub(data_dir: &std::path::Path, health_port: u16, bringup_delay_ms: u64
         .arg("run")
         .env("VIGIL_DATA_DIR", data_dir)
         .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", free_port().to_string())
+        .env(
+            "VIGIL_REVIEW_PORT",
+            free_port().expect("reserve a free port").to_string(),
+        )
         .env("VIGIL_DETECTOR_MODEL_PATH", fixture_model_path())
         .env("VIGIL_FABRIC_HUB", "true")
         .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", "20000")
@@ -182,7 +141,7 @@ fn health_becomes_ready_before_fabric_attaches() {
         fixture_model_path().display()
     );
     let data_dir = tempfile::tempdir().expect("tempdir");
-    let health_port = free_port();
+    let health_port = free_port().expect("reserve a free port");
     // 4s bring-up delay: on the fixed (async-attach) path health is ready in
     // ~1s while fabric_ready appears ~4s later — a clean, non-flaky gap. On the
     // broken (synchronous) path readiness cannot appear until after bring-up, so
@@ -232,7 +191,7 @@ fn boot_prints_phase_markers() {
         fixture_model_path().display()
     );
     let data_dir = tempfile::tempdir().expect("tempdir");
-    let health_port = free_port();
+    let health_port = free_port().expect("reserve a free port");
     let node = spawn_hub(data_dir.path(), health_port, 0);
 
     let required = [

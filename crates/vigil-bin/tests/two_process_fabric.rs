@@ -33,7 +33,7 @@
 use contextdb_engine::Database;
 use contextdb_engine::work_ledger::advertise_capability;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -41,40 +41,15 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vigil::fabric::detector_capability_id;
 
+#[path = "../../vigil/tests/deterministic_fixture_support.rs"]
+mod deterministic_fixture_support;
+use deterministic_fixture_support::{capture_pipe, free_port, vigil_binary_path, workspace_root};
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock after epoch")
         .as_millis() as i64
-}
-
-fn vigil_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
-        return PathBuf::from(path);
-    }
-    workspace_root()
-        .join("target")
-        .join("debug")
-        .join(if cfg!(windows) { "vigil.exe" } else { "vigil" })
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// A NON-DEFAULT free TCP port. The default review port 8098 is known to be
-/// squatted on the smoke box by a stray `vigil run`; every port this test
-/// binds is OS-allocated, so it never collides with a default-port process.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("allocate local TCP port");
-    listener.local_addr().expect("read local TCP port").port()
 }
 
 /// The repo's real detector model fixture — staging it makes the worker's
@@ -88,28 +63,6 @@ fn fixture_model_path() -> PathBuf {
         .join("fixtures")
         .join("models")
         .join("yolox-tiny-coco.pth")
-}
-
-fn capture_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Arc<Mutex<String>> {
-    let logs = Arc::new(Mutex::new(String::new()));
-    if let Some(mut pipe) = pipe {
-        let captured = Arc::clone(&logs);
-        thread::spawn(move || {
-            let mut buffer = [0_u8; 4096];
-            loop {
-                match pipe.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if let Ok(mut logs) = captured.lock() {
-                            logs.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-    logs
 }
 
 struct Node {
@@ -309,8 +262,14 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
     );
 
     let hub_dir = tempfile::tempdir().expect("hub data dir");
-    let hub_health = free_port();
-    let hub = spawn_node(hub_dir.path(), hub_health, free_port(), true, None);
+    let hub_health = free_port().expect("reserve a free port");
+    let hub = spawn_node(
+        hub_dir.path(),
+        hub_health,
+        free_port().expect("reserve a free port"),
+        true,
+        None,
+    );
     assert!(
         wait_for_health(hub_health, Duration::from_secs(20)),
         "hub node must come up"
@@ -321,11 +280,11 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
     // Worker enrolls with the hub already up: its one-shot startup push lands
     // immediately.
     let worker_dir = tempfile::tempdir().expect("worker data dir");
-    let worker_health = free_port();
+    let worker_health = free_port().expect("reserve a free port");
     let worker = spawn_node(
         worker_dir.path(),
         worker_health,
-        free_port(),
+        free_port().expect("reserve a free port"),
         false,
         Some(&ticket),
     );
@@ -396,8 +355,8 @@ fn two_real_processes_render_remote_detectors_line_hub_up_late() {
     // remembered port live beside the data dir, so a later restart on the SAME
     // data dir rebinds the SAME address and the issued ticket stays valid.
     let hub_dir = tempfile::tempdir().expect("hub data dir");
-    let hub_health = free_port();
-    let hub_review = free_port();
+    let hub_health = free_port().expect("reserve a free port");
+    let hub_review = free_port().expect("reserve a free port");
     let hub_first = spawn_node(hub_dir.path(), hub_health, hub_review, true, None);
     assert!(
         wait_for_health(hub_health, Duration::from_secs(20)),
@@ -415,11 +374,11 @@ fn two_real_processes_render_remote_detectors_line_hub_up_late() {
     // its model, advertises locally, and fires its ONE startup push — which
     // misses, because nothing answers the hub's address yet, and is swallowed.
     let worker_dir = tempfile::tempdir().expect("worker data dir");
-    let worker_health = free_port();
+    let worker_health = free_port().expect("reserve a free port");
     let worker = spawn_node(
         worker_dir.path(),
         worker_health,
-        free_port(),
+        free_port().expect("reserve a free port"),
         false,
         Some(&ticket),
     );
@@ -459,7 +418,13 @@ fn two_real_processes_render_remote_detectors_line_hub_up_late() {
 
     // The hub's routing finally comes up, on the SAME data dir → same sticky
     // port → the worker's ticket is now reachable.
-    let hub_second = spawn_node(hub_dir.path(), free_port(), free_port(), true, None);
+    let hub_second = spawn_node(
+        hub_dir.path(),
+        free_port().expect("reserve a free port"),
+        free_port().expect("reserve a free port"),
+        true,
+        None,
+    );
     assert!(
         wait_for_health_any(&hub_second, Duration::from_secs(20)),
         "the restarted hub must come up on its remembered sticky port: {}",
@@ -625,8 +590,14 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
     );
 
     let hub_dir = tempfile::tempdir().expect("hub data dir");
-    let hub_health = free_port();
-    let hub = spawn_node(hub_dir.path(), hub_health, free_port(), true, None);
+    let hub_health = free_port().expect("reserve a free port");
+    let hub = spawn_node(
+        hub_dir.path(),
+        hub_health,
+        free_port().expect("reserve a free port"),
+        true,
+        None,
+    );
     assert!(
         wait_for_health(hub_health, Duration::from_secs(20)),
         "hub node must come up"
@@ -635,11 +606,11 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
         .expect("hub must print its fabric-join ticket");
 
     let worker_dir = tempfile::tempdir().expect("worker data dir");
-    let worker_health = free_port();
+    let worker_health = free_port().expect("reserve a free port");
     let worker = spawn_node(
         worker_dir.path(),
         worker_health,
-        free_port(),
+        free_port().expect("reserve a free port"),
         false,
         Some(&ticket),
     );
@@ -685,7 +656,13 @@ fn two_real_processes_render_only_the_restarted_workers_current_backend() {
 
     // Restart the hub on the SAME data dir (sticky port ⇒ the worker's ticket
     // stays reachable and it reconnects), now carrying the stale burn-wgpu row.
-    let hub = spawn_node(hub_dir.path(), free_port(), free_port(), true, None);
+    let hub = spawn_node(
+        hub_dir.path(),
+        free_port().expect("reserve a free port"),
+        free_port().expect("reserve a free port"),
+        true,
+        None,
+    );
     assert!(
         wait_for_health_any(&hub, Duration::from_secs(20)),
         "the restarted hub must come back up: {}",
@@ -761,8 +738,14 @@ fn two_real_processes_age_out_a_dead_worker_from_remote_detectors() {
     );
 
     let hub_dir = tempfile::tempdir().expect("hub data dir");
-    let hub_health = free_port();
-    let hub = spawn_node(hub_dir.path(), hub_health, free_port(), true, None);
+    let hub_health = free_port().expect("reserve a free port");
+    let hub = spawn_node(
+        hub_dir.path(),
+        hub_health,
+        free_port().expect("reserve a free port"),
+        true,
+        None,
+    );
     assert!(
         wait_for_health(hub_health, Duration::from_secs(20)),
         "hub node must come up"
@@ -771,11 +754,11 @@ fn two_real_processes_age_out_a_dead_worker_from_remote_detectors() {
         .expect("hub must print its fabric-join ticket");
 
     let worker_dir = tempfile::tempdir().expect("worker data dir");
-    let worker_health = free_port();
+    let worker_health = free_port().expect("reserve a free port");
     let worker = spawn_node(
         worker_dir.path(),
         worker_health,
-        free_port(),
+        free_port().expect("reserve a free port"),
         false,
         Some(&ticket),
     );

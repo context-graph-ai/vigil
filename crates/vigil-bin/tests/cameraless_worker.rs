@@ -38,8 +38,7 @@
 
 #![cfg(feature = "fabric")]
 
-use std::io::Read;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +51,10 @@ use contextdb_engine::Database;
 use vigil::DecodedRgbFrame;
 use vigil::detector_workclass::{DetectorDetection, OrderedF64};
 use vigil::fabric::{FabricDetectorBackend, FabricRuntime};
+
+#[path = "../../vigil/tests/deterministic_fixture_support.rs"]
+mod deterministic_fixture_support;
+use deterministic_fixture_support::{capture_pipe, free_port, vigil_binary_path, workspace_root};
 
 async fn within<F: std::future::Future>(fut: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(30), fut)
@@ -90,33 +93,8 @@ impl FabricDetectorBackend for SpyBackend {
 
 // ── T1: subprocess (the bug lives in runtime.rs process bring-up) ─────────
 
-fn vigil_binary_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
-        return PathBuf::from(path);
-    }
-    if let Some(path) = option_env!("CARGO_BIN_EXE_vigil") {
-        return PathBuf::from(path);
-    }
-    workspace_root()
-        .join("target")
-        .join("debug")
-        .join(if cfg!(windows) { "vigil.exe" } else { "vigil" })
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("allocate local TCP port");
-    listener.local_addr().expect("read local TCP port").port()
-}
-
 fn health_status(port: u16) -> Option<u16> {
+    use std::io::Read;
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(200)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(300)));
@@ -152,28 +130,6 @@ fn wait_for_health(port: u16, timeout: Duration) -> bool {
     false
 }
 
-fn capture_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Arc<Mutex<String>> {
-    let logs = Arc::new(Mutex::new(String::new()));
-    if let Some(mut pipe) = pipe {
-        let captured = Arc::clone(&logs);
-        thread::spawn(move || {
-            let mut buffer = [0_u8; 4096];
-            loop {
-                match pipe.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        if let Ok(mut logs) = captured.lock() {
-                            logs.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-    logs
-}
-
 struct Worker {
     child: Child,
     stdout: Arc<Mutex<String>>,
@@ -188,7 +144,7 @@ impl Worker {
 
 /// The repo's real detector model fixture (a raw yolox-tiny checkpoint the
 /// production `yolox_detector` load path reads directly — the same artifact
-/// `ha_test_support` points `VIGIL_DETECTOR_MODEL_PATH` at). Staging it makes
+/// `deterministic_fixture_support` points `VIGIL_DETECTOR_MODEL_PATH` at). Staging it makes
 /// the worker's detector actually LOADABLE, which is what earns the capability
 /// advertisement (advertisement requires executable capability — PO ruling
 /// 2026-07-13).
@@ -261,7 +217,7 @@ fn spawn_cameraless_fabric_worker(
 #[test]
 fn detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera() {
     let data_dir = tempfile::tempdir().expect("data dir");
-    let health_port = free_port();
+    let health_port = free_port().expect("reserve a free port");
     let model_path = fixture_model_path();
     assert!(
         model_path.is_file(),
@@ -366,7 +322,7 @@ fn cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_
     // the named staging fix — never an enrolled-looking node that silently
     // serves nothing.
     let data_dir = tempfile::tempdir().expect("data dir");
-    let health_port = free_port();
+    let health_port = free_port().expect("reserve a free port");
     // No model staged; short slot deadline so the not-started path resolves fast.
     let worker = spawn_cameraless_fabric_worker(data_dir.path(), health_port, None, 1500);
 

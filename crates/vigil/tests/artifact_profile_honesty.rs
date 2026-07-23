@@ -1082,6 +1082,10 @@ fn cargo_command_builds_vigil_hardware_binary(tokens: &[String]) -> bool {
             .any(|token| token.contains("unknown-linux-musl"))
 }
 
+/// The composition-root package that owns the `vigil` binary target. Core's
+/// own `vigil` package has no binary at all — see `crates/vigil-bin`.
+const VIGIL_BINARY_PACKAGE: &str = "vigil-bin";
+
 fn cargo_args_target_vigil_binary_or_package(tokens: &[String]) -> bool {
     let mut saw_package = false;
     let mut saw_bin = false;
@@ -1089,7 +1093,7 @@ fn cargo_args_target_vigil_binary_or_package(tokens: &[String]) -> bool {
         match token.as_str() {
             "-p" | "--package" => {
                 saw_package = true;
-                if tokens.get(idx + 1).map(String::as_str) != Some("vigil") {
+                if tokens.get(idx + 1).map(String::as_str) != Some(VIGIL_BINARY_PACKAGE) {
                     return false;
                 }
             }
@@ -1105,7 +1109,7 @@ fn cargo_args_target_vigil_binary_or_package(tokens: &[String]) -> bool {
                     .or_else(|| token.strip_prefix("--package="))
                 {
                     saw_package = true;
-                    if package != "vigil" {
+                    if package != VIGIL_BINARY_PACKAGE {
                         return false;
                     }
                 }
@@ -1124,7 +1128,7 @@ fn cargo_args_target_vigil_binary_or_package(tokens: &[String]) -> bool {
 fn assert_cargo_vigil_target_guard_rejects_other_outputs() {
     assert!(
         cargo_command_builds_or_installs_vigil_inner(&shell_tokens(
-            "cargo build -p vigil --bin vigil --features decode-gstreamer"
+            "cargo build -p vigil-bin --bin vigil --features decode-gstreamer"
         )),
         "cargo provenance guard must accept an explicit Vigil package/binary build"
     );
@@ -1151,10 +1155,10 @@ fn assert_cargo_vigil_target_guard_rejects_other_outputs() {
 fn assert_cargo_shipped_binary_feature_guard_requires_accelerated_detection() {
     assert_accelerated_detection_is_not_a_default_cargo_feature();
     for command in [
-        "cargo build -p vigil --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric",
-        "cargo build -p vigil --bin vigil --features=decode-gstreamer,detect-burn-wgpu,fabric",
-        "cargo build -p vigil --bin vigil --features decode-gstreamer --features detect-burn-wgpu --features fabric",
-        "cargo build -p vigil --bin vigil --features decode-gstreamer --all-features",
+        "cargo build -p vigil-bin --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric",
+        "cargo build -p vigil-bin --bin vigil --features=decode-gstreamer,detect-burn-wgpu,fabric",
+        "cargo build -p vigil-bin --bin vigil --features decode-gstreamer --features detect-burn-wgpu --features fabric",
+        "cargo build -p vigil-bin --bin vigil --features decode-gstreamer --all-features",
     ] {
         assert!(
             cargo_command_builds_vigil_hardware_binary(&shell_tokens(command)),
@@ -1164,7 +1168,7 @@ fn assert_cargo_shipped_binary_feature_guard_requires_accelerated_detection() {
 
     assert!(
         !cargo_command_builds_vigil_hardware_binary(&shell_tokens(
-            "cargo build -p vigil --bin vigil --features decode-gstreamer,detect-burn-wgpu"
+            "cargo build -p vigil-bin --bin vigil --features decode-gstreamer,detect-burn-wgpu"
         )),
         "cargo provenance guard must reject a Vigil hardware build without fabric: every production hardware binary must carry distributed compute, hardware decode, and accelerated detection together"
     );
@@ -1385,7 +1389,7 @@ fn shell_segment_cd_target(tokens: &[String]) -> Option<&str> {
 fn assert_default_cargo_target_dir_is_tied_to_workdir() {
     assert!(
         cargo_target_dir_matches_source(
-            &shell_tokens("cargo build -p vigil --bin vigil --features decode-gstreamer"),
+            &shell_tokens("cargo build -p vigil-bin --bin vigil --features decode-gstreamer"),
             "/app/target/release/vigil",
             "/app",
         ),
@@ -1393,7 +1397,7 @@ fn assert_default_cargo_target_dir_is_tied_to_workdir() {
     );
     assert!(
         !cargo_target_dir_matches_source(
-            &shell_tokens("cargo build -p vigil --bin vigil --features decode-gstreamer"),
+            &shell_tokens("cargo build -p vigil-bin --bin vigil --features decode-gstreamer"),
             "/tmp/target/release/vigil",
             "/app",
         ),
@@ -1402,7 +1406,7 @@ fn assert_default_cargo_target_dir_is_tied_to_workdir() {
     assert!(
         cargo_target_dir_matches_source(
             &shell_tokens(
-                "cargo build -p vigil --bin vigil --features decode-gstreamer --target-dir /tmp/target"
+                "cargo build -p vigil-bin --bin vigil --features decode-gstreamer --target-dir /tmp/target"
             ),
             "/tmp/target/release/vigil",
             "/app",
@@ -1411,7 +1415,7 @@ fn assert_default_cargo_target_dir_is_tied_to_workdir() {
     );
     assert!(
         !cargo_target_dir_matches_source(
-            &shell_tokens("cargo build -p vigil --bin vigil --features decode-gstreamer"),
+            &shell_tokens("cargo build -p vigil-bin --bin vigil --features decode-gstreamer"),
             "/app/target/release/vigil",
             "/tmp/hw",
         ),

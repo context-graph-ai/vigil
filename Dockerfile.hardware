@@ -11,7 +11,7 @@ COPY contextdb/ /workspace/contextdb/
 WORKDIR /workspace/vigil-src
 RUN mv .cargo/config.toml /tmp/vigil-cargo-cross-config.toml
 ENV RUSTFLAGS="-C target-feature=-crt-static"
-RUN cargo build --release --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric --locked
+RUN cargo build --release -p vigil-bin --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric --locked
 
 # Exact binary hand-off shared by every amd64 production image and by CI's raw
 # binary artifact. No release image may source a different, externally staged
@@ -68,7 +68,7 @@ COPY contextdb/ /workspace/contextdb/
 WORKDIR /workspace/vigil-src
 RUN mv .cargo/config.toml /tmp/vigil-cargo-cross-config.toml
 ENV RUSTFLAGS="-C target-feature=-crt-static"
-RUN cargo build --release --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric --locked
+RUN cargo build --release -p vigil-bin --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric --locked
 
 # Exact binary hand-off shared by every arm64 production image and by CI's raw
 # binary artifact.

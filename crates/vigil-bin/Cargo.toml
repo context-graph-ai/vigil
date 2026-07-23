@@ -1,0 +1,49 @@
+[package]
+name = "vigil-bin"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Vigil composition root: wires the Home Assistant adapter onto the vigil core binary"
+publish = false
+
+[[bin]]
+name = "vigil"
+path = "src/main.rs"
+
+[dependencies]
+vigil = { path = "../vigil" }
+vigil-ha = { path = "../vigil-ha" }
+
+[features]
+default = []
+decode-gstreamer = ["vigil/decode-gstreamer"]
+detect-burn-wgpu = ["vigil/detect-burn-wgpu"]
+first-light-acceptance = ["vigil/first-light-acceptance"]
+fabric = ["vigil/fabric"]
+
+[dev-dependencies]
+# Test-only: these back the acceptance-journey and real-binary-driving test
+# suites moved here from core (they exercise the composed binary, not core
+# in isolation) plus the shared fixture support those suites reuse by path
+# from `crates/vigil/tests/`, never duplicated. Never compiled into the
+# shipped production binary regardless of feature selection.
+chrono.workspace = true
+context-graph.workspace = true
+contextdb-core.workspace = true
+contextdb-engine.workspace = true
+contextdb-server.workspace = true
+image.workspace = true
+libc.workspace = true
+rumqttc.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[[test]]
+name = "first_light_loop"
+path = "tests/first_light_loop.rs"
+required-features = ["first-light-acceptance"]

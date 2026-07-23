@@ -148,7 +148,7 @@ jobs:
         run: |
           while IFS= read -r -d '' path; do
             case "$path" in
-              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
+              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/test-source-scan-allowlist.toml|clippy.toml|crates/vigil-ha/tests/contract-goldens/*|crates/vigil-ha/tests/ha_discovery_id_contract.rs|crates/vigil-ha/tests/mqtt_topic_contract.rs|crates/vigil/tests/automation_handle_capability_scan.rs|crates/vigil/tests/cli_secret_flag_surface.rs|crates/vigil/tests/contract-goldens/*|crates/vigil/tests/dependency_direction_contract.rs|crates/vigil/tests/environment_read_surface.rs|crates/vigil/tests/free_port_call_sites.rs|crates/vigil/tests/home_assistant_vocabulary_scan.rs|crates/vigil/tests/http_route_contract.rs|crates/vigil/tests/oss_cleanliness_scan.rs|crates/vigil/tests/process_cleanup_scan.rs|crates/vigil/tests/runtime_packages_manifest.rs|crates/vigil/tests/settings_registry_declare_boundary.rs|crates/vigil/tests/settings_surface_coverage.rs|crates/vigil/tests/source_scan_contract.rs|crates/vigil/tests/source_scan_lexer.rs|crates/vigil/tests/transport_purity.rs|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
                 echo "normal feature closeout cannot change trusted verification control plane: $path" >&2
                 echo "route a reviewed control-plane update through the owner bootstrap path" >&2
                 exit 1

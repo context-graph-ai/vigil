@@ -168,6 +168,17 @@ enum TestTransitionProof {
         evidence_sha256: String,
         reviewer: String,
     },
+    // Relocation proves movement, never modification: each removed identity
+    // maps to exactly one surviving identity whose body is byte-identical
+    // (via `syntax_fingerprint_bytes`) to the identity's body before the
+    // move. Any actual change to the test's logic must go through the
+    // mutation-comparison or redundant-fault-detection proof instead.
+    Relocation {
+        removed_tests: Vec<String>,
+        evidence: String,
+        evidence_sha256: String,
+        reviewer: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +207,22 @@ struct FaultDetectionRun {
     command: String,
     exit_code: i32,
     duration_seconds: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelocationEvidence {
+    version: u32,
+    moves: Vec<RelocationMove>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelocationMove {
+    removed_test: String,
+    surviving_test: String,
+    body: String,
+    body_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -345,6 +372,11 @@ struct TestRecord {
     identity: String,
     source: String,
     ignored: bool,
+    // Normalized token rendering of the test function's block, used to
+    // fingerprint the test's body for relocation proofs. It deliberately
+    // ignores whitespace and comments, matching the file's existing
+    // `normalized_tokens` convention for structural comparison.
+    body: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -464,7 +496,7 @@ struct CheckOptions {
     nextest_json: Vec<(String, PathBuf)>,
 }
 
-pub(crate) fn check(args: &[OsString]) -> Result<(), String> {
+pub fn check(args: &[OsString]) -> Result<(), String> {
     let options = parse_args(args)?;
     let root = super::repo_root()?;
     let ledger_path = root.join(".config/test-estate-exceptions.toml");
@@ -1623,7 +1655,7 @@ fn audit_test_transitions(
                 receipt.id
             ));
         }
-        audit_transition_proofs(root, receipt, &removed, violations);
+        audit_transition_proofs(root, receipt, &removed, &added, violations);
         current_digest = after_digest;
     }
     if current != *active || current_digest != active_digest {
@@ -1652,6 +1684,7 @@ fn audit_transition_proofs(
     root: &Path,
     receipt: &TestTransitionReceipt,
     removed: &BTreeSet<String>,
+    added: &BTreeSet<String>,
     violations: &mut Vec<String>,
 ) {
     let mut covered = BTreeSet::new();
@@ -1705,6 +1738,23 @@ fn audit_transition_proofs(
                     &receipt.id,
                     removed_tests,
                     surviving_test,
+                    evidence,
+                    evidence_sha256,
+                    violations,
+                );
+                (removed_tests, reviewer)
+            }
+            TestTransitionProof::Relocation {
+                removed_tests,
+                evidence,
+                evidence_sha256,
+                reviewer,
+            } => {
+                audit_relocation(
+                    root,
+                    &receipt.id,
+                    removed_tests,
+                    added,
                     evidence,
                     evidence_sha256,
                     violations,
@@ -1857,6 +1907,100 @@ fn audit_redundant_fault_detection(
     }
 }
 
+// Relocation proves movement, never modification. Each entry is a strict
+// one-to-one mapping from a removed identity to the surviving identity it
+// became; a relocation whose body changed in any way, or whose mapping is
+// not exactly one-to-one, must go through the mutation-comparison or
+// redundant-fault-detection proof instead, with real proofs of no lost
+// detection. The surviving identity must also be one this transition's
+// receipt actually added, so a relocation cannot point at an unrelated
+// pre-existing test and call the removal proven.
+fn audit_relocation(
+    root: &Path,
+    receipt_id: &str,
+    removed_tests: &[String],
+    added: &BTreeSet<String>,
+    evidence_path: &str,
+    evidence_sha256: &str,
+    violations: &mut Vec<String>,
+) {
+    let result = (|| -> Result<(), String> {
+        let bytes = checked_evidence_bytes(root, evidence_path, evidence_sha256)?;
+        let evidence: RelocationEvidence = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("parse {evidence_path}: {error}"))?;
+        if evidence.version != 1 {
+            return Err(format!("evidence version {} is not 1", evidence.version));
+        }
+        if evidence.moves.is_empty() {
+            return Err("relocation evidence contains no moves".to_string());
+        }
+        let current_records = collect_test_records(root)?;
+        let current_bodies = current_records
+            .iter()
+            .map(|record| (record.identity.clone(), record.body.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut removed_seen = BTreeSet::new();
+        let mut surviving_seen = BTreeSet::new();
+        for entry in &evidence.moves {
+            if entry.removed_test == entry.surviving_test {
+                return Err(format!(
+                    "relocation move claims `{}` moved to itself",
+                    entry.removed_test
+                ));
+            }
+            if !removed_seen.insert(entry.removed_test.clone()) {
+                return Err(format!(
+                    "relocation evidence repeats removed identity `{}`",
+                    entry.removed_test
+                ));
+            }
+            if !surviving_seen.insert(entry.surviving_test.clone()) {
+                return Err(format!(
+                    "relocation evidence repeats surviving identity `{}`",
+                    entry.surviving_test
+                ));
+            }
+            let recorded = syntax_fingerprint_bytes(entry.body.as_bytes());
+            if recorded != entry.body_sha256 {
+                return Err(format!(
+                    "relocation move `{}` recorded fingerprint does not match its own recorded pre-move body text",
+                    entry.removed_test
+                ));
+            }
+            let Some(current_body) = current_bodies.get(&entry.surviving_test) else {
+                return Err(format!(
+                    "relocation move `{}` names surviving identity `{}`, which is not present in the current source tree",
+                    entry.removed_test, entry.surviving_test
+                ));
+            };
+            if !added.contains(&entry.surviving_test) {
+                return Err(format!(
+                    "relocation move `{}` names surviving identity `{}`, which this transition did not add; the target must be a test this transition introduced",
+                    entry.removed_test, entry.surviving_test
+                ));
+            }
+            let current_fingerprint = syntax_fingerprint_bytes(current_body.as_bytes());
+            if current_fingerprint != entry.body_sha256 {
+                return Err(format!(
+                    "relocation move `{}` surviving test `{}` body differs from its recorded pre-move body",
+                    entry.removed_test, entry.surviving_test
+                ));
+            }
+        }
+        if removed_seen != removed_tests.iter().cloned().collect::<BTreeSet<_>>() {
+            return Err(
+                "relocation evidence removed identities do not match its receipt".to_string(),
+            );
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        violations.push(format!(
+            "test transition receipt `{receipt_id}` relocation proof is invalid: {error}"
+        ));
+    }
+}
+
 fn checked_evidence_bytes(root: &Path, relative: &str, expected: &str) -> Result<Vec<u8>, String> {
     let path = Path::new(relative);
     if path.is_absolute()
@@ -1964,7 +2108,7 @@ fn read_documentation_contracts(root: &Path) -> Result<DocumentationContracts, S
     Ok(contracts)
 }
 
-pub(crate) fn propose_ledger(args: &[OsString]) -> Result<(), String> {
+pub fn propose_ledger(args: &[OsString]) -> Result<(), String> {
     if !args.is_empty() {
         return Err("usage: cargo xtask test-estate-proposal".to_string());
     }
@@ -2000,7 +2144,7 @@ pub(crate) fn propose_ledger(args: &[OsString]) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn propose_documentation_contracts(args: &[OsString]) -> Result<(), String> {
+pub fn propose_documentation_contracts(args: &[OsString]) -> Result<(), String> {
     let options = parse_docs_proposal_args(args)?;
     let root = super::repo_root()?;
     let docs_root = options.unwrap_or_else(|| root.clone());
@@ -2063,7 +2207,7 @@ pub(crate) fn propose_documentation_contracts(args: &[OsString]) -> Result<(), S
     Ok(())
 }
 
-pub(crate) fn propose_test_contracts(args: &[OsString]) -> Result<(), String> {
+pub fn propose_test_contracts(args: &[OsString]) -> Result<(), String> {
     if !args.is_empty() {
         return Err("usage: cargo xtask test-contract-proposal".to_string());
     }
@@ -2148,7 +2292,7 @@ fn print_contract_proposal(
     println!("]");
 }
 
-pub(crate) fn propose_test_baseline(args: &[OsString]) -> Result<(), String> {
+pub fn propose_test_baseline(args: &[OsString]) -> Result<(), String> {
     let root = if args.is_empty() {
         super::repo_root()?
     } else if args.len() == 2 && args[0] == "--root" {
@@ -2169,6 +2313,41 @@ pub(crate) fn propose_test_baseline(args: &[OsString]) -> Result<(), String> {
         println!("  {test:?},");
     }
     println!("]");
+    Ok(())
+}
+
+/// Dumps every test identity with its normalized body and body fingerprint,
+/// exactly as `collect_test_records` (and therefore `audit_relocation`)
+/// computes them, as a JSON array. Exists so relocation evidence can be
+/// authored from a pre-move tree (via `--root PATH` pointed at a checkout
+/// of the commit before the move) using the identical rendering the live
+/// check re-derives, rather than a hand-normalized approximation.
+pub fn dump_test_records(args: &[OsString]) -> Result<(), String> {
+    let root = if args.is_empty() {
+        super::repo_root()?
+    } else if args.len() == 2 && args[0] == "--root" {
+        PathBuf::from(&args[1])
+    } else {
+        return Err("usage: cargo xtask test-estate-dump-records [--root PATH]".to_string());
+    };
+    let records = collect_test_records(&root)?;
+    let rendered = records
+        .into_iter()
+        .map(|record| {
+            let body_sha256 = syntax_fingerprint_bytes(record.body.as_bytes());
+            serde_json::json!({
+                "identity": record.identity,
+                "source": record.source,
+                "ignored": record.ignored,
+                "body": record.body,
+                "body_sha256": body_sha256,
+            })
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&rendered).map_err(|error| error.to_string())?
+    );
     Ok(())
 }
 
@@ -2252,7 +2431,7 @@ fn inferred_contract_family(
             "integration",
             "pull-request",
         ),
-        "deterministic_test_support" | "ha_test_support" => (
+        "deterministic_test_support" | "deterministic_fixture_support" => (
             "deterministic-harness-readiness-and-prerequisites",
             "Test-estate harness safety: held ports, bounded readiness, and mandatory prerequisites.",
             "behavioral-unit",
@@ -2335,6 +2514,62 @@ fn inferred_contract_family(
         "health_watchdog_liveness" => (
             "health-watchdog-liveness-and-recovery",
             "Vigil inventory: health watchdog production-boundary regressions.",
+            "integration",
+            "pull-request",
+        ),
+        "secret"
+        | "cli_secret_flag_surface"
+        | "environment_read_surface"
+        | "settings"
+        | "settings_registry_declare_boundary"
+        | "settings_surface_coverage" => (
+            "operator-adjustable-settings-secret-handling-and-declare-boundary",
+            "Accepted operator-settings pin/unpin, secret-disclosure, and environment/CLI-surface inventory contract.",
+            "behavioral-unit",
+            "pull-request",
+        ),
+        "dependency_direction_contract" | "home_assistant_vocabulary_scan" => (
+            "structural-packaging-and-source-contracts",
+            "Vigil inventory structural-evidence section; replacement remains required before deleting source scans.",
+            "structural",
+            "pull-request",
+        ),
+        "free_port_call_sites" => (
+            "deterministic-harness-readiness-and-prerequisites",
+            "Test-estate harness safety: held ports, bounded readiness, and mandatory prerequisites.",
+            "behavioral-unit",
+            "pull-request",
+        ),
+        "http_route_contract" => (
+            "http-events-evidence-health-and-review-surfaces",
+            "Accepted HTTP data-plane and media contract, superseded by same-origin owner ruling where applicable.",
+            "integration",
+            "pull-request",
+        ),
+        "recognition_wire_shapes" => (
+            "recognition-enrollment-matching-honesty-and-deletion",
+            "Accepted recognition enrollment, matching, unknown honesty, provenance, and deletion contract.",
+            "integration",
+            "pull-request",
+        ),
+        "site_channel" => (
+            "site-control-camera-enable-boundary-and-disabled-marker-safety",
+            "Accepted SiteControl camera-enable/disable boundary contract: the disabled-marker path never escapes its directory and an unrecognized camera id is a no-op.",
+            "behavioral-unit",
+            "pull-request",
+        ),
+        "ha_discovery_id_contract" | "mqtt_topic_contract" => (
+            "home-assistant-discovery-events-and-corrections",
+            "Accepted Home Assistant discovery and MQTT contract.",
+            "behavioral-unit",
+            "pull-request",
+        ),
+        "correction_core_paths"
+        | "mqtt_composed_product"
+        | "http_data_plane_binary_coexistence"
+        | "binary_cli_surface_smoke" => (
+            "composed-binary-product-paths-require-the-real-compiled-vigil-binary",
+            "Accepted composition-root contract: correction/event/HTTP/CLI product paths provable only against the real compiled `vigil` binary wiring core to the Home Assistant adapter.",
             "integration",
             "pull-request",
         ),
@@ -2479,8 +2714,12 @@ fn audit_rust(root: &Path, ledger: &Ledger) -> Result<Vec<String>, String> {
 
     let mut files = Vec::new();
     collect_rs(&root.join("crates/vigil/tests"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-ha/tests"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-bin/tests"), &mut files)?;
     collect_rs(&root.join("tests"), &mut files)?;
     collect_rs(&root.join("crates/vigil/src"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-ha/src"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-bin/src"), &mut files)?;
     collect_rs(&root.join("xtask/src"), &mut files)?;
     files.sort();
 
@@ -2708,8 +2947,12 @@ impl<'ast> Visit<'ast> for AuditVisitor {
 fn collect_observed_sites(root: &Path) -> Result<Vec<ObservedSite>, String> {
     let mut files = Vec::new();
     collect_rs(&root.join("crates/vigil/tests"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-ha/tests"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-bin/tests"), &mut files)?;
     collect_rs(&root.join("tests"), &mut files)?;
     collect_rs(&root.join("crates/vigil/src"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-ha/src"), &mut files)?;
+    collect_rs(&root.join("crates/vigil-bin/src"), &mut files)?;
     collect_rs(&root.join("xtask/src"), &mut files)?;
     files.sort();
     let mut observed = Vec::new();
@@ -2720,7 +2963,10 @@ fn collect_observed_sites(root: &Path) -> Result<Vec<ObservedSite>, String> {
         let syntax = syn::parse_file(&source)
             .map_err(|error| format!("parse Rust syntax in {rel}: {error}"))?;
         let mut visitor = AuditVisitor::new(rel.clone());
-        if rel.starts_with("crates/vigil/src/") {
+        if rel.starts_with("crates/vigil/src/")
+            || rel.starts_with("crates/vigil-ha/src/")
+            || rel.starts_with("crates/vigil-bin/src/")
+        {
             for item in &syntax.items {
                 if let Item::Use(item_use) = item {
                     collect_use_aliases(&item_use.tree, Vec::new(), &mut visitor.aliases);
@@ -4939,7 +5185,16 @@ fn parse_claim_tag(line: &str) -> Option<String> {
     (values.len() == 1 && body == format!("`{}`", values[0])).then(|| values[0].clone())
 }
 
-fn adjacent_paragraph(lines: &[&str], tag_start: usize) -> Option<String> {
+/// The `[start, end)` line range of the paragraph of contiguous non-blank
+/// lines immediately above `lines[tag_start]` — the one backward-scan this
+/// module (and any external caller needing the SAME paragraph boundary,
+/// see [`adjacent_paragraph`] below) uses to find the text a
+/// `<!-- vigil-claim: ... -->` marker binds to. `pub` so a consumer
+/// outside this crate that needs the raw line range (not just the
+/// joined/normalized text) — a guard test that must mutate only the bound
+/// paragraph's own lines, for instance — calls this directly instead of
+/// re-implementing the same scan.
+pub fn adjacent_paragraph_line_range(lines: &[&str], tag_start: usize) -> Option<(usize, usize)> {
     if tag_start == 0 {
         return None;
     }
@@ -4954,6 +5209,16 @@ fn adjacent_paragraph(lines: &[&str], tag_start: usize) -> Option<String> {
     while start > 0 && !lines[start - 1].trim().is_empty() {
         start -= 1;
     }
+    Some((start, end))
+}
+
+/// The paragraph [`adjacent_paragraph_line_range`] finds, joined back into
+/// text and whitespace-normalized. `pub` for the same reason: a consumer
+/// outside this crate that only needs the paragraph's TEXT (to check
+/// whether it contains some expected content, for instance) calls this
+/// directly rather than re-implementing the backward scan a second time.
+pub fn adjacent_paragraph(lines: &[&str], tag_start: usize) -> Option<String> {
+    let (start, end) = adjacent_paragraph_line_range(lines, tag_start)?;
     let paragraph = lines[start..end].join("\n");
     let normalized = normalize_paragraph(&paragraph);
     (!normalized.is_empty()).then_some(normalized)
@@ -5092,6 +5357,54 @@ fn collect_test_records(root: &Path) -> Result<Vec<TestRecord>, String> {
         )?;
     }
 
+    // The Home Assistant adapter (`vigil-ha`) and the composition-root binary
+    // (`vigil-bin`) are separate workspace packages carved out of `vigil`.
+    // Each contributes its own identity namespace, exactly like `vigil`
+    // above. Guarded with existence checks (unlike `vigil`'s own crate
+    // root, which is load-bearing) so this function keeps working unchanged
+    // when pointed at a pre-split tree that has neither directory.
+    for package in ["vigil-ha", "vigil-bin"] {
+        let package_root = root.join("crates").join(package);
+        let package_source = package_root.join("src");
+        for crate_root in [
+            package_source.join("lib.rs"),
+            package_source.join("main.rs"),
+        ] {
+            if crate_root.is_file() {
+                collect_tests_from_module_file(
+                    root,
+                    &crate_root,
+                    vec![package.to_string()],
+                    &mut records,
+                    &mut BTreeSet::new(),
+                )?;
+            }
+        }
+        let package_integration = package_root.join("tests");
+        if package_integration.is_dir() {
+            let mut package_test_files = fs::read_dir(&package_integration)
+                .map_err(|error| format!("read {}: {error}", package_integration.display()))?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|part| part.to_str()) == Some("rs"))
+                .collect::<Vec<_>>();
+            package_test_files.sort();
+            for path in package_test_files {
+                let stem = path
+                    .file_stem()
+                    .and_then(|part| part.to_str())
+                    .ok_or_else(|| format!("non-UTF8 integration test path: {}", path.display()))?;
+                collect_tests_from_module_file(
+                    root,
+                    &path,
+                    vec![package.to_string(), stem.to_string()],
+                    &mut records,
+                    &mut BTreeSet::new(),
+                )?;
+            }
+        }
+    }
+
     let acceptance = root.join("tests/acceptance.rs");
     if acceptance.is_file() {
         collect_tests_from_module_file(
@@ -5102,15 +5415,24 @@ fn collect_test_records(root: &Path) -> Result<Vec<TestRecord>, String> {
             &mut BTreeSet::new(),
         )?;
     }
-    let xtask = root.join("xtask/src/main.rs");
-    if xtask.is_file() {
-        collect_tests_from_module_file(
-            root,
-            &xtask,
-            vec!["xtask".to_string()],
-            &mut records,
-            &mut BTreeSet::new(),
-        )?;
+    // `xtask` is a bin+lib package: the binary (`src/main.rs`) is release/CI
+    // tooling, and the library (`src/lib.rs`) is the part any OTHER crate
+    // may depend on (see `xtask/src/lib.rs`'s own doc comment) — walked as
+    // TWO separate roots, exactly like `vigil`'s own `lib.rs`/`main.rs`
+    // pair above, so a test living in either half is discovered under the
+    // identical `xtask::` identity regardless of which target module
+    // declares it.
+    for crate_root in ["xtask/src/main.rs", "xtask/src/lib.rs"] {
+        let xtask = root.join(crate_root);
+        if xtask.is_file() {
+            collect_tests_from_module_file(
+                root,
+                &xtask,
+                vec!["xtask".to_string()],
+                &mut records,
+                &mut BTreeSet::new(),
+            )?;
+        }
     }
     Ok(records.into_iter().collect())
 }
@@ -5158,6 +5480,7 @@ fn collect_item_test_records(
                     identity: parts.join("::"),
                     source: relative(root, containing_file)?,
                     ignored: has_ignore(&function.attrs),
+                    body: normalized_tokens(&function.block),
                 });
             }
             syn::Item::Mod(module) => {
@@ -6489,6 +6812,289 @@ jobs:
         );
     }
 
+    fn write_relocation_fixture_source(root: &Path, block_source: &str) {
+        let xtask_src = root.join("xtask/src");
+        fs::create_dir_all(&xtask_src).expect("create xtask fixture source");
+        fs::create_dir_all(root.join("crates/vigil/tests"))
+            .expect("create empty integration fixture root");
+        fs::write(
+            xtask_src.join("main.rs"),
+            format!(
+                r#"
+                mod relocated {{
+                    #[test]
+                    fn keeper() {block_source}
+                }}
+                "#
+            ),
+        )
+        .expect("write relocation fixture source");
+    }
+
+    fn relocation_body_and_fingerprint(block_source: &str) -> (String, String) {
+        let block: syn::Block = syn::parse_str(block_source).expect("fixture block parses");
+        let body = normalized_tokens(&block);
+        let fingerprint = syntax_fingerprint_bytes(body.as_bytes());
+        (body, fingerprint)
+    }
+
+    fn write_relocation_evidence(root: &Path, name: &str, evidence_json: &str) -> (String, String) {
+        let evidence_dir = root.join(".config/test-estate-evidence");
+        fs::create_dir_all(&evidence_dir).expect("create evidence fixture dir");
+        let bytes = evidence_json.as_bytes();
+        fs::write(evidence_dir.join(format!("{name}.json")), bytes)
+            .expect("write relocation evidence fixture");
+        (
+            format!(".config/test-estate-evidence/{name}.json"),
+            syntax_fingerprint_bytes(bytes),
+        )
+    }
+
+    #[test]
+    fn relocation_proof_accepts_a_byte_identical_move() {
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-accept-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let block_source = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        write_relocation_fixture_source(&root, block_source);
+        let (body, fingerprint) = relocation_body_and_fingerprint(block_source);
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move::keeper",
+                        "surviving_test": "xtask::relocated::keeper",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "accept", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-accept",
+            &["xtask::keeper_before_move::keeper".to_string()],
+            &BTreeSet::from(["xtask::relocated::keeper".to_string()]),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "a genuine byte-identical relocation must pass: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
+    #[test]
+    fn relocation_proof_rejects_a_surviving_body_that_changed() {
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-changed-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let recorded_block = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        let changed_block = "{ let doubled = 2 * 21; assert_eq!(doubled, 43); }";
+        write_relocation_fixture_source(&root, changed_block);
+        let (body, fingerprint) = relocation_body_and_fingerprint(recorded_block);
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move::keeper",
+                        "surviving_test": "xtask::relocated::keeper",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "changed", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-changed",
+            &["xtask::keeper_before_move::keeper".to_string()],
+            &BTreeSet::from(["xtask::relocated::keeper".to_string()]),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("differs from its recorded pre-move body")),
+            "a relocation whose surviving body changed must be rejected: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
+    #[test]
+    fn relocation_proof_rejects_a_mapping_that_is_not_one_to_one() {
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-many-to-one-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let block_source = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        write_relocation_fixture_source(&root, block_source);
+        let (body, fingerprint) = relocation_body_and_fingerprint(block_source);
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move_a::keeper",
+                        "surviving_test": "xtask::relocated::keeper",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}"
+                    }},
+                    {{
+                        "removed_test": "xtask::keeper_before_move_b::keeper",
+                        "surviving_test": "xtask::relocated::keeper",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "many-to-one", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-many-to-one",
+            &[
+                "xtask::keeper_before_move_a::keeper".to_string(),
+                "xtask::keeper_before_move_b::keeper".to_string(),
+            ],
+            &BTreeSet::from(["xtask::relocated::keeper".to_string()]),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|item| item.contains("repeats surviving identity")
+                    && item.contains("xtask::relocated::keeper")),
+            "two removed identities claiming the same surviving identity must be rejected: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
+    #[test]
+    fn relocation_proof_rejects_a_recorded_fingerprint_that_does_not_match_its_own_body() {
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-self-mismatch-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let block_source = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        write_relocation_fixture_source(&root, block_source);
+        let (body, _fingerprint) = relocation_body_and_fingerprint(block_source);
+        let wrong_fingerprint =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move::keeper",
+                        "surviving_test": "xtask::relocated::keeper",
+                        "body": {body:?},
+                        "body_sha256": "{wrong_fingerprint}"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "self-mismatch", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-self-mismatch",
+            &["xtask::keeper_before_move::keeper".to_string()],
+            &BTreeSet::from(["xtask::relocated::keeper".to_string()]),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations.iter().any(|item| item.contains(
+                "recorded fingerprint does not match its own recorded pre-move body text"
+            )),
+            "a proof whose recorded fingerprint does not match its own recorded body must be rejected: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
+    #[test]
+    fn relocation_proof_rejects_a_surviving_identity_this_transition_did_not_add() {
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-not-added-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let block_source = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        write_relocation_fixture_source(&root, block_source);
+        let (body, fingerprint) = relocation_body_and_fingerprint(block_source);
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move::keeper",
+                        "surviving_test": "xtask::relocated::keeper",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "not-added", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-not-added",
+            &["xtask::keeper_before_move::keeper".to_string()],
+            // The surviving identity genuinely exists in the tree (built by
+            // write_relocation_fixture_source above) but this transition's
+            // receipt did not add it, so the relocation must be rejected
+            // even though the body byte-for-byte matches.
+            &BTreeSet::new(),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations.iter().any(|item| item.contains(
+                "which this transition did not add; the target must be a test this transition introduced"
+            ) && item.contains("xtask::relocated::keeper")),
+            "a surviving identity this transition did not add must be rejected even if it exists and its body matches: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
     #[test]
     fn physical_contract_requires_active_nonignored_witness_and_exact_command() {
         let contract = TestContract {
@@ -6505,6 +7111,7 @@ jobs:
             identity: "vigil::acceptance::synthetic".to_string(),
             source: "tests/acceptance.rs".to_string(),
             ignored: true,
+            body: String::new(),
         }];
         let mut violations = Vec::new();
         validate_physical_contract(&contract, &records, &mut violations);
@@ -6549,11 +7156,13 @@ jobs:
                 identity: "vigil::acceptance::first_invariant".to_string(),
                 source: "tests/acceptance.rs".to_string(),
                 ignored: false,
+                body: String::new(),
             },
             TestRecord {
                 identity: "vigil::acceptance::second_invariant".to_string(),
                 source: "tests/acceptance.rs".to_string(),
                 ignored: true,
+                body: String::new(),
             },
         ];
         let mut witness_violations = Vec::new();

@@ -537,6 +537,10 @@ fn run_workflow_entrypoint(root: &Path, args: &[OsString]) -> Result<(), String>
                 "-p",
                 "vigil",
                 "-p",
+                "vigil-ha",
+                "-p",
+                "vigil-bin",
+                "-p",
                 "xtask",
                 "-p",
                 "vigil-acceptance",
@@ -600,6 +604,10 @@ fn run_closeout_rehearsal(root: &Path, args: &[OsString]) -> Result<(), String> 
             "fmt",
             "-p",
             "vigil",
+            "-p",
+            "vigil-ha",
+            "-p",
+            "vigil-bin",
             "-p",
             "xtask",
             "-p",
@@ -838,6 +846,10 @@ fn named_lane_command(root: &Path, options: &Options) -> Result<Vec<String>, Str
             "-p",
             "vigil",
             "-p",
+            "vigil-ha",
+            "-p",
+            "vigil-bin",
+            "-p",
             "xtask",
             "-p",
             "vigil-acceptance",
@@ -934,7 +946,7 @@ fn named_lane_command(root: &Path, options: &Options) -> Result<Vec<String>, Str
             "build",
             "--locked",
             "-p",
-            "vigil",
+            "vigil-bin",
             "--release",
             "--target",
             "x86_64-unknown-linux-musl",
@@ -1251,7 +1263,7 @@ fn validate_lane_command(tier: Tier, lane: &str, argv: &[String]) -> Result<(), 
         (Tier::DevCloseout, "install-binary") => {
             matches_prefix(argv, &["cargo", "build"])
                 && has_option(argv, "--release")
-                && option_values(argv, "--package", "-p") == ["vigil"]
+                && option_values(argv, "--package", "-p") == ["vigil-bin"]
                 && option_values(argv, "--target", "") == ["x86_64-unknown-linux-musl"]
                 && option_values(argv, "--features", "") == ["fabric"]
                 && !has_option(argv, "--all-features")
@@ -1318,7 +1330,7 @@ fn lane_command_contract(tier: Tier, lane: &str) -> Option<&'static str> {
             "cargo nextest run from the frozen archive with workspace remap, ci-full profile, and hash:m/4 partition",
         ),
         (Tier::DevCloseout, "install-binary") => Some(
-            "cargo build -p vigil --release --target x86_64-unknown-linux-musl --features fabric",
+            "cargo build -p vigil-bin --release --target x86_64-unknown-linux-musl --features fabric",
         ),
         (Tier::DevCloseout, "install-image") => {
             Some("local docker build/image inspect/save/load without buildx, platform, or push")
@@ -1739,6 +1751,10 @@ impl Drop for ResourceLock {
     }
 }
 
+// Reads an operator-declared verification knob by name; xtask itself is the
+// build/verification tool, not a product surface the settings-declaration
+// guard covers.
+#[allow(clippy::disallowed_methods)]
 fn env_u64(name: &str) -> Result<u64, String> {
     env::var(name)
         .map_err(|_| format!("{name} is missing; run verification through `scripts/verify`"))?
@@ -2454,7 +2470,7 @@ mod tests {
             "cargo",
             "build",
             "-p",
-            "vigil",
+            "vigil-bin",
             "--release",
             "--target",
             "x86_64-unknown-linux-musl",
@@ -2467,7 +2483,7 @@ mod tests {
                 "cargo",
                 "build",
                 "-p",
-                "vigil",
+                "vigil-bin",
                 "--release",
                 "--target",
                 "aarch64-unknown-linux-musl",
@@ -2478,12 +2494,25 @@ mod tests {
                 "cargo",
                 "build",
                 "-p",
-                "vigil",
+                "vigil-bin",
                 "--release",
                 "--target",
                 "x86_64-unknown-linux-musl",
                 "--features",
                 "decode-gstreamer,detect-burn-wgpu,fabric",
+            ]),
+            // Core has no binary target at all: a build selecting core's own
+            // package name can never produce the shipped `vigil` executable.
+            strings(&[
+                "cargo",
+                "build",
+                "-p",
+                "vigil",
+                "--release",
+                "--target",
+                "x86_64-unknown-linux-musl",
+                "--features",
+                "fabric",
             ]),
         ] {
             assert!(validate_lane_command(Tier::DevCloseout, "install-binary", &rejected).is_err());

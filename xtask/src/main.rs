@@ -7,8 +7,15 @@ use std::process::{Command, ExitCode};
 use sha2::{Digest, Sha256};
 
 mod closeout_impact;
-mod test_estate;
 mod verify;
+
+// `test_estate` and `repo_root` live in the library half of this crate
+// (`xtask/src/lib.rs`) — re-exposed here, visible to sibling modules
+// (`verify.rs` reaches it via `super::test_estate`), so this binary keeps
+// working exactly as before while the one parsing implementation becomes
+// callable from outside this crate too.
+pub(crate) use xtask::repo_root;
+pub(crate) use xtask::test_estate;
 
 const PERSON_SHA: &str = "a65415f0da868f59014777ace1b702f6d7c6274c18e5af3e344cf710c37526ea";
 const EMPTY_SHA: &str = "2d4c35233e497d1c81d2a08187e856b5aba84acaf4f10cb47ccd33b9b5edee63";
@@ -37,10 +44,11 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         }
         Some("test-contract-proposal") => test_estate::propose_test_contracts(&args[1..]),
         Some("test-baseline-proposal") => test_estate::propose_test_baseline(&args[1..]),
+        Some("test-estate-dump-records") => test_estate::dump_test_records(&args[1..]),
         Some("closeout-impact") => closeout_impact::run(&args[1..]),
         Some("verify") => verify::run(&args[1..]),
         _ => Err(
-            "usage: cargo xtask <setup-harness|setup-runtime-harness|test-estate-check [--docs PATH] [--nextest-json SHAPE=PATH]...|test-estate-proposal|documentation-contract-proposal [--docs PATH]|test-contract-proposal|test-baseline-proposal [--root PATH]|closeout-impact --base SHA --head SHA --json PATH|verify <change|dev-closeout|release> ...>"
+            "usage: cargo xtask <setup-harness|setup-runtime-harness|test-estate-check [--docs PATH] [--nextest-json SHAPE=PATH]...|test-estate-proposal|documentation-contract-proposal [--docs PATH]|test-contract-proposal|test-baseline-proposal [--root PATH]|test-estate-dump-records [--root PATH]|closeout-impact --base SHA --head SHA --json PATH|verify <change|dev-closeout|release> ...>"
                 .to_string(),
         ),
     }
@@ -240,14 +248,6 @@ pub(crate) fn setup_harness() -> Result<(), String> {
     println!("empty fixture: {}", empty_clip.display());
     println!("model fixture: {}", model_file.display());
     Ok(())
-}
-
-fn repo_root() -> Result<PathBuf, String> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "xtask has no workspace parent".to_string())
 }
 
 struct Asset {
@@ -467,6 +467,9 @@ fn require_tool(name: &str) -> Result<PathBuf, String> {
     })
 }
 
+// Reads PATH to locate a required build tool; xtask is the build/setup
+// tool itself, not a product surface the settings-declaration guard covers.
+#[allow(clippy::disallowed_methods)]
 fn find_on_path(name: &str) -> Option<PathBuf> {
     let paths = env::var_os("PATH")?;
     env::split_paths(&paths)

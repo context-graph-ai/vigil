@@ -30,32 +30,24 @@ use sha2::{Digest, Sha256};
 use tokio::runtime::Builder;
 use url::Url;
 
+use crate::secret::Secret;
+
 const PLAYABLE_MAX_WIDTH: u32 = 1280;
 const PLAYABLE_MAX_HEIGHT: u32 = 720;
 const MOTION_WIDTH: u32 = 64;
 const MOTION_HEIGHT: u32 = 36;
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RtspCredentials {
     pub(crate) username: String,
-    pub(crate) password: String,
-}
-
-impl std::fmt::Debug for RtspCredentials {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("RtspCredentials")
-            .field("username", &self.username)
-            .field("password", &"<redacted>")
-            .finish()
-    }
+    pub(crate) password: Secret,
 }
 
 impl From<RtspCredentials> for RetinaCredentials {
     fn from(credentials: RtspCredentials) -> Self {
         Self {
             username: credentials.username,
-            password: credentials.password,
+            password: credentials.password.expose_secret().to_string(),
         }
     }
 }
@@ -79,7 +71,7 @@ impl RtspSource {
 pub(crate) fn prepare_rtsp_source(
     rtsp_url: &str,
     explicit_username: Option<&str>,
-    explicit_password: Option<&str>,
+    explicit_password: Option<&Secret>,
 ) -> Result<RtspSource, String> {
     let mut url = Url::parse(rtsp_url)
         .map_err(|error| format!("parse RTSP URL {}: {error}", redact_rtsp_url(rtsp_url)))?;
@@ -112,12 +104,14 @@ pub(crate) fn redact_rtsp_url(rtsp_url: &str) -> String {
 fn resolve_rtsp_credentials(
     embedded_credentials: Option<RtspCredentials>,
     explicit_username: Option<&str>,
-    explicit_password: Option<&str>,
+    explicit_password: Option<&Secret>,
 ) -> Result<Option<RtspCredentials>, String> {
     if let Some(username) = explicit_username {
         return Ok(Some(RtspCredentials {
             username: username.to_string(),
-            password: explicit_password.unwrap_or_default().to_string(),
+            password: explicit_password
+                .cloned()
+                .unwrap_or_else(|| Secret::new(String::new())),
         }));
     }
     if let Some(password) = explicit_password {
@@ -128,7 +122,7 @@ fn resolve_rtsp_credentials(
         };
         return Ok(Some(RtspCredentials {
             username: embedded.username,
-            password: password.to_string(),
+            password: password.clone(),
         }));
     }
     Ok(embedded_credentials)
@@ -140,10 +134,11 @@ fn extract_url_credentials(url: &Url) -> Option<RtspCredentials> {
     }
     Some(RtspCredentials {
         username: percent_decode_utf8_lossy(url.username()),
-        password: url
-            .password()
-            .map(percent_decode_utf8_lossy)
-            .unwrap_or_default(),
+        password: Secret::new(
+            url.password()
+                .map(percent_decode_utf8_lossy)
+                .unwrap_or_default(),
+        ),
     })
 }
 
@@ -255,6 +250,9 @@ const HARDWARE_PROBE_UNIT_COUNT: usize = 12;
 /// Advanced override: VIGIL_HARDWARE_PROBE_DEADLINE_SECS.
 const HARDWARE_PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
+// VIGIL_HARDWARE_PROBE_DEADLINE_SECS is an enumerated, reviewed override
+// (`environment_read_surface.baseline.txt`), not an ad-hoc read.
+#[allow(clippy::disallowed_methods)]
 fn hardware_probe_deadline() -> Duration {
     std::env::var("VIGIL_HARDWARE_PROBE_DEADLINE_SECS")
         .ok()
@@ -1514,7 +1512,7 @@ mod tests {
             source.credentials,
             Some(RtspCredentials {
                 username: "admin".to_string(),
-                password: "p@ss:word".to_string(),
+                password: Secret::new("p@ss:word".to_string()),
             })
         );
     }
@@ -1524,7 +1522,7 @@ mod tests {
         let source = prepare_rtsp_source(
             "rtsp://wrong:wrong-password@192.0.2.10:554/Streaming/Channels/102",
             Some("operator"),
-            Some("camera-secret"),
+            Some(&Secret::new("camera-secret".to_string())),
         )
         .expect("explicit credentials should prepare");
 
@@ -1536,7 +1534,7 @@ mod tests {
             source.credentials,
             Some(RtspCredentials {
                 username: "operator".to_string(),
-                password: "camera-secret".to_string(),
+                password: Secret::new("camera-secret".to_string()),
             })
         );
     }
@@ -1546,7 +1544,7 @@ mod tests {
         let source = prepare_rtsp_source(
             "rtsp://admin@192.0.2.10:554/Streaming/Channels/102",
             None,
-            Some("camera-secret"),
+            Some(&Secret::new("camera-secret".to_string())),
         )
         .expect("separate password should pair with URL username");
 
@@ -1554,7 +1552,7 @@ mod tests {
             source.credentials,
             Some(RtspCredentials {
                 username: "admin".to_string(),
-                password: "camera-secret".to_string(),
+                password: Secret::new("camera-secret".to_string()),
             })
         );
     }
@@ -1571,17 +1569,28 @@ mod tests {
     }
 
     #[test]
-    fn rtsp_credentials_debug_redacts_password() {
+    fn rtsp_credentials_debug_redacts_password_and_keeps_username_visible() {
+        // `RtspCredentials` derives `Debug` (no hand-written impl); the
+        // redaction comes entirely from `Secret`'s own `Debug`.
         let text = format!(
             "{:?}",
             RtspCredentials {
                 username: "admin".to_string(),
-                password: "secret".to_string(),
+                password: Secret::new("secret".to_string()),
             }
         );
 
-        assert!(text.contains("admin"));
-        assert!(!text.contains("secret"));
-        assert!(text.contains("<redacted>"));
+        assert!(
+            text.contains("admin"),
+            "the username is not a secret and must stay visible for debugging: {text}"
+        );
+        assert!(
+            !text.contains("secret"),
+            "the password value must never appear in Debug output: {text}"
+        );
+        assert!(
+            text.contains("<redacted>"),
+            "Debug output must show the fixed redaction: {text}"
+        );
     }
 }

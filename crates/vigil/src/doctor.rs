@@ -763,6 +763,11 @@ impl HostFacts for RealHostFacts {
         }
     }
 
+    // The one concrete implementation of the `HostFacts::env_var` seam
+    // (SUPERVISOR_TOKEN/USER, enumerated in
+    // `environment_read_surface.baseline.txt`); every caller goes through
+    // the trait, not a scattered ad-hoc read.
+    #[allow(clippy::disallowed_methods)]
     fn env_var(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
     }

@@ -1,11 +1,14 @@
-// Shared test harness support for ha_correction_seam.rs and ha_mqtt_broker.rs.
+// Shared test harness support: deterministic cg detection fixtures plus
+// process-fixture helpers (RTSP/mediamtx/ffmpeg, the vigil binary path) used
+// by live detector and correction-seam tests. Nothing here is specific to
+// any one integration; the content is generic, so it lives in core even
+// though `ha_mqtt_broker.rs` (in the sibling `vigil-ha` adapter crate) reuses
+// it too via a cross-crate `#[path]`, the same idiom `source_scan_lexer.rs`
+// uses for in-crate reuse.
 //
 // Included via:
-//   #[path = "ha_test_support.rs"]
-//   mod ha_test_support;
-//
-// Provides deterministic cg detection fixtures for correction/MQTT contract
-// tests, plus shared process-fixture helpers used by live detector tests.
+//   #[path = "deterministic_fixture_support.rs"]
+//   mod deterministic_fixture_support;
 
 #![allow(dead_code)]
 
@@ -16,7 +19,6 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
 use std::time::Duration;
 
 use context_graph::{
@@ -29,8 +31,7 @@ use tempfile::TempDir;
 
 #[path = "deterministic_test_support.rs"]
 mod deterministic_test_support;
-use deterministic_test_support::TcpPortReservation;
-pub use deterministic_test_support::wait_until;
+pub use deterministic_test_support::{TcpPortReservation, capture_pipe, wait_until};
 
 // ── Product constants ──────────────────────────────────────────────────────
 
@@ -70,32 +71,155 @@ pub fn wait_for_tcp_port(port: u16, timeout: Duration) -> Result<(), String> {
     })
 }
 
-// ── Capture pipe ───────────────────────────────────────────────────────────
+// ── Raw HTTP test client ────────────────────────────────────────────────────
+// Generic loopback HTTP client used to exercise Vigil's own review/health
+// data-plane surfaces in-process or across a spawned binary — no adapter
+// vocabulary. Reused by `http_data_plane.rs` (in-process) and by any
+// `vigil-bin` test proving the same surface stays reachable through a real
+// compiled process.
 
-pub fn capture_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Arc<Mutex<String>> {
-    let buf = Arc::new(Mutex::new(String::new()));
-    if let Some(mut pipe) = pipe {
-        let captured = Arc::clone(&buf);
-        thread::spawn(move || {
-            let mut tmp = [0u8; 4096];
-            loop {
-                match pipe.read(&mut tmp) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if let Ok(mut g) = captured.lock() {
-                            g.push_str(&String::from_utf8_lossy(&tmp[..n]));
-                        }
-                    }
-                    Err(_) => break,
+#[derive(Debug)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).to_string()
+    }
+}
+
+pub fn request(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: &[u8],
+) -> HttpResponse {
+    request_limited(port, method, path, headers, body, usize::MAX)
+}
+
+pub fn request_limited(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: &[u8],
+    max_body_bytes: usize,
+) -> HttpResponse {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
+        .expect("data-plane port must accept TCP connections");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set read timeout");
+    let request_path = if path.is_empty() { "/" } else { path };
+    let mut wire = format!(
+        "{method} {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n"
+    );
+    for (name, value) in headers {
+        wire.push_str(name);
+        wire.push_str(": ");
+        wire.push_str(value);
+        wire.push_str("\r\n");
+    }
+    if !body.is_empty() {
+        wire.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    wire.push_str("\r\n");
+    use std::io::Write;
+    stream
+        .write_all(wire.as_bytes())
+        .expect("write HTTP request headers");
+    if !body.is_empty() {
+        stream.write_all(body).expect("write HTTP request body");
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Write);
+
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 8192];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if raw.len() > max_body_bytes.saturating_add(16_384) {
+                    break;
                 }
             }
-        });
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => panic!("read HTTP response: {error}"),
+        }
     }
-    buf
+    parse_response(&raw, max_body_bytes)
+}
+
+pub fn parse_response(raw: &[u8], max_body_bytes: usize) -> HttpResponse {
+    let split = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HTTP response must include header/body delimiter");
+    let head = String::from_utf8_lossy(&raw[..split]);
+    let mut lines = head.lines();
+    let status_line = lines
+        .next()
+        .expect("HTTP response must include status line");
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .expect("HTTP status line must include status code")
+        .parse::<u16>()
+        .expect("HTTP status code must be numeric");
+    let headers = lines
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let body_start = split + 4;
+    let body_end = raw.len().min(body_start.saturating_add(max_body_bytes));
+    HttpResponse {
+        status,
+        headers,
+        body: raw[body_start..body_end].to_vec(),
+    }
+}
+
+pub fn json_body(response: &HttpResponse) -> Value {
+    serde_json::from_slice(&response.body).unwrap_or_else(|error| {
+        panic!(
+            "response body must be JSON, status={} body={} error={error}",
+            response.status,
+            response.body_text()
+        )
+    })
+}
+
+pub fn get(port: u16, path: &str) -> HttpResponse {
+    request(port, "GET", path, &[], b"")
 }
 
 // ── Tool / binary paths ────────────────────────────────────────────────────
 
+// Test-fixture tool discovery (an explicit override env var, then PATH,
+// then a cached download), not a product-adjustable value the
+// settings-declaration guard covers.
+#[allow(clippy::disallowed_methods)]
 pub fn tool_path(env_key: &str, binary: &str) -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(env_key).map(PathBuf::from)
         && path.is_file()
@@ -127,6 +251,9 @@ pub fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+// CARGO_BIN_EXE_vigil is cargo's own test-harness-injected variable, not a
+// product-adjustable value the settings-declaration guard covers.
+#[allow(clippy::disallowed_methods)]
 pub fn vigil_binary_path() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_vigil") {
         return PathBuf::from(path);
@@ -518,4 +645,111 @@ pub fn fresh_store_copy(minimum_observations: usize) -> Result<(TempDir, PathBuf
     );
 
     Ok((tmp, store_path))
+}
+
+// ── Rendered acceleration-receipt assertions ───────────────────────────────
+//
+// Shared by core's own in-process detection-acceleration tests and by
+// `vigil-bin`'s real-runtime detection receipt test (the one test in this
+// area that drives the compiled binary, so it lives with the composition
+// root instead) — kept here, not duplicated, so both reach the identical
+// wording rules through this one file.
+
+/// The one place a nonexistent accelerated-detector build could be
+/// misleadingly named in a rendered action line.
+#[cfg(not(feature = "detect-burn-wgpu"))]
+pub const MISLEADING_ACTION: &str = "install a build with an accelerated detector backend";
+
+/// Extract the named `[header]`..next-`[...]` block from a rendered
+/// stats/health/doctor surface, or `None` if the header never appears.
+#[cfg(not(feature = "detect-burn-wgpu"))]
+pub fn rendered_receipt_block(surface: &str, header: &str) -> Option<String> {
+    let mut in_block = false;
+    let mut block = String::new();
+    for line in surface.lines() {
+        let trimmed = line.trim();
+        if trimmed == header {
+            if in_block {
+                break;
+            }
+            in_block = true;
+        } else if in_block && trimmed.starts_with('[') {
+            break;
+        }
+        if in_block {
+            if !block.is_empty() {
+                block.push('\n');
+            }
+            block.push_str(line);
+        }
+    }
+    (!block.is_empty()).then_some(block)
+}
+
+#[cfg(not(feature = "detect-burn-wgpu"))]
+pub fn assert_cpu_detection_action(action_payload: Option<&str>) {
+    assert!(
+        action_payload.is_some(),
+        "detection fallback must include an operator action payload"
+    );
+    let Some(action) = action_payload else {
+        return;
+    };
+    assert_cpu_detection_action_text(action);
+}
+
+#[cfg(not(feature = "detect-burn-wgpu"))]
+pub fn assert_cpu_detection_action_text(action: &str) {
+    let lower = action.to_ascii_lowercase();
+    assert!(
+        lower.contains("cpu") && lower.contains("supported"),
+        "action must say CPU detection is the supported path: {action}"
+    );
+    assert!(
+        lower.contains("decode") && lower.contains("hardware"),
+        "action must keep hardware decode distinct from CPU detection: {action}"
+    );
+    assert!(
+        lower.contains("not in this build")
+            || lower.contains("isn't in this build")
+            || lower.contains("not available")
+            || lower.contains("cannot accelerate"),
+        "action must say accelerated detection is unavailable in this artifact: {action}"
+    );
+    assert!(
+        !lower.contains(MISLEADING_ACTION),
+        "action must not point at a nonexistent accelerated detector build: {action}"
+    );
+}
+
+#[cfg(not(feature = "detect-burn-wgpu"))]
+pub fn assert_cpu_detection_action_in_rendered_block(surface: &str, label: &str) {
+    let block = rendered_receipt_block(surface, "[detect.acceleration]");
+    assert!(
+        block.is_some(),
+        "{label} must render the detection acceleration block: {surface}"
+    );
+    let Some(block) = block else {
+        return;
+    };
+    for (field, expected) in [
+        ("status", "fallback"),
+        (
+            "active_backend",
+            vigil::detection_accel::CPU_DETECTION_BACKEND,
+        ),
+        ("hardware_accelerated", "false"),
+        ("failure_code", "backend_not_compiled"),
+    ] {
+        let expected_line = format!("{field}: {expected}");
+        assert!(
+            block.lines().any(|line| line.trim() == expected_line),
+            "{label} detection block must render `{expected_line}` so the public surface cannot claim accelerated detection while showing CPU fallback advice: {block}"
+        );
+    }
+    assert!(
+        block.contains("action_kind:") && block.contains("action_payload:"),
+        "{label} detection block must render the action rows: {block}"
+    );
+    assert_cpu_detection_action_text(&block);
 }

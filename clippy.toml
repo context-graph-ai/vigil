@@ -1,0 +1,18 @@
+# Workspace-wide clippy configuration.
+#
+# Disallows direct environment reads outside a declared setting. The
+# product rule this enforces is the same one `environment_read_surface.rs`
+# already enforces by inventory (see that file's own doc comment): an
+# adjustable value must be a declared setting with a visible outside
+# control, not an ad-hoc environment-variable read scattered through the
+# source. This config makes the same rule bite at compile time, everywhere
+# in the workspace `cargo clippy --workspace --all-targets` reaches — not
+# just under `crates/vigil/src`. Every existing legitimate read carries its
+# own targeted `#[allow(clippy::disallowed_methods)]` with a one-line
+# reason at its call site; there is no blanket module-level allow anywhere.
+disallowed-methods = [
+    "std::env::var",
+    "std::env::var_os",
+    "std::env::vars",
+    "std::env::vars_os",
+]

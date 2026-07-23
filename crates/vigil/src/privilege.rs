@@ -52,6 +52,9 @@ pub fn privilege_drop_plan(
     ])
 }
 
+// VIGIL_DROP_PRIVILEGES is an enumerated, reviewed override
+// (`environment_read_surface.baseline.txt`), not an ad-hoc read.
+#[allow(clippy::disallowed_methods)]
 pub(crate) fn prepare_runtime_user(store_path: &Path) -> Result<(), String> {
     if std::env::var("VIGIL_DROP_PRIVILEGES").ok().as_deref() != Some("1") {
         return Ok(());
@@ -61,6 +64,9 @@ pub(crate) fn prepare_runtime_user(store_path: &Path) -> Result<(), String> {
     drop_privileges(store_path, uid, gid)
 }
 
+// This wrapper's own callers (VIGIL_RUN_UID, VIGIL_RUN_GID) are enumerated,
+// reviewed overrides (`environment_read_surface.baseline.txt`).
+#[allow(clippy::disallowed_methods)]
 fn env_u32(name: &str, default: u32) -> Result<u32, String> {
     match std::env::var(name) {
         Ok(value) => value
@@ -70,6 +76,9 @@ fn env_u32(name: &str, default: u32) -> Result<u32, String> {
     }
 }
 
+// VIGIL_RUN_SUPPLEMENTAL_GIDS is an enumerated, reviewed override
+// (`environment_read_surface.baseline.txt`), not an ad-hoc read.
+#[allow(clippy::disallowed_methods)]
 #[cfg(unix)]
 fn drop_privileges(store_path: &Path, uid: u32, gid: u32) -> Result<(), String> {
     if unsafe { libc::geteuid() } != 0 {

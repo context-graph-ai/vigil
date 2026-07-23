@@ -1,0 +1,88 @@
+# Frozen environment-read inventory for every production crate's src/:
+# crates/vigil/src, crates/vigil-ha/src, crates/vigil-bin/src.
+#
+# One record per line: file|function|variable
+#   file     - the crate name, then a path relative to that crate's src/
+#              (e.g. "vigil/config.rs", "vigil-ha/ha_discovery.rs")
+#   function - the enclosing function or item name (never a line number)
+#   variable - the literal environment variable name, or the literal token
+#              <dynamic> when the call computes the name from a parameter
+#              instead of a string literal (recorded honestly rather than
+#              guessed at)
+#
+# This file may only shrink as reads are migrated to declared settings
+# (add-on options, CLI flags, config file fields). It must never grow to
+# make room for a new ad-hoc read; environment_read_surface.rs enforces
+# both directions. vigil-ha and vigil-bin hold zero entries today — that is
+# the correct, observed starting point, not an oversight.
+
+vigil/config.rs|env_overrides|VIGIL_DATA_DIR
+vigil/config.rs|env_overrides|VIGIL_STORE_PATH
+vigil/config.rs|env_overrides|VIGIL_HEALTH_PORT
+vigil/config.rs|env_overrides|VIGIL_REVIEW_PORT
+vigil/config.rs|env_overrides|VIGIL_SITE_NAME
+vigil/config.rs|env_overrides|VIGIL_CAMERA_NAME
+vigil/config.rs|env_overrides|VIGIL_RTSP_URL
+vigil/config.rs|env_overrides|VIGIL_LIVE_RTSP_URL
+vigil/config.rs|env_overrides|VIGIL_RTSP_USERNAME
+vigil/config.rs|env_overrides|VIGIL_RTSP_PASSWORD
+vigil/config.rs|env_overrides|VIGIL_DETECTOR_MODEL_ID
+vigil/config.rs|env_overrides|VIGIL_DETECTOR_MODEL_PATH
+vigil/config.rs|env_overrides|VIGIL_RECOGNITION_WEIGHTS_DIR
+vigil/config.rs|env_overrides|VIGIL_RECOGNITION_SPACE_ID
+vigil/config.rs|env_overrides|VIGIL_RECOGNITION_THRESHOLD
+vigil/config.rs|env_overrides|VIGIL_DETECTOR_CONFIDENCE_THRESHOLD
+vigil/config.rs|env_overrides|VIGIL_DETECTOR_SAMPLE_FRAMES
+vigil/config.rs|env_overrides|VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS
+vigil/config.rs|env_overrides|MQTT_HOST
+vigil/config.rs|env_overrides|MQTT_PORT
+vigil/config.rs|env_overrides|MQTT_USER
+vigil/config.rs|env_overrides|MQTT_USERNAME
+vigil/config.rs|env_overrides|MQTT_PASSWORD
+vigil/config.rs|env_overrides|VIGIL_SERVICE_ID
+vigil/config.rs|env_overrides|VIGIL_FABRIC_TICKET
+vigil/config.rs|env_overrides|VIGIL_FABRIC_WORKER_LEASE_MS
+vigil/config.rs|env_overrides|VIGIL_FABRIC_FALLBACK_HORIZON_MS
+vigil/config.rs|env_overrides|VIGIL_HARDWARE_DECODING
+vigil/config.rs|env_overrides|VIGIL_ACCELERATED_DETECTION
+vigil/config.rs|env_overrides|VIGIL_FABRIC_HUB
+vigil/config.rs|env_overrides|VIGIL_FABRIC_ALLOW_FRAME_OFFLOAD
+vigil/config.rs|env_intent_bool|<dynamic>
+vigil/config.rs|default_options_json_path|VIGIL_TEST_OPTIONS_JSON
+vigil/lib.rs|store_path_from_env|VIGIL_STORE_PATH
+vigil/lib.rs|data_dir_from_env|VIGIL_DATA_DIR
+vigil/lib.rs|data_dir_from_env|VIGIL_STORE_PATH
+vigil/control_socket.rs|control_socket_path|VIGIL_CONTROL_SOCKET
+vigil/privilege.rs|prepare_runtime_user|VIGIL_DROP_PRIVILEGES
+vigil/privilege.rs|env_u32|<dynamic>
+vigil/privilege.rs|prepare_runtime_user|VIGIL_RUN_UID
+vigil/privilege.rs|prepare_runtime_user|VIGIL_RUN_GID
+vigil/privilege.rs|drop_privileges|VIGIL_RUN_SUPPLEMENTAL_GIDS
+vigil/supervisor.rs|fetch_supervisor_mqtt|SUPERVISOR_TOKEN
+vigil/health.rs|bind|VIGIL_TEST_EPHEMERAL_HEALTH_PORT
+vigil/yolox_detector.rs|from_env|VIGIL_DETECTOR_FORWARD_PROBE_PATH
+vigil/yolox_detector.rs|from_env|VIGIL_DETECTOR_FORWARD_PROBE_NONCE
+vigil/media_pipeline.rs|hardware_probe_deadline|VIGIL_HARDWARE_PROBE_DEADLINE_SECS
+vigil/decode_gstreamer.rs|decode_probe_deadline|VIGIL_DECODE_PROBE_DEADLINE_SECS
+vigil/doctor.rs|env_var|<dynamic>
+vigil/doctor.rs|user_can_access_device|VIGIL_RUN_SUPPLEMENTAL_GIDS
+vigil/doctor.rs|resolve_service_user|VIGIL_SERVICE_USER
+vigil/doctor.rs|doctor_decode_receipt_with_hardware_backend|USER
+vigil/doctor.rs|live_device_access_finding|USER
+vigil/fabric.rs|resolved_worker_lease_duration_ms|VIGIL_FABRIC_WORKER_LEASE_MS
+vigil/fabric.rs|fabric_bring_up|VIGIL_FABRIC_BRINGUP_DELAY_MS
+vigil/fabric.rs|fabric_bring_up|VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS
+vigil/detection_accel.rs|detection_probe_deadline|VIGIL_DETECTION_PROBE_DEADLINE_SECS
+vigil/detection_accel.rs|detection_late_window|VIGIL_DETECTION_LATE_WINDOW_SECS
+vigil/runtime.rs|register_generic_camera|SUPERVISOR_TOKEN
+vigil/runtime.rs|env_is|<dynamic>
+vigil/runtime.rs|env_u64|<dynamic>
+vigil/runtime.rs|start_rtsp_probe|VIGIL_DETECTOR_QUEUE_CAPACITY
+vigil/runtime.rs|start_rtsp_probe|VIGIL_DETECTOR_WORK_DELAY_MS
+vigil/runtime.rs|start_rtsp_probe|VIGIL_DETECTOR_DECISION_DELAY_MS
+vigil/runtime.rs|start_rtsp_probe|VIGIL_RTSP_RETRY_INITIAL_MS
+vigil/runtime.rs|start_rtsp_probe|VIGIL_RTSP_RETRY_MAX_MS
+vigil/runtime.rs|start_rtsp_probe|VIGIL_CAPTURE_FRAMES
+vigil/runtime.rs|maybe_crash_after_startup_node|VIGIL_FAULT_CRASH_AFTER_STARTUP_NODE
+vigil/config.rs|set|<dynamic>
+vigil/config.rs|remove|<dynamic>

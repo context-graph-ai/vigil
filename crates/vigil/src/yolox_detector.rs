@@ -621,6 +621,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 impl DetectorForwardProbe {
+    // VIGIL_DETECTOR_FORWARD_PROBE_PATH/_NONCE are enumerated, reviewed
+    // test-only reads (`environment_read_surface.baseline.txt`), not an
+    // ad-hoc scattering.
+    #[allow(clippy::disallowed_methods)]
     fn from_env() -> Option<Self> {
         env::var_os(DETECTOR_FORWARD_PROBE_ENV).map(|path| Self {
             path: path.into(),

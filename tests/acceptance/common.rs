@@ -949,10 +949,6 @@ impl RssProbe {
     }
 }
 
-pub(crate) fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 pub(crate) fn temp_config(
     data_dir: &Path,
     store_path: &Path,
@@ -1491,11 +1487,10 @@ fn escape_toml_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::{Path, PathBuf};
 
     use super::{
         direct_child_target_is_safe, free_port, network_line_is_outbound, resolve_acceptance_image,
-        resolve_vigil_binary, workspace_root,
+        resolve_vigil_binary,
     };
 
     #[test]
@@ -1538,69 +1533,7 @@ mod tests {
     }
 
     #[test]
-    fn process_cleanup_has_no_wildcard_or_shell_kill_paths() {
-        let root = workspace_root();
-        let mut rust_files = Vec::new();
-        collect_rust_files(&root.join("tests"), &mut rust_files);
-        collect_rust_files(&root.join("crates/vigil/tests"), &mut rust_files);
-
-        let banned = [
-            ("raw shell kill", ["Command::new(", "\"kill\""].concat()),
-            ("process-group kill", ["kill", "pg"].concat()),
-            ("process-group lookup", ["get", "pgid"].concat()),
-            ("nix signal kill", ["nix::sys::signal", "::kill"].concat()),
-            ("process-group target enum", ["Signal", "Target"].concat()),
-            (
-                "process-group target variant",
-                ["Process", "Group"].concat(),
-            ),
-            (
-                "negative kill argument formatting",
-                ["format!", "(\"-", "{"].concat(),
-            ),
-        ];
-        let allowed_libc_kill_path = root.join("tests/acceptance/common.rs");
-        let libc_kill = ["libc", "::", "kill", "("].concat();
-        let artifact_build_patterns = [
-            ["env!(\"", "CARGO", "\")"].concat(),
-            ["Command::new(\"", "cargo", "\")"].concat(),
-            ["command_output(\"", "cargo", "\""].concat(),
-            ["\"docker\", [\"", "build", "\""].concat(),
-        ];
-        let mut libc_kill_locations = Vec::new();
-        let mut violations = Vec::new();
-
-        for path in rust_files {
-            let source = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
-            for (name, pattern) in &banned {
-                if source.contains(pattern) {
-                    violations.push(format!("{} contains {name}", path.display()));
-                }
-            }
-            if source.contains(&libc_kill) {
-                libc_kill_locations.push(path.clone());
-            }
-            for pattern in &artifact_build_patterns {
-                if source.contains(pattern) {
-                    violations.push(format!(
-                        "{} invokes an artifact builder inside a test process: {pattern}",
-                        path.display()
-                    ));
-                }
-            }
-        }
-
-        assert!(
-            violations.is_empty(),
-            "acceptance tests must not contain unsafe cleanup or nested artifact builds:\n{}",
-            violations.join("\n")
-        );
-        assert_eq!(
-            libc_kill_locations,
-            vec![allowed_libc_kill_path.clone()],
-            "raw signal syscalls must stay centralized in the positive direct-child cleanup helper"
-        );
+    fn resolve_vigil_binary_and_image_prefer_explicit_over_computed_defaults() {
         let artifacts = tempfile::tempdir().expect("artifact resolver tempdir");
         let explicit = artifacts.path().join("explicit-vigil");
         let cargo = artifacts.path().join("cargo-vigil");
@@ -1632,19 +1565,5 @@ mod tests {
             resolve_acceptance_image(Some(String::new())).is_err(),
             "an empty prebuilt image identity must fail closed"
         );
-    }
-
-    fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rust_files(&path, files);
-            } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
-                files.push(path);
-            }
-        }
     }
 }

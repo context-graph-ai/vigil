@@ -7,20 +7,32 @@ path = "crates/vigil/tests/addon_config_surface.rs"
 reason = "Legacy add-on YAML/help surface scanner; replace with the typed packaging contract checker."
 
 [[file]]
+path = "crates/vigil/tests/automation_handle_capability_scan.rs"
+reason = "Reviewed structural scan; proves no impl block for AutomationHandle regains set_manual/return_to_automatic, which the compile_fail doctests beside the type prove only unreachability for, not method absence."
+
+[[file]]
 path = "crates/vigil/tests/artifact_profile_honesty.rs"
 reason = "Legacy Docker/YAML/release-workflow scanner; retained until named image builds replace it."
+
+[[file]]
+path = "crates/vigil/tests/cli_secret_flag_surface.rs"
+reason = "Reviewed frozen inventory of secret-shaped command-line flags; reads crate sources by design."
 
 [[file]]
 path = "crates/vigil/tests/detection_accel_backend.rs"
 reason = "Mixed accelerated-backend behavior and existing live-wiring source parser; move the parser to the central structural checker."
 
 [[file]]
+path = "crates/vigil/tests/environment_read_surface.rs"
+reason = "Reviewed frozen inventory of std::env read call sites; reads crate sources by design."
+
+[[file]]
 path = "crates/vigil/tests/fabric_config_defaults.rs"
 reason = "Mixed behavioral and source-literal fabric config proof; split before removing this allowance."
 
 [[file]]
-path = "crates/vigil/tests/first_light_loop.rs"
-reason = "Accepted first-light no-runtime-oracle-download journey includes an existing oracle source ownership check."
+path = "crates/vigil/tests/home_assistant_vocabulary_scan.rs"
+reason = "Reviewed boundary guard added with the Home Assistant adapter split; proves no Home Assistant discovery/transport vocabulary leaks back into core sources, with a planted-leak canary against a real core file."
 
 [[file]]
 path = "crates/vigil/tests/oss_cleanliness_scan.rs"
@@ -33,6 +45,14 @@ reason = "Legacy add-on schema/help text proof pending typed configuration table
 [[file]]
 path = "crates/vigil/tests/runtime_packages_manifest.rs"
 reason = "Legacy package/Docker/shell parser pending typed manifest and container replacement evidence."
+
+[[file]]
+path = "crates/vigil/tests/settings_registry_declare_boundary.rs"
+reason = "Reviewed structural boundary scan; reads crate sources by design to confirm the settings registry is declared from exactly one production function."
+
+[[file]]
+path = "crates/vigil/tests/settings_surface_coverage.rs"
+reason = "Reviewed settings-registry coverage proof; reads the add-on config and each setting's own documentation page by design to confirm the declaration is not a hidden knob."
 
 [[file]]
 path = "crates/vigil/tests/source_scan_contract.rs"

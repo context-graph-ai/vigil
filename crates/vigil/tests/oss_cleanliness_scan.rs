@@ -123,6 +123,10 @@ fn string_literals(text: &str) -> Vec<(usize, String)> {
     literals
 }
 
+// VIGIL_PRIVATE_NOUN_SCAN_FILE is this guard's own operator-supplied scan
+// input, not a product-adjustable value the settings-declaration guard
+// covers.
+#[allow(clippy::disallowed_methods)]
 fn private_needles() -> Option<Vec<String>> {
     let mut needles = vec![
         PRIVATE_CANARY.to_string(),
@@ -278,13 +282,15 @@ fn no_private_environment_nouns_in_repo_sources() {
 fn backend_nouns_stay_out_of_product_domain_outputs() {
     // Unfakeable because it scans string literals in the code that builds
     // product-domain payloads, while operator records remain allowed to name
-    // backends and devices.
+    // backends and devices. The Home Assistant adapter's payload builders
+    // live in the sibling `vigil-ha` crate, addressed from the workspace
+    // root; the rest are this crate's own product-domain sources.
     let product_output_files = [
-        "src/ha_discovery.rs",
-        "src/ha_mqtt_tasks.rs",
-        "src/correction.rs",
-        "src/live_read.rs",
-        "src/http_data_plane.rs",
+        "crates/vigil-ha/src/ha_discovery.rs",
+        "crates/vigil-ha/src/ha_mqtt_tasks.rs",
+        "crates/vigil/src/correction.rs",
+        "crates/vigil/src/live_read.rs",
+        "crates/vigil/src/http_data_plane.rs",
     ];
     let backend_nouns = [
         "gstreamer",
@@ -304,7 +310,7 @@ fn backend_nouns_stay_out_of_product_domain_outputs() {
 
     let mut violations = Vec::new();
     for file in product_output_files {
-        let path = crate_root().join(file);
+        let path = repo_root().join(file);
         let text = fs::read_to_string(&path);
         assert!(
             text.is_ok(),

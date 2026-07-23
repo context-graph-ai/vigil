@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::ha_mqtt_tasks::MqttConfig;
+use crate::secret::Secret;
+use crate::settings::{SettingHandle, SettingSpec, SettingSurfaces, SettingsRegistry};
+use crate::site_channel::ConnectionEndpoint;
 
 /// One camera entry in the multi-camera list.
 #[derive(Debug, Clone)]
@@ -13,7 +15,7 @@ pub(crate) struct CameraEntry {
     pub(crate) rtsp_url: Option<String>,
     pub(crate) live_rtsp_url: Option<String>,
     pub(crate) username: Option<String>,
-    pub(crate) password: Option<String>,
+    pub(crate) password: Option<Secret>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +31,7 @@ pub(crate) struct RuntimeConfig {
     /// First camera's RTSP URL — retained for backward compat.
     pub(crate) rtsp_url: Option<String>,
     pub(crate) rtsp_username: Option<String>,
-    pub(crate) rtsp_password: Option<String>,
+    pub(crate) rtsp_password: Option<Secret>,
     pub(crate) detector_model_id: String,
     pub(crate) detector_model_path: Option<PathBuf>,
     pub(crate) detector_confidence_threshold: f64,
@@ -38,9 +40,10 @@ pub(crate) struct RuntimeConfig {
     /// Canonical multi-camera list.  Always contains at least one entry (the
     /// single camera_name/rtsp_url for backward compat).
     pub(crate) cameras: Vec<CameraEntry>,
-    /// MQTT broker connection, present when a broker is configured (e.g. via
-    /// HA Supervisor MQTT service or env vars MQTT_HOST / MQTT_PORT).
-    pub(crate) mqtt: Option<MqttConfig>,
+    /// Outbound connection an integration adapter may use, present when a
+    /// broker is configured (e.g. via HA Supervisor MQTT service or env vars
+    /// MQTT_HOST / MQTT_PORT).
+    pub(crate) mqtt: Option<ConnectionEndpoint>,
     /// Stable service identifier derived from site_name or explicitly configured
     /// via VIGIL_SERVICE_ID.  Used as the MQTT topic namespace and HA device id.
     pub(crate) service_id: String,
@@ -102,7 +105,7 @@ struct CameraEntryPartial {
     rtsp_url: Option<String>,
     live_rtsp_url: Option<String>,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Secret>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -116,7 +119,7 @@ struct PartialConfig {
     rtsp_url: Option<String>,
     live_rtsp_url: Option<String>,
     rtsp_username: Option<String>,
-    rtsp_password: Option<String>,
+    rtsp_password: Option<Secret>,
     detector_model_id: Option<String>,
     detector_model_path: Option<PathBuf>,
     detector_confidence_threshold: Option<f64>,
@@ -128,7 +131,7 @@ struct PartialConfig {
     mqtt_host: Option<String>,
     mqtt_port: Option<u16>,
     mqtt_username: Option<String>,
-    mqtt_password: Option<String>,
+    mqtt_password: Option<Secret>,
     service_id: Option<String>,
     recognition_weights_dir: Option<PathBuf>,
     recognition_space_id: Option<String>,
@@ -155,7 +158,7 @@ struct CliOverrides {
     rtsp_url: Option<String>,
     live_rtsp_url: Option<String>,
     rtsp_username: Option<String>,
-    rtsp_password: Option<String>,
+    rtsp_password: Option<Secret>,
     detector_model_id: Option<String>,
     detector_model_path: Option<PathBuf>,
     detector_confidence_threshold: Option<f64>,
@@ -267,10 +270,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     if partial.mqtt_host.is_none()
         && let Some(cfg) = crate::supervisor::fetch_supervisor_mqtt()
     {
-        partial.mqtt_host = Some(cfg.broker_host);
+        partial.mqtt_host = Some(cfg.host);
         // Only override port/creds if the env didn't provide them explicitly.
         if partial.mqtt_port.is_none() {
-            partial.mqtt_port = Some(cfg.broker_port);
+            partial.mqtt_port = Some(cfg.port);
         }
         if partial.mqtt_username.is_none() {
             partial.mqtt_username = cfg.username;
@@ -299,7 +302,24 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         partial.detector_sample_frames.unwrap_or(5),
         "detector_sample_frames",
     )?;
-    let detector_stationary_interval_secs = partial.detector_stationary_interval_secs.unwrap_or(30);
+    // Resolved through the typed settings registry: an operator-supplied
+    // value (from any source already merged into `partial` above) is a
+    // manual pin; nothing supplied leaves it Automatic at its declared
+    // default. This is the one knob moved behind the registry so its
+    // control states are real; the effective value is unchanged.
+    // `declare_settings` is the single function that declares every
+    // setting this crate has (see its own doc comment) — `load` and the
+    // coverage check both go through it, so they can never disagree about
+    // which settings exist.
+    let mut settings_registry = SettingsRegistry::new();
+    let declared_settings = declare_settings(&mut settings_registry);
+    if let Some(value) = partial.detector_stationary_interval_secs {
+        declared_settings
+            .stationary_interval
+            .set_manual(value)
+            .map_err(|error| format!("detector_stationary_interval_secs {error}"))?;
+    }
+    let detector_stationary_interval_secs = declared_settings.stationary_interval.effective_value();
     // Fabric knobs: absent ticket, hub embedding defaults off (criterion
     // C10 — every knob has a sane default, works with nothing provided).
     // Precedence CLI > env > options.json/fabric.toml — `partial.fabric_*`
@@ -339,10 +359,13 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     let fabric_worker_lease_ms = partial.fabric_worker_lease_ms.unwrap_or(300_000);
     let fabric_fallback_horizon_ms = partial.fabric_fallback_horizon_ms.unwrap_or(5_000);
 
-    // MQTT broker: present when a host is configured.
-    let mqtt = partial.mqtt_host.map(|host| MqttConfig {
-        broker_host: host,
-        broker_port: partial.mqtt_port.unwrap_or(1883),
+    // Outbound connection: present when a host is configured. The password
+    // stays wrapped in `Secret` all the way out of config resolution — an
+    // integration adapter is the one that ultimately exposes it, at the
+    // point it actually opens a connection.
+    let mqtt = partial.mqtt_host.map(|host| ConnectionEndpoint {
+        host,
+        port: partial.mqtt_port.unwrap_or(1883),
         username: partial.mqtt_username,
         password: partial.mqtt_password,
     });
@@ -455,7 +478,7 @@ fn parse_cli(args: Vec<OsString>) -> Result<CliOverrides, String> {
                 cli.rtsp_username = Some(next_string(&mut iter, "--rtsp-username")?)
             }
             "--rtsp-password" => {
-                cli.rtsp_password = Some(next_string(&mut iter, "--rtsp-password")?)
+                cli.rtsp_password = Some(Secret::new(next_string(&mut iter, "--rtsp-password")?))
             }
             "--detector-model-id" => {
                 cli.detector_model_id = Some(next_string(&mut iter, "--detector-model-id")?)
@@ -557,6 +580,11 @@ fn parse_intent_bool(value: &str) -> Option<bool> {
     }
 }
 
+// This wrapper's own callers are baselined legacy reads (see
+// `env_overrides` below), enumerated in
+// `environment_read_surface.baseline.txt`, pending migration to the
+// settings registry — not a declared setting today.
+#[allow(clippy::disallowed_methods)]
 fn env_intent_bool(name: &str) -> Result<Option<bool>, String> {
     match std::env::var(name) {
         Ok(value) => parse_intent_bool(&value)
@@ -591,6 +619,81 @@ fn validate_detector_sample_frames(value: usize, name: &str) -> Result<usize, St
         Ok(value)
     } else {
         Err(format!("{name} must be between 1 and 64, got {value}"))
+    }
+}
+
+/// Every setting this crate declares through the typed settings registry,
+/// handed back to whoever declared them.
+pub(crate) struct DeclaredSettings {
+    pub(crate) stationary_interval: SettingHandle<u64>,
+}
+
+/// The single production function that declares every setting this crate
+/// has. `load` (to resolve real values) and `declared_settings` at the
+/// crate root (to check coverage) both call this and nothing else
+/// constructs a config setting's handle, so the two can never disagree
+/// about which settings exist: adding a setting means adding one field to
+/// [`DeclaredSettings`] and one `registry.declare` call here, and both
+/// callers pick it up without further edits.
+///
+/// This is a structural guarantee, enforced two ways, not a discipline
+/// one:
+/// - Outside this crate, it is a compile error: [`SettingsRegistry::new`]
+///   and [`SettingsRegistry::declare`] are both `pub(crate)`, so no
+///   external caller can build a registry at all, let alone declare a
+///   setting on one (see the doctest on [`SettingsRegistry`] itself).
+/// - Inside this crate, a `declare` call added to any function other than
+///   this one is a gate failure: `settings_registry_declare_boundary.rs`
+///   scans the crate's own source and fails the moment `declare(` appears
+///   anywhere outside this function's body (its own unit tests in
+///   `settings.rs` are the sole, reviewed exception, since they exist to
+///   test the registry primitive itself, not to resolve a real setting).
+///
+/// [`SettingHandle::new`] is private to the `settings` module, so the only
+/// way to obtain one — including the one this function returns — is
+/// [`SettingsRegistry::declare`], which always records the setting on the
+/// registry's coverage entries first. A handle that reaches
+/// [`DeclaredSettings`] without having gone through that call cannot exist.
+pub(crate) fn declare_settings(registry: &mut SettingsRegistry) -> DeclaredSettings {
+    DeclaredSettings {
+        stationary_interval: registry.declare(stationary_interval_setting_spec()),
+    }
+}
+
+/// The stationary scan interval's settings-registry declaration: a stable
+/// name, its today-unchanged default and validation, and where an owner
+/// sees and changes it. Unconstrained, matching the resolution this
+/// replaces (any interval was previously accepted).
+fn stationary_interval_setting_spec() -> SettingSpec<u64> {
+    SettingSpec {
+        name: "detector_stationary_interval_secs",
+        default: 30,
+        validate: |_value| Ok(()),
+        surfaces: SettingSurfaces {
+            config_key: "detector_stationary_interval_secs",
+            addon_option_key: "detector_stationary_interval_secs",
+            documentation_page: "docs/configuration.md",
+        },
+    }
+}
+
+/// Whether a standalone-config TOML fragment assigning `raw_value` to
+/// `name` actually sets the field it names, using the real config-file
+/// parser (`PartialConfig`). Test/tooling support for the settings-registry
+/// coverage check: parsing a fragment and confirming it lands on the right
+/// field cannot be done generically over an arbitrary setting name, so this
+/// dispatches by name, one declared setting at a time, and stays honest by
+/// refusing to guess for a name it does not recognize.
+pub(crate) fn config_file_fragment_sets(name: &str, raw_value: &str) -> bool {
+    let fragment = format!("{name} = {raw_value}");
+    let Ok(parsed) = toml::from_str::<PartialConfig>(&fragment) else {
+        return false;
+    };
+    match name {
+        "detector_stationary_interval_secs" => {
+            parsed.detector_stationary_interval_secs == raw_value.parse().ok()
+        }
+        _ => false,
     }
 }
 
@@ -661,6 +764,13 @@ fn read_options_json(path: &Path) -> Result<PartialConfig, String> {
         .map_err(|error| format!("could not parse options {}: {error}", path.display()))
 }
 
+// Every read below is a baselined legacy environment read (an
+// add-on/Supervisor-injected value), enumerated in
+// `environment_read_surface.baseline.txt` and pending migration to the
+// settings registry — only the stationary scan interval is a declared
+// setting today (see `stationary_interval_setting_spec`); this is the one
+// function that gathers the rest, not an ad-hoc scattering.
+#[allow(clippy::disallowed_methods)]
 fn env_overrides() -> Result<PartialConfig, String> {
     Ok(PartialConfig {
         data_dir: std::env::var_os("VIGIL_DATA_DIR").map(PathBuf::from),
@@ -686,7 +796,7 @@ fn env_overrides() -> Result<PartialConfig, String> {
         rtsp_url: std::env::var("VIGIL_RTSP_URL").ok(),
         live_rtsp_url: std::env::var("VIGIL_LIVE_RTSP_URL").ok(),
         rtsp_username: std::env::var("VIGIL_RTSP_USERNAME").ok(),
-        rtsp_password: std::env::var("VIGIL_RTSP_PASSWORD").ok(),
+        rtsp_password: std::env::var("VIGIL_RTSP_PASSWORD").ok().map(Secret::new),
         detector_model_id: std::env::var("VIGIL_DETECTOR_MODEL_ID").ok(),
         detector_model_path: std::env::var_os("VIGIL_DETECTOR_MODEL_PATH").map(Into::into),
         recognition_weights_dir: std::env::var_os("VIGIL_RECOGNITION_WEIGHTS_DIR").map(Into::into),
@@ -735,7 +845,7 @@ fn env_overrides() -> Result<PartialConfig, String> {
         mqtt_username: std::env::var("MQTT_USER")
             .ok()
             .or_else(|| std::env::var("MQTT_USERNAME").ok()),
-        mqtt_password: std::env::var("MQTT_PASSWORD").ok(),
+        mqtt_password: std::env::var("MQTT_PASSWORD").ok().map(Secret::new),
         service_id: std::env::var("VIGIL_SERVICE_ID").ok(),
         hardware_decoding: env_intent_bool("VIGIL_HARDWARE_DECODING")?,
         accelerated_detection: env_intent_bool("VIGIL_ACCELERATED_DETECTION")?,
@@ -879,7 +989,10 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn default_options_json_path() -> PathBuf {
+    // Test-only escape hatch so the suite can point this at a fixture path
+    // instead of the real Supervisor-mounted file.
     #[cfg(test)]
+    #[allow(clippy::disallowed_methods)]
     if let Some(path) = std::env::var_os("VIGIL_TEST_OPTIONS_JSON") {
         return PathBuf::from(path);
     }
@@ -1173,12 +1286,92 @@ mod tests {
         );
     }
 
+    /// The RTSP password can arrive from a CLI flag, a TOML config file, or
+    /// an environment variable — this must keep resolving to the identical
+    /// effective value it did before the password field was wrapped in
+    /// `Secret`, including the existing env-overrides-CLI-overrides-file
+    /// precedence.
+    #[test]
+    fn rtsp_password_resolves_identically_from_cli_file_and_env() {
+        let _guard = env_lock().lock().expect("env lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _options_env = EnvVarGuard::set(
+            "VIGIL_TEST_OPTIONS_JSON",
+            tmp.path().join("absent-options.json"),
+        );
+        let _password_env = EnvVarGuard::remove("VIGIL_RTSP_PASSWORD");
+
+        // CLI flag alone.
+        let cli_only = load(vec![
+            OsString::from("--rtsp-password"),
+            OsString::from("secret-from-cli"),
+        ])
+        .expect("CLI-supplied password loads");
+        assert_eq!(
+            cli_only
+                .rtsp_password
+                .as_ref()
+                .map(|password| password.expose_secret()),
+            Some("secret-from-cli")
+        );
+
+        // TOML config file alone.
+        let config_path = tmp.path().join("vigil.toml");
+        fs::write(&config_path, "rtsp_password = \"secret-from-file\"\n")
+            .expect("write TOML config file");
+        let file_only = load(vec![
+            OsString::from("--config"),
+            OsString::from(config_path.clone()),
+        ])
+        .expect("file-supplied password loads");
+        assert_eq!(
+            file_only
+                .rtsp_password
+                .as_ref()
+                .map(|password| password.expose_secret()),
+            Some("secret-from-file")
+        );
+
+        // Environment variable alone.
+        {
+            let _password_env = EnvVarGuard::set("VIGIL_RTSP_PASSWORD", "secret-from-env");
+            let env_only = load(Vec::<OsString>::new()).expect("env-supplied password loads");
+            assert_eq!(
+                env_only
+                    .rtsp_password
+                    .as_ref()
+                    .map(|password| password.expose_secret()),
+                Some("secret-from-env")
+            );
+
+            // Env still wins over both file and CLI, exactly as before Secret adoption.
+            let env_over_file_and_cli = load(vec![
+                OsString::from("--config"),
+                OsString::from(config_path),
+                OsString::from("--rtsp-password"),
+                OsString::from("secret-from-cli"),
+            ])
+            .expect("all three sources supplied together still load");
+            assert_eq!(
+                env_over_file_and_cli
+                    .rtsp_password
+                    .as_ref()
+                    .map(|password| password.expose_secret()),
+                Some("secret-from-env"),
+                "environment must still win over both a config file and a CLI flag"
+            );
+        }
+    }
+
     struct EnvVarGuard {
         key: &'static str,
         previous: Option<std::ffi::OsString>,
     }
 
     impl EnvVarGuard {
+        // Test-only fence that reads a variable's prior value so it can be
+        // restored on drop; not a product read of an adjustable value.
+        #[allow(clippy::disallowed_methods)]
         fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let guard = Self {
                 key,
@@ -1190,6 +1383,9 @@ mod tests {
             guard
         }
 
+        // Test-only fence that reads a variable's prior value so it can be
+        // restored on drop; not a product read of an adjustable value.
+        #[allow(clippy::disallowed_methods)]
         fn remove(key: &'static str) -> Self {
             let guard = Self {
                 key,

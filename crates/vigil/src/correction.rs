@@ -629,9 +629,11 @@ impl EventCorrectionSummary {
 
 /// Read the PNG bytes for the most-recent detector evidence frame for the named camera.
 ///
-/// Used by the snapshot MQTT control action to publish a real frame to the HA image entity.
-/// The PNG was written by `write_detector_evidence_image` in runtime.rs and referenced as
-/// `"vigil-edge:clip/{filename}"` in the detection observation's `properties["detector_evidence_ref"]`.
+/// Its only caller is `RuntimeSiteControl::latest_detection_image` — an adapter reaches
+/// this data through that `SiteControl` method, never directly, so this stays
+/// `pub(crate)`. The PNG was written by `write_detector_evidence_image` in runtime.rs and
+/// referenced as `"vigil-edge:clip/{filename}"` in the detection observation's
+/// `properties["detector_evidence_ref"]`.
 ///
 /// Returns `None` when no detection, no evidence ref, or the file has been cleaned up.
 /// Callers tolerate None gracefully (log + skip the publish).

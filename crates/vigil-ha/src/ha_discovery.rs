@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::correction::{CorrectionRequest, CorrectionType};
-use crate::health::HealthStatus;
+use vigil::{CorrectionRequest, CorrectionType, HealthStatus};
 
 // ── Service / camera config types ─────────────────────────────────────────
 

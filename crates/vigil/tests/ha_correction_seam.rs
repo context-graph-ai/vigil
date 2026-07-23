@@ -16,8 +16,8 @@ use vigil::{
     review_why,
 };
 
-#[path = "ha_test_support.rs"]
-mod ha_test_support;
+#[path = "deterministic_fixture_support.rs"]
+mod deterministic_fixture_support;
 
 /// List all observations from the store (across all contexts).
 fn list_all_observations(store: &Store) -> Vec<Observation> {
@@ -61,11 +61,11 @@ fn clone_detection_for_unreviewed_row(store: &Store, source: &Observation) -> St
 /// is the RED `review_events_row_flags_corrected_events`.
 #[test]
 fn vigil_events_lists_recent_events_through_review_api() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1).expect(
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(1).expect(
         "seeded store for REGRESSION GUARD vigil_events_lists_recent_events_through_review_api",
     );
-    let store =
-        ha_test_support::open_store_at(&store_path).expect("store must open from seeded copy");
+    let store = deterministic_fixture_support::open_store_at(&store_path)
+        .expect("store must open from seeded copy");
 
     let view = review_events(&store, 100).expect("review_events must not error on a valid store");
 
@@ -90,10 +90,10 @@ fn vigil_events_lists_recent_events_through_review_api() {
 /// match any observation in the store and the observation count does not grow.
 #[test]
 fn correction_writes_durably_through_cg_record_path() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(1)
         .expect("seeded store for correction_writes_durably_through_cg_record_path");
-    let store =
-        ha_test_support::open_store_at(&store_path).expect("store must open from seeded copy");
+    let store = deterministic_fixture_support::open_store_at(&store_path)
+        .expect("store must open from seeded copy");
 
     let observations = list_all_observations(&store);
     assert!(
@@ -153,7 +153,8 @@ fn correction_writes_durably_through_cg_record_path() {
 
     // After reopening the store (simulating restart), the correction is still present.
     drop(store);
-    let store2 = ha_test_support::open_store_at(&store_path).expect("store must reopen");
+    let store2 =
+        deterministic_fixture_support::open_store_at(&store_path).expect("store must reopen");
     let obs_after_reopen = list_all_observations(&store2);
     assert_eq!(
         obs_after_reopen.len(),
@@ -200,10 +201,10 @@ fn correction_writes_durably_through_cg_record_path() {
 /// provenance walk but no corrections.
 #[test]
 fn correction_reads_back_via_review_why() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(1)
         .expect("seeded store for correction_reads_back_via_review_why");
-    let store =
-        ha_test_support::open_store_at(&store_path).expect("store must open from seeded copy");
+    let store = deterministic_fixture_support::open_store_at(&store_path)
+        .expect("store must open from seeded copy");
 
     let observations = list_all_observations(&store);
     assert!(
@@ -256,10 +257,10 @@ fn correction_reads_back_via_review_why() {
 /// corrected event's row still reads false.
 #[test]
 fn review_events_row_flags_corrected_events() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(2)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(2)
         .expect("seeded store for review_events_row_flags_corrected_events");
-    let store =
-        ha_test_support::open_store_at(&store_path).expect("store must open from seeded copy");
+    let store = deterministic_fixture_support::open_store_at(&store_path)
+        .expect("store must open from seeded copy");
 
     let mut observations = list_all_observations(&store);
     assert!(
@@ -315,11 +316,12 @@ fn review_events_row_flags_corrected_events() {
 /// which a mirror could answer).  The wrong stub stores nothing in cg.
 #[test]
 fn correction_held_outside_cg_fails_readback() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(1)
         .expect("seeded store for correction_held_outside_cg_fails_readback");
 
     let observations = {
-        let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+        let store =
+            deterministic_fixture_support::open_store_at(&store_path).expect("store must open");
         list_all_observations(&store)
     };
     assert!(
@@ -330,8 +332,8 @@ fn correction_held_outside_cg_fails_readback() {
 
     // Record a correction — wrong stub writes nothing to cg.
     {
-        let store =
-            ha_test_support::open_store_at(&store_path).expect("store must open for correction");
+        let store = deterministic_fixture_support::open_store_at(&store_path)
+            .expect("store must open for correction");
         let request = CorrectionRequest {
             detection_id: detection_id.clone(),
             label: Some("correction-test-label".to_string()),
@@ -342,7 +344,8 @@ fn correction_held_outside_cg_fails_readback() {
     // All in-process state dropped here (store dropped at end of block above).
 
     // Reopen ONLY the cg Store as a fresh handle.
-    let fresh_store = ha_test_support::open_store_at(&store_path).expect("fresh store must open");
+    let fresh_store =
+        deterministic_fixture_support::open_store_at(&store_path).expect("fresh store must open");
 
     // Read via cg public methods (not review_why).
     let all_observations = fresh_store
@@ -369,11 +372,12 @@ fn correction_held_outside_cg_fails_readback() {
 /// RED — correction must survive a full store reopen (daemon restart simulation).
 #[test]
 fn correction_survives_daemon_restart() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(1)
         .expect("seeded store for correction_survives_daemon_restart");
 
     let detection_id = {
-        let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+        let store =
+            deterministic_fixture_support::open_store_at(&store_path).expect("store must open");
         let obs = list_all_observations(&store);
         assert!(
             !obs.is_empty(),
@@ -384,8 +388,8 @@ fn correction_survives_daemon_restart() {
 
     // Record a correction then drop the store handle (simulates daemon exit).
     {
-        let store =
-            ha_test_support::open_store_at(&store_path).expect("store must open for correction");
+        let store = deterministic_fixture_support::open_store_at(&store_path)
+            .expect("store must open for correction");
         let request = CorrectionRequest {
             detection_id: detection_id.clone(),
             label: Some("false alarm".to_string()),
@@ -395,7 +399,7 @@ fn correction_survives_daemon_restart() {
     }
 
     // Reopen the store (simulates daemon restart) and rebuild the review API on it.
-    let store_after_restart = ha_test_support::open_store_at(&store_path)
+    let store_after_restart = deterministic_fixture_support::open_store_at(&store_path)
         .expect("store must reopen after simulated restart");
 
     // Corrections must read back via the rebuilt review API.
@@ -429,9 +433,9 @@ fn correction_survives_daemon_restart() {
 /// a typed CorrectionError::NoAnchor with zero cg observation written.
 #[test]
 fn record_correction_with_unknown_detection_id_returns_typed_error() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(1)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(1)
         .expect("seeded store for record_correction_with_unknown_detection_id_returns_typed_error");
-    let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store must open");
     let count_before = list_all_observations(&store).len();
 
     // (a) Well-formed but unknown UUID.
@@ -481,9 +485,9 @@ fn record_correction_with_unknown_detection_id_returns_typed_error() {
 /// that anchor to first or last are each defeated.
 #[test]
 fn correction_anchored_to_named_detection_only() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(3)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(3)
         .expect("seeded store for correction_anchored_to_named_detection_only");
-    let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store must open");
     let mut observations = list_all_observations(&store);
     assert!(
         observations.len() >= 3,
@@ -534,9 +538,9 @@ fn correction_anchored_to_named_detection_only() {
 /// label/type content.
 #[test]
 fn false_alarm_and_wrong_class_corrections_record_and_read_back() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(2)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(2)
         .expect("seeded store for false_alarm_and_wrong_class_corrections_record_and_read_back");
-    let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store must open");
     let mut observations = list_all_observations(&store);
     assert!(
         observations.len() >= 2,
@@ -617,9 +621,9 @@ fn false_alarm_and_wrong_class_corrections_record_and_read_back() {
 /// Identity ("confirmed"): correction_recorded=false, confirmed=true.
 #[test]
 fn confirmed_correction_does_not_set_correction_recorded() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(2)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(2)
         .expect("seeded store for confirmed_correction_does_not_set_correction_recorded");
-    let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store must open");
     let mut observations = list_all_observations(&store);
     assert!(
         observations.len() >= 2,
@@ -689,9 +693,9 @@ fn confirmed_correction_does_not_set_correction_recorded() {
 /// label on each row.
 #[test]
 fn review_events_rows_expose_current_correction_authority_fields() {
-    let (_tmp, store_path) = ha_test_support::fresh_store_copy(3)
+    let (_tmp, store_path) = deterministic_fixture_support::fresh_store_copy(3)
         .expect("seeded store for review_events_rows_expose_current_correction_authority_fields");
-    let store = ha_test_support::open_store_at(&store_path).expect("store must open");
+    let store = deterministic_fixture_support::open_store_at(&store_path).expect("store must open");
     let mut detections = list_all_observations(&store)
         .into_iter()
         .filter(|observation| observation.observation_type == "detection")

@@ -1,0 +1,39 @@
+[package]
+name = "vigil-ha"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Home Assistant MQTT integration adapter for Vigil"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+vigil = { path = "../vigil" }
+rumqttc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[features]
+default = []
+# Slow deterministic camera/detector first-light acceptance support code in
+# this crate's own test suite. Mirrors the vigil crate's feature of the same
+# name; keep this out of the default workspace gate.
+first-light-acceptance = []
+# Declared inert (never enabled here) so the shared fixture support this
+# crate reuses by path from `crates/vigil/tests/` — which is cfg-gated on
+# this feature name for its own crate — does not trip an unknown-feature
+# lint when compiled as part of this crate.
+detect-burn-wgpu = []
+
+[dev-dependencies]
+# Test-only, and deliberately NOT context-graph or contextdb: this crate's
+# own tests exercise the adapter against a `SiteControl` test double, never
+# a real store — a broker test that needs a real store is exercising the
+# composed product and lives with `vigil-bin`'s suites instead. See
+# `dependency_direction_contract.rs`'s adapter-boundary arm (both dependency
+# kinds, with a planted canary).
+libc.workspace = true

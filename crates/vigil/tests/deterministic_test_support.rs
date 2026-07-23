@@ -1,13 +1,10 @@
 #![allow(dead_code)]
 
+use std::io::Read;
 use std::net::TcpListener;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
-
-use rumqttc::v5::mqttbytes::QoS;
-use rumqttc::v5::mqttbytes::v5::Packet;
-use rumqttc::v5::{Client, Connection, Event, MqttOptions, RecvTimeoutError};
 
 pub struct TcpPortReservation {
     listener: Option<TcpListener>,
@@ -69,190 +66,29 @@ pub fn wait_until<T>(
     }
 }
 
-pub fn required_tool(env_key: &str, binary: &str, fallbacks: &[&Path]) -> Result<PathBuf, String> {
-    if let Some(path) = std::env::var_os(env_key).map(PathBuf::from) {
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(format!(
-            "{env_key} points to missing {binary} binary: {}",
-            path.display()
-        ));
-    }
-    if let Some(path) = std::env::var_os("PATH").and_then(|path_var| {
-        std::env::split_paths(&path_var)
-            .map(|dir| dir.join(binary))
-            .find(|path| path.is_file())
-    }) {
-        return Ok(path);
-    }
-    fallbacks
-        .iter()
-        .find(|path| path.is_file())
-        .map(|path| path.to_path_buf())
-        .ok_or_else(|| {
-            format!(
-                "required test prerequisite `{binary}` was not found; set {env_key} or add it to PATH"
-            )
-        })
-}
-
-#[derive(Debug, Clone)]
-pub struct ObservedPublish {
-    pub topic: String,
-    pub payload: Vec<u8>,
-    pub retain: bool,
-}
-
-pub struct MqttProbe {
-    client: Client,
-    connection: Connection,
-}
-
-impl MqttProbe {
-    pub fn connect(host: &str, port: u16, timeout: Duration) -> Result<Self, String> {
-        Self::connect_and_subscribe(host, port, &[], timeout)
-    }
-
-    pub fn connect_and_subscribe(
-        host: &str,
-        port: u16,
-        topics: &[&str],
-        timeout: Duration,
-    ) -> Result<Self, String> {
-        Self::connect_and_subscribe_with_max_packet(host, port, topics, timeout, None)
-    }
-
-    pub fn connect_and_subscribe_with_max_packet(
-        host: &str,
-        port: u16,
-        topics: &[&str],
-        timeout: Duration,
-        max_packet_size: Option<u32>,
-    ) -> Result<Self, String> {
-        static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let mut options = MqttOptions::new(format!("vigil-test-probe-{id}"), host, port);
-        options.set_keep_alive(Duration::from_secs(5));
-        if max_packet_size.is_some() {
-            options.set_max_packet_size(max_packet_size);
-        }
-        let (client, connection) = Client::new(options, 32);
-        let mut probe = Self { client, connection };
-
-        probe.wait_for_packet("MQTT CONNACK", timeout, |packet| {
-            matches!(packet, Packet::ConnAck(_))
-        })?;
-        for topic in topics {
-            probe
-                .client
-                .subscribe(*topic, QoS::AtLeastOnce)
-                .map_err(|error| format!("subscribe to {topic}: {error}"))?;
-            probe.wait_for_packet(&format!("MQTT SUBACK for {topic}"), timeout, |packet| {
-                matches!(packet, Packet::SubAck(_))
-            })?;
-        }
-        Ok(probe)
-    }
-
-    pub fn publish_qos1(&self, topic: &str, payload: impl AsRef<[u8]>) -> Result<(), String> {
-        self.client
-            .publish(topic, QoS::AtLeastOnce, false, payload.as_ref().to_vec())
-            .map_err(|error| format!("publish to {topic}: {error}"))
-    }
-
-    pub fn wait_for_pubacks(&mut self, count: usize, timeout: Duration) -> Result<(), String> {
-        let deadline = Instant::now() + timeout;
-        let mut observed = 0;
-        while observed < count {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(format!(
-                    "timed out after {:.2}s waiting for {count} MQTT PUBACKs; observed {observed}",
-                    timeout.as_secs_f64()
-                ));
-            }
-            match self
-                .connection
-                .recv_timeout(remaining.min(Duration::from_millis(100)))
-            {
-                Ok(Ok(Event::Incoming(Packet::PubAck(_)))) => observed += 1,
-                Ok(Ok(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Ok(Err(error)) => return Err(format!("MQTT connection error: {error}")),
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err("MQTT probe disconnected while waiting for PUBACKs".to_string());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn recv_matching(
-        &mut self,
-        description: &str,
-        timeout: Duration,
-        mut matches: impl FnMut(&ObservedPublish) -> bool,
-    ) -> Result<ObservedPublish, String> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(format!(
-                    "timed out after {:.2}s waiting for {description}",
-                    timeout.as_secs_f64()
-                ));
-            }
-            match self
-                .connection
-                .recv_timeout(remaining.min(Duration::from_millis(100)))
-            {
-                Ok(Ok(Event::Incoming(Packet::Publish(publish)))) => {
-                    let observed = ObservedPublish {
-                        topic: String::from_utf8_lossy(&publish.topic).into_owned(),
-                        payload: publish.payload.to_vec(),
-                        retain: publish.retain,
-                    };
-                    if matches(&observed) {
-                        return Ok(observed);
+// Generic process-output capture: carries no context-graph dependency, so it
+// lives here (not in `deterministic_fixture_support.rs`) and is reachable
+// context-graph-free by anything that only needs to capture a spawned
+// process's stdout/stderr (e.g. the Mosquitto broker fixture). Re-exported
+// from `deterministic_fixture_support.rs` for its existing consumers.
+pub fn capture_pipe<T: Read + Send + 'static>(pipe: Option<T>) -> Arc<Mutex<String>> {
+    let buf = Arc::new(Mutex::new(String::new()));
+    if let Some(mut pipe) = pipe {
+        let captured = Arc::clone(&buf);
+        thread::spawn(move || {
+            let mut tmp = [0u8; 4096];
+            loop {
+                match pipe.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut g) = captured.lock() {
+                            g.push_str(&String::from_utf8_lossy(&tmp[..n]));
+                        }
                     }
-                }
-                Ok(Ok(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Ok(Err(error)) => return Err(format!("MQTT connection error: {error}")),
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err("MQTT probe disconnected".to_string());
+                    Err(_) => break,
                 }
             }
-        }
+        });
     }
-
-    fn wait_for_packet(
-        &mut self,
-        description: &str,
-        timeout: Duration,
-        mut matches: impl FnMut(&Packet) -> bool,
-    ) -> Result<(), String> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(format!(
-                    "timed out after {:.2}s waiting for {description}",
-                    timeout.as_secs_f64()
-                ));
-            }
-            match self
-                .connection
-                .recv_timeout(remaining.min(Duration::from_millis(100)))
-            {
-                Ok(Ok(Event::Incoming(packet))) if matches(&packet) => return Ok(()),
-                Ok(Ok(_)) | Err(RecvTimeoutError::Timeout) => {}
-                Ok(Err(error)) => return Err(format!("MQTT connection error: {error}")),
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(format!(
-                        "MQTT probe disconnected while waiting for {description}"
-                    ));
-                }
-            }
-        }
-    }
+    buf
 }

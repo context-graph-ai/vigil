@@ -14,10 +14,6 @@ publish = false
 path = "src/lib.rs"
 
 [[bin]]
-name = "vigil"
-path = "src/main.rs"
-
-[[bin]]
 name = "yolox-burn-oracle"
 path = "src/bin/yolox_burn_oracle.rs"
 
@@ -36,7 +32,6 @@ libc.workspace = true
 mp4.workspace = true
 openh264.workspace = true
 retina.workspace = true
-rumqttc.workspace = true
 rust_h265.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -80,12 +75,15 @@ fabric = ["dep:contextdb-server", "dep:contextdb-engine"]
 
 [dev-dependencies]
 tempfile.workspace = true
+unicode-ident.workspace = true
 uuid.workspace = true
-
-[[test]]
-name = "first_light_loop"
-path = "tests/first_light_loop.rs"
-required-features = ["first-light-acceptance"]
+# The settings-surface-coverage guard test binds its documentation check to
+# a specific contract-bearing paragraph by calling the SAME paragraph-
+# boundary parser the doc-claim registry already freezes a hash of
+# (`xtask::test_estate::adjacent_paragraph`), rather than re-implementing
+# that backward scan a second time. Dev-only: no production code depends
+# on xtask.
+xtask = { path = "../../xtask" }
 
 [[test]]
 name = "ha_correction_seam"
@@ -95,7 +93,3 @@ required-features = ["first-light-acceptance"]
 [[test]]
 name = "http_data_plane"
 path = "tests/http_data_plane.rs"
-
-[[test]]
-name = "ha_mqtt_broker"
-path = "tests/ha_mqtt_broker.rs"

@@ -17,8 +17,6 @@ pub mod detector_workclass;
 pub mod doctor;
 #[cfg(feature = "fabric")]
 pub mod fabric;
-pub mod ha_discovery;
-pub mod ha_mqtt_tasks;
 mod health;
 mod http_data_plane;
 mod live_read;
@@ -28,7 +26,10 @@ mod privilege;
 pub mod recognition;
 mod runtime;
 mod runtime_stats;
+pub mod secret;
+pub mod settings;
 mod shutdown;
+pub mod site_channel;
 mod store;
 mod supervisor;
 pub mod workgraph;
@@ -40,22 +41,18 @@ pub use correction::{
     RecordedCorrection, ReviewError, WhyView, correction_execution_fingerprint, record_correction,
     record_correction_with_clock, review_events, review_why,
 };
-pub use ha_discovery::{
-    CameraConfig, CommandTopicMessage, DetectionInput, DiscoveryPayload, EventPayload, ParseError,
-    ServiceConfig, generate_discovery_payloads, map_detection_to_event_payload,
-    parse_command_topic,
-};
-pub use ha_mqtt_tasks::{
-    DetectionPublisher, DetectionPublisherHandle, MqttConfig, SubscriberHandle,
-    WiredSubscriberConfig, mqtt_connect_intent, publish_detection_event,
-    publish_discovery_to_broker, spawn_detection_publisher, spawn_production_subscriber,
-};
-pub use health::{HealthState, HealthStatus};
+pub use health::{HEALTH_PATH, HealthState, HealthStatus};
 pub use http_data_plane::{
-    ReviewDataPlaneHandle, spawn_review_data_plane, spawn_review_data_plane_with_clock,
+    CORRECTION_ROUTE, EVENTS_ROUTE, MEDIA_ROUTE_PREFIX, ReviewDataPlaneHandle, WHY_ROUTE_PREFIX,
+    spawn_review_data_plane, spawn_review_data_plane_with_clock,
 };
 pub use media_pipeline::{DecodedRgbFrame, VideoCodec};
 pub use privilege::{PrivilegeStep, privilege_drop_plan};
+pub use secret::Secret;
+pub use site_channel::{
+    CameraAnnouncement, CommandListener, ConnectionEndpoint, DetectionChannel, DetectionFact,
+    NoSiteChannel, SiteAnnouncement, SiteChannelFactory, SiteControl, SubmitCorrectionError,
+};
 
 /// The operator-facing acceleration intent, resolved from every config
 /// entry point with absent-means-true semantics.
@@ -119,7 +116,35 @@ use std::process::ExitCode;
 
 use context_graph::{Store, request_control};
 
-pub fn run_cli<I>(args: I) -> ExitCode
+/// Every setting currently declared through the typed settings registry
+/// (see [`settings`]). Calls [`config::declare_settings`] — the single
+/// production function that declares every setting `config::load` resolves
+/// — so this can never fall out of sync with what `load` actually declares;
+/// a second declared setting is picked up here with no further edit.
+/// Test/tooling support for the settings-registry coverage check.
+pub fn declared_settings() -> Vec<settings::SettingCoverageEntry> {
+    let mut registry = settings::SettingsRegistry::new();
+    let _declared = config::declare_settings(&mut registry);
+    registry.coverage_entries().to_vec()
+}
+
+/// Whether a standalone-config TOML fragment assigning `raw_value` to
+/// `name` actually sets the field it names, using the real config-file
+/// parser. Test/tooling support for the settings-registry coverage check.
+pub fn config_file_recognizes_setting(name: &str, raw_value: &str) -> bool {
+    config::config_file_fragment_sets(name, raw_value)
+}
+
+/// The single CLI entry point. A composition root (`vigil-bin`'s `main`)
+/// supplies `factory`, the integration seam every command but `run` ignores.
+/// There is deliberately no default-integration-free variant: an embedder
+/// calling this always states what site channel it wants, rather than
+/// silently getting [`site_channel::NoSiteChannel`] (no Home Assistant
+/// integration at all) by omission.
+pub fn run_cli_with_site_channel<I>(
+    args: I,
+    factory: &dyn site_channel::SiteChannelFactory,
+) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
 {
@@ -178,7 +203,7 @@ where
             }
         },
         Some(command) if command == "detector-probe" => runtime::run_detector_probe(args.collect()),
-        Some(command) if command == "run" => runtime::run(args.collect()),
+        Some(command) if command == "run" => runtime::run(args.collect(), factory),
         _ => {
             print_help();
             ExitCode::from(2)
@@ -300,12 +325,18 @@ fn is_database_locked_error(error: &str) -> bool {
     lower.contains("database is locked") || (lower.contains("locked") && lower.contains("process"))
 }
 
+// VIGIL_STORE_PATH is an enumerated, reviewed override
+// (`environment_read_surface.baseline.txt`), not an ad-hoc read.
+#[allow(clippy::disallowed_methods)]
 fn store_path_from_env() -> std::path::PathBuf {
     std::env::var_os("VIGIL_STORE_PATH")
         .map(Into::into)
         .unwrap_or_else(|| data_dir_from_env().join("store.contextgraph"))
 }
 
+// VIGIL_DATA_DIR/VIGIL_STORE_PATH are enumerated, reviewed overrides
+// (`environment_read_surface.baseline.txt`), not an ad-hoc read.
+#[allow(clippy::disallowed_methods)]
 fn data_dir_from_env() -> std::path::PathBuf {
     if let Some(path) = std::env::var_os("VIGIL_DATA_DIR") {
         return path.into();

@@ -26,11 +26,11 @@ The current Home Assistant path publishes discovery and detection data through M
 service device, per-camera devices, a stateful camera-enable switch, a snapshot action, and a
 correction command path whose durable result is stored in the local Context Graph store.
 <!-- vigil-claim: `vigil.readme.the-current-home-assistant-path-publishes-discovery` -->
-<!-- enforced by: `vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
 
 The local review service lists detections, walks the provenance of one detection, serves snapshots
 and clips—including byte ranges for video—and records corrections through the same durable write
@@ -41,7 +41,7 @@ path used by MQTT.
 <!-- enforced by: `vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport` -->
 <!-- enforced by: `vigil::http_data_plane::snapshot_read_serves_image_bytes_with_image_content_type` -->
 <!-- enforced by: `vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
 
 The implemented recognition storage and matching seam can enroll a detection with a name, resolve a
 later same-site sighting, keep a below-threshold sighting unknown, and show the matched reference,
@@ -81,7 +81,7 @@ reason to watch the camera
 reconstructing it from logs.
 <!-- vigil-claim: `vigil.readme.vigil-why-eventid-and-vigil-why-latest` -->
 <!-- enforced by: `vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current` -->
 
 See [Why Vigil?](docs/why-vigil.md) for the product problem and
 [the promise](docs/promise.md) for the exact line between the working preview and the release

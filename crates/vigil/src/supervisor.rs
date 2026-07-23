@@ -2,7 +2,8 @@
 /// Gated on SUPERVISOR_TOKEN being present.
 use serde::Deserialize;
 
-use crate::ha_mqtt_tasks::MqttConfig;
+use crate::secret::Secret;
+use crate::site_channel::ConnectionEndpoint;
 
 /// GET from a Supervisor REST URL. Returns the response body on success, Err on failure.
 pub(crate) fn supervisor_get(url: &str, token: &str) -> Result<String, String> {
@@ -22,7 +23,7 @@ struct SupervisorMqttData {
     host: Option<String>,
     port: Option<u16>,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Secret>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,28 +191,35 @@ pub(crate) fn flow_step_errors(json: &str) -> Option<String> {
     }
 }
 
-/// Parse the `GET /services/mqtt` response body into an `MqttConfig`.
+/// Parse the `GET /services/mqtt` response body into a `ConnectionEndpoint`.
 /// Returns None if the response is missing, has a non-"ok" result, or lacks a host.
 /// This is a pure function — testable without network I/O.
-pub(crate) fn parse_supervisor_mqtt_response(json: &str) -> Option<MqttConfig> {
+pub(crate) fn parse_supervisor_mqtt_response(json: &str) -> Option<ConnectionEndpoint> {
     let resp: SupervisorMqttResponse = serde_json::from_str(json).ok()?;
     if resp.result.as_deref() != Some("ok") {
         return None;
     }
     let data = resp.data?;
     let host = data.host.filter(|h| !h.is_empty())?;
-    Some(MqttConfig {
-        broker_host: host,
-        broker_port: data.port.unwrap_or(1883),
+    // The password stays wrapped in `Secret` all the way out of Supervisor
+    // discovery; emptiness is checked without exposing it.
+    let password = data.password.filter(|password| !password.is_empty());
+    Some(ConnectionEndpoint {
+        host,
+        port: data.port.unwrap_or(1883),
         username: data.username.filter(|s| !s.is_empty()),
-        password: data.password.filter(|s| !s.is_empty()),
+        password,
     })
 }
 
 /// Attempt to discover the MQTT broker via the HA Supervisor services API.
 /// Returns None if SUPERVISOR_TOKEN is absent, the API call fails, or the
 /// response carries no host (e.g. Mosquitto add-on is not installed).
-pub(crate) fn fetch_supervisor_mqtt() -> Option<MqttConfig> {
+// SUPERVISOR_TOKEN is an enumerated, reviewed read
+// (`environment_read_surface.baseline.txt`), not an ad-hoc one — it is
+// injected by the Home Assistant Supervisor, not user-adjustable.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn fetch_supervisor_mqtt() -> Option<ConnectionEndpoint> {
     let token = std::env::var("SUPERVISOR_TOKEN").ok()?;
     let body = supervisor_get("http://supervisor/services/mqtt", &token).ok()?;
     parse_supervisor_mqtt_response(&body)
@@ -225,10 +233,13 @@ mod tests {
     fn parse_supervisor_mqtt_response_valid() {
         let json = r#"{"result":"ok","data":{"host":"core-mosquitto","port":1883,"ssl":false,"username":"homeassistant","password":"secret"}}"#;
         let cfg = parse_supervisor_mqtt_response(json).expect("must parse valid response");
-        assert_eq!(cfg.broker_host, "core-mosquitto");
-        assert_eq!(cfg.broker_port, 1883);
+        assert_eq!(cfg.host, "core-mosquitto");
+        assert_eq!(cfg.port, 1883);
         assert_eq!(cfg.username.as_deref(), Some("homeassistant"));
-        assert_eq!(cfg.password.as_deref(), Some("secret"));
+        assert_eq!(
+            cfg.password.as_ref().map(Secret::expose_secret),
+            Some("secret")
+        );
     }
 
     #[test]

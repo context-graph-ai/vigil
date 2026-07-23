@@ -9,8 +9,8 @@ publish = false
 
 [workspace]
 resolver = "2"
-members = ["crates/vigil", "xtask"]
-default-members = ["crates/vigil"]
+members = ["crates/vigil", "crates/vigil-ha", "crates/vigil-bin", "xtask"]
+default-members = ["crates/vigil", "crates/vigil-ha", "crates/vigil-bin"]
 
 [workspace.package]
 version = "0.1.0"
@@ -52,6 +52,11 @@ tempfile = "3"
 tiny_http = "0.12"
 tokio = { version = "1", features = ["net", "rt", "time"] }
 toml = "0.9"
+# The exact crate rustc's own lexer uses for XID_Start/XID_Continue —
+# dev-only, consumed by crates/vigil's shared source-scan lexer so identifier
+# acceptance in the guard tests is definitionally the compiler's own grammar,
+# never a hand-rolled approximation.
+unicode-ident = "1"
 url = "2.5"
 uuid = { version = "1", features = ["v4", "v7"] }
 # Hardware decode backend (feature-gated; native artifacts only — the

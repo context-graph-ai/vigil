@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
@@ -11,10 +11,24 @@ use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{LastWill, Packet};
 use rumqttc::v5::{Client, Event, MqttOptions, RecvTimeoutError};
 
-use context_graph::Store;
+use vigil::{Secret, SiteControl, SubmitCorrectionError};
 
-use crate::correction::{CorrectionRequest, read_latest_detection_image};
 use crate::ha_discovery::{CommandTopicMessage, DiscoveryPayload, parse_command_topic};
+
+// ── Published topic surface ────────────────────────────────────────────────
+//
+// These are the exact wire strings a Home Assistant automation or MQTT
+// client binds to directly. Renaming one is a deliberate, reviewed change to
+// a published identifier, not a routine refactor — see
+// `crates/vigil-ha/tests/mqtt_topic_contract.rs`.
+
+/// Owner-issued corrections (identity / wrong-class / false-alarm / enroll)
+/// arrive on this topic.
+pub const CORRECTION_COMMAND_TOPIC: &str = "vigil/commands/correct";
+/// Enable / disable / snapshot control commands arrive on this topic.
+pub const CONTROL_COMMAND_TOPIC: &str = "vigil/commands/control";
+/// Home Assistant announces its own restart on this topic.
+pub const HOME_ASSISTANT_STATUS_TOPIC: &str = "homeassistant/status";
 
 // ── Public MQTT config ─────────────────────────────────────────────────────
 
@@ -23,7 +37,16 @@ pub struct MqttConfig {
     pub broker_host: String,
     pub broker_port: u16,
     pub username: Option<String>,
-    pub password: Option<String>,
+    pub password: Option<Secret>,
+}
+
+/// The one place a configured MQTT credential is exposed and handed to the
+/// client library. Every `MqttOptions` builder in this module funnels
+/// through here so that claim stays true rather than approximate.
+fn apply_credentials(opts: &mut MqttOptions, config: &MqttConfig) {
+    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
+        opts.set_credentials(user, pass.expose_secret());
+    }
 }
 
 // ── Subscriber handle ──────────────────────────────────────────────────────
@@ -60,9 +83,7 @@ fn make_mqtt_options(config: &MqttConfig, id_prefix: &str) -> MqttOptions {
         config.broker_port,
     );
     opts.set_keep_alive(Duration::from_secs(30));
-    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
-        opts.set_credentials(user, pass);
-    }
+    apply_credentials(&mut opts, config);
     opts
 }
 
@@ -159,7 +180,7 @@ pub struct WiredSubscriberConfig {
     pub discovery_payloads: Vec<crate::ha_discovery::DiscoveryPayload>,
     /// Live health state — polled each loop iteration to publish condition
     /// updates as retained messages when health changes.
-    pub health: crate::health::HealthState,
+    pub health: vigil::HealthState,
 }
 
 fn make_production_subscriber_options(
@@ -169,9 +190,7 @@ fn make_production_subscriber_options(
 ) -> MqttOptions {
     let mut opts = MqttOptions::new(client_id, &config.broker_host, config.broker_port);
     opts.set_keep_alive(Duration::from_secs(30));
-    if let (Some(user), Some(pass)) = (&config.username, &config.password) {
-        opts.set_credentials(user, pass);
-    }
+    apply_credentials(&mut opts, config);
     // Last-will: broker publishes "offline" to the availability topic when
     // the TCP connection drops without a clean DISCONNECT packet.
     // In MQTT 5, LastWill::new takes an extra properties argument (None = no user properties).
@@ -200,7 +219,7 @@ fn re_announce_to_broker(
     condition_topic: &str,
     current_condition: &str,
     service_id: &str,
-    camera_flags: &BTreeMap<String, Arc<AtomicBool>>,
+    control: &dyn SiteControl,
 ) {
     for payload in payloads {
         if let Ok(json) = serde_json::to_string(&payload.payload) {
@@ -220,25 +239,23 @@ fn re_announce_to_broker(
         true,
         current_condition.as_bytes().to_vec(),
     );
-    publish_enabled_states(client, service_id, camera_flags);
+    publish_enabled_states(client, service_id, control);
 }
 
-fn enabled_state_topic(service_id: &str, camera_id: &str) -> String {
+/// Published state topic for a camera's `enabled` switch/reflection.
+pub fn enabled_state_topic(service_id: &str, camera_id: &str) -> String {
     format!("vigil/{service_id}/{camera_id}/enabled")
 }
 
-fn publish_enabled_states(
-    client: &Client,
-    service_id: &str,
-    camera_flags: &BTreeMap<String, Arc<AtomicBool>>,
-) {
-    for (camera_id, enabled) in camera_flags {
-        publish_enabled_state(
-            client,
-            service_id,
-            camera_id,
-            enabled.load(Ordering::SeqCst),
-        );
+/// Published snapshot-image topic for a camera. No service_id prefix — the
+/// control handler derives it from `camera_id` alone.
+pub fn snapshot_topic(camera_id: &str) -> String {
+    format!("vigil/{camera_id}/snapshot")
+}
+
+fn publish_enabled_states(client: &Client, service_id: &str, control: &dyn SiteControl) {
+    for (camera_id, enabled) in control.camera_enabled_states() {
+        publish_enabled_state(client, service_id, &camera_id, enabled);
     }
 }
 
@@ -254,10 +271,8 @@ fn publish_enabled_state(client: &Client, service_id: &str, camera_id: &str, ena
 
 fn handle_production_control(
     payload: &[u8],
-    data_dir: Option<&std::path::Path>,
     service_id: &str,
-    camera_flags: &BTreeMap<String, Arc<AtomicBool>>,
-    store: &Store,
+    control: &dyn SiteControl,
     client: &Client,
 ) {
     #[derive(serde::Deserialize)]
@@ -273,35 +288,23 @@ fn handle_production_control(
 
     match cmd.action.as_str() {
         "disable" => {
-            if let Some(dir) = data_dir {
-                let disabled_dir = dir.join("camera-disabled");
-                let _ = std::fs::create_dir_all(&disabled_dir);
-                let _ = std::fs::write(disabled_dir.join(&cmd.camera_id), b"");
-            }
             let state_service_id = cmd.service_id.as_deref().unwrap_or(service_id);
-            if let Some(flag) = camera_flags.get(&cmd.camera_id) {
-                flag.store(false, Ordering::SeqCst);
+            if control.set_camera_enabled(&cmd.camera_id, false) {
                 publish_enabled_state(client, state_service_id, &cmd.camera_id, false);
             }
         }
         "enable" => {
-            if let Some(dir) = data_dir {
-                let marker = dir.join("camera-disabled").join(&cmd.camera_id);
-                let _ = std::fs::remove_file(marker);
-            }
             let state_service_id = cmd.service_id.as_deref().unwrap_or(service_id);
-            if let Some(flag) = camera_flags.get(&cmd.camera_id) {
-                flag.store(true, Ordering::SeqCst);
+            if control.set_camera_enabled(&cmd.camera_id, true) {
                 publish_enabled_state(client, state_service_id, &cmd.camera_id, true);
             }
         }
         "snapshot" => {
             // Publish the most-recent detector evidence PNG to the HA image topic so
             // the HA image entity shows the latest detection frame.
-            // Topic matches the image entity's image_topic: "vigil/{camera_id}/snapshot".
-            let Some(dir) = data_dir else { return };
-            let image_topic = format!("vigil/{}/snapshot", cmd.camera_id);
-            if let Some(bytes) = read_latest_detection_image(store, &cmd.camera_id, dir) {
+            // Topic matches the image entity's image_topic (see `snapshot_topic`).
+            let image_topic = snapshot_topic(&cmd.camera_id);
+            if let Some(bytes) = control.latest_detection_image(&cmd.camera_id) {
                 let _ = client.publish(&image_topic, QoS::AtMostOnce, false, bytes);
             } else {
                 println!("snapshot_no_frame camera={}", cmd.camera_id);
@@ -315,13 +318,14 @@ fn handle_production_control(
 ///
 /// Handles BOTH the correction topic (`vigil/commands/correct`) and the control
 /// topic (`vigil/commands/control`).  Correction commands are forwarded via
-/// `command_tx` — if the channel is full, the command is dropped, `overflow_count`
-/// is incremented, and a log line is emitted.  Control commands
-/// (disable/enable/snapshot) are handled inline.
+/// `control.submit_correction` — if its queue is full, the command is dropped,
+/// `overflow_count` is incremented, and a log line is emitted.  Control commands
+/// (disable/enable/snapshot) are handled inline via `control`.
 ///
-/// The caller owns the receive end of `command_tx`'s channel and is responsible
-/// for draining it (e.g. a worker thread calling `record_correction`).  Holding
-/// the receive end without draining demonstrates overflow behaviour.
+/// Vigil owns the receive end of that submission queue and is responsible for
+/// draining it (its own correction-writer thread, which calls
+/// `record_correction`).  Holding the receive end without draining demonstrates
+/// overflow behaviour.
 ///
 /// Features:
 ///   - Stable `client_id` so the broker can correlate the last-will across
@@ -333,16 +337,14 @@ fn handle_production_control(
 ///     payloads so HA entities survive a Mosquitto restart without a reboot.
 ///   - Subscribes `homeassistant/status`; on "online" (HA restart): same
 ///     re-announce so HA sees all Vigil entities immediately.
-///   - Routes `vigil/commands/control` to named per-camera `AtomicBool`
-///     flags in addition to writing/removing disk markers.
+///   - Routes `vigil/commands/control` to `control.set_camera_enabled` by
+///     name, which is Vigil's own enable/disable action.
 ///   - Polls `cfg.health` each loop iteration and publishes a retained
 ///     condition update when health changes.
 ///   - Brief exponential backoff on connection errors before rumqttc retries.
 pub fn spawn_production_subscriber(
     cfg: WiredSubscriberConfig,
-    store: Arc<Store>,
-    camera_flags: BTreeMap<String, Arc<AtomicBool>>,
-    command_tx: mpsc::SyncSender<CorrectionRequest>,
+    control: Arc<dyn SiteControl>,
     overflow_count: Arc<AtomicUsize>,
 ) -> SubscriberHandle {
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -350,7 +352,6 @@ pub fn spawn_production_subscriber(
     let overflow_clone = Arc::clone(&overflow_count);
 
     let thread = thread::spawn(move || {
-        let data_dir = store.db_path().parent().map(|p| p.to_path_buf());
         let opts =
             make_production_subscriber_options(&cfg.mqtt, &cfg.client_id, &cfg.availability_topic);
         let (client, mut connection) = Client::new(opts, 100);
@@ -406,9 +407,9 @@ pub fn spawn_production_subscriber(
                     reconnect_delay_ms = 500; // reset backoff on successful connect
                     // Re-subscribe every command topic on every (re)connect so
                     // subscriptions survive a broker restart.
-                    let _ = client.subscribe("vigil/commands/correct", QoS::AtLeastOnce);
-                    let _ = client.subscribe("vigil/commands/control", QoS::AtLeastOnce);
-                    let _ = client.subscribe("homeassistant/status", QoS::AtMostOnce);
+                    let _ = client.subscribe(CORRECTION_COMMAND_TOPIC, QoS::AtLeastOnce);
+                    let _ = client.subscribe(CONTROL_COMMAND_TOPIC, QoS::AtLeastOnce);
+                    let _ = client.subscribe(HOME_ASSISTANT_STATUS_TOPIC, QoS::AtMostOnce);
                     // Re-publish retained discovery and availability so HA entities
                     // reappear after a broker restart without requiring a Vigil restart.
                     // Use the current live health for the condition.
@@ -422,14 +423,14 @@ pub fn spawn_production_subscriber(
                         &cfg.condition_topic,
                         conn_condition,
                         &cfg.service_id,
-                        &camera_flags,
+                        control.as_ref(),
                     );
                 }
                 Ok(Event::Incoming(Packet::Publish(p))) => {
                     // In MQTT 5, Publish.topic is Bytes, not String.
                     let topic = std::str::from_utf8(&p.topic).unwrap_or("");
                     match topic {
-                        "homeassistant/status" => {
+                        HOME_ASSISTANT_STATUS_TOPIC => {
                             // HA restarted — re-publish discovery so HA re-registers all
                             // Vigil entities immediately without waiting for the next retain flush.
                             if p.payload.as_ref() == b"online" {
@@ -443,32 +444,30 @@ pub fn spawn_production_subscriber(
                                     &cfg.condition_topic,
                                     ha_condition,
                                     &cfg.service_id,
-                                    &camera_flags,
+                                    control.as_ref(),
                                 );
                             }
                         }
-                        "vigil/commands/correct" => {
+                        CORRECTION_COMMAND_TOPIC => {
                             if let Ok(msg) =
                                 serde_json::from_slice::<CommandTopicMessage>(&p.payload)
                                 && let Ok(req) = parse_command_topic(&msg)
                             {
-                                match command_tx.try_send(req) {
+                                match control.submit_correction(req) {
                                     Ok(()) => {}
-                                    Err(mpsc::TrySendError::Full(_)) => {
+                                    Err(SubmitCorrectionError::QueueFull) => {
                                         let n = overflow_clone.fetch_add(1, Ordering::SeqCst) + 1;
                                         println!("mqtt_correction_command_overflow=true total={n}");
                                     }
-                                    Err(mpsc::TrySendError::Disconnected(_)) => break,
+                                    Err(SubmitCorrectionError::Disconnected) => break,
                                 }
                             }
                         }
-                        "vigil/commands/control" => {
+                        CONTROL_COMMAND_TOPIC => {
                             handle_production_control(
                                 &p.payload,
-                                data_dir.as_deref(),
                                 &cfg.service_id,
-                                &camera_flags,
-                                store.as_ref(),
+                                control.as_ref(),
                                 &client,
                             );
                         }
@@ -581,7 +580,7 @@ pub struct DetectionPublisher {
     tx: mpsc::SyncSender<PublisherMsg>,
     /// Counts detection publishes dropped due to channel overflow.
     pub overflow_count: Arc<AtomicUsize>,
-    health: crate::health::HealthState,
+    health: vigil::HealthState,
 }
 
 impl DetectionPublisher {
@@ -596,7 +595,7 @@ impl DetectionPublisher {
                 let n = self.overflow_count.fetch_add(1, Ordering::SeqCst) + 1;
                 println!("mqtt_detection_publish_overflow=true total={n}");
                 self.health.set(
-                    crate::health::HealthStatus::KeepPaceFailed,
+                    vigil::HealthStatus::KeepPaceFailed,
                     "mqtt outbound channel overflow",
                 );
             }
@@ -645,7 +644,7 @@ impl DetectionPublisherHandle {
 /// after camera threads have exited (so all senders are gone).
 pub fn spawn_detection_publisher(
     config: &MqttConfig,
-    health: crate::health::HealthState,
+    health: vigil::HealthState,
 ) -> (Arc<DetectionPublisher>, DetectionPublisherHandle) {
     let (tx, rx) = mpsc::sync_channel::<PublisherMsg>(DETECTION_PUBLISH_CHANNEL_CAPACITY);
     let shutdown = Arc::new(AtomicBool::new(false));

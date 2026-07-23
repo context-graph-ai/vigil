@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,8 +36,11 @@ const DETECTOR_INPUT_WIDTH: u32 = 640;
 const DETECTOR_INPUT_HEIGHT: u32 = 640;
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-pub(crate) fn run(args: Vec<OsString>) -> ExitCode {
-    match run_inner(args) {
+pub(crate) fn run(
+    args: Vec<OsString>,
+    site_channel: &dyn crate::site_channel::SiteChannelFactory,
+) -> ExitCode {
+    match run_inner(args, site_channel) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -60,7 +63,10 @@ fn run_detector_probe_inner(args: Vec<OsString>) -> Result<(), String> {
     yolox_detector::run_detector_probe(args)
 }
 
-fn run_inner(args: Vec<OsString>) -> Result<(), String> {
+fn run_inner(
+    args: Vec<OsString>,
+    site_channel: &dyn crate::site_channel::SiteChannelFactory,
+) -> Result<(), String> {
     let boot_started = Instant::now();
     let config = config::load(args)?;
     validate_compiled_capability_requests(config.fabric_ticket.is_some(), config.fabric_hub)?;
@@ -186,10 +192,8 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
 
     let mut control = None;
     let mut camera_handles: Vec<JoinHandle<()>> = Vec::new();
-    let mut mqtt_subscriber: Option<crate::ha_mqtt_tasks::SubscriberHandle> = None;
-    let mut detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>> = None;
-    let mut detection_publisher_handle: Option<crate::ha_mqtt_tasks::DetectionPublisherHandle> =
-        None;
+    let mut command_listener: Option<Box<dyn crate::site_channel::CommandListener>> = None;
+    let mut detection_publisher: Option<Arc<dyn crate::site_channel::DetectionChannel>> = None;
     let mut review_server = None;
     println!(
         "boot_phase=store-open-start path={}",
@@ -256,18 +260,13 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                 }
             }
 
-            // ── MQTT detection publisher — spawned before camera threads ──────
-            // The publisher owns one persistent MQTT connection for all detection
-            // events.  It must be created before camera threads start so they capture
-            // a live Arc rather than None.
-            if crate::ha_mqtt_tasks::mqtt_connect_intent(config.mqtt.as_ref())
-                && let Some(ref mqtt_cfg) = config.mqtt
-            {
-                let (pub_arc, pub_handle) =
-                    crate::ha_mqtt_tasks::spawn_detection_publisher(mqtt_cfg, health.clone());
-                detection_publisher = Some(pub_arc);
-                detection_publisher_handle = Some(pub_handle);
-                println!("mqtt_detection_publisher_started=true");
+            // ── Outbound detection channel — connected before camera threads ──
+            // An attached channel owns one persistent connection for all
+            // detection facts.  It must be connected before camera threads
+            // start so they capture a live Arc rather than None.
+            if let Some(ref endpoint) = config.mqtt {
+                detection_publisher =
+                    site_channel.connect(endpoint, &config.service_id, health.clone());
             }
 
             // ── Multi-camera fan-out ───────────────────────────────────────
@@ -331,41 +330,25 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                 }
             }
 
-            // Wire the MQTT subscriber (needs camera_flags which is now fully built).
-            // Gate on the same predicate used above so the subscriber and publisher
+            // Announce the site and start listening for owner commands (needs
+            // camera_flags which is now fully built). Gate on the same
+            // predicate used above so the listener and the outbound channel
             // are always either both present or both absent.
-            if crate::ha_mqtt_tasks::mqtt_connect_intent(config.mqtt.as_ref())
-                && let Some(ref mqtt_cfg) = config.mqtt
-            {
-                let svc = service_config_from_runtime(&config);
-                let payloads = crate::ha_discovery::generate_discovery_payloads(&svc);
-                match crate::ha_mqtt_tasks::publish_discovery_to_broker(mqtt_cfg, &payloads) {
-                    Ok(()) => println!("mqtt_discovery_published=true"),
-                    Err(e) => println!("mqtt_discovery_error={e}"),
-                }
-                let avail_topic = format!("vigil/{}/availability", config.service_id);
-                match crate::ha_mqtt_tasks::publish_availability_online(mqtt_cfg, &avail_topic) {
-                    Ok(()) => println!("mqtt_availability_online=true"),
-                    Err(e) => println!("mqtt_availability_error={e}"),
-                }
-                let condition_topic =
-                    crate::ha_discovery::running_condition_topic(&config.service_id);
-                let overflow = Arc::new(AtomicUsize::new(0));
-                // Derive a stable client id from the service_id so the broker
-                // can correlate last-will across restarts.
-                let client_id = format!("vigil-{}-sub", slug_for_id(&config.service_id));
-                let sub_cfg = crate::ha_mqtt_tasks::WiredSubscriberConfig {
-                    mqtt: mqtt_cfg.clone(),
+            if let Some(ref endpoint) = config.mqtt {
+                let site = crate::site_channel::SiteAnnouncement {
+                    service_name: config.site_name.clone(),
                     service_id: config.service_id.clone(),
-                    client_id,
-                    availability_topic: avail_topic,
-                    condition_topic,
-                    discovery_payloads: payloads,
-                    // Pass live health so the subscriber can publish condition updates.
-                    health: health.clone(),
+                    cameras: config
+                        .cameras
+                        .iter()
+                        .map(|c| crate::site_channel::CameraAnnouncement {
+                            id: camera_slug(&c.name),
+                            label: c.name.clone(),
+                        })
+                        .collect(),
                 };
-                // Bounded correction channel: the MQTT subscriber thread forwards
-                // correction commands here; the worker thread drains and writes to cg.
+                // Bounded correction channel: the listener forwards correction
+                // commands here; the worker thread drains and writes to cg.
                 let (correction_tx, correction_rx) =
                     std::sync::mpsc::sync_channel::<crate::correction::CorrectionRequest>(64);
                 let store_worker = Arc::new(store.handle.clone());
@@ -391,15 +374,24 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
                         }
                     })
                     .map_err(|error| format!("could not start correction writer: {error}"))?;
-                let subscriber = crate::ha_mqtt_tasks::spawn_production_subscriber(
-                    sub_cfg,
-                    Arc::new(store.handle.clone()),
+                // Matches the pre-seam derivation exactly (`store.db_path()`'s
+                // parent, not `config.data_dir`): an operator-overridden
+                // `--store-path` need not live under `data_dir`, and the
+                // disable-marker/snapshot-read location must not silently
+                // move when it doesn't.
+                let control_data_dir = store
+                    .handle
+                    .db_path()
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| config.data_dir.clone());
+                let control = crate::site_channel::store_backed_site_control(
+                    store.handle.clone(),
+                    control_data_dir,
                     camera_flags,
                     correction_tx,
-                    overflow,
                 );
-                mqtt_subscriber = Some(subscriber);
-                println!("mqtt_subscriber_started=true");
+                command_listener = site_channel.listen(endpoint, site, health.clone(), control);
             }
             println!(
                 "boot_phase=pipeline-up elapsed_ms={}",
@@ -413,23 +405,23 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
     shutdown.wait();
 
     // Teardown order — store handle drops LAST:
-    //  1. MQTT subscriber (holds Arc<Store>; signals shutdown, blocks until thread exits)
-    //  2. Detection publisher (camera threads must exit first so all senders are gone)
+    //  1. Command listener (holds Arc<Store>; signals shutdown, blocks until thread exits)
+    //  2. Detection channel (camera threads must exit first so all senders are gone)
     //  3. Camera probe threads (each holds a Store clone via Arc)
     //  4. Control listener (read_handler captures a Store clone)
     //  5. Review data plane (holds a Store clone)
     //  6. Health server (no Store reference — safe to join before or after store)
     //  7. drop(store) — all other Store holders are now joined and their clones dropped
-    if let Some(sub) = mqtt_subscriber {
-        sub.shutdown_and_join();
+    if let Some(listener) = command_listener {
+        listener.shutdown_and_join();
         println!("mqtt_subscriber_stopped=true");
     }
-    // Camera handles exit first so their DetectionPublisher senders are all dropped.
+    // Camera handles exit first so their detection-channel senders are all dropped.
     for handle in camera_handles {
         let _ = handle.join();
     }
-    if let Some(pub_handle) = detection_publisher_handle {
-        pub_handle.shutdown_and_join();
+    if let Some(channel) = detection_publisher {
+        channel.shutdown_and_join();
         println!("mqtt_detection_publisher_stopped=true");
     }
     if let Some(handle) = control.take() {
@@ -458,19 +450,6 @@ fn validate_compiled_capability_requests(
     Ok(())
 }
 
-/// Derive a stable lowercase slug for use as a stable MQTT client id.
-fn slug_for_id(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 /// Register each camera as an HA Generic Camera config entry via the Core config-flow API.
 ///
 /// The MQTT camera platform is image-only (no `stream_source` key), so live video requires
@@ -491,6 +470,10 @@ fn slug_for_id(s: &str) -> String {
 /// to HLS (laggier but functional).  H.265 sources register but don't negotiate WebRTC.
 ///
 /// Failures are logged and never panic; the add-on continues without live view.
+// SUPERVISOR_TOKEN is an enumerated, reviewed read
+// (`environment_read_surface.baseline.txt`), not an ad-hoc one — it is
+// injected by the Home Assistant Supervisor, not user-adjustable.
+#[allow(clippy::disallowed_methods)]
 fn register_generic_camera(cam_slug: &str, rtsp_url: &str, data_dir: &std::path::Path) {
     // ── Sentinel-based idempotency ─────────────────────────────────────────
     // The Generic Camera config-flow API is NOT inherently idempotent — calling it
@@ -637,8 +620,8 @@ fn log_startup(config: &config::RuntimeConfig) {
         println!("detector_model_path={}", display(model_path));
     }
     if let Some(mqtt) = config.mqtt.as_ref() {
-        println!("mqtt_host={}", mqtt.broker_host);
-        println!("mqtt_port={}", mqtt.broker_port);
+        println!("mqtt_host={}", mqtt.host);
+        println!("mqtt_port={}", mqtt.port);
         println!(
             "mqtt_username={}",
             mqtt.username.as_deref().unwrap_or("<none>")
@@ -787,7 +770,7 @@ pub fn start_rtsp_probe(
     health: HealthState,
     shutdown: Arc<AtomicBool>,
     enabled: Arc<AtomicBool>,
-    detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>>,
+    detection_publisher: Option<Arc<dyn crate::site_channel::DetectionChannel>>,
     recognition_embedder: Option<Arc<dyn context_graph::Embedder>>,
     accel: Arc<crate::acceleration::AccelerationState>,
     receipts: Arc<crate::workgraph::StageReceiptLog>,
@@ -817,7 +800,7 @@ pub fn start_rtsp_probe(
             let rtsp_source = match media_pipeline::prepare_rtsp_source(
                 &rtsp_url,
                 config.rtsp_username.as_deref(),
-                config.rtsp_password.as_deref(),
+                config.rtsp_password.as_ref(),
             ) {
                 Ok(source) => source,
                 Err(error) => {
@@ -1823,25 +1806,6 @@ fn camera_slug(camera_name: &str) -> String {
     }
 }
 
-/// Build a `ServiceConfig` for MQTT discovery from the loaded runtime config.
-/// Uses the canonical `cameras` list so multi-camera configs are fully announced.
-fn service_config_from_runtime(
-    config: &config::RuntimeConfig,
-) -> crate::ha_discovery::ServiceConfig {
-    crate::ha_discovery::ServiceConfig {
-        service_name: config.site_name.clone(),
-        service_id: config.service_id.clone(),
-        cameras: config
-            .cameras
-            .iter()
-            .map(|c| crate::ha_discovery::CameraConfig {
-                camera_id: camera_slug(&c.name),
-                camera_label: c.name.clone(),
-            })
-            .collect(),
-    }
-}
-
 fn finalize_clip(
     segment: &CapturedSegment,
     stats: &RuntimeStatsState,
@@ -1944,6 +1908,9 @@ fn clip_write_failure(
     message.into()
 }
 
+// This wrapper's own callers are enumerated, reviewed test-only pressure
+// levers (`environment_read_surface.baseline.txt`), not an ad-hoc read.
+#[allow(clippy::disallowed_methods)]
 fn env_is(key: &str, expected: &str) -> bool {
     std::env::var(key).is_ok_and(|value| value == expected)
 }
@@ -2003,6 +1970,9 @@ fn encoded_clip_sha256(media: &media_pipeline::DecodedVideoSegment) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+// This wrapper's own callers are enumerated, reviewed test-only pressure
+// levers (`environment_read_surface.baseline.txt`), not an ad-hoc read.
+#[allow(clippy::disallowed_methods)]
 fn env_u64(key: &str) -> Option<u64> {
     std::env::var(key).ok()?.parse().ok()
 }
@@ -2164,7 +2134,7 @@ pub(crate) fn record_detected_events(
     output: &yolox_detector::DetectorOutput,
     stats: &RuntimeStatsState,
     health: &HealthState,
-    detection_publisher: Option<&crate::ha_mqtt_tasks::DetectionPublisher>,
+    detection_publisher: Option<&dyn crate::site_channel::DetectionChannel>,
     recognition_embedder: Option<&dyn context_graph::Embedder>,
     detection_work: &crate::workgraph::WorkEnvelope,
     receipts: &crate::workgraph::StageReceiptLog,
@@ -2293,10 +2263,11 @@ pub(crate) fn record_detected_events(
                     Some(RecognitionAttempt::Done(outcome)) => (outcome.name, Some(outcome.score)),
                     _ => (None, None),
                 };
-                // Publish the detection event via the long-lived publisher when configured.
-                if let Some(publisher) = detection_publisher {
-                    let input = crate::ha_discovery::DetectionInput {
+                // Publish the detection fact via the long-lived channel when configured.
+                if let Some(channel) = detection_publisher {
+                    let fact = crate::site_channel::DetectionFact {
                         observation_id: observation_id.to_string(),
+                        camera_id: camera_slug(&config.camera_name),
                         camera_name: config.camera_name.clone(),
                         object_class: detection.class_name.clone(),
                         confidence: detection.confidence,
@@ -2306,20 +2277,7 @@ pub(crate) fn record_detected_events(
                         entity_name,
                         match_score,
                     };
-                    let cam_slug = camera_slug(&config.camera_name);
-                    let topic = format!("vigil/{}/{}/detection", config.service_id, cam_slug);
-                    let evt = crate::ha_discovery::map_detection_to_event_payload(&input);
-                    match serde_json::to_string(&evt) {
-                        Ok(json) => {
-                            publisher.try_publish(topic, json);
-                            // Feed the per-camera motion binary_sensor retained state.
-                            let active_topic =
-                                format!("vigil/{}/{}/active", config.service_id, cam_slug);
-                            publisher.notify_active(active_topic);
-                            println!("mqtt_detection_published=true");
-                        }
-                        Err(e) => println!("mqtt_detection_serialize_error={e}"),
-                    }
+                    channel.publish_detection(fact);
                 }
             }
             Err(error) => {

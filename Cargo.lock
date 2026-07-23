@@ -8626,7 +8626,6 @@ dependencies = [
  "openh264",
  "pollster",
  "retina",
- "rumqttc",
  "rust_h265",
  "serde",
  "serde_json",
@@ -8636,9 +8635,11 @@ dependencies = [
  "tiny_http",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "unicode-ident",
  "url",
  "uuid",
  "wgpu",
+ "xtask",
  "yolox-burn",
 ]
 
@@ -8649,6 +8650,38 @@ dependencies = [
  "context-graph",
  "libc",
  "tempfile",
+]
+
+[[package]]
+name = "vigil-bin"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "context-graph",
+ "contextdb-core",
+ "contextdb-engine",
+ "contextdb-server",
+ "image",
+ "libc",
+ "rumqttc",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "vigil",
+ "vigil-ha",
+]
+
+[[package]]
+name = "vigil-ha"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rumqttc",
+ "serde",
+ "serde_json",
+ "vigil",
 ]
 
 [[package]]

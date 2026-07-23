@@ -1197,7 +1197,7 @@ pub(crate) struct PendingOffloadSegment {
     pub(crate) store: Store,
     pub(crate) stats: RuntimeStatsState,
     pub(crate) health: HealthState,
-    pub(crate) detection_publisher: Option<Arc<crate::ha_mqtt_tasks::DetectionPublisher>>,
+    pub(crate) detection_publisher: Option<Arc<dyn crate::site_channel::DetectionChannel>>,
     pub(crate) recognition_embedder: Option<Arc<dyn context_graph::Embedder>>,
     pub(crate) receipts: Arc<crate::workgraph::StageReceiptLog>,
 }

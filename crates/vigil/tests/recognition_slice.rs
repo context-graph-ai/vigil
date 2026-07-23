@@ -20,7 +20,7 @@ use vigil::recognition::{
     forget_named_entity, map_bbox_to_frame, match_crop_for_class, match_vector,
     match_vector_for_class, open_store_with_embedder, record_enrollment, record_match_observation,
 };
-use vigil::{CorrectionRequest, CorrectionType, parse_command_topic, record_correction};
+use vigil::{CorrectionRequest, CorrectionType, record_correction};
 
 const SPACE: &str = "vigil_site_vision_test";
 const DIM: usize = 768;
@@ -454,18 +454,6 @@ fn enroll_correction_creates_named_entity_and_later_sightings_match() {
 }
 
 #[test]
-fn enroll_wire_shape_parses_from_the_command_topic() {
-    let request = parse_command_topic(&vigil::CommandTopicMessage {
-        detection_id: "det-1".to_string(),
-        label: Some("Arjun".to_string()),
-        correction_type: "enroll".to_string(),
-    })
-    .expect("enroll parses");
-    assert_eq!(request.correction_type, CorrectionType::Enroll);
-    assert_eq!(request.label.as_deref(), Some("Arjun"));
-}
-
-#[test]
 fn enroll_without_a_name_is_refused() {
     let world = world("enroll-no-name");
     let detection = seed_detection(&world, "person");
@@ -734,24 +722,6 @@ fn forget_removes_references_and_the_subject_reverts_to_unknown() {
 }
 
 // ── Surfaces (AC2, AC4) ────────────────────────────────────────────────────
-
-#[test]
-fn event_payload_carries_the_entity_name_when_matched() {
-    let payload = vigil::map_detection_to_event_payload(&vigil::DetectionInput {
-        observation_id: "obs-1".to_string(),
-        camera_name: "gate".to_string(),
-        object_class: "person".to_string(),
-        confidence: 0.9,
-        timestamp_ms: 1,
-        evidence_ref: "vigil-edge:clip/x".to_string(),
-        snapshot_ref: "vigil-edge:clip/y".to_string(),
-        entity_name: Some("Arjun".to_string()),
-        match_score: Some(0.93),
-    });
-    assert_eq!(payload.entity_name.as_deref(), Some("Arjun"));
-    let json = serde_json::to_value(&payload).expect("serialize");
-    assert_eq!(json["entity_name"], serde_json::json!("Arjun"));
-}
 
 #[test]
 fn review_events_row_carries_the_entity_name() {

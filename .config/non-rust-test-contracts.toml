@@ -117,7 +117,7 @@ gate = "physical"
 status = "active"
 lineage = "TH-09 now requires Vigil discovery below homeassistant/# while rejecting Vigil-named traffic below frigate/#; the deterministic publisher witness restricts every generated discovery topic to the same namespace."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker witness requires Vigil discovery below homeassistant/# and rejects every generated discovery topic below frigate/#, matching the owner-approved namespace boundary."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
+deterministic_witnesses = ["vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
 explicit_run = "TH_RUN_LIST=TH-09 tests/ha-os-vm/run-th-suite.sh"
 
 [[case]]
@@ -152,7 +152,7 @@ gate = "physical"
 status = "active"
 lineage = "HA-OS discovery acceptance verifies that Vigil publishes device and per-camera discovery to the real Home Assistant broker."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker discovery witness enforces the same core invariant."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
+deterministic_witnesses = ["vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
 explicit_run = "TH_RUN_LIST=TH-12 tests/ha-os-vm/run-th-suite.sh"
 
 [[case]]
@@ -164,8 +164,8 @@ status = "active"
 lineage = "TH-13 requires discovery topics and entity ids to remain a pure function of service/camera identity across Vigil and broker restarts; the deterministic generator witness compares repeated generations and a distinct identity."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: repeated and distinct-identity generation proves the stable identity function, and the real-broker witness proves those generated discovery topics are actually published."
 deterministic_witnesses = [
-  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
-  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+  "vigil-ha::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
+  "vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
 ]
 explicit_run = "TH_RUN_LIST=TH-13 tests/ha-os-vm/run-th-suite.sh"
 
@@ -177,7 +177,7 @@ gate = "physical"
 status = "active"
 lineage = "TH-14 requires detection id, class, and confidence in one real-broker event, then resolves that same detection from cg through why; the deterministic witness builds the production payload from one cg why record, publishes it through Mosquitto, and value-compares the received id, class, and confidence to that same record."
 reviewed_by = "Fermat independent physical-to-deterministic review, 2026-07-21: physical TH-14 requires nonempty typed broker fields, resolves that exact detection ID through both the installed CLI and structured /why route, and value-compares ID, class, and numeric confidence with the same cg record; the deterministic real-broker witness enforces the identical causal join."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker"]
+deterministic_witnesses = ["vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker"]
 explicit_run = "TH_RUN_LIST=TH-14 tests/ha-os-vm/run-th-suite.sh"
 
 [[case]]
@@ -200,7 +200,7 @@ gate = "physical"
 status = "active"
 lineage = "TH-16 publishes an Identity correction through the production broker subscriber and reads it from cg through why; the direct real-broker witness proves that complete Identity path."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the production subscriber receives an Identity correction from a SUBACK-proven real-broker path, commits it to cg, and review_why value-compares both the label and Identity type."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg"]
+deterministic_witnesses = ["vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary"]
 explicit_run = "TH_RUN_LIST=TH-16 tests/ha-os-vm/run-th-suite.sh"
 
 [[case]]
@@ -211,7 +211,7 @@ gate = "physical"
 status = "active"
 lineage = "TH-17 requires disable-camera silence, clears retained snapshot state before the action and requires causal nonempty bytes on the named snapshot topic, then requires acknowledge on the named detection; the real-broker witness exercises the same three handlers."
 reviewed_by = "Fermat independent physical-to-deterministic review, 2026-07-21: both paths prove named-camera disable behavior, causal nonempty snapshot bytes after a broker-confirmed subscription, and an Identity acknowledgement read back from cg; the physical silence audit scans the full shared-topic window after SUBACK and ignores sibling-camera traffic."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::operator_action_command_effects_action"]
+deterministic_witnesses = ["vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary", "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary", "vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker"]
 explicit_run = "TH_RUN_LIST=TH-17 tests/ha-os-vm/run-th-suite.sh"
 
 [[case]]
@@ -246,7 +246,7 @@ gate = "physical"
 status = "active"
 lineage = "TH-20 now requires exactly one whole-service running-condition entity and zero per-camera health entities; the deterministic discovery witness asserts both cardinalities from generated payloads."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the witness asserts exactly one whole-service running-condition and rejects health, problem, status, diagnostic, connectivity, and availability roles on per-camera discovery."
-deterministic_witnesses = ["vigil::ha_discovery::tests::discovery_has_no_per_camera_health_entity"]
+deterministic_witnesses = ["vigil-ha::ha_discovery::tests::discovery_has_no_per_camera_health_entity"]
 explicit_run = "TH_RUN_LIST=TH-20 tests/ha-os-vm/run-th-suite.sh"
 
 [[case]]
@@ -269,8 +269,8 @@ status = "active"
 lineage = "TH-22 now fails when broker observation fails and requires a numeric zero event count; paired witnesses prove the real runtime lands no empty/undecodable observation and a ConnAck-proven production publisher emits no unsolicited event."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the runtime witness lands no event for empty, zero-media, and undecodable streams, while the ConnAck-proven publisher witness rejects unsolicited broker events."
 deterministic_witnesses = [
-  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
-  "vigil::ha_mqtt_broker::empty_stream_publishes_no_event_to_broker",
+  "vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+  "vigil-ha::ha_mqtt_broker::empty_stream_publishes_no_event_to_broker",
 ]
 explicit_run = "TH_RUN_LIST=TH-22 tests/ha-os-vm/run-th-suite.sh"
 
@@ -284,8 +284,8 @@ lineage = "HA-OS physical acceptance attaches fail-closed network-syscall tracin
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the witnesses jointly freeze fingerprint correlation, fail-closed physical tracing, a planted network call inside the dedicated writer closure, real broker correction landing, and durable cg readback."
 deterministic_witnesses = [
   "vigil::ha_correction_seam::correction_survives_daemon_restart",
-  "vigil::ha_mqtt_broker::correction_path_makes_no_outbound_network_beyond_broker",
-  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "vigil-ha::ha_mqtt_broker::correction_path_makes_no_outbound_network_beyond_broker",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
   "xtask::test_estate::tests::ha_smoke_required_steps_cannot_skip_or_warn_green",
 ]
 explicit_run = "TH_RUN_LIST=TH-23 tests/ha-os-vm/run-th-suite.sh"
@@ -299,7 +299,7 @@ status = "active"
 lineage = "TH-24 requires a broker-ingressed correction to remain in cg and read through /why after restart; the paired witnesses prove production MQTT ingress and durable store reopen/readback."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: one witness proves production MQTT correction ingress into cg and the other proves the correction survives store reopen and remains visible through why."
 deterministic_witnesses = [
-  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
   "vigil::ha_correction_seam::correction_survives_daemon_restart",
 ]
 explicit_run = "TH_RUN_LIST=TH-24 tests/ha-os-vm/run-th-suite.sh"
@@ -347,7 +347,7 @@ gate = "physical"
 status = "active"
 lineage = "Home Assistant physical smoke step verifies device and per-camera discovery against a real broker; registration is not a completed run receipt."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker discovery witness enforces the same core invariant."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
+deterministic_witnesses = ["vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start"]
 explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S1 full-suite receipt"
 
 [[case]]
@@ -358,7 +358,7 @@ gate = "physical"
 status = "active"
 lineage = "Home Assistant physical smoke step verifies a real Vigil detection event delivered through the broker; registration is not a completed run receipt."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker event witness enforces the same delivery invariant."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker"]
+deterministic_witnesses = ["vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker"]
 explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S2 full-suite receipt"
 
 [[case]]
@@ -405,7 +405,7 @@ gate = "physical"
 status = "active"
 lineage = "Home Assistant physical smoke step verifies a broker correction command lands in the Context Graph; registration is not a completed run receipt."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the real-broker correction witness enforces the same landing invariant."
-deterministic_witnesses = ["vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg"]
+deterministic_witnesses = ["vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary"]
 explicit_run = "HA_S4_MANUAL_PROOF=/path/to/exported-trace.json HA_S5_MEDIA_BROWSE_PROOF=/path/to/media-root.json tests/ha-os-vm/ha-integration-smoke.sh # HA-S6 full-suite receipt"
 
 [[case]]
@@ -417,7 +417,7 @@ status = "active"
 lineage = "Home Assistant physical smoke requires the exact correction label/type/anchor through shipped /why JSON; TH-23 exclusively owns correction-writer egress proof."
 reviewed_by = "Accepted by independent closeout reviewer Codex (/root/closeout_review) on 2026-07-21: the witnesses jointly prove broker-ingressed typed correction, restart durability required by the checklist, and exact correction rendering through the shipped why route."
 deterministic_witnesses = [
-  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
   "vigil::ha_correction_seam::correction_survives_daemon_restart",
   "vigil::http_data_plane::http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent",
 ]

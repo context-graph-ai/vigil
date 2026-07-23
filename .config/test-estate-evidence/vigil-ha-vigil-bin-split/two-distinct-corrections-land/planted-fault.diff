@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index a711d30..ae84b45 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -272,8 +272,6 @@ pub fn record_correction_with_clock(
+             .map(|s| s.to_string());
+ 
+         if anchored == Some(request.detection_id.as_str())
+-            && ct == Some(correction_type_str)
+-            && lbl == request.label
+         {
+             return Ok(CorrectionReceipt {
+                 correction_id: obs.id.to_string(),
+
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index d346910..9e098c1 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -272,8 +272,6 @@ pub fn record_correction_with_clock(
+             .map(|s| s.to_string());
+ 
+         if anchored == Some(request.detection_id.as_str())
+-            && ct == Some(correction_type_str)
+-            && lbl == request.label
+         {
+             return Ok(CorrectionReceipt {
+                 correction_id: obs.id.to_string(),

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "match the dedup scan on anchored_detection_id alone, dropping the correction_type/label comparison, so a second distinct correction on the same detection is wrongly treated as a duplicate (correction.rs)",
+    "source_sha256": "sha256:0687c96d88a4acf6aadc3fd9645de086c852dbf42c42c417ff35a744f96d4612",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/two-distinct-corrections-land/planted-fault.diff",
+    "diff_sha256": "sha256:0687c96d88a4acf6aadc3fd9645de086c852dbf42c42c417ff35a744f96d4612"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::two_distinct_corrections_on_same_detection_both_land",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker two_distinct_corrections_on_same_detection_both_land -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.76
+  },
+  "survivor": {
+    "test": "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test mqtt_composed_product correction_commands_via_mqtt_land_in_cg_through_the_composed_binary -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 18.87
+  }
+}

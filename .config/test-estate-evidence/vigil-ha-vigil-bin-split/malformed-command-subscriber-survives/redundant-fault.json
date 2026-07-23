@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "panic the subscriber thread on a malformed correction-command payload instead of silently discarding it (ha_mqtt_tasks.rs)",
+    "source_sha256": "sha256:8547d9d893d91c0d889cc1a988c4e275378497636f0e93289bb0a8c379a2a59f",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/malformed-command-subscriber-survives/planted-fault.diff",
+    "diff_sha256": "sha256:8547d9d893d91c0d889cc1a988c4e275378497636f0e93289bb0a8c379a2a59f"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::malformed_correction_command_is_rejected_and_subscriber_survives",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker malformed_correction_command_is_rejected_and_subscriber_survives -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.91
+  },
+  "survivor": {
+    "test": "vigil-ha::ha_mqtt_broker::malformed_correction_command_is_rejected_and_subscriber_survives",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-ha --features first-light-acceptance --test ha_mqtt_broker malformed_correction_command_is_rejected_and_subscriber_survives -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 5.82
+  }
+}

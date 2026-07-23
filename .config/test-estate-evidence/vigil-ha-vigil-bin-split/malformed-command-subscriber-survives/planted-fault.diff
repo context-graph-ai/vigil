@@ -1,0 +1,37 @@
+diff --git a/crates/vigil/src/ha_mqtt_tasks.rs b/crates/vigil/src/ha_mqtt_tasks.rs
+index b6475d9..ee785bc 100644
+--- a/crates/vigil/src/ha_mqtt_tasks.rs
++++ b/crates/vigil/src/ha_mqtt_tasks.rs
+@@ -470,10 +470,10 @@ pub fn spawn_production_subscriber(
+                             }
+                         }
+                         CORRECTION_COMMAND_TOPIC => {
+-                            if let Ok(msg) =
+-                                serde_json::from_slice::<CommandTopicMessage>(&p.payload)
+-                                && let Ok(req) = parse_command_topic(&msg)
+                             {
++                                let msg = serde_json::from_slice::<CommandTopicMessage>(&p.payload)
++                                    .expect("test-estate planted fault: malformed command must panic");
++                                let req = parse_command_topic(&msg).expect("planted fault");
+                                 match command_tx.try_send(req) {
+                                     Ok(()) => {}
+                                     Err(mpsc::TrySendError::Full(_)) => {
+
+diff --git a/crates/vigil-ha/src/ha_mqtt_tasks.rs b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+index 5029989..5a95cb4 100644
+--- a/crates/vigil-ha/src/ha_mqtt_tasks.rs
++++ b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+@@ -449,10 +449,10 @@ pub fn spawn_production_subscriber(
+                             }
+                         }
+                         CORRECTION_COMMAND_TOPIC => {
+-                            if let Ok(msg) =
+-                                serde_json::from_slice::<CommandTopicMessage>(&p.payload)
+-                                && let Ok(req) = parse_command_topic(&msg)
+                             {
++                                let msg = serde_json::from_slice::<CommandTopicMessage>(&p.payload)
++                                    .expect("test-estate planted fault: malformed command must panic");
++                                let req = parse_command_topic(&msg).expect("planted fault");
+                                 match control.submit_correction(req) {
+                                     Ok(()) => {}
+                                     Err(SubmitCorrectionError::QueueFull) => {

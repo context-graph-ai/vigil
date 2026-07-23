@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index b09b6bb..36f1635 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -893,7 +893,7 @@ impl FabricRuntime {
+             // miss and nothing to retry — printing the failure line here
+             // would just be permanent, meaningless noise on a healthy hub.
+             if !writes_are_canonical && let Err(error) = client.push().await {
+-                println!("fabric_capability_push_failed=true backend={backend_tag} error={error}");
++                let _ = (&backend_tag, &error); // test-estate planted fault: line suppressed
+             }
+             let _ = contextdb_server::work_ledger::run_worker_loop(
+                 &client,
+
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index 401f438..6a864a3 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -893,7 +893,7 @@ impl FabricRuntime {
+             // miss and nothing to retry — printing the failure line here
+             // would just be permanent, meaningless noise on a healthy hub.
+             if !writes_are_canonical && let Err(error) = client.push().await {
+-                println!("fabric_capability_push_failed=true backend={backend_tag} error={error}");
++                let _ = (&backend_tag, &error); // test-estate planted fault: line suppressed
+             }
+             let _ = contextdb_server::work_ledger::run_worker_loop(
+                 &client,

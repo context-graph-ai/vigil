@@ -69,7 +69,7 @@ same durable correction seam.
 <!-- enforced by: `vigil::ha_correction_seam::correction_anchored_to_named_detection_only` -->
 <!-- enforced by: `vigil::ha_correction_seam::correction_survives_daemon_restart` -->
 <!-- enforced by: `vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
 
 Corrections do not yet form a general learning loop. Enrollment affects later recognition; false
 alarms and wrong classes are currently memory and review facts, not automatic detector tuning or
@@ -103,11 +103,11 @@ Vigil publishes MQTT discovery for a service device and per-camera devices, publ
 events to a real broker, exposes a retained camera-enable switch and snapshot action, and consumes
 correction commands from MQTT into the local store.
 <!-- vigil-claim: `vigil.docs-promise.vigil-publishes-mqtt-discovery-for-a-service` -->
-<!-- enforced by: `vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::operator_action_command_effects_action` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
 
 The complete rich review path also depends on a separate Vigil Home Assistant integration and a
 Vigil engine in an Advanced Camera Card fork. Those companion repositories are not yet distributed

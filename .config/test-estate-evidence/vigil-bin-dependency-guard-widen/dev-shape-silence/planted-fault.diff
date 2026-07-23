@@ -1,0 +1,13 @@
+diff --git a/crates/vigil/tests/dependency_direction_contract.rs b/crates/vigil/tests/dependency_direction_contract.rs
+index 71e4278..259c3cb 100644
+--- a/crates/vigil/tests/dependency_direction_contract.rs
++++ b/crates/vigil/tests/dependency_direction_contract.rs
+@@ -308,7 +308,7 @@ fn direct_forbidden_names(graph: &Graph, package: &str, forbidden: &[&str]) -> V
+ fn edge_is_normal_or_build(edge: &Edge) -> bool {
+     edge.kinds
+         .iter()
+-        .any(|kind| matches!(kind.as_deref(), None | Some("build")))
++        .any(|kind| matches!(kind.as_deref(), None | Some("build") | Some("dev")))
+ }
+ 
+ /// Check only `package`'s own DIRECT NORMAL (shipped-in-the-binary) and

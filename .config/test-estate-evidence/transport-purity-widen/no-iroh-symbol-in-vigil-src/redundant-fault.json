@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "add a code-position (non-comment) mention of the transport name to crates/vigil/src/control_socket.rs, a file both the removed and the renamed scan cover identically (the file is byte-identical between the removed identity's commit, 49bfcff, and the renamed identity's commit)",
+    "source_sha256": "sha256:7bb41dc5b3a585864bb0a87055b562ffcb6329d496a50cb9199c3ac33054ebaf",
+    "diff": ".config/test-estate-evidence/transport-purity-widen/no-iroh-symbol-in-vigil-src/planted-fault.diff",
+    "diff_sha256": "sha256:7bb41dc5b3a585864bb0a87055b562ffcb6329d496a50cb9199c3ac33054ebaf"
+  },
+  "removed": {
+    "test": "vigil::transport_purity::no_iroh_symbol_in_vigil_src",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test transport_purity no_iroh_symbol_in_vigil_src -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 193.52
+  },
+  "survivor": {
+    "test": "vigil::transport_purity::no_iroh_symbol_anywhere_in_production_crate_sources",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test transport_purity no_iroh_symbol_anywhere_in_production_crate_sources -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.8
+  }
+}

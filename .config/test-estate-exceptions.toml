@@ -1,27 +1,67 @@
 # Exact current timing/port debt inventory. Additions or relocations fail the executable guard.
 
 [[file]]
-path = "crates/vigil/tests/boot_readiness.rs"
+path = "crates/vigil-bin/tests/boot_readiness.rs"
 sleeps = 3
 raw_clocks = 3
-free_port_helpers = 1
+free_port_helpers = 0
 elapsed_calls = 3
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
 [[file]]
-path = "crates/vigil/tests/cameraless_worker.rs"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
 sleeps = 5
 raw_clocks = 7
-free_port_helpers = 1
+free_port_helpers = 0
 elapsed_calls = 1
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
 [[file]]
-path = "crates/vigil/tests/capability_delivery.rs"
+path = "crates/vigil-bin/tests/capability_delivery.rs"
 sleeps = 2
 raw_clocks = 3
-free_port_helpers = 1
+free_port_helpers = 0
 elapsed_calls = 1
+reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
+
+[[file]]
+path = "crates/vigil-bin/tests/detection_accel_backend.rs"
+sleeps = 1
+raw_clocks = 2
+free_port_helpers = 0
+elapsed_calls = 0
+reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
+
+[[file]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+sleeps = 20
+raw_clocks = 18
+free_port_helpers = 1
+elapsed_calls = 13
+reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
+
+[[file]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+sleeps = 14
+raw_clocks = 11
+free_port_helpers = 0
+elapsed_calls = 9
+reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
+
+[[file]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+sleeps = 3
+raw_clocks = 3
+free_port_helpers = 0
+elapsed_calls = 1
+reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
+
+[[file]]
+path = "crates/vigil-ha/tests/mqtt_test_probe.rs"
+sleeps = 0
+raw_clocks = 6
+free_port_helpers = 0
+elapsed_calls = 0
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
 [[file]]
@@ -34,8 +74,8 @@ reason = "Exact current timing and port surface is frozen migration debt; change
 
 [[file]]
 path = "crates/vigil/tests/detection_accel_backend.rs"
-sleeps = 3
-raw_clocks = 3
+sleeps = 2
+raw_clocks = 1
 free_port_helpers = 0
 elapsed_calls = 1
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
@@ -59,17 +99,9 @@ reason = "Exact current timing and port surface is frozen migration debt; change
 [[file]]
 path = "crates/vigil/tests/deterministic_test_support.rs"
 sleeps = 1
-raw_clocks = 8
+raw_clocks = 2
 free_port_helpers = 1
 elapsed_calls = 0
-reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
-
-[[file]]
-path = "crates/vigil/tests/first_light_loop.rs"
-sleeps = 20
-raw_clocks = 18
-free_port_helpers = 1
-elapsed_calls = 13
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
 [[file]]
@@ -86,22 +118,6 @@ sleeps = 0
 raw_clocks = 3
 free_port_helpers = 0
 elapsed_calls = 0
-reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
-
-[[file]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-sleeps = 14
-raw_clocks = 11
-free_port_helpers = 1
-elapsed_calls = 9
-reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
-
-[[file]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-sleeps = 3
-raw_clocks = 3
-free_port_helpers = 1
-elapsed_calls = 1
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
 [[file]]
@@ -137,7 +153,23 @@ elapsed_calls = 2
 reason = "The verifier measures command wall time, per-step time, and process-tree memory; these clocks and the 100 ms sampler interval produce receipts and never decide whether product behavior passes."
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
+path = "crates/vigil-bin/tests/boot_readiness.rs"
+scope = "boot_prints_phase_markers"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/boot_readiness.rs"
+scope = "boot_prints_phase_markers"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/boot_readiness.rs"
 scope = "boot_prints_phase_markers"
 kind = "sleep"
 fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
@@ -145,31 +177,23 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (100))
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
-scope = "boot_prints_phase_markers"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
-scope = "boot_prints_phase_markers"
+path = "crates/vigil-bin/tests/boot_readiness.rs"
+scope = "health_becomes_ready_before_fabric_attaches"
 kind = "elapsed_call"
 fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: start . elapsed ()
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
-scope = "free_port"
-kind = "bind_port_zero"
-fingerprint = "sha256:ff9e1dbcadbbd6d6acbc40f66173885cd8dbd026d61ad24336deabfa8eb29df5"
+path = "crates/vigil-bin/tests/boot_readiness.rs"
+scope = "health_becomes_ready_before_fabric_attaches"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: TcpListener :: bind ("127.0.0.1:0")
+# syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
+path = "crates/vigil-bin/tests/boot_readiness.rs"
 scope = "health_becomes_ready_before_fabric_attaches"
 kind = "sleep"
 fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
@@ -177,23 +201,23 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (25))
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
-scope = "health_becomes_ready_before_fabric_attaches"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
-scope = "health_becomes_ready_before_fabric_attaches"
+path = "crates/vigil-bin/tests/boot_readiness.rs"
+scope = "wait_for_line"
 kind = "elapsed_call"
 fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: start . elapsed ()
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
+path = "crates/vigil-bin/tests/boot_readiness.rs"
+scope = "wait_for_line"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/boot_readiness.rs"
 scope = "wait_for_line"
 kind = "sleep"
 fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
@@ -201,23 +225,23 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (50))
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
-scope = "wait_for_line"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
 kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/boot_readiness.rs"
-scope = "wait_for_line"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
+# syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
 scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
 kind = "sleep"
 fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
@@ -225,7 +249,7 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (500))
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
 scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
 kind = "sleep"
 fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
@@ -233,23 +257,23 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (50))
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
 kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
 kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
 scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
 kind = "sleep"
 fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
@@ -257,31 +281,23 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (50))
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "hub_sees_cameraless_worker_detector_capability_after_join"
 kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "hub_sees_cameraless_worker_detector_capability_after_join"
 kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "free_port"
-kind = "bind_port_zero"
-fingerprint = "sha256:ff9e1dbcadbbd6d6acbc40f66173885cd8dbd026d61ad24336deabfa8eb29df5"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: TcpListener :: bind ("127.0.0.1:0")
-
-[[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
 scope = "hub_sees_cameraless_worker_detector_capability_after_join"
 kind = "sleep"
 fingerprint = "sha256:f6906e8a3ac0ba4bae877311d4bb191be4c2e9affbc806525f2203c53b99dd47"
@@ -289,39 +305,7 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: tokio :: time :: sleep (Duration :: from_millis (200))
 
 [[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "hub_sees_cameraless_worker_detector_capability_after_join"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "hub_sees_cameraless_worker_detector_capability_after_join"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "wait_for_health"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
-scope = "wait_for_health"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/cameraless_worker.rs"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
 scope = "wait_for_health"
 kind = "elapsed_call"
 fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
@@ -329,7 +313,39 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: start . elapsed ()
 
 [[site]]
-path = "crates/vigil/tests/capability_delivery.rs"
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "wait_for_health"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/cameraless_worker.rs"
+scope = "wait_for_health"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/capability_delivery.rs"
+scope = "failed_capability_push_emits_named_error"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/capability_delivery.rs"
+scope = "failed_capability_push_emits_named_error"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/capability_delivery.rs"
 scope = "failed_capability_push_emits_named_error"
 kind = "sleep"
 fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
@@ -337,31 +353,23 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (100))
 
 [[site]]
-path = "crates/vigil/tests/capability_delivery.rs"
-scope = "failed_capability_push_emits_named_error"
+path = "crates/vigil-bin/tests/capability_delivery.rs"
+scope = "wait_for_health"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/capability_delivery.rs"
+scope = "wait_for_health"
 kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/capability_delivery.rs"
-scope = "failed_capability_push_emits_named_error"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/capability_delivery.rs"
-scope = "free_port"
-kind = "bind_port_zero"
-fingerprint = "sha256:ff9e1dbcadbbd6d6acbc40f66173885cd8dbd026d61ad24336deabfa8eb29df5"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: TcpListener :: bind ("127.0.0.1:0")
-
-[[site]]
-path = "crates/vigil/tests/capability_delivery.rs"
+path = "crates/vigil-bin/tests/capability_delivery.rs"
 scope = "wait_for_health"
 kind = "sleep"
 fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
@@ -369,7 +377,327 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: thread :: sleep (Duration :: from_millis (25))
 
 [[site]]
-path = "crates/vigil/tests/capability_delivery.rs"
+path = "crates/vigil-bin/tests/detection_accel_backend.rs"
+scope = "runtime_stats_text_attempt"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/detection_accel_backend.rs"
+scope = "runtime_stats_text_attempt"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "free_port"
+kind = "bind_port_zero"
+fingerprint = "sha256:ff9e1dbcadbbd6d6acbc40f66173885cd8dbd026d61ad24336deabfa8eb29df5"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: TcpListener :: bind ("127.0.0.1:0")
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl FirstLightWorld::run_runtime_until_observation_count"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl FirstLightWorld::run_runtime_until_observation_count"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl FirstLightWorld::run_runtime_until_observation_count"
+kind = "sleep"
+fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (100))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_decoded_frames"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_decoded_frames"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_decoded_frames"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_log_contains"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_log_contains"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_log_contains"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_log_occurrences"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_log_occurrences"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::observe_until_log_occurrences"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::wait_for_exit"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::wait_for_exit"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl LiveRuntime::wait_for_exit"
+kind = "sleep"
+fingerprint = "sha256:71e90686deda097c69830f0dd8377be42d33260e72f53c5f024b9e3e4b929134"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (20))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl RtspFixture::start_current_publisher"
+kind = "sleep"
+fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (400))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl RtspFixture::start_with_publisher_from_base"
+kind = "sleep"
+fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (400))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl RtspFixture::start_zero_media_with_auth"
+kind = "sleep"
+fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (400))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "impl RtspFixture::switch_clip"
+kind = "sleep"
+fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (400))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "record_out_of_order_observed_at_fixture"
+kind = "raw_clock"
+fingerprint = "sha256:7c84cdc16fd1bed9f319c5edde5a265b038c521284bdfd801b4959192a971d30"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Utc :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "record_out_of_order_observed_at_fixture"
+kind = "sleep"
+fingerprint = "sha256:e6846cf8d15c0c5261be8cb9be200475c53b360648c141bc966d32d82f458760"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (10))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "run_command_with_timeout"
+kind = "elapsed_call"
+fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: started . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "run_command_with_timeout"
+kind = "elapsed_call"
+fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: started . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "run_command_with_timeout"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "run_command_with_timeout"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "run_command_with_timeout"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "run_command_with_timeout"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "transient_rtsp_drop_recovers_without_losing_camera"
+kind = "raw_clock"
+fingerprint = "sha256:7c84cdc16fd1bed9f319c5edde5a265b038c521284bdfd801b4959192a971d30"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Utc :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "vigil_why_served_over_socket_while_store_is_locked"
+kind = "raw_clock"
+fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: SystemTime :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "vigil_why_served_over_socket_while_store_is_locked"
+kind = "raw_clock"
+fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: SystemTime :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_child_exit"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_child_exit"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_child_exit"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_health"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
 scope = "wait_for_health"
 kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
@@ -377,12 +705,484 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: Instant :: now ()
 
 [[site]]
-path = "crates/vigil/tests/capability_delivery.rs"
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_health"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_live_event_after"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_live_event_after"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_live_event_after"
+kind = "sleep"
+fingerprint = "sha256:729276490156f002393f09eadd71d8b3af2e2a32232007888737f9d1cd3a4260"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (250))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_live_events_row"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_live_events_row"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_live_events_row"
+kind = "sleep"
+fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (100))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_tcp_port"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_tcp_port"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_tcp_port"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_unhealthy_health"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_unhealthy_health"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/first_light_loop.rs"
+scope = "wait_for_unhealthy_health"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "now_ms"
+kind = "elapsed_call"
+fingerprint = "sha256:ae0361f5c6aad0f1b22160552d150578a94f1e320ccb37eef66260e133517275"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: SystemTime :: now () . duration_since (UNIX_EPOCH)
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "now_ms"
+kind = "raw_clock"
+fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: SystemTime :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_hub_for_remote_worker"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_hub_for_remote_worker"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_hub_for_remote_worker"
+kind = "sleep"
+fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (500))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_hub_until_worker_absent"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_hub_until_worker_absent"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_hub_until_worker_absent"
+kind = "sleep"
+fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (500))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_ledger_for_capability"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_ledger_for_capability"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "poll_ledger_for_capability"
+kind = "sleep"
+fingerprint = "sha256:140f8ffe881a891e753757c480128497707d244d63252f88ca9b635edbca5e29"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (300))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_age_out_a_dead_worker_from_remote_detectors"
+kind = "sleep"
+fingerprint = "sha256:77188e250a74197f500c1098c817e25829c175347a1f1a49ac4b582db403f326"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_secs (13))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_render_only_the_restarted_workers_current_backend"
+kind = "sleep"
+fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (500))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_render_remote_detectors_line_hub_first"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_render_remote_detectors_line_hub_first"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_render_remote_detectors_line_hub_first"
+kind = "sleep"
+fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (500))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_render_remote_detectors_line_hub_first"
+kind = "sleep"
+fingerprint = "sha256:96cf58866e041272502b4429a4d080f7ce57c1e59aa192bcbc142f24932c9417"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_secs (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_render_remote_detectors_line_hub_up_late"
+kind = "sleep"
+fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (500))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "two_real_processes_render_remote_detectors_line_hub_up_late"
+kind = "sleep"
+fingerprint = "sha256:55370490fd2153df807e30b7ffc62af8ba06a2965f642b5a753d16d1e8ee7584"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_secs (55))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
 scope = "wait_for_health"
 kind = "elapsed_call"
 fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_health"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_health"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_health_any"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_health_any"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_health_any"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_line"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_line"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_line"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_node_id"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_node_id"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_node_id"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_ticket"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_ticket"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/two_process_fabric.rs"
+scope = "wait_for_ticket"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+scope = "wait_for_health"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
+
+[[site]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+scope = "wait_for_health"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+scope = "wait_for_health"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
+kind = "sleep"
+fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (500))
+
+[[site]]
+path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
+scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
+
+[[site]]
+path = "crates/vigil-ha/tests/mqtt_test_probe.rs"
+scope = "impl MqttProbe::recv_matching"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-ha/tests/mqtt_test_probe.rs"
+scope = "impl MqttProbe::recv_matching"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-ha/tests/mqtt_test_probe.rs"
+scope = "impl MqttProbe::wait_for_packet"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-ha/tests/mqtt_test_probe.rs"
+scope = "impl MqttProbe::wait_for_packet"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-ha/tests/mqtt_test_probe.rs"
+scope = "impl MqttProbe::wait_for_pubacks"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil-ha/tests/mqtt_test_probe.rs"
+scope = "impl MqttProbe::wait_for_pubacks"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
 
 [[site]]
 path = "crates/vigil/tests/capability_lifecycle.rs"
@@ -403,18 +1203,18 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "crates/vigil/tests/detection_accel_backend.rs"
 scope = "detection_probe_timeout_and_panic_classify_probe_failed_without_hang"
-kind = "raw_clock"
-fingerprint = "sha256:8a492051b8f9b539ecb23445e01d6d9d44fda32fac45f4e38e85d242b0500a8d"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: time :: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_accel_backend.rs"
-scope = "detection_probe_timeout_and_panic_classify_probe_failed_without_hang"
 kind = "elapsed_call"
 fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: started . elapsed ()
+
+[[site]]
+path = "crates/vigil/tests/detection_accel_backend.rs"
+scope = "detection_probe_timeout_and_panic_classify_probe_failed_without_hang"
+kind = "raw_clock"
+fingerprint = "sha256:8a492051b8f9b539ecb23445e01d6d9d44fda32fac45f4e38e85d242b0500a8d"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: std :: time :: Instant :: now ()
 
 [[site]]
 path = "crates/vigil/tests/detection_accel_backend.rs"
@@ -423,30 +1223,6 @@ kind = "sleep"
 fingerprint = "sha256:34992e54f1c5836237fe523bc197a0e9ba148f922349021ccc7e65fcb31ec192"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: std :: thread :: sleep (self . delay)
-
-[[site]]
-path = "crates/vigil/tests/detection_accel_backend.rs"
-scope = "runtime_stats_text_attempt"
-kind = "sleep"
-fingerprint = "sha256:ba8d430d6d6454b184780e628a0995491c5bbe9245e7d9a9f98b8ec7099fc4cf"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: thread :: sleep (Duration :: from_millis (100))
-
-[[site]]
-path = "crates/vigil/tests/detection_accel_backend.rs"
-scope = "runtime_stats_text_attempt"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_accel_backend.rs"
-scope = "runtime_stats_text_attempt"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
 
 [[site]]
 path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
@@ -459,26 +1235,26 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
 scope = "wait_for_detection_receipt"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
+scope = "wait_for_detection_receipt"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
+scope = "wait_for_detection_receipt"
 kind = "sleep"
 fingerprint = "sha256:a1efee31029e0eb0ca11f2489e605d0bdc9cc9c0b707447ab4e2fb4d14b04f91"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: std :: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
-scope = "wait_for_detection_receipt"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
-scope = "wait_for_detection_receipt"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
 
 [[site]]
 path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
@@ -499,74 +1275,26 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
 scope = "poll"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
+scope = "poll"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
+scope = "poll"
 kind = "sleep"
 fingerprint = "sha256:a1efee31029e0eb0ca11f2489e605d0bdc9cc9c0b707447ab4e2fb4d14b04f91"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: std :: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-scope = "poll"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-scope = "poll"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "impl MqttProbe::recv_matching"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "impl MqttProbe::recv_matching"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "impl MqttProbe::wait_for_packet"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "impl MqttProbe::wait_for_packet"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "impl MqttProbe::wait_for_pubacks"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "impl MqttProbe::wait_for_pubacks"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
 
 [[site]]
 path = "crates/vigil/tests/deterministic_test_support.rs"
@@ -579,458 +1307,34 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "crates/vigil/tests/deterministic_test_support.rs"
 scope = "wait_until"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil/tests/deterministic_test_support.rs"
+scope = "wait_until"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
+
+[[site]]
+path = "crates/vigil/tests/deterministic_test_support.rs"
+scope = "wait_until"
 kind = "sleep"
 fingerprint = "sha256:954183c1e0114bf5dc04babf1228f8ce510a904c692cae854b210aaee934d19e"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: std :: thread :: sleep (Duration :: from_millis (25))
 
 [[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "wait_until"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/deterministic_test_support.rs"
-scope = "wait_until"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "free_port"
-kind = "bind_port_zero"
-fingerprint = "sha256:ff9e1dbcadbbd6d6acbc40f66173885cd8dbd026d61ad24336deabfa8eb29df5"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: TcpListener :: bind ("127.0.0.1:0")
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl FirstLightWorld::run_runtime_until_observation_count"
-kind = "sleep"
-fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (100))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl FirstLightWorld::run_runtime_until_observation_count"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl FirstLightWorld::run_runtime_until_observation_count"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_decoded_frames"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_decoded_frames"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_decoded_frames"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_log_contains"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_log_contains"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_log_contains"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_log_occurrences"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_log_occurrences"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::observe_until_log_occurrences"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::wait_for_exit"
-kind = "sleep"
-fingerprint = "sha256:71e90686deda097c69830f0dd8377be42d33260e72f53c5f024b9e3e4b929134"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (20))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::wait_for_exit"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl LiveRuntime::wait_for_exit"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl RtspFixture::start_current_publisher"
-kind = "sleep"
-fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (400))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl RtspFixture::start_with_publisher_from_base"
-kind = "sleep"
-fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (400))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl RtspFixture::start_zero_media_with_auth"
-kind = "sleep"
-fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (400))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "impl RtspFixture::switch_clip"
-kind = "sleep"
-fingerprint = "sha256:b05192228a1b3aa22460aded4c2e2784f10292003b6653d1851ef13751284a7d"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (400))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "record_out_of_order_observed_at_fixture"
-kind = "sleep"
-fingerprint = "sha256:e6846cf8d15c0c5261be8cb9be200475c53b360648c141bc966d32d82f458760"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (10))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "record_out_of_order_observed_at_fixture"
-kind = "raw_clock"
-fingerprint = "sha256:7c84cdc16fd1bed9f319c5edde5a265b038c521284bdfd801b4959192a971d30"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Utc :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "run_command_with_timeout"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "run_command_with_timeout"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "run_command_with_timeout"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "run_command_with_timeout"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "run_command_with_timeout"
-kind = "elapsed_call"
-fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: started . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "run_command_with_timeout"
-kind = "elapsed_call"
-fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: started . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "transient_rtsp_drop_recovers_without_losing_camera"
-kind = "raw_clock"
-fingerprint = "sha256:7c84cdc16fd1bed9f319c5edde5a265b038c521284bdfd801b4959192a971d30"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Utc :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "vigil_why_served_over_socket_while_store_is_locked"
-kind = "raw_clock"
-fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: SystemTime :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "vigil_why_served_over_socket_while_store_is_locked"
-kind = "raw_clock"
-fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: SystemTime :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_child_exit"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_child_exit"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_child_exit"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_health"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_health"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_health"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_live_event_after"
-kind = "sleep"
-fingerprint = "sha256:729276490156f002393f09eadd71d8b3af2e2a32232007888737f9d1cd3a4260"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (250))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_live_event_after"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_live_event_after"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_live_events_row"
-kind = "sleep"
-fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (100))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_live_events_row"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_live_events_row"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_tcp_port"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_tcp_port"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_tcp_port"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_unhealthy_health"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_unhealthy_health"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/first_light_loop.rs"
-scope = "wait_for_unhealthy_health"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
 path = "crates/vigil/tests/promotion_readvertise.rs"
 scope = "late_promotion_advertises_a_new_backend_row_and_keeps_the_old_one"
-kind = "sleep"
-fingerprint = "sha256:4bd054fe874d4c5269b1eb0824548277aff6c2876e4ae06b192f76a74502b73c"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: tokio :: time :: sleep (Duration :: from_millis (100))
-
-[[site]]
-path = "crates/vigil/tests/promotion_readvertise.rs"
-scope = "late_promotion_advertises_a_new_backend_row_and_keeps_the_old_one"
-kind = "sleep"
-fingerprint = "sha256:4bd054fe874d4c5269b1eb0824548277aff6c2876e4ae06b192f76a74502b73c"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: tokio :: time :: sleep (Duration :: from_millis (100))
+# syntax: Instant :: now ()
 
 [[site]]
 path = "crates/vigil/tests/promotion_readvertise.rs"
@@ -1059,10 +1363,18 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "crates/vigil/tests/promotion_readvertise.rs"
 scope = "late_promotion_advertises_a_new_backend_row_and_keeps_the_old_one"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+kind = "sleep"
+fingerprint = "sha256:4bd054fe874d4c5269b1eb0824548277aff6c2876e4ae06b192f76a74502b73c"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
+# syntax: tokio :: time :: sleep (Duration :: from_millis (100))
+
+[[site]]
+path = "crates/vigil/tests/promotion_readvertise.rs"
+scope = "late_promotion_advertises_a_new_backend_row_and_keeps_the_old_one"
+kind = "sleep"
+fingerprint = "sha256:4bd054fe874d4c5269b1eb0824548277aff6c2876e4ae06b192f76a74502b73c"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: tokio :: time :: sleep (Duration :: from_millis (100))
 
 [[site]]
 path = "crates/vigil/tests/result_join_authority.rs"
@@ -1089,350 +1401,6 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: Utc :: now ()
 
 [[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "free_port"
-kind = "bind_port_zero"
-fingerprint = "sha256:ff9e1dbcadbbd6d6acbc40f66173885cd8dbd026d61ad24336deabfa8eb29df5"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: TcpListener :: bind ("127.0.0.1:0")
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "now_ms"
-kind = "raw_clock"
-fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: SystemTime :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "now_ms"
-kind = "elapsed_call"
-fingerprint = "sha256:ae0361f5c6aad0f1b22160552d150578a94f1e320ccb37eef66260e133517275"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: SystemTime :: now () . duration_since (UNIX_EPOCH)
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_hub_for_remote_worker"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_hub_for_remote_worker"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_hub_for_remote_worker"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_hub_until_worker_absent"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_hub_until_worker_absent"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_hub_until_worker_absent"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_ledger_for_capability"
-kind = "sleep"
-fingerprint = "sha256:140f8ffe881a891e753757c480128497707d244d63252f88ca9b635edbca5e29"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (300))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_ledger_for_capability"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "poll_ledger_for_capability"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_age_out_a_dead_worker_from_remote_detectors"
-kind = "sleep"
-fingerprint = "sha256:77188e250a74197f500c1098c817e25829c175347a1f1a49ac4b582db403f326"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_secs (13))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_only_the_restarted_workers_current_backend"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "sleep"
-fingerprint = "sha256:96cf58866e041272502b4429a4d080f7ce57c1e59aa192bcbc142f24932c9417"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_secs (25))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_up_late"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_up_late"
-kind = "sleep"
-fingerprint = "sha256:55370490fd2153df807e30b7ffc62af8ba06a2965f642b5a753d16d1e8ee7584"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_secs (55))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_health"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_health"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_health"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_health_any"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_health_any"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_health_any"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_line"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_line"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_line"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_node_id"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_node_id"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_node_id"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_ticket"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_ticket"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/two_process_fabric.rs"
-scope = "wait_for_ticket"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "free_port"
-kind = "bind_port_zero"
-fingerprint = "sha256:ff9e1dbcadbbd6d6acbc40f66173885cd8dbd026d61ad24336deabfa8eb29df5"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: TcpListener :: bind ("127.0.0.1:0")
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "wait_for_health"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "wait_for_health"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "wait_for_health"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/worker_intent_loudness.rs"
-scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
 path = "tests/acceptance/common.rs"
 scope = "free_port"
 kind = "bind_port_zero"
@@ -1443,10 +1411,10 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "tests/acceptance/common.rs"
 scope = "impl HealthProbe::wait_for_status"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
+# syntax: start . elapsed ()
 
 [[site]]
 path = "tests/acceptance/common.rs"
@@ -1459,18 +1427,18 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "tests/acceptance/common.rs"
 scope = "impl HealthProbe::wait_for_status"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "tests/acceptance/common.rs"
-scope = "impl VigilProcess::wait_for_log"
 kind = "sleep"
 fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "tests/acceptance/common.rs"
+scope = "impl VigilProcess::wait_for_log"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
 
 [[site]]
 path = "tests/acceptance/common.rs"
@@ -1483,18 +1451,10 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "tests/acceptance/common.rs"
 scope = "impl VigilProcess::wait_for_log"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
-
-[[site]]
-path = "tests/acceptance/common.rs"
-scope = "unique_container_name"
-kind = "raw_clock"
-fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: SystemTime :: now ()
+# syntax: thread :: sleep (Duration :: from_millis (25))
 
 [[site]]
 path = "tests/acceptance/common.rs"
@@ -1506,11 +1466,19 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 
 [[site]]
 path = "tests/acceptance/common.rs"
-scope = "wait_for_child_exit"
-kind = "sleep"
-fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+scope = "unique_container_name"
+kind = "raw_clock"
+fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (25))
+# syntax: SystemTime :: now ()
+
+[[site]]
+path = "tests/acceptance/common.rs"
+scope = "wait_for_child_exit"
+kind = "elapsed_call"
+fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: start . elapsed ()
 
 [[site]]
 path = "tests/acceptance/common.rs"
@@ -1523,10 +1491,26 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "tests/acceptance/common.rs"
 scope = "wait_for_child_exit"
+kind = "sleep"
+fingerprint = "sha256:dd78d24e1ebc56607902c56296f9c74b1589c059fe8330067f8688aa871764e7"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (25))
+
+[[site]]
+path = "tests/acceptance/common.rs"
+scope = "wait_for_docker_health"
 kind = "elapsed_call"
 fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: start . elapsed ()
+
+[[site]]
+path = "tests/acceptance/common.rs"
+scope = "wait_for_docker_health"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: Instant :: now ()
 
 [[site]]
 path = "tests/acceptance/common.rs"
@@ -1535,22 +1519,6 @@ kind = "sleep"
 fingerprint = "sha256:729276490156f002393f09eadd71d8b3af2e2a32232007888737f9d1cd3a4260"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: thread :: sleep (Duration :: from_millis (250))
-
-[[site]]
-path = "tests/acceptance/common.rs"
-scope = "wait_for_docker_health"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "tests/acceptance/common.rs"
-scope = "wait_for_docker_health"
-kind = "elapsed_call"
-fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: start . elapsed ()
 
 [[site]]
 path = "tests/acceptance/installable_substrate.rs"
@@ -1587,32 +1555,18 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "tests/acceptance/one_camera_acceptance.rs"
 scope = "wait_for_tcp_port"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "tests/acceptance/one_camera_acceptance.rs"
-scope = "wait_for_tcp_port"
-kind = "raw_clock"
-fingerprint = "sha256:8a492051b8f9b539ecb23445e01d6d9d44fda32fac45f4e38e85d242b0500a8d"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: time :: Instant :: now ()
-
-[[site]]
-path = "tests/acceptance/one_camera_acceptance.rs"
-scope = "wait_for_tcp_port"
 kind = "elapsed_call"
 fingerprint = "sha256:f78c8728f1e4069a45f7d78e93f86358ef3b04af9ce20e157ce057970c3d7271"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: start . elapsed ()
+
 [[site]]
-path = "xtask/src/verify.rs"
-scope = "run"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "A monotonic timestamp measures the complete verified command for its receipt; pass or fail comes only from the child command and verifier contract."
+path = "tests/acceptance/one_camera_acceptance.rs"
+scope = "wait_for_tcp_port"
+kind = "sleep"
+fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: thread :: sleep (Duration :: from_millis (50))
 
 [[site]]
 path = "xtask/src/verify.rs"
@@ -1624,16 +1578,16 @@ reason = "Elapsed wall time is reported as the measured development budget and i
 [[site]]
 path = "xtask/src/verify.rs"
 scope = "run_step"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "A monotonic timestamp attributes cost to each command step in the receipt; it does not synchronize product behavior."
+kind = "elapsed_call"
+fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
+reason = "Per-step elapsed time exposes the component that consumed the budget and is not a test oracle."
 
 [[site]]
 path = "xtask/src/verify.rs"
 scope = "run_step"
-kind = "elapsed_call"
-fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
-reason = "Per-step elapsed time exposes the component that consumed the budget and is not a test oracle."
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "A monotonic timestamp attributes cost to each command step in the receipt; it does not synchronize product behavior."
 
 [[site]]
 path = "xtask/src/verify.rs"
@@ -1641,3 +1595,26 @@ scope = "sample_process_tree"
 kind = "sleep"
 fingerprint = "sha256:863755a8a02e1d1068b20c983970be6fcc9f18560c0e0d48b4ced002bcdfb130"
 reason = "The telemetry thread samples process-tree memory every 100 ms until the child exits; this interval neither advances nor observes product state."
+
+[[site]]
+path = "crates/vigil-bin/tests/detection_accel_backend.rs"
+scope = "runtime_stats_text_attempt"
+kind = "sleep"
+fingerprint = "sha256:ba8d430d6d6454b184780e628a0995491c5bbe9245e7d9a9f98b8ec7099fc4cf"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: std :: thread :: sleep (Duration :: from_millis (100))
+
+[[site]]
+path = "xtask/src/verify.rs"
+scope = "run"
+kind = "raw_clock"
+fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
+reason = "A monotonic timestamp measures the complete verified command for its receipt; pass or fail comes only from the child command and verifier contract."
+
+[[site]]
+path = "tests/acceptance/one_camera_acceptance.rs"
+scope = "wait_for_tcp_port"
+kind = "raw_clock"
+fingerprint = "sha256:8a492051b8f9b539ecb23445e01d6d9d44fda32fac45f4e38e85d242b0500a8d"
+reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
+# syntax: std :: time :: Instant :: now ()

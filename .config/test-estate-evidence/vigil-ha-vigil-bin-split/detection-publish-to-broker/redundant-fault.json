@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "make publish_detection_event (ha_mqtt_tasks.rs) return Err unconditionally before it ever contacts the broker",
+    "source_sha256": "sha256:6c74ef151f2ac6cffe2cbb27c4d1e457a9df3a9b37c765e47eff23fd20eb1a7b",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/detection-publish-to-broker/planted-fault.diff",
+    "diff_sha256": "sha256:6c74ef151f2ac6cffe2cbb27c4d1e457a9df3a9b37c765e47eff23fd20eb1a7b"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker detection_publishes_event_to_real_broker -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.6
+  },
+  "survivor": {
+    "test": "vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test correction_core_paths detection_publishes_event_to_real_broker -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.47
+  }
+}

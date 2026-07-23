@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "silently drop the arm's own kind filter to always-false in edge_is_normal_or_build (crates/vigil/tests/dependency_direction_contract.rs at the current tip, 6782f04) \u2014 an analogous always-false mutation was applied to the sibling function edge_is_normal at the removed identity's commit, e4e00a6, since the function was renamed between the two commits and the same diff text cannot apply to both trees; removed-side source sha256:ce74a2396b532787ee545f39fa97d7f1ffc666252d80977dd17818004796ebed",
+    "source_sha256": "sha256:ddcc4af38960ef9cfc748a4f9db469bd06e0c7d24217d07e8eca126797cc9042",
+    "diff": ".config/test-estate-evidence/vigil-bin-dependency-guard-widen/substrate-catch/planted-fault.diff",
+    "diff_sha256": "sha256:b430ad7fee347ca4026072f4832d3b44c49f8b81e737b9e929d92a749ad893c3"
+  },
+  "removed": {
+    "test": "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_normal_only_catches_a_planted_shipped_substrate_dependency",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test dependency_direction_contract graph_logic::direct_forbidden_names_normal_only_catches_a_planted_shipped_substrate_dependency -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.349659
+  },
+  "survivor": {
+    "test": "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_excluding_dev_catches_a_planted_shipped_substrate_dependency",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test dependency_direction_contract graph_logic::direct_forbidden_names_excluding_dev_catches_a_planted_shipped_substrate_dependency -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.318961
+  }
+}

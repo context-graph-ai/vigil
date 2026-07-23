@@ -24,7 +24,7 @@ and `MQTT_PASSWORD`.
 With no broker configured, Vigil makes no MQTT connection.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.install-and-run-the-mosquitto-broker-addon` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured` -->
 
 ## Devices and entities
 
@@ -39,16 +39,16 @@ MQTT discovery creates one parent Vigil device with a **Running Condition** sens
 - **Snapshot Trigger** — a button that republishes the latest available detector image.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.detection-an-event-entity-for-vigildetection-messages` -->
-<!-- enforced by: `vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
-<!-- enforced by: `vigil::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch` -->
 
 Entity IDs and discovery topics derive from configured service and camera IDs, so regenerating
 discovery from the same configuration keeps the same identities. Every generated entity carries
 Vigil's availability topic.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.entity-ids-and-discovery-topics-are-derived` -->
-<!-- enforced by: `vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration` -->
-<!-- enforced by: `vigil::ha_discovery::tests::discovery_entities_carry_required_ha_fields` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::discovery_entities_carry_required_ha_fields` -->
 
 An unclean MQTT disconnect is intended to make the broker publish `offline` through the last will;
 the mapped discovery-generation tests do not exercise a real unclean disconnect.
@@ -62,7 +62,7 @@ config-flow API to create a Generic Camera entry, passes `live_rtsp_url` when co
 otherwise falls back to the detection `rtsp_url`.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.vigil-does-not-create-an-mqtt-camera` -->
-<!-- enforced by: `vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
 <!-- enforced by: `vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url` -->
 <!-- enforced by: `vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras` -->
 <!-- enforced by: `vigil::source_scan_contract::generic_camera_registration_confirms_home_assistant_preview_step` -->
@@ -83,15 +83,15 @@ Generic Camera registration requires the add-on's Supervisor token and Home Assi
 Each event payload carries `event_type: vigil_detection`, the durable detection ID, camera name, object class, confidence, event timestamp, evidence and snapshot references, and optional recognition name and score. The current broker test proves delivery of this payload, but it does not prove production-path ordering between local persistence and MQTT publication.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.each-event-payload-carries-eventtype-vigildetection-the` -->
-<!-- enforced by: `vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::detection_publisher_delivers_to_broker` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::detection_publisher_delivers_to_broker` -->
 
 The current event payload carries no `zone` field. When a recognition sighting is supplied with a
 matched subject, the event carries that server-authoritative name.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.the-current-runtime-does-not-configure-zones` -->
-<!-- enforced by: `vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
-<!-- enforced by: `vigil::recognition_slice::event_payload_carries_the_entity_name_when_matched` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
+<!-- enforced by: `vigil-ha::recognition_wire_shapes::event_payload_carries_the_entity_name_when_matched` -->
 
 Recognition events are also intended to carry the match score and omit a name for unmatched
 sightings, but the mapped event-payload witnesses do not assert those two branches.
@@ -103,8 +103,8 @@ sightings, but the mapped event-payload witnesses do not assert those two branch
 The Running Condition sensor reports `running`, `store-open-failed`, `ingest-failed`, `disk-full`, or `keep-pace-failed`. Degraded CPU fallback remains alive for the Home Assistant watchdog; genuinely dead startup states answer non-2xx on the health endpoint.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.the-running-condition-sensor-reports-running-storeopenfailed` -->
-<!-- enforced by: `vigil::ha_discovery::tests::running_condition_maps_each_named_fault` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::running_condition_tracks_live_health_retained` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::running_condition_maps_each_named_fault` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::running_condition_tracks_live_health_retained` -->
 <!-- enforced by: `vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog` -->
 <!-- enforced by: `vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx` -->
 
@@ -117,13 +117,13 @@ Vigil republishes retained discovery, availability, running condition, and camer
 Use the camera's **Enabled** switch to enable or disable processing. Vigil reflects the retained state in Home Assistant and writes a local disabled marker. The command targets one camera; it does not disable its siblings. Restart restoration is not yet covered by an end-to-end acceptance test, so the developer preview does not guarantee that behavior.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.use-the-cameras-enabled-switch-to-enable` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::operator_action_command_effects_action` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
+<!-- enforced by: `vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker` -->
 
 Press **Snapshot Trigger** to publish the latest stored detector evidence image for that camera. It does not force the RTSP pipeline to capture a new frame at button-press time.
 
 <!-- vigil-claim: `vigil.docs-ha-integration.press-snapshot-trigger-to-publish-the-latest` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::operator_action_command_effects_action` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary` -->
 
 ## Review and correct events
 
@@ -149,8 +149,8 @@ Corrections supported by the current server are Confirmed (`Identity`), Wrong cl
 
 <!-- vigil-claim: `vigil.docs-ha-integration.corrections-supported-by-the-current-server-are` -->
 <!-- enforced by: `vigil::http_data_plane::http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg` -->
-<!-- enforced by: `vigil::recognition_slice::enroll_wire_shape_parses_from_the_command_topic` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
+<!-- enforced by: `vigil-ha::recognition_wire_shapes::enroll_wire_shape_parses_from_the_command_topic` -->
 <!-- enforced by: `vigil::ha_correction_seam::confirmed_correction_does_not_set_correction_recorded` -->
 
 ## Automations

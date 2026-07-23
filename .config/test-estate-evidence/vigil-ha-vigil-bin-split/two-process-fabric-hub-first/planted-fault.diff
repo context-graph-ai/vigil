@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index b09b6bb..693c713 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -619,6 +619,8 @@ impl FabricRuntime {
+     /// saturated", never a speed claim, so this is the honest floor pending a
+     /// richer capability-detail signal.
+     pub async fn remote_detector_capabilities(&self) -> Result<Vec<RemoteCapability>, String> {
++        return Ok(Vec::new()); // test-estate planted fault
++        #[allow(unreachable_code)]
+         let result = self
+             .db
+             .execute(
+
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index 401f438..0e66367 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -619,6 +619,8 @@ impl FabricRuntime {
+     /// saturated", never a speed claim, so this is the honest floor pending a
+     /// richer capability-detail signal.
+     pub async fn remote_detector_capabilities(&self) -> Result<Vec<RemoteCapability>, String> {
++        return Ok(Vec::new()); // test-estate planted fault
++        #[allow(unreachable_code)]
+         let result = self
+             .db
+             .execute(

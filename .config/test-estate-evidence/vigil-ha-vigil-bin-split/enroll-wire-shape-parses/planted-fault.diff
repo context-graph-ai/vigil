@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/ha_discovery.rs b/crates/vigil/src/ha_discovery.rs
+index fb0545a..62d6506 100644
+--- a/crates/vigil/src/ha_discovery.rs
++++ b/crates/vigil/src/ha_discovery.rs
+@@ -346,7 +346,7 @@ pub fn parse_command_topic(msg: &CommandTopicMessage) -> Result<CorrectionReques
+         "identity" | "Identity" => CorrectionType::Identity,
+         "wrong_class" | "WrongClass" => CorrectionType::WrongClass,
+         "false_alarm" | "FalseAlarm" => CorrectionType::FalseAlarm,
+-        "enroll" | "Enroll" => CorrectionType::Enroll,
++        "enroll-planted-fault-disabled" | "Enroll" => CorrectionType::Enroll,
+         other => {
+             return Err(ParseError(format!(
+                 "unknown correction_type '{other}'; expected identity|wrong_class|false_alarm|enroll"
+
+diff --git a/crates/vigil-ha/src/ha_discovery.rs b/crates/vigil-ha/src/ha_discovery.rs
+index 991e494..f575f2e 100644
+--- a/crates/vigil-ha/src/ha_discovery.rs
++++ b/crates/vigil-ha/src/ha_discovery.rs
+@@ -345,7 +345,7 @@ pub fn parse_command_topic(msg: &CommandTopicMessage) -> Result<CorrectionReques
+         "identity" | "Identity" => CorrectionType::Identity,
+         "wrong_class" | "WrongClass" => CorrectionType::WrongClass,
+         "false_alarm" | "FalseAlarm" => CorrectionType::FalseAlarm,
+-        "enroll" | "Enroll" => CorrectionType::Enroll,
++        "enroll-planted-fault-disabled" | "Enroll" => CorrectionType::Enroll,
+         other => {
+             return Err(ParseError(format!(
+                 "unknown correction_type '{other}'; expected identity|wrong_class|false_alarm|enroll"

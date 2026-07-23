@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "skip the store.record_observation write in record_correction_with_clock (crates/vigil/src/correction.rs), returning Ok without persisting",
+    "source_sha256": "sha256:3c28a19aa39be666c9606a5e11aa75071bd58f2cf6591ded1ce202d3d6d6aa8f",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/broker-drop-durable-record/planted-fault.diff",
+    "diff_sha256": "sha256:3c28a19aa39be666c9606a5e11aa75071bd58f2cf6591ded1ce202d3d6d6aa8f"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker broker_drop_does_not_affect_durable_cg_record -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.6
+  },
+  "survivor": {
+    "test": "vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test correction_core_paths broker_drop_does_not_affect_durable_cg_record -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.52
+  }
+}

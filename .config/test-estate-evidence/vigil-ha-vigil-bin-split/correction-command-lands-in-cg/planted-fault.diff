@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index a711d30..9d099ea 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -333,6 +333,8 @@ pub fn record_correction_with_clock(
+             .map_err(CorrectionError::WriteFailed)?;
+     }
+ 
++    return Ok(CorrectionReceipt { correction_id: correction_id.to_string() });
++    #[allow(unreachable_code)]
+     store
+         .record_observation(RecordObservation {
+             id: correction_id,
+
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index d346910..eda8b5e 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -333,6 +333,8 @@ pub fn record_correction_with_clock(
+             .map_err(CorrectionError::WriteFailed)?;
+     }
+ 
++    return Ok(CorrectionReceipt { correction_id: correction_id.to_string() });
++    #[allow(unreachable_code)]
+     store
+         .record_observation(RecordObservation {
+             id: correction_id,

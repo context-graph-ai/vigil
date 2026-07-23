@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "corrupt the fabric-worker-serving=false literal doctor/status renders (offload_policy.rs)",
+    "source_sha256": "sha256:62ed876a2362b3236cb39b476ecb0ec074ca7d8ca174b6a3346e58684e4654e2",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/worker-intent-not-serving-line/planted-fault.diff",
+    "diff_sha256": "sha256:62ed876a2362b3236cb39b476ecb0ec074ca7d8ca174b6a3346e58684e4654e2"
+  },
+  "removed": {
+    "test": "vigil::worker_intent_loudness::worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test worker_intent_loudness worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 8.28
+  },
+  "survivor": {
+    "test": "vigil-bin::worker_intent_loudness::worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features fabric --test worker_intent_loudness worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 8.76
+  }
+}

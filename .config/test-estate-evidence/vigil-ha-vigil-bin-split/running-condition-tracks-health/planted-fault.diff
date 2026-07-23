@@ -1,0 +1,43 @@
+diff --git a/crates/vigil/src/ha_discovery.rs b/crates/vigil/src/ha_discovery.rs
+index fb0545a..8ef0b61 100644
+--- a/crates/vigil/src/ha_discovery.rs
++++ b/crates/vigil/src/ha_discovery.rs
+@@ -330,14 +330,8 @@ pub fn map_detection_to_event_payload(detection: &DetectionInput) -> EventPayloa
+ 
+ /// Map a health status to the running-condition string published on the broker.
+ pub(crate) fn map_health_to_running_condition(health: HealthStatus) -> &'static str {
+-    match health {
+-        HealthStatus::Starting => "running",
+-        HealthStatus::Ready => "running",
+-        HealthStatus::StoreOpenFailed => "store-open-failed",
+-        HealthStatus::IngestFailed => "ingest-failed",
+-        HealthStatus::DiskFull => "disk-full",
+-        HealthStatus::KeepPaceFailed => "keep-pace-failed",
+-    }
++    let _ = health;
++    "running" // test-estate planted fault: condition never tracks live health
+ }
+ 
+ /// Parse a command-topic message into a channel-agnostic CorrectionRequest.
+
+diff --git a/crates/vigil-ha/src/ha_discovery.rs b/crates/vigil-ha/src/ha_discovery.rs
+index 991e494..2953b08 100644
+--- a/crates/vigil-ha/src/ha_discovery.rs
++++ b/crates/vigil-ha/src/ha_discovery.rs
+@@ -329,14 +329,8 @@ pub fn map_detection_to_event_payload(detection: &DetectionInput) -> EventPayloa
+ 
+ /// Map a health status to the running-condition string published on the broker.
+ pub(crate) fn map_health_to_running_condition(health: HealthStatus) -> &'static str {
+-    match health {
+-        HealthStatus::Starting => "running",
+-        HealthStatus::Ready => "running",
+-        HealthStatus::StoreOpenFailed => "store-open-failed",
+-        HealthStatus::IngestFailed => "ingest-failed",
+-        HealthStatus::DiskFull => "disk-full",
+-        HealthStatus::KeepPaceFailed => "keep-pace-failed",
+-    }
++    let _ = health;
++    "running" // test-estate planted fault: condition never tracks live health
+ }
+ 
+ /// Parse a command-topic message into a channel-agnostic CorrectionRequest.

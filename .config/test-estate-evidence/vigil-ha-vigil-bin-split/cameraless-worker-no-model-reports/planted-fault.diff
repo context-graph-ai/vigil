@@ -1,0 +1,31 @@
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index b09b6bb..4557a0b 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -1356,9 +1356,7 @@ pub(crate) fn fabric_bring_up(
+                     // No executable capability: name the staging fix and do
+                     // NOT advertise a detector row (PO ruling 2026-07-13).
+                     if let Ok(mut reason) = boot_bundle.worker_serving_reason.lock() {
+-                        *reason = "no-model — stage a loadable detection model on this worker \
+-                                   (set detector_model_path / VIGIL_DETECTOR_MODEL_PATH)"
+-                            .to_string();
++                        *reason = "test-estate-planted-fault-reason-text".to_string();
+                     }
+                 }
+             }
+
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index 401f438..4d9bfc8 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -1356,9 +1356,7 @@ pub(crate) fn fabric_bring_up(
+                     // No executable capability: name the staging fix and do
+                     // NOT advertise a detector row (PO ruling 2026-07-13).
+                     if let Ok(mut reason) = boot_bundle.worker_serving_reason.lock() {
+-                        *reason = "no-model — stage a loadable detection model on this worker \
+-                                   (set detector_model_path / VIGIL_DETECTOR_MODEL_PATH)"
+-                            .to_string();
++                        *reason = "test-estate-planted-fault-reason-text".to_string();
+                     }
+                 }
+             }

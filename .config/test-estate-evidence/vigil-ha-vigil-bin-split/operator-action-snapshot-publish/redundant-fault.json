@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "make read_latest_detection_image always return None, so a snapshot command never has evidence bytes to publish (correction.rs)",
+    "source_sha256": "sha256:323038696727fea29c6c8dbf54f037c84fea3f895d2dc727cdbe5552d1999cab",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/operator-action-snapshot-publish/planted-fault.diff",
+    "diff_sha256": "sha256:323038696727fea29c6c8dbf54f037c84fea3f895d2dc727cdbe5552d1999cab"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker operator_action_command_effects_action -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 9.59
+  },
+  "survivor": {
+    "test": "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test mqtt_composed_product snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 14.39
+  }
+}

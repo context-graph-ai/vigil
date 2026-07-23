@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "run fabric bring-up synchronously on the boot thread instead of on a spawned thread, reproducing the historical ordering bug (runtime.rs)",
+    "source_sha256": "sha256:38e35f274afc560dc57d0096a7d5e1d872b6abe561797f83a4c1cf9fb5447987",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/health-ready-before-fabric-attaches/planted-fault.diff",
+    "diff_sha256": "sha256:38e35f274afc560dc57d0096a7d5e1d872b6abe561797f83a4c1cf9fb5447987"
+  },
+  "removed": {
+    "test": "vigil::boot_readiness::health_becomes_ready_before_fabric_attaches",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test boot_readiness health_becomes_ready_before_fabric_attaches -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 36.31
+  },
+  "survivor": {
+    "test": "vigil-bin::boot_readiness::health_becomes_ready_before_fabric_attaches",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features fabric --test boot_readiness health_becomes_ready_before_fabric_attaches -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 36.21
+  }
+}

@@ -1,0 +1,25 @@
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index a711d30..a9e2041 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -254,6 +254,7 @@ pub fn record_correction_with_clock(
+         .map_err(|e| CorrectionError::WriteFailed(format!("list_observations failed: {e}")))?;
+ 
+     for obs in &all_obs {
++        if true { break; }
+         let anchored = obs
+             .observed_properties
+             .get("anchored_detection_id")
+
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index d346910..2f2d104 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -254,6 +254,7 @@ pub fn record_correction_with_clock(
+         .map_err(|e| CorrectionError::WriteFailed(format!("list_observations failed: {e}")))?;
+ 
+     for obs in &all_obs {
++        if true { break; }
+         let anchored = obs
+             .observed_properties
+             .get("anchored_detection_id")

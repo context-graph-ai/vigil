@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/offload_policy.rs b/crates/vigil/src/offload_policy.rs
+index 4a0692a..d9a61ea 100644
+--- a/crates/vigil/src/offload_policy.rs
++++ b/crates/vigil/src/offload_policy.rs
+@@ -353,7 +353,7 @@ pub fn render_fabric_status_receipt(facts: &FabricStatusFacts) -> String {
+         "fabric-worker-serving=true".to_string()
+     } else {
+         format!(
+-            "fabric-worker-serving=false reason={}",
++            "fabric-worker-serving=TESTFAULT reason={}",
+             if facts.worker_serving_reason.is_empty() {
+                 "not-serving"
+             } else {
+
+diff --git a/crates/vigil/src/offload_policy.rs b/crates/vigil/src/offload_policy.rs
+index 4a0692a..d9a61ea 100644
+--- a/crates/vigil/src/offload_policy.rs
++++ b/crates/vigil/src/offload_policy.rs
+@@ -353,7 +353,7 @@ pub fn render_fabric_status_receipt(facts: &FabricStatusFacts) -> String {
+         "fabric-worker-serving=true".to_string()
+     } else {
+         format!(
+-            "fabric-worker-serving=false reason={}",
++            "fabric-worker-serving=TESTFAULT reason={}",
+             if facts.worker_serving_reason.is_empty() {
+                 "not-serving"
+             } else {

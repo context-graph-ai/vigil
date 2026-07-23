@@ -32,7 +32,7 @@ attach itself to a different event.
 MQTT and HTTP do not own separate correction stores. Both routes land through the same local write
 path, so a broker drop does not erase the correction authority.
 <!-- vigil-claim: `vigil.docs-why-vigil.mqtt-and-http-do-not-own-separate` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record` -->
 <!-- enforced by: `vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam` -->
 
 The distinction matters because a UI-only “saved” state is not memory. It cannot safely drive later

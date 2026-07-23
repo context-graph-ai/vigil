@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/ha_discovery.rs b/crates/vigil/src/ha_discovery.rs
+index fb0545a..665b63f 100644
+--- a/crates/vigil/src/ha_discovery.rs
++++ b/crates/vigil/src/ha_discovery.rs
+@@ -323,7 +323,7 @@ pub fn map_detection_to_event_payload(detection: &DetectionInput) -> EventPayloa
+         timestamp_ms: detection.timestamp_ms,
+         evidence_ref: detection.evidence_ref.clone(),
+         snapshot_ref: detection.snapshot_ref.clone(),
+-        entity_name: detection.entity_name.clone(),
++        entity_name: None,
+         match_score: detection.match_score,
+     }
+ }
+
+diff --git a/crates/vigil-ha/src/ha_discovery.rs b/crates/vigil-ha/src/ha_discovery.rs
+index 991e494..10618cf 100644
+--- a/crates/vigil-ha/src/ha_discovery.rs
++++ b/crates/vigil-ha/src/ha_discovery.rs
+@@ -322,7 +322,7 @@ pub fn map_detection_to_event_payload(detection: &DetectionInput) -> EventPayloa
+         timestamp_ms: detection.timestamp_ms,
+         evidence_ref: detection.evidence_ref.clone(),
+         snapshot_ref: detection.snapshot_ref.clone(),
+-        entity_name: detection.entity_name.clone(),
++        entity_name: None,
+         match_score: detection.match_score,
+     }
+ }

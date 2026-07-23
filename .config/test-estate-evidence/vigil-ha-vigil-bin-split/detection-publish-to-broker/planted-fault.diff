@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/ha_mqtt_tasks.rs b/crates/vigil/src/ha_mqtt_tasks.rs
+index b6475d9..6ee11ce 100644
+--- a/crates/vigil/src/ha_mqtt_tasks.rs
++++ b/crates/vigil/src/ha_mqtt_tasks.rs
+@@ -525,6 +525,8 @@ pub fn publish_detection_event(
+     event_json: &str,
+     topic: &str,
+ ) -> Result<(), String> {
++    return Err("test-estate planted fault: publish disabled".to_string());
++    #[allow(unreachable_code)]
+     let opts = make_mqtt_options(config, "ve");
+     let (client, mut connection) = Client::new(opts, 16);
+ 
+
+diff --git a/crates/vigil-ha/src/ha_mqtt_tasks.rs b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+index 5029989..59c9a7a 100644
+--- a/crates/vigil-ha/src/ha_mqtt_tasks.rs
++++ b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+@@ -502,6 +502,8 @@ pub fn publish_detection_event(
+     event_json: &str,
+     topic: &str,
+ ) -> Result<(), String> {
++    return Err("test-estate planted fault: publish disabled".to_string());
++    #[allow(unreachable_code)]
+     let opts = make_mqtt_options(config, "ve");
+     let (client, mut connection) = Client::new(opts, 16);
+ 

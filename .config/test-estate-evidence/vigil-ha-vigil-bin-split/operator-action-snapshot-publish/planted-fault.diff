@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index a711d30..f9fc49b 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -640,6 +640,8 @@ pub(crate) fn read_latest_detection_image(
+     camera_id_slug: &str,
+     data_dir: &std::path::Path,
+ ) -> Option<Vec<u8>> {
++    return None; // test-estate planted fault
++    #[allow(unreachable_code)]
+     use context_graph::{EntityType, EvidenceKind, ListEntityFilter};
+ 
+     let entities = store
+
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index d346910..d541673 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -642,6 +642,8 @@ pub(crate) fn read_latest_detection_image(
+     camera_id_slug: &str,
+     data_dir: &std::path::Path,
+ ) -> Option<Vec<u8>> {
++    return None; // test-estate planted fault
++    #[allow(unreachable_code)]
+     use context_graph::{EntityType, EvidenceKind, ListEntityFilter};
+ 
+     let entities = store

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "suppress the fabric_capability_push_failed=true named log line on a failed capability push (fabric.rs)",
+    "source_sha256": "sha256:b3a1641bd55c213ef646721fad9aed9c2a7d2ccb7dee8361f2c75ddfddf9cd07",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/capability-push-failure-named/planted-fault.diff",
+    "diff_sha256": "sha256:b3a1641bd55c213ef646721fad9aed9c2a7d2ccb7dee8361f2c75ddfddf9cd07"
+  },
+  "removed": {
+    "test": "vigil::capability_delivery::failed_capability_push_emits_named_error",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test capability_delivery failed_capability_push_emits_named_error -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 26.46
+  },
+  "survivor": {
+    "test": "vigil-bin::capability_delivery::failed_capability_push_emits_named_error",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features fabric --test capability_delivery failed_capability_push_emits_named_error -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 26.56
+  }
+}

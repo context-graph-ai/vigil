@@ -10,7 +10,7 @@ Runtime startup creates a baseline watch Intention and a detector-config Decisio
 camera and site.
 
 <!-- vigil-claim: `vigil.docs-rules.vigil-does-create-a-baseline-watch-intention` -->
-<!-- enforced by: `vigil::first_light_loop::detector_config_recorded_as_decision` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_config_recorded_as_decision` -->
 
 Those records are generated provenance rather than an operator-authored rule engine; user rule
 creation and lifecycle controls remain outside the current product surface.
@@ -22,7 +22,7 @@ creation and lifecycle controls remain outside the current product surface.
 Home Assistant receives a `vigil_detection` event entity for each configured camera. Its event payload includes the detection ID, camera, object class, confidence, timestamp, evidence and snapshot references, and optional recognition name and score. A `zone` field is not exposed until zone configuration and runtime matching ship.
 
 <!-- vigil-claim: `vigil.docs-rules.home-assistant-receives-a-vigildetection-event-entity` -->
-<!-- enforced by: `vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 
 Build present-day reactions as Home Assistant automations against that event. Home Assistant owns the condition and action: Vigil does not persist that automation as a rule, execute its action, or explain why Home Assistant chose to run it.
 
@@ -33,8 +33,8 @@ Build present-day reactions as Home Assistant automations against that event. Ho
 Each camera has an Enabled switch and Snapshot Trigger button in Home Assistant. Disabling one camera stops that camera without changing another camera's enabled state; the state is retained and restored through the MQTT control plane. These are direct controls, not scheduled or conditional rules.
 
 <!-- vigil-claim: `vigil.docs-rules.each-camera-has-an-enabled-switch-and` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::operator_action_command_effects_action` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
+<!-- enforced by: `vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
 
 ## Corrections are not rules
 

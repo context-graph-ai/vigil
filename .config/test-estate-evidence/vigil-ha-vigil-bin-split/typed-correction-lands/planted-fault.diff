@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index a711d30..7a77d93 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -160,7 +160,7 @@ fn correction_type_to_str(ct: &CorrectionType) -> &'static str {
+ fn correction_type_from_str(s: &str) -> Option<CorrectionType> {
+     match s {
+         "Identity" => Some(CorrectionType::Identity),
+-        "WrongClass" => Some(CorrectionType::WrongClass),
++        "WrongClass" => Some(CorrectionType::Identity),
+         "FalseAlarm" => Some(CorrectionType::FalseAlarm),
+         "Enroll" => Some(CorrectionType::Enroll),
+         _ => None,
+
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index d346910..7a9bb67 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -160,7 +160,7 @@ fn correction_type_to_str(ct: &CorrectionType) -> &'static str {
+ fn correction_type_from_str(s: &str) -> Option<CorrectionType> {
+     match s {
+         "Identity" => Some(CorrectionType::Identity),
+-        "WrongClass" => Some(CorrectionType::WrongClass),
++        "WrongClass" => Some(CorrectionType::Identity),
+         "FalseAlarm" => Some(CorrectionType::FalseAlarm),
+         "Enroll" => Some(CorrectionType::Enroll),
+         _ => None,

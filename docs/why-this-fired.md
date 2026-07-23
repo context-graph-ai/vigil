@@ -17,7 +17,7 @@ The current chain is:
 The detection Observation carries the detected class, confidence, bounding box, frame index, event time, and the detector Decision ID. The Decision carries the model ID and threshold and serves the baseline watch Intention. The camera Entity and Site Context provide the configured names.
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.the-detection-observation-carries-the-detected-class` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
 
 This chain is created from the running configuration. Current Vigil does not let a user author the Intention text or attach a free-form rationale to the Decision.
 
@@ -34,13 +34,13 @@ VIGIL_DATA_DIR=/var/lib/vigil vigil events
 The command lists recent landed detections newest first. Motion-only segments and correction rows are excluded. Each row includes the Observation ID used by the other review surfaces.
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.the-command-lists-recent-landed-detections-newest` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_events_lists_recent_events_newest_first` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::detection_only_events_excludes_corrections` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::detection_only_events_excludes_corrections` -->
 
 Home Assistant detection events carry the same value as `detection_id`. The review HTTP API exposes it as `observation_id` in `GET /events`.
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.home-assistant-detection-events-carry-the-same` -->
-<!-- enforced by: `vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 <!-- enforced by: `vigil::http_data_plane::event_list_serves_full_review_row_fieldset` -->
 
 ## Walk the chain at the CLI
@@ -63,8 +63,8 @@ and frame, model and threshold, Intention and Decision IDs, and evidence referen
 returns a clean error instead of substituting another event.
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.the-result-includes-the-detection-and-event` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly` -->
 
 Malformed detection IDs are also intended to return a clean error, but the mapped error-path test
 uses a well-formed unknown UUID.
@@ -74,8 +74,8 @@ uses a well-formed unknown UUID.
 When the daemon owns the open store, the CLI asks it over the local control socket. If no runtime is holding the store, the CLI reads the same local store directly. It does not send the review request to a cloud service.
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.when-the-daemon-owns-the-open-store` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_served_over_socket_while_store_is_locked` -->
-<!-- enforced by: `vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_served_over_socket_while_store_is_locked` -->
+<!-- enforced by: `vigil-bin::first_light_loop::review_and_stats_surfaces_make_no_network_call` -->
 
 ## Use the local review data
 
@@ -103,7 +103,7 @@ If media has been pruned, the event and provenance row can still exist while the
 `vigil why` follows the Decision linked to the detection. If the detector configuration changes later, an older event still reports the model and threshold that produced that event rather than today's values.
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.vigil-why-follows-the-decision-linked-to` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current` -->
 
 That is event-level historical provenance. It is not a general `state_at(timestamp)` replay command.
 <!-- vigil-unenforced: classification=product-decision; reason=`Event-specific provenance is deliberately distinct from general timestamp replay.` -->
@@ -129,7 +129,7 @@ Corrections survive store reopen. Repeating the same detection ID, correction ty
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.corrections-survive-store-reopen-repeating-the-same` -->
 <!-- enforced by: `vigil::ha_correction_seam::correction_survives_daemon_restart` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::two_distinct_corrections_on_same_detection_both_land` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
 
 Current corrections do not retrain the detector, adjust its threshold, or generate a rule. Enrollment affects later recognition matching; the other correction types remain durable review facts.
 

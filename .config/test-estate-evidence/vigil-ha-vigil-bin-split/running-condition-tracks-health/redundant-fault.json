@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "freeze map_health_to_running_condition to always return \"running\" regardless of the live HealthStatus (ha_discovery.rs)",
+    "source_sha256": "sha256:279dfd9baca9b40c10139294ba852c32b59c3c35c2f043b4de19fdc6f2268ada",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/running-condition-tracks-health/planted-fault.diff",
+    "diff_sha256": "sha256:279dfd9baca9b40c10139294ba852c32b59c3c35c2f043b4de19fdc6f2268ada"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::running_condition_tracks_live_health_retained",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test ha_mqtt_broker running_condition_tracks_live_health_retained -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 7.42
+  },
+  "survivor": {
+    "test": "vigil-ha::ha_mqtt_broker::running_condition_tracks_live_health_retained",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-ha --test ha_mqtt_broker running_condition_tracks_live_health_retained -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 5.61
+  }
+}

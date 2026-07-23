@@ -1,0 +1,26 @@
+diff --git a/crates/vigil/src/media_pipeline.rs b/crates/vigil/src/media_pipeline.rs
+index cfaefea..de3a98d 100644
+--- a/crates/vigil/src/media_pipeline.rs
++++ b/crates/vigil/src/media_pipeline.rs
+@@ -46,7 +46,7 @@ impl std::fmt::Debug for RtspCredentials {
+         formatter
+             .debug_struct("RtspCredentials")
+             .field("username", &self.username)
+-            .field("password", &"<redacted>")
++            .field("password", &self.password)
+             .finish()
+     }
+ }
+diff --git a/crates/vigil/src/secret.rs b/crates/vigil/src/secret.rs
+index 1e944c5..3231e42 100644
+--- a/crates/vigil/src/secret.rs
++++ b/crates/vigil/src/secret.rs
+@@ -55,7 +55,7 @@ impl Eq for Secret {}
+ 
+ impl fmt::Debug for Secret {
+     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        formatter.write_str(REDACTED)
++        formatter.write_str(&self.0)
+     }
+ }
+ 

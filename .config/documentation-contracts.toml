@@ -21,7 +21,7 @@ document = "docs/cameras.md"
 paragraph_sha256 = "sha256:e825f3d97e298c4073ecda86a46e83eb0079e019a9f8e7dcffd2e4a91ce9581c"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
   "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
 ]
 reviewed = true
@@ -73,7 +73,7 @@ document = "docs/detection.md"
 paragraph_sha256 = "sha256:8bcf06c8bf308abc183b7af3a5cb6edb2fd4ca050b4f5faa486e5e1c61588cd2"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
   "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
 ]
@@ -113,11 +113,11 @@ document = "README.md"
 paragraph_sha256 = "sha256:8c266da7f936ffab3a626ca128c0cb7c61ee3a355eafef05d9b4528a7f20d284"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
-  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
-  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
-  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+  "vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
+  "vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker",
+  "vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -130,7 +130,7 @@ document = "README.md"
 paragraph_sha256 = "sha256:7c774f91a1344fe5e2a79532d3cb14ad20d3a8ecbb6d0d660a83619a6355b08d"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
   "vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
   "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
@@ -180,7 +180,7 @@ paragraph_sha256 = "sha256:00c5b75ced7781065b91ca3e541f83314d8f6777d801cc6e36690
 evidence_tier = "acceptance"
 tests = [
   "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
-  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
+  "vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -206,7 +206,7 @@ document = "docs/architecture.md"
 paragraph_sha256 = "sha256:c743044b6fb2263cddc613a829570a48a82c0ef174df3479e292c3dba402ec0c"
 evidence_tier = "integration"
 tests = [
-  "vigil::http_data_plane::health_liveness_still_serves_alongside_data_plane_in_single_binary",
+  "vigil-bin::http_data_plane_binary_coexistence::health_liveness_still_serves_alongside_data_plane_in_single_binary",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -219,8 +219,8 @@ document = "docs/architecture.md"
 paragraph_sha256 = "sha256:b7e27f30685ab6bd249049c39dd910b6bd3a1c351229d599e8d33dea9f07d9f9"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::camera_survives_store_reopen",
-  "vigil::first_light_loop::event_history_survives_store_reopen",
+  "vigil-bin::first_light_loop::camera_survives_store_reopen",
+  "vigil-bin::first_light_loop::event_history_survives_store_reopen",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -233,8 +233,8 @@ document = "docs/architecture.md"
 paragraph_sha256 = "sha256:50596bfa8bb7c054dd3ed13de3ff173cc6823d805e30f67a66728c47f3ec12e5"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::confidence_is_detector_output_not_threshold_derived",
-  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+  "vigil-bin::first_light_loop::confidence_is_detector_output_not_threshold_derived",
+  "vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -261,7 +261,7 @@ document = "docs/architecture.md"
 paragraph_sha256 = "sha256:bcc277b9a674d6321441af737424c2fcdc0a3920d4a9709c5f79f67fce7997a7"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+  "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -274,8 +274,8 @@ document = "docs/architecture.md"
 paragraph_sha256 = "sha256:b90c6f7008bb409982fdceb882e7248ee6b222cd2d20fc1815b57f756f3edabe"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence",
-  "vigil::first_light_loop::observation_never_references_undurable_clip",
+  "vigil-bin::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence",
+  "vigil-bin::first_light_loop::observation_never_references_undurable_clip",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -305,12 +305,12 @@ document = "docs/architecture.md"
 paragraph_sha256 = "sha256:102657b0a7ce448e04f1ff99d8224aa49c0c668331dcaad1ef9507818de185c1"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
-  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
-  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
-  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
+  "vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker",
+  "vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+  "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary",
   "vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras",
   "vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url",
   "vigil::supervisor::tests::build_generic_camera_flow_step_payload_nests_advanced_fields",
@@ -355,9 +355,9 @@ document = "docs/cameras.md"
 paragraph_sha256 = "sha256:446bec9968c1d1ec56c2721455299c4e19afc4d266943a7bcf9ad5bed4417451"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity",
-  "vigil::first_light_loop::camera_survives_store_reopen",
-  "vigil::first_light_loop::reregistration_is_idempotent_no_duplicate",
+  "vigil-bin::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity",
+  "vigil-bin::first_light_loop::camera_survives_store_reopen",
+  "vigil-bin::first_light_loop::reregistration_is_idempotent_no_duplicate",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -384,8 +384,8 @@ document = "docs/cameras.md"
 paragraph_sha256 = "sha256:1233dfa4b0f29633792e4f71609f941d36ceae074b4678cd4a7dc96a01b85822"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface",
-  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
+  "vigil-bin::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface",
+  "vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
   "vigil::media_pipeline::tests::explicit_rtsp_credentials_override_url_userinfo",
   "vigil::media_pipeline::tests::rtsp_url_redaction_removes_userinfo_from_parse_errors",
 ]
@@ -400,7 +400,7 @@ document = "docs/cameras.md"
 paragraph_sha256 = "sha256:4258db6cab30f7c8e751d54a880bdb449f7d841fbad9d29b74f62ece5e99546a"
 evidence_tier = "behavioral_unit"
 tests = [
-  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
+  "vigil-ha::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -413,7 +413,7 @@ document = "docs/cameras.md"
 paragraph_sha256 = "sha256:0034426224e74b3548f2546ae70c0c338927b02b3c2bd253a049fb5ba24fee4d"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -426,7 +426,7 @@ document = "docs/cameras.md"
 paragraph_sha256 = "sha256:4187b4012460c864335f0badfae7ed04d56b2829aabd7122a16f850d6ebd362c"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera",
+  "vigil-bin::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -439,7 +439,7 @@ document = "docs/cameras.md"
 paragraph_sha256 = "sha256:304bc8d6e4b28cede2144022ce3635352a14631e076272f884495c45f75d9070"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+  "vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -453,7 +453,7 @@ paragraph_sha256 = "sha256:fb30e16dc1e658199b6e4e367034563e9d2a538f764efab9401c2
 evidence_tier = "integration"
 tests = [
   "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
-  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
+  "vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -466,7 +466,7 @@ document = "docs/cli.md"
 paragraph_sha256 = "sha256:d3992a63824aa4395290368640f0274888eb72d3a4c028eb0eecb6ea4b4a59e9"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first",
+  "vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -479,8 +479,8 @@ document = "docs/cli.md"
 paragraph_sha256 = "sha256:edf383db958bff7ea8deb85f53bc9f1bfaa715ac2ce5d55590d60533ab4203da"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_why_latest_walks_the_newest_event",
-  "vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly",
+  "vigil-bin::first_light_loop::vigil_why_latest_walks_the_newest_event",
+  "vigil-bin::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -493,7 +493,7 @@ document = "docs/cli.md"
 paragraph_sha256 = "sha256:281749849f2d1dd3d1c5a0c089113c7e4b163356f84cbe0a4e4a7392b192c791"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters",
+  "vigil-bin::first_light_loop::vigil_stats_reports_live_pipeline_counters",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -547,7 +547,7 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:5046e5eafacff3b17bfa33090b969cd9cb39a3bac43e82225716bc10af54b111"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::site_context_created_and_name_retained",
+  "vigil-bin::first_light_loop::site_context_created_and_name_retained",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -561,7 +561,7 @@ paragraph_sha256 = "sha256:aa1f0174e4232bb47ec06c9265748c037dfc0256e5938b864a8fb
 evidence_tier = "integration"
 tests = [
   "vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url",
-  "vigil::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix",
+  "vigil-bin::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -574,8 +574,8 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:eb280e304778ee4d5eb244165679e1d9088bd4bf71b8721e3cb1432275320ead"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event",
-  "vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera",
+  "vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event",
+  "vigil-bin::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -588,8 +588,8 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:70a97d348ad58df7fa3b11f510294f0a9570e6d0b8a0793a6c8e379d4bae2109"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::detector_config_recorded_as_decision",
-  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames",
+  "vigil-bin::first_light_loop::detector_config_recorded_as_decision",
+  "vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -602,7 +602,7 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:a521b2e5240782637542bd9b16615e1997cc70e3ca7b08d5c71834819c1cb90a"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
   "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
 ]
@@ -617,7 +617,7 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:b93ae341a7492b9b298a1116c1dd23f96a3a29dbdf5c73370e15b713cb855c3b"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::observation_never_references_undurable_clip",
+  "vigil-bin::first_light_loop::observation_never_references_undurable_clip",
   "vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport",
 ]
 reviewed = true
@@ -631,7 +631,7 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:8901c20bbc077cdaa39fa9703bc75d3c41cb545496a55bfea7a564cdf5c01121"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::detection_produces_observation_referencing_clip",
+  "vigil-bin::first_light_loop::detection_produces_observation_referencing_clip",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
 ]
 reviewed = true
@@ -658,7 +658,7 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:84d65c4bce5d51b9705b413ecee570cb66b9c31e9d0a649af287be6007816900"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+  "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -671,7 +671,7 @@ document = "docs/concepts.md"
 paragraph_sha256 = "sha256:d614371ee25886981bf5820c9f0cd9a97666aedb2d0755d9b7ba88ead2824d86"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
+  "vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -726,7 +726,7 @@ paragraph_sha256 = "sha256:35d5e7f5d14755df3e1e90566fd8a249f7eec53a494eacbce821e
 evidence_tier = "integration"
 tests = [
   "vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url",
-  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
+  "vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -745,9 +745,9 @@ tests = [
   "vigil::config_acceleration_intent::acceleration_booleans_default_true_everywhere",
   "vigil::config_acceleration_intent::toml_config_can_disable_each_boolean_independently",
   "vigil::decode_backend_contract::hardware_backend_failure_activates_software_fallback_with_visible_reason",
-  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
-  "vigil::first_light_loop::detector_config_recorded_as_decision",
-  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames",
+  "vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output",
+  "vigil-bin::first_light_loop::detector_config_recorded_as_decision",
+  "vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames",
   "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan",
 ]
 reviewed = true
@@ -774,7 +774,7 @@ document = "docs/configuration.md"
 paragraph_sha256 = "sha256:89d0d3a44d602111eeefda25863b3821e6e2814e0f3fa80ab2506e225ac06060"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
+  "vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -814,7 +814,7 @@ document = "docs/detection.md"
 paragraph_sha256 = "sha256:49edca82ed95f4c19319d7491267b950c49a8d9a485bb4bfe931bbeab528a2cc"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::motion_gate_suppresses_non_motion_frames",
+  "vigil-bin::first_light_loop::motion_gate_suppresses_non_motion_frames",
   "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan",
   "vigil::runtime::tests::detector_gate_still_enqueues_motion_positive_segments",
 ]
@@ -829,7 +829,7 @@ document = "docs/detection.md"
 paragraph_sha256 = "sha256:120be5d38b5262ff18113e93382654c80f346bc1a726eb6826090ed9149f4938"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames",
+  "vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -843,7 +843,7 @@ paragraph_sha256 = "sha256:eef6f394b96cf6e44a6bf4545810a808f48ece2274dd1b8bf3e8a
 evidence_tier = "integration"
 tests = [
   "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
-  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
+  "vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -928,8 +928,8 @@ document = "docs/detection.md"
 paragraph_sha256 = "sha256:6d31382237a0458448eae05407540cb1b5038dabe9e5b12c1fb0188197a11f29"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence",
-  "vigil::first_light_loop::observation_never_references_undurable_clip",
+  "vigil-bin::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence",
+  "vigil-bin::first_light_loop::observation_never_references_undurable_clip",
   "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx",
 ]
 reviewed = true
@@ -973,7 +973,7 @@ document = "docs/getting-started.md"
 paragraph_sha256 = "sha256:8db8d6c7446fde4416779ca04c29b7e0a383b101fd8577ba33b16f656fd3daf9"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -986,10 +986,10 @@ document = "docs/getting-started.md"
 paragraph_sha256 = "sha256:0c9d316dc07ccbbeaf45d66453cbc771f5789b8e57dbf6dad31c2943ef56480c"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::detection_produces_observation_referencing_clip",
-  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output",
-  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil-bin::first_light_loop::detection_produces_observation_referencing_clip",
+  "vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output",
+  "vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker",
+  "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1002,9 +1002,9 @@ document = "docs/getting-started.md"
 paragraph_sha256 = "sha256:f6627437bb0294ab4b1d56be480b4a315b8e690cd90cc2cf6b054321a98e52b2"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first",
-  "vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters",
-  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+  "vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first",
+  "vigil-bin::first_light_loop::vigil_stats_reports_live_pipeline_counters",
+  "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1017,7 +1017,7 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:16b64edf2e16bbf47efe0c8df6a9f5350b60c39b1457b44935010eca3e5920aa"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
+  "vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1030,8 +1030,8 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:6a286e2632a14d4a0b1daade61f28f999d853c638052b598758398a1c306338b"
 evidence_tier = "behavioral_unit"
 tests = [
-  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
-  "vigil::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch",
+  "vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil-ha::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1044,8 +1044,8 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:08cb4df474aa787858d6bedda42b02c3d496c3b426ed78f60fb7783348bdff6f"
 evidence_tier = "behavioral_unit"
 tests = [
-  "vigil::ha_discovery::tests::discovery_entities_carry_required_ha_fields",
-  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
+  "vigil-ha::ha_discovery::tests::discovery_entities_carry_required_ha_fields",
+  "vigil-ha::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1058,7 +1058,7 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:71d86f783554daa1959c391dd68c654b3ec8603577dae9e7d7a49c7d5fe10750"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
   "vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras",
   "vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url",
   "vigil::source_scan_contract::generic_camera_registration_confirms_home_assistant_preview_step",
@@ -1075,8 +1075,8 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:2af443b3f0a2302f4cbf336d56599f37862aa90d666fec748811473a92108f01"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
-  "vigil::ha_mqtt_broker::detection_publisher_delivers_to_broker",
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil-ha::ha_mqtt_broker::detection_publisher_delivers_to_broker",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1089,8 +1089,8 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:eebeb92cfd6f0266b50ec58e2becbad90c59b729d7f1799ea281f142825e2820"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
-  "vigil::recognition_slice::event_payload_carries_the_entity_name_when_matched",
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil-ha::recognition_wire_shapes::event_payload_carries_the_entity_name_when_matched",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1103,8 +1103,8 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:1d3fb6ca58b73ca8825342c34f027e500e455d849548f3e61f79462d5a7167d3"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::running_condition_maps_each_named_fault",
-  "vigil::ha_mqtt_broker::running_condition_tracks_live_health_retained",
+  "vigil-ha::ha_discovery::tests::running_condition_maps_each_named_fault",
+  "vigil-ha::ha_mqtt_broker::running_condition_tracks_live_health_retained",
   "vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog",
   "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx",
 ]
@@ -1119,8 +1119,8 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:11e1b195b67c2ccac3614df07d50ea232e57b576c22b9858801575a81fc6fe99"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1133,7 +1133,7 @@ document = "docs/ha-integration.md"
 paragraph_sha256 = "sha256:887e679992639f8bb5d0f0104d44986f46b42dfc1657df67c6f570e244a22de1"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1166,9 +1166,9 @@ paragraph_sha256 = "sha256:eeb577b8b80ec385ff9a264cb58dd5a5592991c33401d6c6894bc
 evidence_tier = "integration"
 tests = [
   "vigil::ha_correction_seam::confirmed_correction_does_not_set_correction_recorded",
-  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
   "vigil::http_data_plane::http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent",
-  "vigil::recognition_slice::enroll_wire_shape_parses_from_the_command_topic",
+  "vigil-ha::recognition_wire_shapes::enroll_wire_shape_parses_from_the_command_topic",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1181,8 +1181,8 @@ document = "docs/privacy.md"
 paragraph_sha256 = "sha256:17eb4ed1ec901f942b155c781bbd65cf340a3972e12e5f2a7891acd0d8f9acbf"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::detection_produces_observation_referencing_clip",
-  "vigil::first_light_loop::observation_never_references_undurable_clip",
+  "vigil-bin::first_light_loop::detection_produces_observation_referencing_clip",
+  "vigil-bin::first_light_loop::observation_never_references_undurable_clip",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1195,8 +1195,8 @@ document = "docs/privacy.md"
 paragraph_sha256 = "sha256:34d3db2854fb7d757bc5b2d151f1ce2c50a698f75a661837a17398775e6bfd17"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call",
-  "vigil::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch",
+  "vigil-bin::first_light_loop::review_and_stats_surfaces_make_no_network_call",
+  "vigil-bin::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1209,7 +1209,7 @@ document = "docs/privacy.md"
 paragraph_sha256 = "sha256:92f672407d0cb8865d4b090d60e06b2e1d7feb11f80394a081662112776efc93"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp",
+  "vigil-bin::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1222,8 +1222,8 @@ document = "docs/privacy.md"
 paragraph_sha256 = "sha256:c7c57f25e1a727de900c1b08fb0c1c59badfde47f378f1e028ea908c54bdb787"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record",
-  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
+  "vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record",
+  "vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1280,8 +1280,8 @@ document = "docs/privacy.md"
 paragraph_sha256 = "sha256:a013406ed8edeb178265725edb01e83a6683a403b2f535dd45a743b3d6562985"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface",
-  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
+  "vigil-bin::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface",
+  "vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1382,7 +1382,7 @@ tests = [
   "vigil::ha_correction_seam::correction_anchored_to_named_detection_only",
   "vigil::ha_correction_seam::correction_survives_daemon_restart",
   "vigil::ha_correction_seam::false_alarm_and_wrong_class_corrections_record_and_read_back",
-  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
   "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
 ]
 reviewed = true
@@ -1424,11 +1424,11 @@ document = "docs/promise.md"
 paragraph_sha256 = "sha256:5e0fab8a2ed5b16ac8f7100ffd8ff8476a3b16df0648a8ae780ac06869ee1dd6"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
-  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg",
-  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker",
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice",
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
+  "vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker",
+  "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1459,7 +1459,7 @@ document = "docs/rules.md"
 paragraph_sha256 = "sha256:f54589be6f8966697dcc39de9e13ca32b97bc318776ec5e3053914e5d30dbbea"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::detector_config_recorded_as_decision",
+  "vigil-bin::first_light_loop::detector_config_recorded_as_decision",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1472,7 +1472,7 @@ document = "docs/rules.md"
 paragraph_sha256 = "sha256:46a3b3666ad279aecdb2a19f1113979694e41e8e20eb3c4d5bb8346fb32d0b5e"
 evidence_tier = "behavioral_unit"
 tests = [
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1485,8 +1485,8 @@ document = "docs/rules.md"
 paragraph_sha256 = "sha256:67dee5941a45104c2827aea8336ba1df2f89f610a709547d32210db19c38d5d1"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+  "vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1541,8 +1541,10 @@ document = "docs/strategy.md"
 paragraph_sha256 = "sha256:1e11d77a4e80bdfd12c700ac42e9007e83ddde461b538e90b20f927e979f3329"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action",
+  "vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
+  "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary",
+  "vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
   "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
 ]
@@ -1585,7 +1587,7 @@ paragraph_sha256 = "sha256:fdb00558c31fa48ad276095e752332ab22823a352081a983a2171
 evidence_tier = "integration"
 tests = [
   "vigil::ha_correction_seam::correction_survives_daemon_restart",
-  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record",
+  "vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record",
   "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
 ]
 reviewed = true
@@ -1599,7 +1601,7 @@ document = "docs/why-this-fired.md"
 paragraph_sha256 = "sha256:ec2932d3ddeda3e1608d6ca47dff6bdc2cc30b22a073615e6966e5e6c4f32e5d"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+  "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1612,8 +1614,8 @@ document = "docs/why-this-fired.md"
 paragraph_sha256 = "sha256:835f23298949ad99e6039cf124e7194bf97fb79bb8c96a5de3ebae086c06377c"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first",
-  "vigil::ha_mqtt_broker::detection_only_events_excludes_corrections",
+  "vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first",
+  "vigil-bin::correction_core_paths::detection_only_events_excludes_corrections",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1626,7 +1628,7 @@ document = "docs/why-this-fired.md"
 paragraph_sha256 = "sha256:638014298c4e27368603665cfcafc05b45538311efa184c932c3f4611c8dcc13"
 evidence_tier = "behavioral_unit"
 tests = [
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
 ]
 reviewed = true
@@ -1640,8 +1642,8 @@ document = "docs/why-this-fired.md"
 paragraph_sha256 = "sha256:cb47ec6db046755104ef777b013cd681062fbefb6baac38e2de1233695ee485e"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly",
-  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
+  "vigil-bin::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly",
+  "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
 ]
 reviewed = true
 reviewed_by = "Fermat independent documentation repair review, 2026-07-21"
@@ -1654,8 +1656,8 @@ document = "docs/why-this-fired.md"
 paragraph_sha256 = "sha256:4302e2aca835f8d3653ffb63844da4fc2cc1f2836ffa82dfc6d4f46cf624f01a"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call",
-  "vigil::first_light_loop::vigil_why_served_over_socket_while_store_is_locked",
+  "vigil-bin::first_light_loop::review_and_stats_surfaces_make_no_network_call",
+  "vigil-bin::first_light_loop::vigil_why_served_over_socket_while_store_is_locked",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1696,7 +1698,7 @@ document = "docs/why-this-fired.md"
 paragraph_sha256 = "sha256:ac1d7f4566db68b876242911db00fd3c00baba26cc4663943c2c33e6a500a195"
 evidence_tier = "integration"
 tests = [
-  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
+  "vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1724,7 +1726,7 @@ paragraph_sha256 = "sha256:3045c2be64867f225120ac8d5fa059217a5beb53240007819a77e
 evidence_tier = "integration"
 tests = [
   "vigil::ha_correction_seam::correction_survives_daemon_restart",
-  "vigil::ha_mqtt_broker::two_distinct_corrections_on_same_detection_both_land",
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
 ]
 reviewed = true
 reviewed_by = "Feynman independent documentation review, 2026-07-21"
@@ -1779,7 +1781,7 @@ document = "docs/why-vigil.md"
 paragraph_sha256 = "sha256:65ebd9b4c72e18a56b210d1a2bebc07e1b170d71f23775b19d079f784d0a9cc9"
 evidence_tier = "integration"
 tests = [
-  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record",
+  "vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record",
   "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam",
 ]
 reviewed = true

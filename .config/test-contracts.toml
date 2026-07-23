@@ -1,10 +1,10 @@
 # REVIEW PROPOSAL ONLY. This command never writes or approves registry entries.
 version = 1
-
 [[contract]]
 id = "acceleration-selection-fallback-promotion-and-honesty"
 lineage = "Accepted acceleration selection, fallback, promotion, artifact, and receipt criteria."
 sources = [
+  "crates/vigil-bin/tests/detection_accel_backend.rs",
   "crates/vigil/tests/acceleration_receipts.rs",
   "crates/vigil/tests/config_acceleration_intent.rs",
   "crates/vigil/tests/decode_backend_contract.rs",
@@ -18,6 +18,7 @@ sources = [
 evidence_kind = "integration"
 gate = "accelerated-detection"
 tests = [
+  "vigil-bin::detection_accel_backend::runtime_detection_receipt_action_line_is_honest", # crates/vigil-bin/tests/detection_accel_backend.rs
   "vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::acceleration_receipts::health_reports_degraded_decode_and_detection_when_configured_but_fallback", # crates/vigil/tests/acceleration_receipts.rs
@@ -42,7 +43,6 @@ tests = [
   "vigil::detection_accel_backend::detection_kill_path_action_names_cpu_detection_as_supported", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::detection_probe_timeout_and_panic_classify_probe_failed_without_hang", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::doctor_detection_action_line_names_cpu_detection_as_supported", # crates/vigil/tests/detection_accel_backend.rs
-  "vigil::detection_accel_backend::runtime_detection_receipt_action_line_is_honest", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_fallback_action_truth::fallback_action_says_backend_absent_when_accelerated_detection_is_not_compiled", # crates/vigil/tests/detection_fallback_action_truth.rs
   "vigil::detection_fallback_action_truth::probe_failure_action_names_real_next_steps_when_accelerated_backend_is_compiled", # crates/vigil/tests/detection_fallback_action_truth.rs
   "vigil::detection_probe_completes_after_deadline::deadline_returns_fallback_now_but_probe_runs_to_completion_and_promotes_on_late_pass", # crates/vigil/tests/detection_probe_completes_after_deadline.rs
@@ -61,10 +61,9 @@ tests = [
   "vigil::doctor_acceleration::sudo_without_service_user_source_is_manual_action_required", # crates/vigil/tests/doctor_acceleration.rs
   "vigil::shader_cache_persistence::persistent_gpu_caches_live_under_data_root_and_export_their_env", # crates/vigil/tests/shader_cache_persistence.rs
 ]
-
 [[contract]]
 id = "acceptance-harness-process-port-and-network-safety"
-lineage = "Accepted first-light harness-safety criteria and the explicit acceptance-harness lineage review."
+lineage = "Accepted first-light harness-safety criteria and the explicit acceptance-harness lineage review; the process-cleanup/nested-build source scan that used to live in this contract moved to its own contract (`test-source-process-cleanup-and-nested-build-safety`) alongside the sibling scans in `crates/vigil/tests/`, leaving this contract's own artifact-resolver assertion in place under a name that describes only what it now checks."
 sources = [
   "tests/acceptance/common.rs",
 ]
@@ -74,57 +73,66 @@ tests = [
   "vigil-acceptance::acceptance::common::tests::direct_child_cleanup_rejects_current_acceptance_process", # tests/acceptance/common.rs
   "vigil-acceptance::acceptance::common::tests::free_port_allocates_unique_ports_within_acceptance_process", # tests/acceptance/common.rs
   "vigil-acceptance::acceptance::common::tests::network_trace_does_not_classify_unspecified_local_connect_as_outbound", # tests/acceptance/common.rs
-  "vigil-acceptance::acceptance::common::tests::process_cleanup_has_no_wildcard_or_shell_kill_paths", # tests/acceptance/common.rs
+  "vigil-acceptance::acceptance::common::tests::resolve_vigil_binary_and_image_prefer_explicit_over_computed_defaults", # tests/acceptance/common.rs
   "vigil-acceptance::acceptance::common::tests::signal_target_rejects_wildcard_process_targets", # tests/acceptance/common.rs
 ]
-
+[[contract]]
+id = "test-source-process-cleanup-and-nested-build-safety"
+lineage = "Extracted from the acceptance-harness contract's own process-cleanup scan (see `acceptance-harness-process-port-and-network-safety`) into the file family every sibling source-scan guard already sits in, and widened from `tests/` alone to every production crate's own `tests/` directory; proof of no lost detection is the redundant-fault-detection evidence at `.config/test-estate-evidence/process-cleanup-extraction/`."
+sources = [
+  "crates/vigil/tests/process_cleanup_scan.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::process_cleanup_scan::no_unsafe_cleanup_or_nested_artifact_builds_in_test_sources", # crates/vigil/tests/process_cleanup_scan.rs
+]
 [[contract]]
 id = "camera-process-store-and-cli-journeys"
 lineage = "Accepted first-light process, store, RTSP, and CLI criteria."
 sources = [
-  "crates/vigil/tests/first_light_loop.rs",
+  "crates/vigil-bin/tests/first_light_loop.rs",
 ]
 evidence_kind = "acceptance"
 gate = "slow-acceptance"
 tests = [
-  "vigil::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::camera_survives_store_reopen", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::cli_read_when_runtime_busy_errors_cleanly", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::confidence_is_detector_output_not_threshold_derived", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::credentialed_existing_camera_rtsp_url_is_redacted_on_startup", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::detection_produces_observation_referencing_clip", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::detector_confidence_threshold_filters_detector_output", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::detector_config_recorded_as_decision", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::detector_loads_and_runs_over_real_frames", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::event_history_survives_store_reopen", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::motion_gate_suppresses_non_motion_frames", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::observation_never_references_undurable_clip", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::reregistration_is_idempotent_no_duplicate", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::site_context_created_and_name_retained", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::startup_crash_mid_config_heals_on_restart", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::two_rapid_events_get_distinct_observations_and_clips", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_events_lists_recent_events_newest_first", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_events_on_empty_store_returns_clean_empty_list", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_events_shows_only_landed_events_not_motion_only", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_stats_before_any_frame_is_all_zero_no_panic", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_why_latest_on_empty_store_is_clean_not_found", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_why_latest_walks_the_newest_event", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_why_served_over_socket_while_store_is_locked", # crates/vigil/tests/first_light_loop.rs
-  "vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context", # crates/vigil/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::camera_survives_store_reopen", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::cli_read_when_runtime_busy_errors_cleanly", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::confidence_is_detector_output_not_threshold_derived", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::credentialed_existing_camera_rtsp_url_is_redacted_on_startup", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::detection_produces_observation_referencing_clip", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::detector_config_recorded_as_decision", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::event_history_survives_store_reopen", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::motion_gate_suppresses_non_motion_frames", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::observation_never_references_undurable_clip", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::reregistration_is_idempotent_no_duplicate", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::review_and_stats_surfaces_make_no_network_call", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::site_context_created_and_name_retained", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::startup_crash_mid_config_heals_on_restart", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::two_rapid_events_get_distinct_observations_and_clips", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_events_on_empty_store_returns_clean_empty_list", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_events_shows_only_landed_events_not_motion_only", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_stats_before_any_frame_is_all_zero_no_panic", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_stats_reports_live_pipeline_counters", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_why_latest_on_empty_store_is_clean_not_found", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_why_latest_walks_the_newest_event", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_why_served_over_socket_while_store_is_locked", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context", # crates/vigil-bin/tests/first_light_loop.rs
 ]
-
 [[contract]]
 id = "codec-parameter-sets-complete-decoder-config"
 lineage = "Vigil inventory: inline decode tests; current SDP parameter-set defect work list."
@@ -137,7 +145,6 @@ tests = [
   "vigil::decode::tests::split_h264_parameter_sets_are_not_codec_config", # crates/vigil/src/decode.rs
   "vigil::decode::tests::split_h265_parameter_sets_are_not_codec_config", # crates/vigil/src/decode.rs
 ]
-
 [[contract]]
 id = "corrections-are-authoritative-durable-and-readable"
 lineage = "Accepted Home Assistant correction durability contract."
@@ -159,7 +166,6 @@ tests = [
   "vigil::ha_correction_seam::review_events_rows_expose_current_correction_authority_fields", # crates/vigil/tests/ha_correction_seam.rs
   "vigil::ha_correction_seam::vigil_events_lists_recent_events_through_review_api", # crates/vigil/tests/ha_correction_seam.rs
 ]
-
 [[contract]]
 id = "distributed-schema-policy-and-workgraph-authority"
 lineage = "Accepted distributed-compute schema, pressure policy, workgraph, and visible-config criteria."
@@ -196,14 +202,15 @@ tests = [
   "vigil::workgraph_contract::result_envelope_joins_only_to_exact_work_identity", # crates/vigil/tests/workgraph_contract.rs
   "vigil::workgraph_contract::stage_may_emit_zero_or_many_results_with_counted_disposition", # crates/vigil/tests/workgraph_contract.rs
 ]
-
 [[contract]]
 id = "distributed-worker-lifecycle-routing-and-receipts"
 lineage = "Accepted distributed-compute worker, ledger, routing, fallback, and receipt criteria."
 sources = [
-  "crates/vigil/tests/boot_readiness.rs",
-  "crates/vigil/tests/cameraless_worker.rs",
-  "crates/vigil/tests/capability_delivery.rs",
+  "crates/vigil-bin/tests/boot_readiness.rs",
+  "crates/vigil-bin/tests/cameraless_worker.rs",
+  "crates/vigil-bin/tests/capability_delivery.rs",
+  "crates/vigil-bin/tests/two_process_fabric.rs",
+  "crates/vigil-bin/tests/worker_intent_loudness.rs",
   "crates/vigil/tests/capability_lifecycle.rs",
   "crates/vigil/tests/dead_capability_steal.rs",
   "crates/vigil/tests/detector_worker.rs",
@@ -214,18 +221,22 @@ sources = [
   "crates/vigil/tests/provenance_receipts.rs",
   "crates/vigil/tests/result_join_authority.rs",
   "crates/vigil/tests/symmetry.rs",
-  "crates/vigil/tests/two_process_fabric.rs",
   "crates/vigil/tests/worker_intent_loudness.rs",
 ]
 evidence_kind = "integration"
 gate = "fabric"
 tests = [
-  "vigil::boot_readiness::boot_prints_phase_markers", # crates/vigil/tests/boot_readiness.rs
-  "vigil::boot_readiness::health_becomes_ready_before_fabric_attaches", # crates/vigil/tests/boot_readiness.rs
-  "vigil::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model", # crates/vigil/tests/cameraless_worker.rs
-  "vigil::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera", # crates/vigil/tests/cameraless_worker.rs
-  "vigil::cameraless_worker::hub_sees_cameraless_worker_detector_capability_after_join", # crates/vigil/tests/cameraless_worker.rs
-  "vigil::capability_delivery::failed_capability_push_emits_named_error", # crates/vigil/tests/capability_delivery.rs
+  "vigil-bin::boot_readiness::boot_prints_phase_markers", # crates/vigil-bin/tests/boot_readiness.rs
+  "vigil-bin::boot_readiness::health_becomes_ready_before_fabric_attaches", # crates/vigil-bin/tests/boot_readiness.rs
+  "vigil-bin::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model", # crates/vigil-bin/tests/cameraless_worker.rs
+  "vigil-bin::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera", # crates/vigil-bin/tests/cameraless_worker.rs
+  "vigil-bin::cameraless_worker::hub_sees_cameraless_worker_detector_capability_after_join", # crates/vigil-bin/tests/cameraless_worker.rs
+  "vigil-bin::capability_delivery::failed_capability_push_emits_named_error", # crates/vigil-bin/tests/capability_delivery.rs
+  "vigil-bin::two_process_fabric::two_real_processes_age_out_a_dead_worker_from_remote_detectors", # crates/vigil-bin/tests/two_process_fabric.rs
+  "vigil-bin::two_process_fabric::two_real_processes_render_only_the_restarted_workers_current_backend", # crates/vigil-bin/tests/two_process_fabric.rs
+  "vigil-bin::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_first", # crates/vigil-bin/tests/two_process_fabric.rs
+  "vigil-bin::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_up_late", # crates/vigil-bin/tests/two_process_fabric.rs
+  "vigil-bin::worker_intent_loudness::worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering", # crates/vigil-bin/tests/worker_intent_loudness.rs
   "vigil::capability_lifecycle::a_dead_worker_ages_out_of_remote_detectors", # crates/vigil/tests/capability_lifecycle.rs
   "vigil::capability_lifecycle::a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls", # crates/vigil/tests/capability_lifecycle.rs
   "vigil::capability_lifecycle::a_restarted_worker_renders_only_its_current_backend", # crates/vigil/tests/capability_lifecycle.rs
@@ -245,14 +256,8 @@ tests = [
   "vigil::provenance_receipts::remote_detection_carries_node_and_backend_one_vocabulary", # crates/vigil/tests/provenance_receipts.rs
   "vigil::result_join_authority::remote_result_joins_or_is_rejected_and_is_idempotent", # crates/vigil/tests/result_join_authority.rs
   "vigil::symmetry::one_node_submits_and_claims_in_one_run", # crates/vigil/tests/symmetry.rs
-  "vigil::two_process_fabric::two_real_processes_age_out_a_dead_worker_from_remote_detectors", # crates/vigil/tests/two_process_fabric.rs
-  "vigil::two_process_fabric::two_real_processes_render_only_the_restarted_workers_current_backend", # crates/vigil/tests/two_process_fabric.rs
-  "vigil::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_first", # crates/vigil/tests/two_process_fabric.rs
-  "vigil::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_up_late", # crates/vigil/tests/two_process_fabric.rs
   "vigil::worker_intent_loudness::empty_string_ticket_from_the_addon_options_mapping_is_treated_as_no_ticket_configured", # crates/vigil/tests/worker_intent_loudness.rs
-  "vigil::worker_intent_loudness::worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering", # crates/vigil/tests/worker_intent_loudness.rs
 ]
-
 [[contract]]
 id = "health-watchdog-liveness-and-recovery"
 lineage = "Vigil inventory: health watchdog production-boundary regressions."
@@ -266,32 +271,35 @@ tests = [
   "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx", # crates/vigil/tests/health_watchdog_liveness.rs
   "vigil::health_watchdog_liveness::ready_runtime_is_alive_for_the_watchdog", # crates/vigil/tests/health_watchdog_liveness.rs
 ]
-
 [[contract]]
 id = "home-assistant-discovery-events-and-corrections"
 lineage = "Accepted Home Assistant discovery and MQTT contract."
 sources = [
-  "crates/vigil/src/ha_discovery.rs",
+  "crates/vigil-ha/src/ha_discovery.rs",
+  "crates/vigil-ha/tests/ha_discovery_id_contract.rs",
+  "crates/vigil-ha/tests/mqtt_topic_contract.rs",
 ]
 evidence_kind = "behavioral-unit"
 gate = "pull-request"
 tests = [
-  "vigil::ha_discovery::tests::command_topic_parses_to_channel_agnostic_request", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::discovery_entities_carry_required_ha_fields", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::discovery_has_no_per_camera_health_entity", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::discovery_payload_uses_default_entity_id_not_object_id", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch", # crates/vigil/src/ha_discovery.rs
-  "vigil::ha_discovery::tests::running_condition_maps_each_named_fault", # crates/vigil/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::command_topic_parses_to_channel_agnostic_request", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::discovery_entities_carry_required_ha_fields", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::discovery_has_no_per_camera_health_entity", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::discovery_payload_uses_default_entity_id_not_object_id", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::per_camera_entity_names_are_device_local_and_enabled_is_stateful_switch", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery::tests::running_condition_maps_each_named_fault", # crates/vigil-ha/src/ha_discovery.rs
+  "vigil-ha::ha_discovery_id_contract::published_discovery_identity_surface_matches_frozen_registry", # crates/vigil-ha/tests/ha_discovery_id_contract.rs
+  "vigil-ha::mqtt_topic_contract::published_mqtt_topic_surface_matches_frozen_registry", # crates/vigil-ha/tests/mqtt_topic_contract.rs
 ]
-
 [[contract]]
 id = "http-events-evidence-health-and-review-surfaces"
 lineage = "Accepted HTTP data-plane and media contract, superseded by same-origin owner ruling where applicable."
 sources = [
   "crates/vigil/tests/http_data_plane.rs",
+  "crates/vigil/tests/http_route_contract.rs",
 ]
 evidence_kind = "integration"
 gate = "pull-request"
@@ -305,7 +313,7 @@ tests = [
   "vigil::http_data_plane::event_list_ordering_matches_review_events_newest_first", # crates/vigil/tests/http_data_plane.rs
   "vigil::http_data_plane::event_list_serializes_current_correction_authority_fields", # crates/vigil/tests/http_data_plane.rs
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset", # crates/vigil/tests/http_data_plane.rs
-  "vigil::http_data_plane::health_liveness_still_serves_alongside_data_plane_in_single_binary", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_data_plane::frozen_route_constants_are_what_production_actually_dispatches_on", # crates/vigil/tests/http_data_plane.rs
   "vigil::http_data_plane::http_correction_post_labelled_wrong_class_survives_to_why_and_is_idempotent", # crates/vigil/tests/http_data_plane.rs
   "vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam", # crates/vigil/tests/http_data_plane.rs
   "vigil::http_data_plane::large_media_reads_use_fixed_content_length_not_chunked_transfer", # crates/vigil/tests/http_data_plane.rs
@@ -317,8 +325,8 @@ tests = [
   "vigil::http_data_plane::snapshot_read_serves_image_bytes_with_image_content_type", # crates/vigil/tests/http_data_plane.rs
   "vigil::http_data_plane::why_unknown_or_malformed_detection_id_returns_not_found", # crates/vigil/tests/http_data_plane.rs
   "vigil::http_data_plane::why_walk_back_serves_provenance_excludes_rtsp_url_and_lists_correction", # crates/vigil/tests/http_data_plane.rs
+  "vigil::http_route_contract::published_http_route_surface_matches_frozen_registry", # crates/vigil/tests/http_route_contract.rs
 ]
-
 [[contract]]
 id = "injected-clock-controls-test-time"
 lineage = "Test-estate deterministic harness implementation: injected clock boundary."
@@ -330,7 +338,6 @@ gate = "pull-request"
 tests = [
   "vigil::clock::tests::persisted_time_uses_the_contextdb_wallclock_seam", # crates/vigil/src/clock.rs
 ]
-
 [[contract]]
 id = "installable-binary-container-lifecycle-and-health"
 lineage = "Accepted installable substrate binary and container criteria."
@@ -352,7 +359,6 @@ tests = [
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_sigterm_exits_zero_and_releases_store", # tests/acceptance/installable_substrate.rs
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_version_reports_nonempty_build_identity", # tests/acceptance/installable_substrate.rs
 ]
-
 [[contract]]
 id = "media-evidence-credentials-and-redaction"
 lineage = "Accepted HTTP/media and Home Assistant live-camera contracts."
@@ -367,45 +373,33 @@ tests = [
   "vigil::media_pipeline::tests::credentialed_rtsp_url_is_stripped_for_session_and_kept_for_auth", # crates/vigil/src/media_pipeline.rs
   "vigil::media_pipeline::tests::explicit_rtsp_credentials_override_url_userinfo", # crates/vigil/src/media_pipeline.rs
   "vigil::media_pipeline::tests::playable_dimensions_cap_large_review_clips_without_upscaling", # crates/vigil/src/media_pipeline.rs
-  "vigil::media_pipeline::tests::rtsp_credentials_debug_redacts_password", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::rtsp_credentials_debug_redacts_password_and_keeps_username_visible", # crates/vigil/src/media_pipeline.rs
   "vigil::media_pipeline::tests::rtsp_url_redaction_removes_userinfo_from_parse_errors", # crates/vigil/src/media_pipeline.rs
   "vigil::media_pipeline::tests::separate_password_can_pair_with_url_username", # crates/vigil/src/media_pipeline.rs
 ]
-
 [[contract]]
 id = "mqtt-discovery-delivery-state-and-corrections"
 lineage = "Accepted live-broker Home Assistant integration contract."
 sources = [
-  "crates/vigil/tests/ha_mqtt_broker.rs",
+  "crates/vigil-ha/tests/ha_mqtt_broker.rs",
 ]
 evidence_kind = "integration"
 gate = "pull-request"
 tests = [
-  "vigil::ha_mqtt_broker::bounded_wait_reports_the_missing_state", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::correction_and_event_under_disk_full_fail_loudly", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::correction_command_channel_overflow_is_loud", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::correction_path_makes_no_outbound_network_beyond_broker", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::correction_rejected_for_non_detection_anchor", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::detection_fires_active_sensor_on", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::detection_only_events_excludes_corrections", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::detection_publisher_delivers_to_broker", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::empty_stream_publishes_no_event_to_broker", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::malformed_correction_command_is_rejected_and_subscriber_survives", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::operator_action_command_effects_action", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::outbound_detection_publish_is_nonblocking_and_overflow_is_loud", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::redelivered_correction_command_is_idempotent", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::running_condition_tracks_live_health_retained", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::tcp_reservation_holds_port_until_release", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::two_distinct_corrections_on_same_detection_both_land", # crates/vigil/tests/ha_mqtt_broker.rs
-  "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg", # crates/vigil/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::bounded_wait_reports_the_missing_state", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::correction_command_channel_overflow_is_loud", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::correction_path_makes_no_outbound_network_beyond_broker", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::detection_fires_active_sensor_on", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::detection_publisher_delivers_to_broker", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::empty_stream_publishes_no_event_to_broker", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::malformed_correction_command_is_rejected_and_subscriber_survives", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::outbound_detection_publish_is_nonblocking_and_overflow_is_loud", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::running_condition_tracks_live_health_retained", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::tcp_reservation_holds_port_until_release", # crates/vigil-ha/tests/ha_mqtt_broker.rs
 ]
-
 [[contract]]
 id = "operator-configuration-reaches-runtime"
 lineage = "Vigil inventory: inline production-module configuration tests; owner rulings and HTTP/recognition contracts."
@@ -418,17 +412,20 @@ tests = [
   "vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line", # crates/vigil/src/config.rs
   "vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url", # crates/vigil/src/config.rs
   "vigil::config::tests::review_port_cli_override_is_documented_and_loaded", # crates/vigil/src/config.rs
+  "vigil::config::tests::rtsp_password_resolves_identically_from_cli_file_and_env", # crates/vigil/src/config.rs
 ]
-
 [[contract]]
 id = "recognition-enrollment-matching-honesty-and-deletion"
 lineage = "Accepted recognition enrollment, matching, unknown honesty, provenance, and deletion contract."
 sources = [
+  "crates/vigil-ha/tests/recognition_wire_shapes.rs",
   "crates/vigil/tests/recognition_slice.rs",
 ]
 evidence_kind = "integration"
 gate = "pull-request"
 tests = [
+  "vigil-ha::recognition_wire_shapes::enroll_wire_shape_parses_from_the_command_topic", # crates/vigil-ha/tests/recognition_wire_shapes.rs
+  "vigil-ha::recognition_wire_shapes::event_payload_carries_the_entity_name_when_matched", # crates/vigil-ha/tests/recognition_wire_shapes.rs
   "vigil::recognition_slice::animal_class_enrolls_and_matches_as_an_animal_entity", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::bbox_mapping_clamps_to_frame_and_rejects_degenerate_boxes", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::bbox_maps_from_detector_space_to_original_frame_pixels", # crates/vigil/tests/recognition_slice.rs
@@ -439,9 +436,7 @@ tests = [
   "vigil::recognition_slice::crop_png_extracts_the_requested_region", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::enroll_correction_creates_named_entity_and_later_sightings_match", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::enroll_failure_writes_no_correction_row", # crates/vigil/tests/recognition_slice.rs
-  "vigil::recognition_slice::enroll_wire_shape_parses_from_the_command_topic", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::enroll_without_a_name_is_refused", # crates/vigil/tests/recognition_slice.rs
-  "vigil::recognition_slice::event_payload_carries_the_entity_name_when_matched", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::forget_removes_references_and_the_subject_reverts_to_unknown", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::http_event_rows_and_why_carry_recognition_for_the_card", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::match_records_observation_against_the_matched_entity_with_vector_and_score", # crates/vigil/tests/recognition_slice.rs
@@ -451,7 +446,6 @@ tests = [
   "vigil::recognition_slice::vehicle_sighting_cannot_match_a_person_identity_even_with_identical_vector", # crates/vigil/tests/recognition_slice.rs
   "vigil::recognition_slice::why_view_shows_match_provenance_reference_score_and_enrolling_correction", # crates/vigil/tests/recognition_slice.rs
 ]
-
 [[contract]]
 id = "runtime-queue-camera-selection-and-detection-gates"
 lineage = "Vigil owner rulings for newest-wins queues, camera URLs, and stationary scanning."
@@ -471,13 +465,14 @@ tests = [
   "vigil::runtime::tests::latest_segment_queue_wakes_receiver_when_closed", # crates/vigil/src/runtime.rs
   "vigil::runtime::tests::runtime_detection_selection_seam_is_honest_for_this_artifact", # crates/vigil/src/runtime.rs
 ]
-
 [[contract]]
 id = "structural-packaging-and-source-contracts"
 lineage = "Vigil inventory structural-evidence section; replacement remains required before deleting source scans."
 sources = [
   "crates/vigil/tests/addon_config_surface.rs",
   "crates/vigil/tests/artifact_profile_honesty.rs",
+  "crates/vigil/tests/dependency_direction_contract.rs",
+  "crates/vigil/tests/home_assistant_vocabulary_scan.rs",
   "crates/vigil/tests/oss_cleanliness_scan.rs",
   "crates/vigil/tests/probe_deadline_knob_surface.rs",
   "crates/vigil/tests/runtime_packages_manifest.rs",
@@ -492,6 +487,31 @@ tests = [
   "vigil::addon_config_surface::addon_config_states_accelerated_detection_gpu_with_cpu_fallback_in_help", # crates/vigil/tests/addon_config_surface.rs
   "vigil::artifact_profile_honesty::hardware_addon_image_carries_manifest_hardware_profile", # crates/vigil/tests/artifact_profile_honesty.rs
   "vigil::artifact_profile_honesty::release_notes_name_the_hardware_generic_docker_artifact", # crates/vigil/tests/artifact_profile_honesty.rs
+  "vigil::dependency_direction_contract::adapter_crate_declares_no_dependency_of_either_kind_on_a_substrate_core_already_embeds", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::core_crate_never_depends_on_the_adapter_or_an_mqtt_transport_crate", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::every_workspace_member_is_classified_as_production_or_explicitly_excluded", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_catches_a_planted_build_edge", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_catches_a_planted_dev_edge", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_catches_a_planted_normal_edge", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_does_not_walk_transitively", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_excluding_dev_catches_a_planted_build_edge_but_ignores_a_planted_dev_edge", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_excluding_dev_catches_a_planted_shipped_mqtt_dependency", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_excluding_dev_catches_a_planted_shipped_substrate_dependency", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_excluding_dev_is_silent_on_the_real_shape_of_vigil_bins_dev_dependencies", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_is_silent_on_a_clean_adapter_graph", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::from_packages_reaches_a_forbidden_crate_declared_under_a_local_package_rename", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::from_packages_reaches_an_optional_dependency_behind_a_non_default_feature", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::reachable_forbidden_names_catches_a_planted_build_edge", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::reachable_forbidden_names_catches_a_planted_dev_edge", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::reachable_forbidden_names_catches_a_planted_edge_reached_transitively", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::reachable_forbidden_names_catches_a_planted_normal_edge_at_depth_one", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::reachable_forbidden_names_is_silent_on_a_clean_transitive_graph", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::unclassified_workspace_members_catches_a_planted_fourth_product_crate", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::unclassified_workspace_members_is_silent_when_every_member_is_classified", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::graph_logic::workspace_member_package_names_reads_declared_workspace_members_not_default_members", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::dependency_direction_contract::product_binary_crate_never_ships_a_direct_dependency_on_a_substrate_or_mqtt_transport_crate", # crates/vigil/tests/dependency_direction_contract.rs
+  "vigil::home_assistant_vocabulary_scan::core_sources_carry_no_home_assistant_vocabulary", # crates/vigil/tests/home_assistant_vocabulary_scan.rs
+  "vigil::home_assistant_vocabulary_scan::scan_detects_a_planted_leak_in_a_real_core_file", # crates/vigil/tests/home_assistant_vocabulary_scan.rs
   "vigil::oss_cleanliness_scan::backend_nouns_stay_out_of_product_domain_outputs", # crates/vigil/tests/oss_cleanliness_scan.rs
   "vigil::oss_cleanliness_scan::no_private_environment_nouns_in_repo_sources", # crates/vigil/tests/oss_cleanliness_scan.rs
   "vigil::oss_cleanliness_scan::packaging_and_docs_surfaces_are_covered_by_the_cleanliness_scan", # crates/vigil/tests/oss_cleanliness_scan.rs
@@ -513,9 +533,11 @@ tests = [
   "vigil::source_scan_contract::vigil_addon_does_not_auto_install_legacy_lovelace_gallery", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::yolox_oracle_owns_decode_path_without_dead_code_link_shims", # crates/vigil/tests/source_scan_contract.rs
   "vigil::transport_purity::guard_catches_every_shape_of_the_transport_name", # crates/vigil/tests/transport_purity.rs
-  "vigil::transport_purity::no_iroh_symbol_in_vigil_src", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::no_declared_dependency_names_the_transport_crate_in_any_production_manifest", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::no_iroh_symbol_anywhere_in_production_crate_sources", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::scan_catches_a_transport_dependency_declared_directly_or_renamed_via_the_package_field_in_a_real_manifest", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::scan_detects_a_planted_leak_in_vigil_ha_and_vigil_bin", # crates/vigil/tests/transport_purity.rs
 ]
-
 [[contract]]
 id = "supervisor-service-and-generic-camera-payloads"
 lineage = "Accepted Home Assistant Supervisor and Generic Camera integration contract."
@@ -538,7 +560,6 @@ tests = [
   "vigil::supervisor::tests::parse_supervisor_mqtt_response_rejects_every_invalid_shape", # crates/vigil/src/supervisor.rs
   "vigil::supervisor::tests::parse_supervisor_mqtt_response_valid", # crates/vigil/src/supervisor.rs
 ]
-
 [[contract]]
 id = "supplemental-group-privilege-ordering"
 lineage = "Current test-estate work list: privilege ordering is an untouchable regression."
@@ -553,7 +574,6 @@ tests = [
   "vigil::privilege_supplemental_gids::supplemental_gids_env_parses_and_orders_setgroups_before_setgid_setuid", # crates/vigil/tests/privilege_supplemental_gids.rs
   "vigil::privilege_supplemental_gids::whitespace_and_empty_entries_are_tolerated", # crates/vigil/tests/privilege_supplemental_gids.rs
 ]
-
 [[contract]]
 id = "synthetic-camera-frigate-replacement-journey"
 lineage = "Accepted installable one-camera Frigate-replacement journey."
@@ -565,7 +585,6 @@ gate = "slow-acceptance"
 tests = [
   "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic", # tests/acceptance/one_camera_acceptance.rs
 ]
-
 [[contract]]
 id = "real-camera-physical-frigate-replacement-journey"
 lineage = "Vigil test-estate inventory: installable and physical acceptance; owner-run real-camera window."
@@ -579,7 +598,6 @@ explicit_run = "cargo test --features acceptance --test acceptance one_camera_ac
 tests = [
   "vigil-acceptance::acceptance::one_camera_acceptance::frigate_replacement_real_camera_event_lands_and_walks", # tests/acceptance/one_camera_acceptance.rs
 ]
-
 [[contract]]
 id = "closeout-impact-classification-enforcement"
 lineage = "Development closeout compartment: repository-owned diff rules decide when install and container proof is mandatory, including deletion, rename, platform, and classifier self-change bypasses."
@@ -598,7 +616,6 @@ tests = [
   "xtask::closeout_impact::tests::target_specific_rust_change_expands_install_proof",
   "xtask::closeout_impact::tests::unknown_top_level_build_like_file_fails_closed",
 ]
-
 [[contract]]
 id = "verification-command-and-receipt-enforcement"
 lineage = "Development verification compartments: the checked-in verifier constrains exact selections, exact source identities, resource bounds, cache honesty, archive consumers, and release-only commands."
@@ -625,7 +642,6 @@ tests = [
   "xtask::verify::tests::registered_list_command_becomes_bounded_filtered_run",
   "xtask::verify::tests::slow_shards_run_only_the_frozen_archive_without_build_selection",
 ]
-
 [[contract]]
 id = "test-estate-guard-self-enforcement"
 lineage = "The test-estate guard's own adversarial fixtures enforce inventory, transition, CI, documentation, nondeterminism, and schema invariants."
@@ -663,7 +679,115 @@ tests = [
   "xtask::test_estate::tests::receipt_must_enumerate_the_exact_surviving_vector",
   "xtask::test_estate::tests::release_note_hardware_names_do_not_substitute_for_named_target_builds",
   "xtask::test_estate::tests::relocating_same_syntax_changes_the_exact_site_identity",
+  "xtask::test_estate::tests::relocation_proof_accepts_a_byte_identical_move",
+  "xtask::test_estate::tests::relocation_proof_rejects_a_mapping_that_is_not_one_to_one",
+  "xtask::test_estate::tests::relocation_proof_rejects_a_recorded_fingerprint_that_does_not_match_its_own_body",
+  "xtask::test_estate::tests::relocation_proof_rejects_a_surviving_body_that_changed",
+  "xtask::test_estate::tests::relocation_proof_rejects_a_surviving_identity_this_transition_did_not_add",
   "xtask::test_estate::tests::sleep_hidden_in_macro_tokens_is_a_site",
   "xtask::test_estate::tests::source_scan_definition_ignores_doc_links_but_catches_executable_reads",
   "xtask::test_estate::tests::wall_and_monotonic_clocks_and_elapsed_calls_are_sites",
+]
+[[contract]]
+id = "composed-binary-product-paths-require-the-real-compiled-vigil-binary"
+lineage = "Accepted composition-root contract: correction/event/HTTP/CLI product paths provable only against the real compiled `vigil` binary wiring core to the Home Assistant adapter."
+sources = [
+  "crates/vigil-bin/tests/binary_cli_surface_smoke.rs",
+  "crates/vigil-bin/tests/correction_core_paths.rs",
+  "crates/vigil-bin/tests/http_data_plane_binary_coexistence.rs",
+  "crates/vigil-bin/tests/mqtt_composed_product.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil-bin::binary_cli_surface_smoke::help_flag_names_the_run_command", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
+  "vigil-bin::binary_cli_surface_smoke::no_arguments_prints_help_and_exits_nonzero", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
+  "vigil-bin::binary_cli_surface_smoke::version_flag_reports_core_crate_version", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
+  "vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record", # crates/vigil-bin/tests/correction_core_paths.rs
+  "vigil-bin::correction_core_paths::correction_and_event_under_disk_full_fail_loudly", # crates/vigil-bin/tests/correction_core_paths.rs
+  "vigil-bin::correction_core_paths::correction_rejected_for_non_detection_anchor", # crates/vigil-bin/tests/correction_core_paths.rs
+  "vigil-bin::correction_core_paths::detection_only_events_excludes_corrections", # crates/vigil-bin/tests/correction_core_paths.rs
+  "vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker", # crates/vigil-bin/tests/correction_core_paths.rs
+  "vigil-bin::http_data_plane_binary_coexistence::health_liveness_still_serves_alongside_data_plane_in_single_binary", # crates/vigil-bin/tests/http_data_plane_binary_coexistence.rs
+  "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary", # crates/vigil-bin/tests/mqtt_composed_product.rs
+  "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary", # crates/vigil-bin/tests/mqtt_composed_product.rs
+]
+[[contract]]
+id = "deterministic-harness-readiness-and-prerequisites"
+lineage = "Test-estate harness safety: held ports, bounded readiness, and mandatory prerequisites."
+sources = [
+  "crates/vigil/tests/free_port_call_sites.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::free_port_call_sites::free_port_call_sites_match_the_frozen_set", # crates/vigil/tests/free_port_call_sites.rs
+  "vigil::free_port_call_sites::scan_detects_a_planted_call_site_in_a_real_file", # crates/vigil/tests/free_port_call_sites.rs
+]
+[[contract]]
+id = "operator-adjustable-settings-secret-handling-and-declare-boundary"
+lineage = "Accepted operator-settings pin/unpin, secret-disclosure, and environment/CLI-surface inventory contract."
+sources = [
+  "crates/vigil/src/secret.rs",
+  "crates/vigil/src/settings.rs",
+  "crates/vigil/tests/automation_handle_capability_scan.rs",
+  "crates/vigil/tests/cli_secret_flag_surface.rs",
+  "crates/vigil/tests/environment_read_surface.rs",
+  "crates/vigil/tests/settings_registry_declare_boundary.rs",
+  "crates/vigil/tests/settings_surface_coverage.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::automation_handle_capability_scan::automation_handle_never_gains_a_manual_pin_or_unpin_method", # crates/vigil/tests/automation_handle_capability_scan.rs
+  "vigil::automation_handle_capability_scan::detector_catches_a_direct_alias_declared_inside_a_nested_module_and_referenced_by_its_module_path", # crates/vigil/tests/automation_handle_capability_scan.rs
+  "vigil::automation_handle_capability_scan::detector_catches_a_direct_alias_whose_right_hand_side_is_path_qualified", # crates/vigil/tests/automation_handle_capability_scan.rs
+  "vigil::automation_handle_capability_scan::detector_catches_the_reviewed_type_alias_bypass_that_the_target_type_only_check_missed", # crates/vigil/tests/automation_handle_capability_scan.rs
+  "vigil::automation_handle_capability_scan::detector_does_not_treat_a_substring_lookalike_name_as_the_type_or_an_alias_of_it", # crates/vigil/tests/automation_handle_capability_scan.rs
+  "vigil::automation_handle_capability_scan::detector_flags_a_planted_pin_method_on_automation_handle_and_leaves_the_owner_handle_alone", # crates/vigil/tests/automation_handle_capability_scan.rs
+  "vigil::cli_secret_flag_surface::baseline_parses_into_the_expected_count", # crates/vigil/tests/cli_secret_flag_surface.rs
+  "vigil::cli_secret_flag_surface::detector_flags_a_planted_secret_flag_and_leaves_allowed_shapes_alone", # crates/vigil/tests/cli_secret_flag_surface.rs
+  "vigil::cli_secret_flag_surface::no_new_secret_cli_flags_and_baseline_only_shrinks", # crates/vigil/tests/cli_secret_flag_surface.rs
+  "vigil::environment_read_surface::baseline_parses_into_the_expected_count", # crates/vigil/tests/environment_read_surface.rs
+  "vigil::environment_read_surface::detector_flags_a_planted_environment_read_and_leaves_allowed_shapes_alone", # crates/vigil/tests/environment_read_surface.rs
+  "vigil::environment_read_surface::detector_flags_a_planted_wrapper_call_with_a_literal_key", # crates/vigil/tests/environment_read_surface.rs
+  "vigil::environment_read_surface::detector_numbers_repeated_reads_of_the_same_variable_as_distinct_sites", # crates/vigil/tests/environment_read_surface.rs
+  "vigil::environment_read_surface::detector_resolves_plain_unaliased_use_imports", # crates/vigil/tests/environment_read_surface.rs
+  "vigil::environment_read_surface::no_new_environment_read_sites_and_baseline_only_shrinks", # crates/vigil/tests/environment_read_surface.rs
+  "vigil::secret::tests::debug_output_never_contains_the_secret_and_always_shows_the_redaction", # crates/vigil/src/secret.rs
+  "vigil::secret::tests::deserializes_from_a_plain_json_string", # crates/vigil/src/secret.rs
+  "vigil::secret::tests::equality_and_clone_compare_and_preserve_the_underlying_value", # crates/vigil/src/secret.rs
+  "vigil::secret::tests::expose_secret_round_trips_the_original_value", # crates/vigil/src/secret.rs
+  "vigil::secret::tests::is_empty_reports_without_exposing_the_value", # crates/vigil/src/secret.rs
+  "vigil::settings::tests::automatic_write_against_a_manual_pin_is_withheld_not_applied", # crates/vigil/src/settings.rs
+  "vigil::settings::tests::coverage_check_reports_a_setting_missing_from_the_addon_options", # crates/vigil/src/settings.rs
+  "vigil::settings::tests::coverage_check_reports_a_setting_missing_from_the_config_surface", # crates/vigil/src/settings.rs
+  "vigil::settings::tests::coverage_check_reports_a_setting_missing_from_the_documentation", # crates/vigil/src/settings.rs
+  "vigil::settings::tests::coverage_check_reports_nothing_for_a_fully_covered_setting", # crates/vigil/src/settings.rs
+  "vigil::settings::tests::manual_and_automatic_writes_share_the_same_validation", # crates/vigil/src/settings.rs
+  "vigil::settings::tests::returning_a_pin_to_automatic_lets_the_next_automatic_write_apply", # crates/vigil/src/settings.rs
+  "vigil::settings_registry_declare_boundary::declare_is_called_only_from_the_single_declare_settings_function", # crates/vigil/tests/settings_registry_declare_boundary.rs
+  "vigil::settings_registry_declare_boundary::detector_flags_a_planted_declare_call_outside_declare_settings", # crates/vigil/tests/settings_registry_declare_boundary.rs
+  "vigil::settings_registry_declare_boundary::detector_flags_a_planted_qualified_path_declare_call_bypassing_the_ufcs_qualifier_read", # crates/vigil/tests/settings_registry_declare_boundary.rs
+  "vigil::settings_registry_declare_boundary::detector_flags_a_planted_turbofish_declare_call_bypassing_the_bare_paren_read", # crates/vigil/tests/settings_registry_declare_boundary.rs
+  "vigil::settings_registry_declare_boundary::detector_flags_a_planted_ufcs_declare_call_bypassing_the_dot_syntax_check", # crates/vigil/tests/settings_registry_declare_boundary.rs
+  "vigil::settings_registry_declare_boundary::settings_rs_own_registry_tests_are_the_reviewed_exception_not_the_whole_file", # crates/vigil/tests/settings_registry_declare_boundary.rs
+  "vigil::settings_surface_coverage::declared_settings_are_covered_by_every_promised_surface", # crates/vigil/tests/settings_surface_coverage.rs
+  "vigil::settings_surface_coverage::observation_path_is_not_fooled_by_an_incidental_mention_outside_the_bound_paragraph", # crates/vigil/tests/settings_surface_coverage.rs
+  "vigil::settings_surface_coverage::observation_path_notices_a_config_key_the_real_dispatch_does_not_recognize", # crates/vigil/tests/settings_surface_coverage.rs
+  "vigil::settings_surface_coverage::observation_path_notices_the_pilot_setting_missing_from_the_addon_options_surface", # crates/vigil/tests/settings_surface_coverage.rs
+  "vigil::settings_surface_coverage::observation_path_notices_the_pilot_setting_missing_from_the_documentation_surface", # crates/vigil/tests/settings_surface_coverage.rs
+]
+[[contract]]
+id = "site-control-camera-enable-boundary-and-disabled-marker-safety"
+lineage = "Accepted SiteControl camera-enable/disable boundary contract: the disabled-marker path never escapes its directory and an unrecognized camera id is a no-op."
+sources = [
+  "crates/vigil/src/site_channel.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker", # crates/vigil/src/site_channel.rs
+  "vigil::site_channel::tests::unrecognized_camera_id_containing_a_traversal_segment_never_escapes_the_disabled_dir", # crates/vigil/src/site_channel.rs
+  "vigil::site_channel::tests::unrecognized_camera_id_is_a_no_op_and_never_touches_disk", # crates/vigil/src/site_channel.rs
 ]

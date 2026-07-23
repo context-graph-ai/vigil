@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "rename the \"enroll\" match arm in parse_command_topic's correction_type mapping so \"enroll\" no longer parses (ha_discovery.rs)",
+    "source_sha256": "sha256:f3b91c7ea9edcb15a6287f945d7916473807a9f834cafd891dc5687e4e4cbed9",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/enroll-wire-shape-parses/planted-fault.diff",
+    "diff_sha256": "sha256:f3b91c7ea9edcb15a6287f945d7916473807a9f834cafd891dc5687e4e4cbed9"
+  },
+  "removed": {
+    "test": "vigil::recognition_slice::enroll_wire_shape_parses_from_the_command_topic",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test recognition_slice enroll_wire_shape_parses_from_the_command_topic -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.56
+  },
+  "survivor": {
+    "test": "vigil-ha::recognition_wire_shapes::enroll_wire_shape_parses_from_the_command_topic",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-ha --test recognition_wire_shapes enroll_wire_shape_parses_from_the_command_topic -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 2.0
+  }
+}

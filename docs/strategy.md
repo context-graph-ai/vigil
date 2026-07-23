@@ -45,8 +45,10 @@ control plane is not part of Vigil OSS.
 MQTT discovery and control provide the entity and automation plane; the review data plane supplies
 events, evidence, `why`, and corrections to the richer Home Assistant review surface.
 <!-- vigil-claim: `vigil.docs-strategy.mqtt-discovery-and-control-provide-the-entity` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::operator_action_command_effects_action` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary` -->
+<!-- enforced by: `vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker` -->
 <!-- enforced by: `vigil::http_data_plane::event_list_serves_full_review_row_fieldset` -->
 <!-- enforced by: `vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam` -->
 
@@ -87,7 +89,7 @@ MQTT and HTTP correction entry points converge on the local correction record. R
 daemon or losing the broker does not turn a recorded correction into client-local state.
 <!-- vigil-claim: `vigil.docs-strategy.mqtt-and-http-correction-entry-points-converge` -->
 <!-- enforced by: `vigil::ha_correction_seam::correction_survives_daemon_restart` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record` -->
 <!-- enforced by: `vigil::http_data_plane::http_correction_post_lands_through_record_correction_seam` -->
 
 ## How Vigil relates to existing products

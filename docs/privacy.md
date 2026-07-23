@@ -17,8 +17,8 @@ implemented.
 A landed detection references one local, durable, decodable clip and one local detector image.
 
 <!-- vigil-claim: `vigil.docs-privacy.detection-clips-detector-images-context-graph-memory` -->
-<!-- enforced by: `vigil::first_light_loop::detection_produces_observation_referencing_clip` -->
-<!-- enforced by: `vigil::first_light_loop::observation_never_references_undurable_clip` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detection_produces_observation_referencing_clip` -->
+<!-- enforced by: `vigil-bin::first_light_loop::observation_never_references_undurable_clip` -->
 
 Context Graph memory, camera-disabled markers, and runtime statistics are intended to stay below
 the configured data directory or store path. The mapped detection-evidence tests do not bind that
@@ -30,14 +30,14 @@ complete on-disk layout.
 Opening the local store keeps the text embedder disabled, so review does not fetch a model.
 
 <!-- vigil-claim: `vigil.docs-privacy.vigil-events-vigil-why-and-vigil-stats` -->
-<!-- enforced by: `vigil::first_light_loop::review_and_stats_surfaces_make_no_network_call` -->
-<!-- enforced by: `vigil::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch` -->
+<!-- enforced by: `vigil-bin::first_light_loop::review_and_stats_surfaces_make_no_network_call` -->
+<!-- enforced by: `vigil-bin::first_light_loop::store_opens_with_text_embedder_disabled_no_model_fetch` -->
 
 The first-light camera loop's network trace permits only the explicitly configured RTSP source; it
 does not contact a model host, telemetry collector, or other service on that path.
 
 <!-- vigil-claim: `vigil.docs-privacy.the-firstlight-camera-loops-network-trace-permits` -->
-<!-- enforced by: `vigil::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp` -->
+<!-- enforced by: `vigil-bin::first_light_loop::first_light_loop_makes_no_network_call_beyond_rtsp` -->
 
 ## Expected local-network traffic
 
@@ -58,8 +58,8 @@ MQTT is gated off when no broker is configured. A broker failure cannot erase a 
 was already durably recorded in the local store.
 
 <!-- vigil-claim: `vigil.docs-privacy.mqtt-is-gated-off-when-no-broker` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::broker_drop_does_not_affect_durable_cg_record` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::broker_drop_does_not_affect_durable_cg_record` -->
 
 Vigil does not currently ship a hosted control-plane client or default telemetry exporter. Do not
 turn that into an absolute "never communicates off box" claim: the operator-supplied endpoints
@@ -185,8 +185,8 @@ RTSP credentials embedded in a URL are stripped from the runtime session/log sur
 credentials authenticate without putting user information in the URL.
 
 <!-- vigil-claim: `vigil.docs-privacy.rtsp-credentials-embedded-in-a-url-are` -->
-<!-- enforced by: `vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface` -->
-<!-- enforced by: `vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo` -->
+<!-- enforced by: `vigil-bin::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface` -->
+<!-- enforced by: `vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo` -->
 
 The current binary still parses a password command-line flag. It is forbidden for release because
 process arguments can be visible to other software on the host. Add-on options, TOML, and an

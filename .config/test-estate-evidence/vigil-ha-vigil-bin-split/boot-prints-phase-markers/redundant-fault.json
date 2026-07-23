@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "suppress the boot_phase=store-open-done marker println in run_inner (runtime.rs)",
+    "source_sha256": "sha256:0649b3358f3b452318a0a0e44bc9aba680a0aa7bf38fc0c1863e36be74182317",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/boot-prints-phase-markers/planted-fault.diff",
+    "diff_sha256": "sha256:0649b3358f3b452318a0a0e44bc9aba680a0aa7bf38fc0c1863e36be74182317"
+  },
+  "removed": {
+    "test": "vigil::boot_readiness::boot_prints_phase_markers",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test boot_readiness boot_prints_phase_markers -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 93.07
+  },
+  "survivor": {
+    "test": "vigil-bin::boot_readiness::boot_prints_phase_markers",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features fabric --test boot_readiness boot_prints_phase_markers -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 120.36
+  }
+}

@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/ha_mqtt_tasks.rs b/crates/vigil/src/ha_mqtt_tasks.rs
+index b6475d9..24ea9ef 100644
+--- a/crates/vigil/src/ha_mqtt_tasks.rs
++++ b/crates/vigil/src/ha_mqtt_tasks.rs
+@@ -303,7 +303,7 @@ fn handle_production_control(
+             let state_service_id = cmd.service_id.as_deref().unwrap_or(service_id);
+             if let Some(flag) = camera_flags.get(&cmd.camera_id) {
+                 flag.store(false, Ordering::SeqCst);
+-                publish_enabled_state(client, state_service_id, &cmd.camera_id, false);
++                publish_enabled_state(client, state_service_id, &cmd.camera_id, true);
+             }
+         }
+         "enable" => {
+
+diff --git a/crates/vigil-ha/src/ha_mqtt_tasks.rs b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+index 5029989..6453667 100644
+--- a/crates/vigil-ha/src/ha_mqtt_tasks.rs
++++ b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+@@ -290,7 +290,7 @@ fn handle_production_control(
+         "disable" => {
+             let state_service_id = cmd.service_id.as_deref().unwrap_or(service_id);
+             if control.set_camera_enabled(&cmd.camera_id, false) {
+-                publish_enabled_state(client, state_service_id, &cmd.camera_id, false);
++                publish_enabled_state(client, state_service_id, &cmd.camera_id, true);
+             }
+         }
+         "enable" => {

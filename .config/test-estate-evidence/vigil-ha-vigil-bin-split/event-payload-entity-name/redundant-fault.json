@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "drop the matched entity_name field in map_detection_to_event_payload, always emitting None (ha_discovery.rs)",
+    "source_sha256": "sha256:18d53c813a1b62bc94d86b1f5e0b94a27095857c8855f5989270baa22bd08614",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/event-payload-entity-name/planted-fault.diff",
+    "diff_sha256": "sha256:18d53c813a1b62bc94d86b1f5e0b94a27095857c8855f5989270baa22bd08614"
+  },
+  "removed": {
+    "test": "vigil::recognition_slice::event_payload_carries_the_entity_name_when_matched",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test recognition_slice event_payload_carries_the_entity_name_when_matched -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.18
+  },
+  "survivor": {
+    "test": "vigil-ha::recognition_wire_shapes::event_payload_carries_the_entity_name_when_matched",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-ha --test recognition_wire_shapes event_payload_carries_the_entity_name_when_matched -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 1.98
+  }
+}

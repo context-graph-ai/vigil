@@ -23,9 +23,9 @@ source survive a store reopen, and restarting with the same configuration does n
 camera row.
 
 <!-- vigil-claim: `vigil.docs-cameras.on-startup-vigil-records-the-configured-camera` -->
-<!-- enforced by: `vigil::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity` -->
-<!-- enforced by: `vigil::first_light_loop::camera_survives_store_reopen` -->
-<!-- enforced by: `vigil::first_light_loop::reregistration_is_idempotent_no_duplicate` -->
+<!-- enforced by: `vigil-bin::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity` -->
+<!-- enforced by: `vigil-bin::first_light_loop::camera_survives_store_reopen` -->
+<!-- enforced by: `vigil-bin::first_light_loop::reregistration_is_idempotent_no_duplicate` -->
 
 The current implementation identifies an existing camera by display name. That is wrong for a
 multi-node installation because a same-named camera can rebind the earlier entity. Before OSS
@@ -76,8 +76,8 @@ password = "replace-me"
 ```
 
 <!-- vigil-claim: `vigil.docs-cameras.toml-cameras-name-side-gate-rtspurl-rtspcameralocal554stream` -->
-<!-- enforced by: `vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo` -->
-<!-- enforced by: `vigil::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface` -->
+<!-- enforced by: `vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo` -->
+<!-- enforced by: `vigil-bin::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface` -->
 <!-- enforced by: `vigil::media_pipeline::tests::explicit_rtsp_credentials_override_url_userinfo` -->
 <!-- enforced by: `vigil::media_pipeline::tests::rtsp_url_redaction_removes_userinfo_from_parse_errors` -->
 
@@ -114,7 +114,7 @@ Repeated Home Assistant discovery generation derives stable entity identifiers a
 configured camera names.
 
 <!-- vigil-claim: `vigil.docs-cameras.yaml-cameras-name-frontgate-rtspurl-rtspfrontgatelocal554stream-name` -->
-<!-- enforced by: `vigil::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::entity_ids_and_topics_stable_across_regeneration` -->
 
 Camera ordering is not a user contract. Use names to identify cameras in Home Assistant and review
 output.
@@ -126,7 +126,7 @@ With MQTT/Home Assistant integration active, each camera has an enabled switch. 
 commands update the live processing flag for only the named camera and publish the reflected state.
 
 <!-- vigil-claim: `vigil.docs-cameras.with-mqtthome-assistant-integration-active-each-camera` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
 
 The current runtime also writes a local disabled marker and reads it on startup, but no end-to-end
 test proves the restart behavior yet. That persistence claim remains untagged until the test exists.
@@ -143,12 +143,12 @@ A transient RTSP drop changes health, retries with shutdown-aware backoff, and c
 losing the camera entity. A successful reconnect restores ingest health.
 
 <!-- vigil-claim: `vigil.docs-cameras.a-transient-rtsp-drop-changes-health-retries` -->
-<!-- enforced by: `vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera` -->
+<!-- enforced by: `vigil-bin::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera` -->
 
 If a source is empty or undecodable, Vigil must not fabricate a detection event.
 
 <!-- vigil-claim: `vigil.docs-cameras.if-a-source-is-empty-or-undecodable` -->
-<!-- enforced by: `vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event` -->
+<!-- enforced by: `vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event` -->
 
 Pre-OSS work adds an explicit Home Assistant coverage signal so “nothing happened” can be
 distinguished from “Vigil could not analyze the stream.”
@@ -178,7 +178,7 @@ Detection event payloads currently carry no `zone` field, and the add-on accepts
 
 <!-- vigil-claim: `vigil.docs-cameras.zones-and-masks-are-not-yet-available` -->
 <!-- enforced by: `vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema` -->
-<!-- enforced by: `vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 
 Polygon-zone matching, privacy and motion masks, precedence, and per-zone rules are future release
 work rather than current operator surfaces.

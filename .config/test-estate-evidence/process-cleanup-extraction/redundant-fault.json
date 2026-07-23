@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "add an unreachable nested `cargo build --release` invocation to tests/acceptance/one_camera_acceptance.rs, a file untouched by the process-cleanup-scan extraction and byte-identical at commit 0b46327 and in the working tree",
+    "source_sha256": "sha256:4c0383889ee530921525ebd980e767a4affcb086b7d2d05cc143c2e85bcea230",
+    "diff": ".config/test-estate-evidence/process-cleanup-extraction/planted-fault.diff",
+    "diff_sha256": "sha256:0f5ae586b434277e384cb2d9e87cc656427dfcdebc03cbb25792646950c79b41"
+  },
+  "removed": {
+    "test": "vigil-acceptance::acceptance::common::tests::process_cleanup_has_no_wildcard_or_shell_kill_paths",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-acceptance --features acceptance --test acceptance common::tests::process_cleanup_has_no_wildcard_or_shell_kill_paths -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.13
+  },
+  "survivor": {
+    "test": "vigil::process_cleanup_scan::no_unsafe_cleanup_or_nested_artifact_builds_in_test_sources",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test process_cleanup_scan no_unsafe_cleanup_or_nested_artifact_builds_in_test_sources -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.13
+  }
+}

@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/runtime.rs b/crates/vigil/src/runtime.rs
+index 4fd50cc..95b907c 100644
+--- a/crates/vigil/src/runtime.rs
++++ b/crates/vigil/src/runtime.rs
+@@ -157,7 +157,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
+         let bringup_accel = accel.clone();
+         let bringup_slot = fabric_slot.clone();
+         let bringup_candidate = worker_detector_candidate.clone();
+-        thread::spawn(move || {
++        (move || {
+             let started = Instant::now();
+             match fabric_bring_up(
+                 &bringup_config,
+
+diff --git a/crates/vigil/src/runtime.rs b/crates/vigil/src/runtime.rs
+index 9b4de3d..c0ef865 100644
+--- a/crates/vigil/src/runtime.rs
++++ b/crates/vigil/src/runtime.rs
+@@ -163,7 +163,7 @@ fn run_inner(
+         let bringup_accel = accel.clone();
+         let bringup_slot = fabric_slot.clone();
+         let bringup_candidate = worker_detector_candidate.clone();
+-        thread::spawn(move || {
++        (move || {
+             let started = Instant::now();
+             match fabric_bring_up(
+                 &bringup_config,

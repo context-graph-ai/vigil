@@ -1,0 +1,16 @@
+diff --git a/tests/acceptance/one_camera_acceptance.rs b/tests/acceptance/one_camera_acceptance.rs
+index e1089c5..cc8f4fa 100644
+--- a/tests/acceptance/one_camera_acceptance.rs
++++ b/tests/acceptance/one_camera_acceptance.rs
+@@ -21,6 +21,11 @@ use crate::common::{
+ 
+ const CAMERA_RTSP_URL: &str = "rtsp://127.0.0.1:8554/lower-gate";
+ 
++#[allow(dead_code)]
++fn test_estate_planted_fault_nested_cargo_build() {
++    let _ = Command::new(env!("CARGO")).args(["build", "--release"]).output();
++}
++
+ struct FixtureReadiness {
+     person_clip_present: bool,
+     empty_clip_present: bool,

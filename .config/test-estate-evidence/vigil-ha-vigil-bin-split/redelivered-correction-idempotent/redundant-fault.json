@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "break out of the dedup scan on its first iteration in record_correction_with_clock, disabling identical-correction dedup (correction.rs)",
+    "source_sha256": "sha256:6ca58f09c238ec38fe07da050913e4dfd2247a175e1eb9058a4db891a70b6c70",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/redelivered-correction-idempotent/planted-fault.diff",
+    "diff_sha256": "sha256:6ca58f09c238ec38fe07da050913e4dfd2247a175e1eb9058a4db891a70b6c70"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::redelivered_correction_command_is_idempotent",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker redelivered_correction_command_is_idempotent -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.3
+  },
+  "survivor": {
+    "test": "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test mqtt_composed_product correction_commands_via_mqtt_land_in_cg_through_the_composed_binary -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 7.03
+  }
+}

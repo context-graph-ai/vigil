@@ -137,7 +137,7 @@ information in the URL.
 
 <!-- vigil-claim: `vigil.docs-configuration.field-required-meaning-name-yes-display-label` -->
 <!-- enforced by: `vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url` -->
-<!-- enforced by: `vigil::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo` -->
+<!-- enforced by: `vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo` -->
 
 Legacy one-camera fields also exist: `camera_name`, `rtsp_url`, `live_rtsp_url`, `rtsp_username`,
 and `rtsp_password`. Prefer `[[cameras]]` for a new configuration.
@@ -167,14 +167,14 @@ options, and `/data/options.json`.
 <!-- vigil-claim: `vigil.docs-configuration.field-default-validation-and-behavior-detectormodelid-yoloxtinyburncpu` -->
 <!-- enforced by: `vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line` -->
 <!-- enforced by: `vigil::config::tests::review_port_cli_override_is_documented_and_loaded` -->
-<!-- enforced by: `vigil::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
 <!-- enforced by: `vigil::config_acceleration_intent::toml_config_can_disable_each_boolean_independently` -->
 <!-- enforced by: `vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan` -->
 <!-- enforced by: `vigil::config_acceleration_intent::acceleration_booleans_default_true_everywhere` -->
 <!-- enforced by: `vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback` -->
 <!-- enforced by: `vigil::decode_backend_contract::hardware_backend_failure_activates_software_fallback_with_visible_reason` -->
-<!-- enforced by: `vigil::first_light_loop::detector_config_recorded_as_decision` -->
-<!-- enforced by: `vigil::first_light_loop::detector_loads_and_runs_over_real_frames` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_config_recorded_as_decision` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames` -->
 
 The Home Assistant schema currently exposes `detector_model_path` and
 `detector_stationary_interval_secs`, but not confidence threshold or sampled-frame count. Adding
@@ -231,7 +231,7 @@ Vigil reads the Home Assistant MQTT service connection. With no broker configura
 not start.
 
 <!-- vigil-claim: `vigil.docs-configuration.in-the-addon-the-broker-is-optional` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured` -->
 
 ## Acceleration probe deadlines
 

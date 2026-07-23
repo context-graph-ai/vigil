@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "retain every observation instead of only observation_type == \"detection\" in handle_events_read (crates/vigil/src/live_read.rs)",
+    "source_sha256": "sha256:3f012e9aa05aadc3b1381b13eab851d12ae01dd0aa0da36abe6e4a15fd296528",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/events-exclude-corrections/planted-fault.diff",
+    "diff_sha256": "sha256:3f012e9aa05aadc3b1381b13eab851d12ae01dd0aa0da36abe6e4a15fd296528"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::detection_only_events_excludes_corrections",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker detection_only_events_excludes_corrections -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.31
+  },
+  "survivor": {
+    "test": "vigil-bin::correction_core_paths::detection_only_events_excludes_corrections",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test correction_core_paths detection_only_events_excludes_corrections -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.21
+  }
+}

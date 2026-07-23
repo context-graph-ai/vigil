@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "leave worker_detector_slot unset even when bootstrap_worker_detector successfully loads a detector (fabric.rs)",
+    "source_sha256": "sha256:bb5917b4f8476c587cd9bfd60f67cb9ad6199b9cc6d8044334df77c2e19d1413",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/cameraless-worker-slot-populates/planted-fault.diff",
+    "diff_sha256": "sha256:bb5917b4f8476c587cd9bfd60f67cb9ad6199b9cc6d8044334df77c2e19d1413"
+  },
+  "removed": {
+    "test": "vigil::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test cameraless_worker detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 16.21
+  },
+  "survivor": {
+    "test": "vigil-bin::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features fabric --test cameraless_worker detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 15.89
+  }
+}

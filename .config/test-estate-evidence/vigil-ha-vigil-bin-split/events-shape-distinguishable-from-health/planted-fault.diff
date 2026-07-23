@@ -1,0 +1,31 @@
+diff --git a/crates/vigil/src/http_data_plane.rs b/crates/vigil/src/http_data_plane.rs
+index 7eed1ba..0931720 100644
+--- a/crates/vigil/src/http_data_plane.rs
++++ b/crates/vigil/src/http_data_plane.rs
+@@ -244,8 +244,8 @@ fn handle_request(mut request: Request, store: Arc<Store>, clock: &PersistedCloc
+ fn events_response(store: &Store, raw_url: &str) -> Response<Box<dyn Read + Send>> {
+     match review_events(store, event_limit(raw_url)) {
+         Ok(events) => {
+-            let rows = events.rows.iter().map(event_row_json).collect::<Vec<_>>();
+-            json_response(200, &Value::Array(rows))
++            let _rows = events.rows.iter().map(event_row_json).collect::<Vec<_>>();
++            json_response(200, &serde_json::json!({"status": "test-estate-planted-fault"}))
+         }
+         Err(ReviewError::NotFound(_)) => json_error(404, "not_found"),
+         Err(ReviewError::StoreError(_)) => json_error(500, "store_error"),
+
+diff --git a/crates/vigil/src/http_data_plane.rs b/crates/vigil/src/http_data_plane.rs
+index 7eed1ba..0931720 100644
+--- a/crates/vigil/src/http_data_plane.rs
++++ b/crates/vigil/src/http_data_plane.rs
+@@ -244,8 +244,8 @@ fn handle_request(mut request: Request, store: Arc<Store>, clock: &PersistedCloc
+ fn events_response(store: &Store, raw_url: &str) -> Response<Box<dyn Read + Send>> {
+     match review_events(store, event_limit(raw_url)) {
+         Ok(events) => {
+-            let rows = events.rows.iter().map(event_row_json).collect::<Vec<_>>();
+-            json_response(200, &Value::Array(rows))
++            let _rows = events.rows.iter().map(event_row_json).collect::<Vec<_>>();
++            json_response(200, &serde_json::json!({"status": "test-estate-planted-fault"}))
+         }
+         Err(ReviewError::NotFound(_)) => json_error(404, "not_found"),
+         Err(ReviewError::StoreError(_)) => json_error(500, "store_error"),

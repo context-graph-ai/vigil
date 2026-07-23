@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "make events_response return a health-shaped {\"status\":...} object instead of the event row array (http_data_plane.rs)",
+    "source_sha256": "sha256:5a54b184e133c5965f375f602a7cd7a147d1576806e52e5f589d30fd973ef78b",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/events-shape-distinguishable-from-health/planted-fault.diff",
+    "diff_sha256": "sha256:5a54b184e133c5965f375f602a7cd7a147d1576806e52e5f589d30fd973ef78b"
+  },
+  "removed": {
+    "test": "vigil::http_data_plane::health_liveness_still_serves_alongside_data_plane_in_single_binary",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test http_data_plane health_liveness_still_serves_alongside_data_plane_in_single_binary -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 5.1
+  },
+  "survivor": {
+    "test": "vigil-bin::http_data_plane_binary_coexistence::health_liveness_still_serves_alongside_data_plane_in_single_binary",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --test http_data_plane_binary_coexistence health_liveness_still_serves_alongside_data_plane_in_single_binary -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 6.56
+  }
+}

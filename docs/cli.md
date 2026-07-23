@@ -58,7 +58,7 @@ The confidence threshold must be between `0.0` and `1.0`; sampled frames must be
 
 <!-- vigil-claim: `vigil.docs-cli.the-confidence-threshold-must-be-between-00` -->
 <!-- enforced by: `vigil::config::tests::review_port_cli_override_is_documented_and_loaded` -->
-<!-- enforced by: `vigil::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
 
 ## Events
 
@@ -80,7 +80,7 @@ With its local store selected explicitly, `vigil events` reads landed events and
 observed first.
 
 <!-- vigil-claim: `vigil.docs-cli.varlibvigil-must-match-the-running-daemons-datadir` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_events_lists_recent_events_newest_first` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first` -->
 
 ## Why
 
@@ -93,8 +93,8 @@ VIGIL_DATA_DIR=/var/lib/vigil vigil why --latest
 Decision, baseline Intention, and evidence. An unknown UUID returns a clean not-found error.
 
 <!-- vigil-claim: `vigil.docs-cli.walks-a-detection-through-camera-site-detector` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_latest_walks_the_newest_event` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_latest_walks_the_newest_event` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly` -->
 
 Omitting the `why` argument currently behaves as `--latest`, while malformed detection IDs are
 intended to return an error. The mapped tests do not exercise either CLI form directly.
@@ -110,7 +110,7 @@ VIGIL_DATA_DIR=/var/lib/vigil vigil stats
 `vigil stats` prints the runtime's local persisted snapshot of pipeline counters and health.
 
 <!-- vigil-claim: `vigil.docs-cli.prints-the-runtimes-local-persisted-snapshot-of` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_stats_reports_live_pipeline_counters` -->
 
 If a fabric is configured, shared fabric status and join instructions are intended to appear on this
 surface as well; the local-counter witness does not exercise a fabric-configured CLI invocation.

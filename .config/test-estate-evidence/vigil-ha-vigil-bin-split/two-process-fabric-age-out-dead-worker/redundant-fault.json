@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "force remote_detector_capabilities to always return an empty Vec regardless of advertised capability rows (fabric.rs)",
+    "source_sha256": "sha256:6793c6f705657aa8c89bfef6d6317deef75c3fe4c5dca4c632e28683bd6ee2b4",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/two-process-fabric-age-out-dead-worker/planted-fault.diff",
+    "diff_sha256": "sha256:6793c6f705657aa8c89bfef6d6317deef75c3fe4c5dca4c632e28683bd6ee2b4"
+  },
+  "removed": {
+    "test": "vigil::two_process_fabric::two_real_processes_age_out_a_dead_worker_from_remote_detectors",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test two_process_fabric two_real_processes_age_out_a_dead_worker_from_remote_detectors -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 45.71
+  },
+  "survivor": {
+    "test": "vigil-bin::two_process_fabric::two_real_processes_age_out_a_dead_worker_from_remote_detectors",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features fabric --test two_process_fabric two_real_processes_age_out_a_dead_worker_from_remote_detectors -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 45.71
+  }
+}

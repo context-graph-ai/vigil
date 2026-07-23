@@ -12,7 +12,7 @@ Motion-positive segments go to the detector. Motion-free segments are normally s
 optional periodic look-anyway scan for stationary people or objects.
 
 <!-- vigil-claim: `vigil.docs-detection.motionpositive-segments-go-to-the-detector-motionfree` -->
-<!-- enforced by: `vigil::first_light_loop::motion_gate_suppresses_non_motion_frames` -->
+<!-- enforced by: `vigil-bin::first_light_loop::motion_gate_suppresses_non_motion_frames` -->
 <!-- enforced by: `vigil::runtime::tests::detector_gate_still_enqueues_motion_positive_segments` -->
 <!-- enforced by: `vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan` -->
 
@@ -35,14 +35,14 @@ The current baseline model is YOLOX Tiny executed by Burn. The live acceptance t
 checkpoint, runs it over decoded frames, and compares the detector path with an independent oracle.
 
 <!-- vigil-claim: `vigil.docs-detection.the-current-baseline-model-is-yolox-tiny` -->
-<!-- enforced by: `vigil::first_light_loop::detector_loads_and_runs_over_real_frames` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames` -->
 
 `detector_confidence_threshold` defaults to `0.5`. A result below the threshold is not emitted as a
 detection. The value must be finite and between `0.0` and `1.0`.
 
 <!-- vigil-claim: `vigil.docs-detection.detectorconfidencethreshold-defaults-to-05-a-result-below` -->
 <!-- enforced by: `vigil::config::tests::review_port_cli_override_is_documented_and_loaded` -->
-<!-- enforced by: `vigil::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
 
 `detector_sample_frames` defaults to five frames per segment and accepts values from 1 through 64.
 It is available in TOML, the environment, and the standalone command line, but it is not yet an
@@ -136,7 +136,7 @@ HTTP event rows carry no `zone` field.
 
 <!-- vigil-claim: `vigil.docs-detection.zones-and-masks-are-not-yet-available` -->
 <!-- enforced by: `vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema` -->
-<!-- enforced by: `vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 <!-- enforced by: `vigil::http_data_plane::event_list_serves_full_review_row_fieldset` -->
 
 Zone matching and polygon masks are future runtime work, so automations must not depend on a zone
@@ -176,8 +176,8 @@ An ingest-failed health state answers non-success. A disk-full clip failure prev
 referencing evidence that was never made durable.
 
 <!-- vigil-claim: `vigil.docs-detection.a-detector-or-ingest-failure-changes-health` -->
-<!-- enforced by: `vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence` -->
-<!-- enforced by: `vigil::first_light_loop::observation_never_references_undurable_clip` -->
+<!-- enforced by: `vigil-bin::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence` -->
+<!-- enforced by: `vigil-bin::first_light_loop::observation_never_references_undurable_clip` -->
 <!-- enforced by: `vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx` -->
 
 A separate detector-dead health transition is intended to keep a runtime from appearing ready with

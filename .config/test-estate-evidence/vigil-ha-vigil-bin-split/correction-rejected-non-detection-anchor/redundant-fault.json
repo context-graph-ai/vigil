@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "disable the observation_type != \"detection\" anchor-type guard in record_correction_with_clock (crates/vigil/src/correction.rs)",
+    "source_sha256": "sha256:35ca8c5fef045e27dd439a7e81629a9f0396fe00b0c5ee688957c3464a7bdc64",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/correction-rejected-non-detection-anchor/planted-fault.diff",
+    "diff_sha256": "sha256:35ca8c5fef045e27dd439a7e81629a9f0396fe00b0c5ee688957c3464a7bdc64"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::correction_rejected_for_non_detection_anchor",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker correction_rejected_for_non_detection_anchor -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.53
+  },
+  "survivor": {
+    "test": "vigil-bin::correction_core_paths::correction_rejected_for_non_detection_anchor",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test correction_core_paths correction_rejected_for_non_detection_anchor -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.59
+  }
+}

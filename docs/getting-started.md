@@ -118,7 +118,7 @@ The camera enable switch is stateful: enable/disable commands change the live ca
 reflected Home Assistant state.
 
 <!-- vigil-claim: `vigil.docs-getting-started.the-camera-enable-switch-is-stateful-enabledisable` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
 
 The runtime writes a disabled marker and reads it at startup, but there is no end-to-end restart
 test for that behavior yet; it is therefore not tagged as an enforced documentation claim.
@@ -137,10 +137,10 @@ frame index. If MQTT is configured, the event metadata is also published to Home
 latest detector image can be requested through the snapshot button.
 
 <!-- vigil-claim: `vigil.docs-getting-started.when-a-motionpositive-segment-contains-a-detection` -->
-<!-- enforced by: `vigil::first_light_loop::detection_produces_observation_referencing_clip` -->
-<!-- enforced by: `vigil::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::operator_action_command_effects_action` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detection_produces_observation_referencing_clip` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary` -->
 
 The current detector path is not the final release behavior for busy scenes: it does not yet
 guarantee one event for every above-threshold subject in a segment. Multi-detection, indexed
@@ -171,9 +171,9 @@ prints local pipeline and acceleration receipts. These commands query the runnin
 socket when possible and fall back to a direct local read when the store is not owned by the daemon.
 
 <!-- vigil-claim: `vigil.docs-getting-started.vigil-events-lists-recent-detections-vigil-why` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_events_lists_recent_events_newest_first` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_stats_reports_live_pipeline_counters` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_stats_reports_live_pipeline_counters` -->
 
 Commands from the old documentation outline such as `vigil status`, `vigil config check`,
 `vigil scan onvif`, `vigil state-at`, and `vigil support-bundle` do not exist and are not valid

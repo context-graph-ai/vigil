@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "publish the retained enabled-state topic with the opposite boolean of the one actually applied on a disable command (ha_mqtt_tasks.rs)",
+    "source_sha256": "sha256:6c5727bf5b9d44a678544ce739e5cd58bfcc307899f21b003e5ed4819f33ae00",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/camera-enable-switch-state/planted-fault.diff",
+    "diff_sha256": "sha256:6c5727bf5b9d44a678544ce739e5cd58bfcc307899f21b003e5ed4819f33ae00"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test ha_mqtt_broker camera_enabled_switch_state_is_retained_and_updates_on_control_commands -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 7.47
+  },
+  "survivor": {
+    "test": "vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-ha --test ha_mqtt_broker camera_enabled_switch_state_is_retained_and_updates_on_control_commands -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 8.86
+  }
+}

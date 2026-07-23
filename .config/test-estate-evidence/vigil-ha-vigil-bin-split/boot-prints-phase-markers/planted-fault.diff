@@ -1,0 +1,33 @@
+diff --git a/crates/vigil/src/runtime.rs b/crates/vigil/src/runtime.rs
+index 4fd50cc..12db4d3 100644
+--- a/crates/vigil/src/runtime.rs
++++ b/crates/vigil/src/runtime.rs
+@@ -198,10 +198,7 @@ fn run_inner(args: Vec<OsString>) -> Result<(), String> {
+     let store_open_started = Instant::now();
+     let opened = match store::open_with_recognition(&config.store_path, &config.recognition) {
+         Ok((store, embedder)) => {
+-            println!(
+-                "boot_phase=store-open-done elapsed_ms={}",
+-                store_open_started.elapsed().as_millis()
+-            );
++            // test-estate planted fault: marker suppressed
+             if embedder.is_some() {
+                 println!("{}", recognition_enabled_startup_line(&config.recognition));
+             }
+
+diff --git a/crates/vigil/src/runtime.rs b/crates/vigil/src/runtime.rs
+index 9b4de3d..7985023 100644
+--- a/crates/vigil/src/runtime.rs
++++ b/crates/vigil/src/runtime.rs
+@@ -202,10 +202,7 @@ fn run_inner(
+     let store_open_started = Instant::now();
+     let opened = match store::open_with_recognition(&config.store_path, &config.recognition) {
+         Ok((store, embedder)) => {
+-            println!(
+-                "boot_phase=store-open-done elapsed_ms={}",
+-                store_open_started.elapsed().as_millis()
+-            );
++            // test-estate planted fault: marker suppressed
+             if embedder.is_some() {
+                 println!("{}", recognition_enabled_startup_line(&config.recognition));
+             }

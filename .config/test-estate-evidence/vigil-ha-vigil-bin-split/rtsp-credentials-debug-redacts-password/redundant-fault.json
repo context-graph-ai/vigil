@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "expose the real password in RtspCredentials's Debug output instead of the fixed redaction (the redaction mechanism moved from RtspCredentials's own hand-written Debug impl at the pre-split-branch base commit to Secret's Debug impl at the current commit, so the fault is planted at each mechanism's own location)",
+    "source_sha256": "sha256:2e1e0e8621c9699b5774917f5aa2a7bdf52d5ad59e37f956b01d8d922273683e",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/rtsp-credentials-debug-redacts-password/planted-fault.diff",
+    "diff_sha256": "sha256:2e1e0e8621c9699b5774917f5aa2a7bdf52d5ad59e37f956b01d8d922273683e"
+  },
+  "removed": {
+    "test": "vigil::media_pipeline::tests::rtsp_credentials_debug_redacts_password",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib media_pipeline::tests::rtsp_credentials_debug_redacts_password -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 56.4
+  },
+  "survivor": {
+    "test": "vigil::media_pipeline::tests::rtsp_credentials_debug_redacts_password_and_keeps_username_visible",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib media_pipeline::tests::rtsp_credentials_debug_redacts_password_and_keeps_username_visible -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 53.13
+  }
+}

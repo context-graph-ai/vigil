@@ -1,0 +1,35 @@
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index b09b6bb..3dfa1de 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -1347,10 +1347,8 @@ pub(crate) fn fabric_bring_up(
+         thread::spawn(move || {
+             match crate::runtime::bootstrap_worker_detector(&boot_config, &boot_accel, &boot_stats)
+             {
+-                Some((detector, backend_tag)) => {
+-                    let _ = boot_bundle
+-                        .worker_detector_slot
+-                        .set((detector, backend_tag));
++                Some((_detector, _backend_tag)) => {
++                    // test-estate planted fault: slot intentionally left unset
+                 }
+                 None => {
+                     // No executable capability: name the staging fix and do
+
+diff --git a/crates/vigil/src/fabric.rs b/crates/vigil/src/fabric.rs
+index 401f438..41eca55 100644
+--- a/crates/vigil/src/fabric.rs
++++ b/crates/vigil/src/fabric.rs
+@@ -1347,10 +1347,8 @@ pub(crate) fn fabric_bring_up(
+         thread::spawn(move || {
+             match crate::runtime::bootstrap_worker_detector(&boot_config, &boot_accel, &boot_stats)
+             {
+-                Some((detector, backend_tag)) => {
+-                    let _ = boot_bundle
+-                        .worker_detector_slot
+-                        .set((detector, backend_tag));
++                Some((_detector, _backend_tag)) => {
++                    // test-estate planted fault: slot intentionally left unset
+                 }
+                 None => {
+                     // No executable capability: name the staging fix and do

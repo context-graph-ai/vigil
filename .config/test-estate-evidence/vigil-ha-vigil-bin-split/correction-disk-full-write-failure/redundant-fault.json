@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "skip the store.record_observation write in record_correction_with_clock (crates/vigil/src/correction.rs), returning Ok without persisting",
+    "source_sha256": "sha256:3c28a19aa39be666c9606a5e11aa75071bd58f2cf6591ded1ce202d3d6d6aa8f",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/correction-disk-full-write-failure/planted-fault.diff",
+    "diff_sha256": "sha256:3c28a19aa39be666c9606a5e11aa75071bd58f2cf6591ded1ce202d3d6d6aa8f"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::correction_and_event_under_disk_full_fail_loudly",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker correction_and_event_under_disk_full_fail_loudly -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.56
+  },
+  "survivor": {
+    "test": "vigil-bin::correction_core_paths::correction_and_event_under_disk_full_fail_loudly",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test correction_core_paths correction_and_event_under_disk_full_fail_loudly -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.63
+  }
+}

@@ -1,0 +1,33 @@
+diff --git a/crates/vigil/src/ha_mqtt_tasks.rs b/crates/vigil/src/ha_mqtt_tasks.rs
+index b6475d9..f9caf6d 100644
+--- a/crates/vigil/src/ha_mqtt_tasks.rs
++++ b/crates/vigil/src/ha_mqtt_tasks.rs
+@@ -476,10 +476,7 @@ pub fn spawn_production_subscriber(
+                             {
+                                 match command_tx.try_send(req) {
+                                     Ok(()) => {}
+-                                    Err(mpsc::TrySendError::Full(_)) => {
+-                                        let n = overflow_clone.fetch_add(1, Ordering::SeqCst) + 1;
+-                                        println!("mqtt_correction_command_overflow=true total={n}");
+-                                    }
++                                    Err(mpsc::TrySendError::Full(_)) => {}
+                                     Err(mpsc::TrySendError::Disconnected(_)) => break,
+                                 }
+                             }
+
+diff --git a/crates/vigil-ha/src/ha_mqtt_tasks.rs b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+index 5029989..d71f560 100644
+--- a/crates/vigil-ha/src/ha_mqtt_tasks.rs
++++ b/crates/vigil-ha/src/ha_mqtt_tasks.rs
+@@ -455,10 +455,7 @@ pub fn spawn_production_subscriber(
+                             {
+                                 match control.submit_correction(req) {
+                                     Ok(()) => {}
+-                                    Err(SubmitCorrectionError::QueueFull) => {
+-                                        let n = overflow_clone.fetch_add(1, Ordering::SeqCst) + 1;
+-                                        println!("mqtt_correction_command_overflow=true total={n}");
+-                                    }
++                                    Err(SubmitCorrectionError::QueueFull) => {}
+                                     Err(SubmitCorrectionError::Disconnected) => break,
+                                 }
+                             }

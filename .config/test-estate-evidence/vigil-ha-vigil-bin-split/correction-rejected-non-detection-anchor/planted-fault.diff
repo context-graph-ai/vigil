@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index a711d30..a7bb2ad 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -230,7 +230,7 @@ pub fn record_correction_with_clock(
+     // Reject non-detection anchors — a correction must be anchored to a detection, not to
+     // another correction or any other cg-internal observation type.  Anchoring a correction
+     // to itself or to a prior correction would break the provenance model.
+-    if detection_obs.observation_type != "detection" {
++    if false && detection_obs.observation_type != "detection" {
+         return Err(CorrectionError::NoAnchor(format!(
+             "anchor {} has type '{}', expected 'detection'",
+             request.detection_id, detection_obs.observation_type
+
+diff --git a/crates/vigil/src/correction.rs b/crates/vigil/src/correction.rs
+index d346910..0dc231b 100644
+--- a/crates/vigil/src/correction.rs
++++ b/crates/vigil/src/correction.rs
+@@ -230,7 +230,7 @@ pub fn record_correction_with_clock(
+     // Reject non-detection anchors — a correction must be anchored to a detection, not to
+     // another correction or any other cg-internal observation type.  Anchoring a correction
+     // to itself or to a prior correction would break the provenance model.
+-    if detection_obs.observation_type != "detection" {
++    if false && detection_obs.observation_type != "detection" {
+         return Err(CorrectionError::NoAnchor(format!(
+             "anchor {} has type '{}', expected 'detection'",
+             request.detection_id, detection_obs.observation_type

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "silently fold Some(\"dev\") back into the arm's own kind filter in edge_is_normal_or_build (crates/vigil/tests/dependency_direction_contract.rs at the current tip, 6782f04), forgetting the one documented DEV exception \u2014 an analogous mutation (folding Some(\"dev\") into edge_is_normal) was applied to the removed identity's commit, e4e00a6, since the function was renamed between the two commits and the same diff text cannot apply to both trees; removed-side source sha256:ce74a2396b532787ee545f39fa97d7f1ffc666252d80977dd17818004796ebed",
+    "source_sha256": "sha256:ddcc4af38960ef9cfc748a4f9db469bd06e0c7d24217d07e8eca126797cc9042",
+    "diff": ".config/test-estate-evidence/vigil-bin-dependency-guard-widen/build-catch-dev-ignore/planted-fault.diff",
+    "diff_sha256": "sha256:e4fcd1594da94e11760caf7d4f469d66877e20db8eaf9f33e97b6dccf3a4b37e"
+  },
+  "removed": {
+    "test": "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_normal_only_ignores_a_dev_only_edge_the_all_kinds_arm_would_catch",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test dependency_direction_contract graph_logic::direct_forbidden_names_normal_only_ignores_a_dev_only_edge_the_all_kinds_arm_would_catch -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.328042
+  },
+  "survivor": {
+    "test": "vigil::dependency_direction_contract::graph_logic::direct_forbidden_names_excluding_dev_catches_a_planted_build_edge_but_ignores_a_planted_dev_edge",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test dependency_direction_contract graph_logic::direct_forbidden_names_excluding_dev_catches_a_planted_build_edge_but_ignores_a_planted_dev_edge -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 0.326042
+  }
+}

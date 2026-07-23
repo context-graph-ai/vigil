@@ -1,0 +1,27 @@
+diff --git a/crates/vigil/src/live_read.rs b/crates/vigil/src/live_read.rs
+index 0abbc22..7bf3b38 100644
+--- a/crates/vigil/src/live_read.rs
++++ b/crates/vigil/src/live_read.rs
+@@ -400,7 +400,7 @@ pub(crate) fn handle_events_read(
+     };
+     // Only surface detection observations — corrections and other cg-internal bookkeeping
+     // (ingestion, digest, etc.) must never appear on the events display or events API surface.
+-    observations.retain(|o| o.observation_type == "detection");
++    observations.retain(|_o| true);
+     observations.sort_by(|left, right| {
+         right
+             .observed_at
+
+diff --git a/crates/vigil/src/live_read.rs b/crates/vigil/src/live_read.rs
+index 0abbc22..7bf3b38 100644
+--- a/crates/vigil/src/live_read.rs
++++ b/crates/vigil/src/live_read.rs
+@@ -400,7 +400,7 @@ pub(crate) fn handle_events_read(
+     };
+     // Only surface detection observations — corrections and other cg-internal bookkeeping
+     // (ingestion, digest, etc.) must never appear on the events display or events API surface.
+-    observations.retain(|o| o.observation_type == "detection");
++    observations.retain(|_o| true);
+     observations.sort_by(|left, right| {
+         right
+             .observed_at

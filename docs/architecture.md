@@ -5,7 +5,7 @@
 Vigil serves health and the review HTTP data plane from the same Rust process.
 
 <!-- vigil-claim: `vigil.docs-architecture.vigils-edge-runtime-is-one-rust-binary` -->
-<!-- enforced by: `vigil::http_data_plane::health_liveness_still_serves_alongside_data_plane_in_single_binary` -->
+<!-- enforced by: `vigil-bin::http_data_plane_binary_coexistence::health_liveness_still_serves_alongside_data_plane_in_single_binary` -->
 
 The edge application is packaged as one Rust binary and is intended to own configuration, camera
 ingest, media decode, motion gating, object detection, event evidence, Context Graph writes, the
@@ -38,8 +38,8 @@ Context Graph rather than stored as opaque video blobs in the graph row.
 Registered camera data and landed event history survive closing and reopening the local store.
 
 <!-- vigil-claim: `vigil.docs-architecture.the-default-data-directory-is-vigildata-for` -->
-<!-- enforced by: `vigil::first_light_loop::camera_survives_store_reopen` -->
-<!-- enforced by: `vigil::first_light_loop::event_history_survives_store_reopen` -->
+<!-- enforced by: `vigil-bin::first_light_loop::camera_survives_store_reopen` -->
+<!-- enforced by: `vigil-bin::first_light_loop::event_history_survives_store_reopen` -->
 
 ## Detection pipeline
 
@@ -54,8 +54,8 @@ Vigil preserves confidence produced by the detector instead of manufacturing it 
 threshold, and an empty or undecodable stream produces no event.
 
 <!-- vigil-claim: `vigil.docs-architecture.for-each-configured-rtsp-camera-vigil-captures` -->
-<!-- enforced by: `vigil::first_light_loop::confidence_is_detector_output_not_threshold_derived` -->
-<!-- enforced by: `vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event` -->
+<!-- enforced by: `vigil-bin::first_light_loop::confidence_is_detector_output_not_threshold_derived` -->
+<!-- enforced by: `vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event` -->
 
 The portable static artifact is intended to use software decode and CPU detection, while native
 feature builds may add GStreamer hardware decode and Burn/WGPU detection. The current runtime tests
@@ -75,13 +75,13 @@ CPU fallback keeps the watchdog alive when detection falls behind.
 Startup maintains four configuration nodes: Site Context, Camera Entity, baseline watch Intention, and detector-config Decision. A landed detection adds the Observation with video and detector-image evidence, producing the five-node explanation path users see through `vigil why`.
 
 <!-- vigil-claim: `vigil.docs-architecture.startup-maintains-four-configuration-nodes-site-context` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
 
 Evidence is durable before the Observation is written. If clip or image persistence fails, Vigil writes no event that points at missing evidence and removes orphaned material from the failed path.
 
 <!-- vigil-claim: `vigil.docs-architecture.evidence-is-durable-before-the-observation-is` -->
-<!-- enforced by: `vigil::first_light_loop::observation_never_references_undurable_clip` -->
-<!-- enforced by: `vigil::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence` -->
+<!-- enforced by: `vigil-bin::first_light_loop::observation_never_references_undurable_clip` -->
+<!-- enforced by: `vigil-bin::first_light_loop::disk_full_on_clip_write_surfaces_and_drops_no_evidence` -->
 
 ## Review paths
 
@@ -114,12 +114,12 @@ Home Assistant's Generic Camera flow, using `live_rtsp_url` when present and oth
 RTSP URL.
 
 <!-- vigil-claim: `vigil.docs-architecture.the-mqtt-connection-is-a-control-and` -->
-<!-- enforced by: `vigil::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::correction_command_on_broker_lands_in_cg` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::detection_publishes_event_to_real_broker` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::discovery_published_to_real_broker_on_start` -->
-<!-- enforced by: `vigil::ha_mqtt_broker::operator_action_command_effects_action` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::discovery_registers_device_and_per_camera_subdevice` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::camera_enabled_switch_state_is_retained_and_updates_on_control_commands` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary` -->
+<!-- enforced by: `vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker` -->
+<!-- enforced by: `vigil-ha::ha_mqtt_broker::discovery_published_to_real_broker_on_start` -->
+<!-- enforced by: `vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary` -->
 <!-- enforced by: `vigil::runtime::tests::generic_camera_url_falls_back_to_detection_rtsp_url_for_single_stream_cameras` -->
 <!-- enforced by: `vigil::runtime::tests::generic_camera_url_prefers_live_rtsp_url_over_detection_rtsp_url` -->
 <!-- enforced by: `vigil::supervisor::tests::build_generic_camera_flow_step_payload_nests_advanced_fields` -->

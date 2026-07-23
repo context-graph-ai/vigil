@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "replace the named \"no-model\" worker_serving_reason text with an unrelated fixed string that names neither staging fix (fabric.rs)",
+    "source_sha256": "sha256:23cd458b30c850648590fb46cc0c0118d24024221d50661f0283b27f25fb4b0c",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/cameraless-worker-no-model-reports/planted-fault.diff",
+    "diff_sha256": "sha256:23cd458b30c850648590fb46cc0c0118d24024221d50661f0283b27f25fb4b0c"
+  },
+  "removed": {
+    "test": "vigil::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features fabric --test cameraless_worker cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 11.13
+  },
+  "survivor": {
+    "test": "vigil-bin::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features fabric --test cameraless_worker cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 10.79
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "drop the overflow counter increment and the mqtt_correction_command_overflow=true log line on a full correction queue (ha_mqtt_tasks.rs)",
+    "source_sha256": "sha256:5949a9a3a27947f2bc943e5aca8ee1df7acb73a508903b9781ec79bcf583e3e0",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/correction-overflow-loud/planted-fault.diff",
+    "diff_sha256": "sha256:5949a9a3a27947f2bc943e5aca8ee1df7acb73a508903b9781ec79bcf583e3e0"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::correction_command_channel_overflow_is_loud",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test ha_mqtt_broker correction_command_channel_overflow_is_loud -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 6.85
+  },
+  "survivor": {
+    "test": "vigil-ha::ha_mqtt_broker::correction_command_channel_overflow_is_loud",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-ha --test ha_mqtt_broker correction_command_channel_overflow_is_loud -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 40.4
+  }
+}

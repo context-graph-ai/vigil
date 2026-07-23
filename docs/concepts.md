@@ -10,7 +10,7 @@ Runtime startup creates one local Context Graph context with the configured `sit
 named context survives a store reopen.
 
 <!-- vigil-claim: `vigil.docs-concepts.a-site-is-one-vigil-installation-and` -->
-<!-- enforced by: `vigil::first_light_loop::site_context_created_and_name_retained` -->
+<!-- enforced by: `vigil-bin::first_light_loop::site_context_created_and_name_retained` -->
 
 `site_name` defaults to `site-1`; the site is intended to group cameras, detector configuration,
 detections, evidence, corrections, and optional recognition references in one local store. The
@@ -25,7 +25,7 @@ provenance and clip naming. Configuration preserves separate detection and Home 
 RTSP URLs.
 
 <!-- vigil-claim: `vigil.docs-concepts.a-camera-is-a-named-rtsp-source` -->
-<!-- enforced by: `vigil::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix` -->
+<!-- enforced by: `vigil-bin::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix` -->
 <!-- enforced by: `vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url` -->
 
 MQTT topics and Home Assistant device names are also intended to derive from the configured camera
@@ -39,8 +39,8 @@ The deterministic RTSP fixtures recover after a transient source loss and land n
 or undecodable input.
 
 <!-- vigil-claim: `vigil.docs-concepts.a-stream-is-the-rtsp-media-vigil` -->
-<!-- enforced by: `vigil::first_light_loop::empty_or_undecodable_stream_lands_no_event` -->
-<!-- enforced by: `vigil::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera` -->
+<!-- enforced by: `vigil-bin::first_light_loop::empty_or_undecodable_stream_lands_no_event` -->
+<!-- enforced by: `vigil-bin::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera` -->
 
 The repository's live fixture currently uses H.264. An H.265 decoder path has owner-live evidence,
 but no deterministic repository H.265 fixture makes that evidence repeatable in CI.
@@ -53,8 +53,8 @@ Vigil executes the configured YOLOX object detector through Burn on decoded fram
 model identity and confidence threshold in a detector-config Decision.
 
 <!-- vigil-claim: `vigil.docs-concepts.the-detector-is-the-configured-yolox-objectdetection` -->
-<!-- enforced by: `vigil::first_light_loop::detector_loads_and_runs_over_real_frames` -->
-<!-- enforced by: `vigil::first_light_loop::detector_config_recorded_as_decision` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detector_config_recorded_as_decision` -->
 
 Motion gating and segment sampling precede that detector in the intended pipeline. Hardware
 detection belongs to compatible native artifacts after a successful probe, while the portable
@@ -70,7 +70,7 @@ The add-on configuration, Home Assistant event payload, and review HTTP event ro
 
 <!-- vigil-claim: `vigil.docs-concepts.zone-is-unavailable-and-not-exposed` -->
 <!-- enforced by: `vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema` -->
-<!-- enforced by: `vigil::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
+<!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 <!-- enforced by: `vigil::http_data_plane::event_list_serves_full_review_row_fieldset` -->
 
 Polygon-zone runtime matching is future work, so automations must not depend on zone values yet.
@@ -88,7 +88,7 @@ Polygon-zone runtime matching is future work, so automations must not depend on 
 The current recording unit is an event clip, not continuous NVR recording. Vigil finalizes the clip before writing an Observation that refers to it; if clip persistence fails, it writes no dangling event. The review data plane can stream the clip, including HTTP byte ranges used by video players.
 
 <!-- vigil-claim: `vigil.docs-concepts.the-current-recording-unit-is-an-event` -->
-<!-- enforced by: `vigil::first_light_loop::observation_never_references_undurable_clip` -->
+<!-- enforced by: `vigil-bin::first_light_loop::observation_never_references_undurable_clip` -->
 <!-- enforced by: `vigil::http_data_plane::clip_read_serves_range_206_partial_content_transport` -->
 
 ## Event
@@ -98,7 +98,7 @@ confidence, bounding box, sampled frame index, local clip reference, and detecto
 The review HTTP event list exposes the stored row fields.
 
 <!-- vigil-claim: `vigil.docs-concepts.an-event-is-a-durable-detection-observation` -->
-<!-- enforced by: `vigil::first_light_loop::detection_produces_observation_referencing_clip` -->
+<!-- enforced by: `vigil-bin::first_light_loop::detection_produces_observation_referencing_clip` -->
 <!-- enforced by: `vigil::http_data_plane::event_list_serves_full_review_row_fieldset` -->
 
 The CLI and Home Assistant are also intended to expose views of the same stored event, but this
@@ -137,7 +137,7 @@ The current runtime creates a baseline watch Intention that `vigil why` walks to
 detection's Decision, camera, site, and evidence.
 
 <!-- vigil-claim: `vigil.docs-concepts.an-intention-records-why-a-decision-exists` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
 
 Intentions are generated provenance rather than a current user-authored surface; the mapped why
 walk does not itself prove that no create or edit path exists elsewhere.
@@ -149,7 +149,7 @@ walk does not itself prove that no create or edit path exists elsewhere.
 A Decision is the detector configuration serving the baseline watch Intention. Current decisions record the model ID and confidence threshold and are linked to the camera and site. When configuration changes, a later event's `why` view uses the decision that existed for that event rather than substituting the newest settings.
 
 <!-- vigil-claim: `vigil.docs-concepts.a-decision-is-the-detector-configuration-serving` -->
-<!-- enforced by: `vigil::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current` -->
 
 ## Outcome
 

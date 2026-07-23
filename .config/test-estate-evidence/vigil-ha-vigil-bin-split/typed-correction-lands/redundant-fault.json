@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "map the wire string \"WrongClass\" to CorrectionType::Identity instead of CorrectionType::WrongClass in correction_type_from_str (correction.rs)",
+    "source_sha256": "sha256:d9395831a60553eaf7477804f1756d3c242561b285807a72aaa9608ff43daf56",
+    "diff": ".config/test-estate-evidence/vigil-ha-vigil-bin-split/typed-correction-lands/planted-fault.diff",
+    "diff_sha256": "sha256:d9395831a60553eaf7477804f1756d3c242561b285807a72aaa9608ff43daf56"
+  },
+  "removed": {
+    "test": "vigil::ha_mqtt_broker::typed_correction_via_mqtt_lands_in_cg",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --features first-light-acceptance --test ha_mqtt_broker typed_correction_via_mqtt_lands_in_cg -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.62
+  },
+  "survivor": {
+    "test": "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil-bin --features first-light-acceptance --test mqtt_composed_product correction_commands_via_mqtt_land_in_cg_through_the_composed_binary -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 4.52
+  }
+}

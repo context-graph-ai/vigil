@@ -207,7 +207,7 @@ async fn one_node_submits_and_claims_in_one_run() {
             auto_propagate: true,
         },
         lease_duration_ms: LEASE,
-        blob_service: None,
+        blob_store: None,
         defer_own_submissions_until_deadline: false,
         writes_are_canonical: false,
     };

@@ -73,7 +73,7 @@ pub fn detector_capability_id(backend_tag: &str) -> String {
 
 /// The contextdb `WorkExecutor` for work class `vigil.detector` (criterion
 /// C3). A claimed job's two inputs arrive (in `job.input_refs` order,
-/// already resolved by the worker loop's `WorkerConfig.blob_service` before
+/// already resolved by the worker loop's `WorkerConfig.blob_store` before
 /// this trait is invoked): a ledger-carried JSON metadata chunk (the
 /// `DetectorJob` payload minus its blob reference) and the `blob_ref`
 /// length-framed `encoded_units` chunk. `execute` decodes the units, runs
@@ -270,9 +270,9 @@ pub struct FabricRuntime {
     /// `hub_endpoint`'s bound port when this node also carries the hub (one
     /// endpoint, two protocol registrations); its own otherwise.
     own_endpoint: Arc<contextdb_server::PeerEndpoint>,
-    /// This node's blob service: ingests its own submissions' frame blobs
+    /// This node's blob store: ingests its own submissions' frame blobs
     /// and resolves `blob_ref` inputs it claims from others.
-    blob_service: Arc<contextdb_server::blob_resolver::BlobService>,
+    blob_store: Arc<contextdb_server::blob_resolver::BlobStore>,
     /// `true` when this node has a usable fabric SERVING role: it either
     /// carries the hub, or it enrolled with a ticket that VALIDATED (so it is
     /// dialing a real hub). A node with a rejected ticket has worker INTENT
@@ -367,14 +367,14 @@ impl FabricRuntime {
                 .map_err(|err| format!("fabric: bind this node's endpoint: {err}"))?,
         );
 
-        let blob_service = Arc::new(contextdb_server::blob_resolver::BlobService::new(
+        let blob_store = Arc::new(contextdb_server::blob_resolver::BlobStore::new(
             db.clone(),
             contextdb_engine::work_ledger::MovementPolicy {
                 auto_propagate: true,
             },
             identity_path.clone(),
         ));
-        blob_service.serve_on(&own_endpoint);
+        blob_store.serve_on(&own_endpoint);
 
         let tenant = contextdb_core::TenantId::from(FABRIC_TENANT);
         let hub_endpoint = if fabric_hub {
@@ -426,7 +426,7 @@ impl FabricRuntime {
             node_id,
             hub_endpoint,
             own_endpoint,
-            blob_service,
+            blob_store,
             serves_role,
             enrollment_error,
             capability_liveness_ttl_ms: DEFAULT_CAPABILITY_LIVENESS_TTL_MS,
@@ -547,7 +547,7 @@ impl FabricRuntime {
     ) -> Result<String, String> {
         let framed = crate::detector_workclass::encode_length_framed_units(encoded_units);
         let hash = self
-            .blob_service
+            .blob_store
             .ingest_bytes(&framed)
             .map_err(|err| format!("fabric: ingest frames blob: {err}"))?;
         // A claiming worker resolves this blob node-to-node against THIS
@@ -817,7 +817,7 @@ impl FabricRuntime {
     ) -> tokio::task::JoinHandle<()> {
         let client = self.client.clone();
         let db = self.db.clone();
-        let blob_service = self.blob_service.clone();
+        let blob_store = self.blob_store.clone();
         let node_id = self.node_id.clone();
         let backend_tag = backend.backend_tag().to_string();
         let advertised_tags = vec![
@@ -851,7 +851,7 @@ impl FabricRuntime {
                 auto_propagate: true,
             },
             lease_duration_ms: resolved_worker_lease_duration_ms(self.worker_lease_ms),
-            blob_service: Some(blob_service),
+            blob_store: Some(blob_store),
             defer_own_submissions_until_deadline: true,
             writes_are_canonical,
         };

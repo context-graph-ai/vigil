@@ -27,7 +27,7 @@ use contextdb_engine::work_ledger::{
     BlobHash, InputRef, JobSpec, JobState, MovementPolicy, advertise_capability, advertised_tags,
     install_work_ledger_schema, job_result, job_state, record_result, submit_job,
 };
-use contextdb_server::blob_resolver::BlobService;
+use contextdb_server::blob_resolver::BlobStore;
 use contextdb_server::transport::iroh::IrohServer;
 use contextdb_server::work_ledger::{PollOutcome, WorkerConfig, poll_and_execute_once};
 use contextdb_server::{FabricIdentity, InProcessBroker, SyncClient, SyncServer};
@@ -248,7 +248,7 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
         broker.client(),
         TenantId::from(tenant),
     ));
-    let holder_blob_service = Arc::new(BlobService::new(
+    let holder_blob_service = Arc::new(BlobStore::new(
         holder_db.clone(),
         MovementPolicy {
             auto_propagate: true,
@@ -293,7 +293,7 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
     install_work_ledger_schema(&worker_db).expect("worker ledger schema");
     let worker_client =
         SyncClient::with_transport(worker_db.clone(), broker.client(), TenantId::from(tenant));
-    let worker_blob_service = Arc::new(BlobService::new(
+    let worker_blob_service = Arc::new(BlobStore::new(
         worker_db.clone(),
         MovementPolicy {
             auto_propagate: true,
@@ -331,7 +331,7 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
             auto_propagate: true,
         },
         lease_duration_ms: LEASE,
-        blob_service: Some(worker_blob_service),
+        blob_store: Some(worker_blob_service),
         defer_own_submissions_until_deadline: false,
         writes_are_canonical: false,
     };

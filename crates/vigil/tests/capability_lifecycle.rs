@@ -369,7 +369,7 @@ async fn a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls() {
                     auto_propagate: true,
                 },
                 lease_duration_ms: 5 * 60_000,
-                blob_service: None,
+                blob_store: None,
                 defer_own_submissions_until_deadline: false,
                 writes_are_canonical: false,
             };

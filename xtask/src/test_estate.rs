@@ -3649,13 +3649,16 @@ fn audit_ci_config(root: &Path, violations: &mut Vec<String>) -> Result<(), Stri
     };
     let change = read_workflow("ci.yml")?;
     let closeout = read_workflow("dev-closeout.yml")?;
+    let haos_artifact = read_workflow("dev-haos-artifact.yml")?;
     let integration = read_workflow("integrate-dev.yml")?;
     let release = read_workflow("release-qualification.yml")?;
     audit_ci_compartments(&change, &closeout, &release, violations);
     audit_dev_integration_workflow(&integration, violations);
+    audit_dev_haos_artifact_workflow(&haos_artifact, violations);
     for (name, workflow) in [
         ("ci.yml", &change),
         ("dev-closeout.yml", &closeout),
+        ("dev-haos-artifact.yml", &haos_artifact),
         ("integrate-dev.yml", &integration),
         ("release-qualification.yml", &release),
     ] {
@@ -3715,6 +3718,7 @@ fn audit_codeowners_text(content: &str, violations: &mut Vec<String>) {
         "/.github/CODEOWNERS @lucidprogrammer",
         "/.github/workflows/ci.yml @lucidprogrammer",
         "/.github/workflows/dev-closeout.yml @lucidprogrammer",
+        "/.github/workflows/dev-haos-artifact.yml @lucidprogrammer",
         "/.github/workflows/integrate-dev.yml @lucidprogrammer",
         "/.github/workflows/release-qualification.yml @lucidprogrammer",
         "/.config/dev-closeout-impact.toml @lucidprogrammer",
@@ -4258,6 +4262,69 @@ fn audit_dev_integration_workflow(content: &str, violations: &mut Vec<String>) {
         if active.contains(forbidden) {
             violations.push(format!(
                 "dev integration must remain receipt-bound and non-forcing; forbidden form `{forbidden}` found"
+            ));
+        }
+    }
+}
+
+fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>) {
+    let active = active_workflow_text(content);
+    let scripts = workflow_run_scripts(&active);
+    let commands = workflow_run_command_lines(&scripts);
+    let verified = verified_workflow_commands(
+        "HAOS deploy artifact",
+        &scripts,
+        "./scripts/verify dev-closeout \\",
+        violations,
+    );
+
+    require_workflow_text(
+        "HAOS deploy artifact",
+        &active,
+        &[
+            "workflow_dispatch:",
+            "vigil_sha:",
+            "context_graph_sha:",
+            "contextdb_sha:",
+            "test \"$GITHUB_REF\" = \"refs/heads/dev\"",
+            "test \"$GITHUB_SHA\" = \"$VIGIL_SHA\"",
+            "repos/context-graph-ai/context-graph/git/ref/heads/dev",
+            "repos/context-graph-ai/contextdb/git/ref/heads/dev",
+            "./scripts/verify workflow --step setup-harness",
+            "./scripts/verify dev-closeout",
+            "--lane install-binary",
+            "--step build",
+            "published:false",
+            "vigil-haos-musl-${{ needs.exact-sources.outputs.vigil_sha }}",
+            "retention-days: 90",
+        ],
+        violations,
+    );
+    if verified
+        .iter()
+        .filter(|invocation| {
+            invocation.contains("--lane install-binary") && invocation.ends_with("--step build")
+        })
+        .count()
+        != 1
+    {
+        violations.push(
+            "HAOS deploy artifact must build one exact musl binary through the repository verifier"
+                .to_string(),
+        );
+    }
+    for forbidden in [
+        "pull_request:",
+        "docker build",
+        "docker buildx",
+        "--push",
+        "docker push",
+        "cargo publish",
+        "statuses: write",
+    ] {
+        if commands.iter().any(|line| line.contains(forbidden)) || active.contains(forbidden) {
+            violations.push(format!(
+                "HAOS deploy artifact must remain non-publishing and binary-only; forbidden form `{forbidden}` found"
             ));
         }
     }
@@ -6536,6 +6603,29 @@ jobs:
                 "integration guard accepted weakened protection: {weakened}"
             );
         }
+
+        let haos_artifact = include_str!("../../.github/workflows/dev-haos-artifact.yml");
+        let mut accepted_haos_artifact = Vec::new();
+        audit_dev_haos_artifact_workflow(haos_artifact, &mut accepted_haos_artifact);
+        assert!(
+            accepted_haos_artifact.is_empty(),
+            "{accepted_haos_artifact:?}"
+        );
+        let publishing_haos_artifact = haos_artifact.replacen(
+            "retention-days: 90",
+            "retention-days: 90\n      - run: docker push forbidden",
+            1,
+        );
+        let mut publishing_haos_violations = Vec::new();
+        audit_dev_haos_artifact_workflow(
+            &publishing_haos_artifact,
+            &mut publishing_haos_violations,
+        );
+        assert!(
+            publishing_haos_violations
+                .iter()
+                .any(|item| item.contains("non-publishing"))
+        );
 
         let status_leak = closeout.replacen(
             "permissions:\n  contents: read",

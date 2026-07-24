@@ -10,6 +10,7 @@
 /.github/CODEOWNERS @lucidprogrammer
 /.github/workflows/ci.yml @lucidprogrammer
 /.github/workflows/dev-closeout.yml @lucidprogrammer
+/.github/workflows/dev-haos-artifact.yml @lucidprogrammer
 /.github/workflows/integrate-dev.yml @lucidprogrammer
 /.github/workflows/release-qualification.yml @lucidprogrammer
 /tests/ha-os-vm/ @lucidprogrammer

@@ -4291,6 +4291,7 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
             "repos/context-graph-ai/context-graph/git/ref/heads/dev",
             "repos/context-graph-ai/contextdb/git/ref/heads/dev",
             "./scripts/verify workflow --step setup-harness",
+            "install -y ffmpeg mosquitto mosquitto-clients",
             "./scripts/verify dev-closeout",
             "--lane install-binary",
             "--step build",

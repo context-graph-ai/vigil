@@ -13,4 +13,5 @@
 /.github/workflows/dev-haos-artifact.yml @lucidprogrammer
 /.github/workflows/integrate-dev.yml @lucidprogrammer
 /.github/workflows/release-qualification.yml @lucidprogrammer
+/Dockerfile.hardware @lucidprogrammer
 /tests/ha-os-vm/ @lucidprogrammer

@@ -3652,9 +3652,13 @@ fn audit_ci_config(root: &Path, violations: &mut Vec<String>) -> Result<(), Stri
     let haos_artifact = read_workflow("dev-haos-artifact.yml")?;
     let integration = read_workflow("integrate-dev.yml")?;
     let release = read_workflow("release-qualification.yml")?;
+    let haos_hardware_dockerfile_path = root.join("Dockerfile.hardware");
+    let haos_hardware_dockerfile = fs::read_to_string(&haos_hardware_dockerfile_path)
+        .map_err(|error| format!("read {}: {error}", haos_hardware_dockerfile_path.display()))?;
     audit_ci_compartments(&change, &closeout, &release, violations);
     audit_dev_integration_workflow(&integration, violations);
     audit_dev_haos_artifact_workflow(&haos_artifact, violations);
+    audit_haos_hardware_dockerfile(&haos_hardware_dockerfile, violations);
     for (name, workflow) in [
         ("ci.yml", &change),
         ("dev-closeout.yml", &closeout),
@@ -3721,6 +3725,7 @@ fn audit_codeowners_text(content: &str, violations: &mut Vec<String>) {
         "/.github/workflows/dev-haos-artifact.yml @lucidprogrammer",
         "/.github/workflows/integrate-dev.yml @lucidprogrammer",
         "/.github/workflows/release-qualification.yml @lucidprogrammer",
+        "/Dockerfile.hardware @lucidprogrammer",
         "/.config/dev-closeout-impact.toml @lucidprogrammer",
         "/xtask/src/verify.rs @lucidprogrammer",
         "/xtask/src/closeout_impact.rs @lucidprogrammer",
@@ -4338,6 +4343,23 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
         violations.push(
             "HAOS deploy artifact must use the reviewed Dockerfile.hardware Buildx target, never an unreviewed docker build".to_string(),
         );
+    }
+}
+
+fn audit_haos_hardware_dockerfile(content: &str, violations: &mut Vec<String>) {
+    for required in [
+        "FROM rust:alpine3.22 AS vigil-hw-builder-amd64",
+        "RUN apk add --no-cache build-base pkgconf gstreamer-dev gst-plugins-base-dev",
+        "RUSTFLAGS=\"-C target-feature=-crt-static\"",
+        "cargo build --release -p vigil-bin --bin vigil --features decode-gstreamer,detect-burn-wgpu,fabric --locked",
+        "FROM scratch AS vigil-hw-binary-amd64",
+        "COPY --from=vigil-hw-builder-amd64 /workspace/vigil-src/target/release/vigil /vigil",
+    ] {
+        if !content.contains(required) {
+            violations.push(format!(
+                "Home Assistant OS hardware artifact must keep its native Alpine GStreamer, Burn/WGPU, and Fabric build contract; missing `{required}`"
+            ));
+        }
     }
 }
 
@@ -6428,8 +6450,10 @@ jobs:
 /.github/CODEOWNERS @lucidprogrammer
 /.github/workflows/ci.yml @lucidprogrammer
 /.github/workflows/dev-closeout.yml @lucidprogrammer
+/.github/workflows/dev-haos-artifact.yml @lucidprogrammer
 /.github/workflows/integrate-dev.yml @lucidprogrammer
 /.github/workflows/release-qualification.yml @lucidprogrammer
+/Dockerfile.hardware @lucidprogrammer
 /.config/dev-closeout-impact.toml @lucidprogrammer
 /xtask/src/verify.rs @lucidprogrammer
 /xtask/src/closeout_impact.rs @lucidprogrammer
@@ -6636,6 +6660,24 @@ jobs:
             publishing_haos_violations
                 .iter()
                 .any(|item| item.contains("non-publishing"))
+        );
+
+        let haos_hardware_dockerfile = include_str!("../../Dockerfile.hardware");
+        let mut accepted_haos_hardware = Vec::new();
+        audit_haos_hardware_dockerfile(haos_hardware_dockerfile, &mut accepted_haos_hardware);
+        assert!(
+            accepted_haos_hardware.is_empty(),
+            "{accepted_haos_hardware:?}"
+        );
+        let mut reduced_haos_hardware = Vec::new();
+        audit_haos_hardware_dockerfile(
+            &haos_hardware_dockerfile.replace("decode-gstreamer,detect-burn-wgpu,fabric", "fabric"),
+            &mut reduced_haos_hardware,
+        );
+        assert!(
+            reduced_haos_hardware
+                .iter()
+                .any(|item| item.contains("GStreamer, Burn/WGPU, and Fabric"))
         );
 
         let status_leak = closeout.replacen(

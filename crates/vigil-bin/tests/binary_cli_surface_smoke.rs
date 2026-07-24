@@ -21,8 +21,15 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+// `VIGIL_ACCEPTANCE_BIN` is the restored process binary when this test runs
+// from the immutable nextest archive on a fresh closeout runner. Cargo's
+// compile-time path names the builder's target directory and is not valid
+// there.
+#[allow(clippy::disallowed_methods)]
 fn vigil_binary_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_vigil"))
+    std::env::var_os("VIGIL_ACCEPTANCE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_vigil")))
 }
 
 #[test]

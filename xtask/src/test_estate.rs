@@ -4274,7 +4274,7 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
     let verified = verified_workflow_commands(
         "HAOS deploy artifact",
         &scripts,
-        "./scripts/verify dev-closeout \\",
+        "./scripts/verify release \\",
         violations,
     );
 
@@ -4290,13 +4290,15 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
             "test \"$GITHUB_SHA\" = \"$VIGIL_SHA\"",
             "repos/context-graph-ai/context-graph/git/ref/heads/dev",
             "repos/context-graph-ai/contextdb/git/ref/heads/dev",
-            "./scripts/verify workflow --step setup-harness",
-            "install -y ffmpeg mosquitto mosquitto-clients",
-            "./scripts/verify dev-closeout",
-            "--lane install-production-binary",
-            "--step build",
+            "docker/setup-buildx-action@v3",
+            "Stage the bounded production source context",
+            "./scripts/verify release",
+            "--lane artifact-amd64",
+            "--target vigil-hw-binary-amd64",
+            "Dockerfile.hardware",
             "published:false",
-            "vigil-haos-musl-${{ needs.exact-sources.outputs.vigil_sha }}",
+            "native-alpine-production-binary",
+            "vigil-haos-production-amd64-${{ needs.exact-sources.outputs.vigil_sha }}",
             "retention-days: 90",
         ],
         violations,
@@ -4304,21 +4306,20 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
     if verified
         .iter()
         .filter(|invocation| {
-            invocation.contains("--lane install-production-binary")
-                && invocation.ends_with("--step build")
+            invocation.contains("--lane artifact-amd64")
+                && invocation.contains("--target vigil-hw-binary-amd64")
+                && invocation.contains("Dockerfile.hardware")
         })
         .count()
         != 1
     {
         violations.push(
-            "HAOS deploy artifact must build one exact production-feature musl binary through the repository verifier"
+            "HAOS deploy artifact must build one exact native-Alpine production binary through the repository verifier"
                 .to_string(),
         );
     }
     for forbidden in [
         "pull_request:",
-        "docker build",
-        "docker buildx",
         "--push",
         "docker push",
         "cargo publish",
@@ -4329,6 +4330,14 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
                 "HAOS deploy artifact must remain non-publishing and binary-only; forbidden form `{forbidden}` found"
             ));
         }
+    }
+    if commands
+        .iter()
+        .any(|line| line.trim_start().starts_with("docker build "))
+    {
+        violations.push(
+            "HAOS deploy artifact must use the reviewed Dockerfile.hardware Buildx target, never an unreviewed docker build".to_string(),
+        );
     }
 }
 

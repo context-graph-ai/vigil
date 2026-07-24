@@ -112,9 +112,9 @@ jobs:
           echo "contextdb_sha=$contextdb_sha" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build exact HAOS musl binary
+    name: Build exact HAOS production binary
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     needs: exact-sources
     steps:
       - name: Checkout exact Vigil commit
@@ -138,63 +138,69 @@ jobs:
           ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
           path: contextdb
           persist-credentials: false
-      - name: Restore artifact build cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vigil
-          key: ${{ inputs.cache_epoch }}
-      - name: Verify build disk capacity
+      - name: Free hosted-runner build disk
         run: |
-          mkdir -p vigil/target
-          target_kb="$(du -sk vigil/target | awk '{print $1}')"
-          available_kb="$(df --output=avail vigil/target | tail -n 1)"
-          effective_capacity_kb=$((available_kb + target_kb))
-          test "$available_kb" -ge 16777216
-          test "$effective_capacity_kb" -ge 31457280
-      - name: Install bounded musl-harness runtime tools
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af || true
+          df -h
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Stage the bounded production source context
         run: |
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-      - name: Set up the exact musl harness
-        working-directory: vigil
-        run: ./scripts/verify workflow --step setup-harness
-      - name: Add the HAOS musl target
-        working-directory: vigil
-        run: rustup target add x86_64-unknown-linux-musl
-      - name: Build and receipt the HAOS binary
+          mkdir -p haos-context
+          tar \
+            --exclude='*/target' \
+            --exclude='*/target/**' \
+            --exclude='*/.vigil-tools-target' \
+            --exclude='*/.vigil-tools-target/**' \
+            --exclude='*/.git' \
+            --exclude='*/.git/**' \
+            --exclude='*/tests/fixtures/.cache' \
+            --exclude='*/tests/fixtures/.cache/**' \
+            -cf - vigil context-graph contextdb | tar -xf - -C haos-context
+      - name: Create hardware artifact output
+        run: mkdir -p haos-output/receipts
+      - name: Build and receipt the HAOS production binary
         working-directory: vigil
         run: |
-          ./scripts/verify dev-closeout \
-            --lane install-production-binary \
+          ./scripts/verify release \
+            --lane artifact-amd64 \
             --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
             --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \
             --cache-state mixed \
-            --receipt target/verify-receipts/dev-haos-artifact.json \
-            --step build
+            --receipt ../haos-output/receipts/dev-haos-artifact.json \
+            -- docker buildx build \
+              --platform linux/amd64 \
+              --target vigil-hw-binary-amd64 \
+              --file ../haos-context/vigil/Dockerfile.hardware \
+              --cache-from "type=gha,scope=vigil-haos-amd64-${{ inputs.cache_epoch }}" \
+              --cache-to "type=gha,mode=max,scope=vigil-haos-amd64-${{ inputs.cache_epoch }}" \
+              --output type=local,dest=../haos-output/binary \
+              ../haos-context
       - name: Bind the artifact to its exact source tuple
-        working-directory: vigil
         env:
           VIGIL_SHA: ${{ needs.exact-sources.outputs.vigil_sha }}
           CONTEXT_GRAPH_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
           CONTEXTDB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
         run: |
-          sha256sum target/x86_64-unknown-linux-musl/release/vigil > target/verify-receipts/dev-haos-artifact.sha256
+          sha256sum haos-output/binary/vigil > haos-output/receipts/dev-haos-artifact.sha256
           jq -n \
             --arg vigil_sha "$VIGIL_SHA" \
             --arg context_graph_sha "$CONTEXT_GRAPH_SHA" \
             --arg contextdb_sha "$CONTEXTDB_SHA" \
-            --arg binary_sha256 "$(cut -d' ' -f1 target/verify-receipts/dev-haos-artifact.sha256)" \
-            '{tier:"dev-haos-artifact",published:false,vigil_sha:$vigil_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,binary_sha256:$binary_sha256}' \
-            > target/verify-receipts/dev-haos-artifact-source.json
+            --arg binary_sha256 "$(cut -d' ' -f1 haos-output/receipts/dev-haos-artifact.sha256)" \
+            '{tier:"dev-haos-artifact",artifact:"native-alpine-production-binary",published:false,vigil_sha:$vigil_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,binary_sha256:$binary_sha256}' \
+            > haos-output/receipts/dev-haos-artifact-source.json
       - name: Upload the exact HAOS deploy artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vigil-haos-musl-${{ needs.exact-sources.outputs.vigil_sha }}
+          name: vigil-haos-production-amd64-${{ needs.exact-sources.outputs.vigil_sha }}
           path: |
-            vigil/target/x86_64-unknown-linux-musl/release/vigil
-            vigil/target/verify-receipts/dev-haos-artifact.json
-            vigil/target/verify-receipts/dev-haos-artifact.sha256
-            vigil/target/verify-receipts/dev-haos-artifact-source.json
+            haos-output/binary/vigil
+            haos-output/receipts/dev-haos-artifact.json
+            haos-output/receipts/dev-haos-artifact.sha256
+            haos-output/receipts/dev-haos-artifact-source.json
           if-no-files-found: error
           retention-days: 90

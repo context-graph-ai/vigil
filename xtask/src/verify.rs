@@ -26,6 +26,7 @@ const DEV_LANES: &[&str] = &[
     "slow-preflight",
     "slow-shard",
     "install-binary",
+    "install-production-binary",
     "install-image",
     "install-smoke",
 ];
@@ -810,7 +811,7 @@ fn validate_named_lane_step(tier: Tier, lane: &str, options: &Options) -> Result
                     .as_deref()
                     .is_some_and(|shard| matches!(shard.parse::<u8>(), Ok(1..=4)))
         }
-        (Tier::DevCloseout, "install-binary", "build")
+        (Tier::DevCloseout, "install-binary" | "install-production-binary", "build")
         | (Tier::DevCloseout, "install-smoke", "tests")
         | (Tier::DevCloseout, "install-image", "build" | "inspect" | "save" | "load")
         | (Tier::Release, "source", "tests")
@@ -952,6 +953,18 @@ fn named_lane_command(root: &Path, options: &Options) -> Result<Vec<String>, Str
             "x86_64-unknown-linux-musl",
             "--features",
             "fabric",
+        ]),
+        (Tier::DevCloseout, "install-production-binary", "build") => strings(&[
+            "cargo",
+            "build",
+            "--locked",
+            "-p",
+            "vigil-bin",
+            "--release",
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "--features",
+            "decode-gstreamer,detect-burn-wgpu,fabric",
         ]),
         (Tier::DevCloseout, "install-image", image_step) => {
             let sha = options.vigil_sha.as_deref().expect("validated sha");
@@ -1220,13 +1233,19 @@ fn bound_nextest(argv: Vec<String>) -> Vec<String> {
 }
 
 fn validate_lane_command(tier: Tier, lane: &str, argv: &[String]) -> Result<(), String> {
-    if tier == Tier::DevCloseout && lane != "install-binary" && has_option(argv, "--target") {
+    if tier == Tier::DevCloseout
+        && !matches!(lane, "install-binary" | "install-production-binary")
+        && has_option(argv, "--target")
+    {
         return Err(format!(
             "dev-closeout lane `{lane}` must not perform a cross-target build; static and artifact builds belong to release"
         ));
     }
     if tier == Tier::DevCloseout
-        && !matches!(lane, "slow-preflight" | "slow-shard" | "install-binary")
+        && !matches!(
+            lane,
+            "slow-preflight" | "slow-shard" | "install-binary" | "install-production-binary"
+        )
         && has_option(argv, "--release")
     {
         return Err(format!(
@@ -1266,6 +1285,15 @@ fn validate_lane_command(tier: Tier, lane: &str, argv: &[String]) -> Result<(), 
                 && option_values(argv, "--package", "-p") == ["vigil-bin"]
                 && option_values(argv, "--target", "") == ["x86_64-unknown-linux-musl"]
                 && option_values(argv, "--features", "") == ["fabric"]
+                && !has_option(argv, "--all-features")
+        }
+        (Tier::DevCloseout, "install-production-binary") => {
+            matches_prefix(argv, &["cargo", "build"])
+                && has_option(argv, "--release")
+                && option_values(argv, "--package", "-p") == ["vigil-bin"]
+                && option_values(argv, "--target", "") == ["x86_64-unknown-linux-musl"]
+                && option_values(argv, "--features", "")
+                    == ["decode-gstreamer,detect-burn-wgpu,fabric"]
                 && !has_option(argv, "--all-features")
         }
         (Tier::DevCloseout, "install-image") => {
@@ -1331,6 +1359,9 @@ fn lane_command_contract(tier: Tier, lane: &str) -> Option<&'static str> {
         ),
         (Tier::DevCloseout, "install-binary") => Some(
             "cargo build -p vigil-bin --release --target x86_64-unknown-linux-musl --features fabric",
+        ),
+        (Tier::DevCloseout, "install-production-binary") => Some(
+            "cargo build -p vigil-bin --release --target x86_64-unknown-linux-musl --features decode-gstreamer,detect-burn-wgpu,fabric",
         ),
         (Tier::DevCloseout, "install-image") => {
             Some("local docker build/image inspect/save/load without buildx, platform, or push")
@@ -2478,6 +2509,25 @@ mod tests {
             "fabric",
         ]);
         assert!(validate_lane_command(Tier::DevCloseout, "install-binary", &exact_binary).is_ok());
+        let exact_production_binary = strings(&[
+            "cargo",
+            "build",
+            "-p",
+            "vigil-bin",
+            "--release",
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "--features",
+            "decode-gstreamer,detect-burn-wgpu,fabric",
+        ]);
+        assert!(
+            validate_lane_command(
+                Tier::DevCloseout,
+                "install-production-binary",
+                &exact_production_binary
+            )
+            .is_ok()
+        );
         for rejected in [
             strings(&[
                 "cargo",

@@ -154,7 +154,7 @@ jobs:
       - name: Install bounded musl-harness runtime tools
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Set up the exact musl harness
         working-directory: vigil
         run: ./scripts/verify workflow --step setup-harness
@@ -165,7 +165,7 @@ jobs:
         working-directory: vigil
         run: |
           ./scripts/verify dev-closeout \
-            --lane install-binary \
+            --lane install-production-binary \
             --vigil-sha "${{ needs.exact-sources.outputs.vigil_sha }}" \
             --context-graph-sha "${{ needs.exact-sources.outputs.context_graph_sha }}" \
             --contextdb-sha "${{ needs.exact-sources.outputs.contextdb_sha }}" \

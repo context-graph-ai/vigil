@@ -4293,7 +4293,7 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
             "./scripts/verify workflow --step setup-harness",
             "install -y ffmpeg mosquitto mosquitto-clients",
             "./scripts/verify dev-closeout",
-            "--lane install-binary",
+            "--lane install-production-binary",
             "--step build",
             "published:false",
             "vigil-haos-musl-${{ needs.exact-sources.outputs.vigil_sha }}",
@@ -4304,13 +4304,14 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
     if verified
         .iter()
         .filter(|invocation| {
-            invocation.contains("--lane install-binary") && invocation.ends_with("--step build")
+            invocation.contains("--lane install-production-binary")
+                && invocation.ends_with("--step build")
         })
         .count()
         != 1
     {
         violations.push(
-            "HAOS deploy artifact must build one exact musl binary through the repository verifier"
+            "HAOS deploy artifact must build one exact production-feature musl binary through the repository verifier"
                 .to_string(),
         );
     }

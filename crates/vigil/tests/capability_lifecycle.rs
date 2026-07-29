@@ -337,14 +337,13 @@ async fn a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls() {
     // SHARED local store directly.
     let broker = contextdb_server::InProcessBroker::new();
     let hub_db = std::sync::Arc::new(contextdb_engine::Database::open_memory());
-    let hub = std::sync::Arc::new(contextdb_server::SyncServer::with_transport(
-        hub_db.clone(),
-        broker.server(),
-        contextdb_core::TenantId::from("vigil-fabric"),
-        contextdb_engine::sync_types::ConflictPolicies::uniform(
-            contextdb_engine::sync_types::ConflictPolicy::LatestWins,
+    let hub = std::sync::Arc::new(
+        contextdb_server::SyncServer::with_authenticated_transport_for_test(
+            hub_db.clone(),
+            broker.server_as("capability-lifecycle-hub"),
+            contextdb_core::TenantId::from("vigil-fabric"),
         ),
-    ));
+    );
     let hub_shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let hub_task = {
         let hub = hub.clone();
@@ -352,16 +351,20 @@ async fn a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls() {
         tokio::spawn(async move { hub.run_until(hub_shutdown).await })
     };
 
-    let worker_client = std::sync::Arc::new(contextdb_server::SyncClient::with_transport(
-        runtime.db.clone(),
-        broker.client(),
-        contextdb_core::TenantId::from("vigil-fabric"),
-    ));
+    let worker_client = std::sync::Arc::new(
+        contextdb_server::SyncClient::with_authenticated_transport_for_test(
+            runtime.db.clone(),
+            broker.client_as("live-worker"),
+            contextdb_core::TenantId::from("vigil-fabric"),
+        ),
+    );
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = {
         let client = worker_client.clone();
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
+            let executor: std::sync::Arc<dyn contextdb_server::work_ledger::WorkExecutor> =
+                std::sync::Arc::new(NoopExecutor);
             let config = contextdb_server::work_ledger::WorkerConfig {
                 node_id: "live-worker".to_string(),
                 advertised_tags: tags(&["backend:burn-cpu"]),
@@ -376,7 +379,7 @@ async fn a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls() {
             let _ = contextdb_server::work_ledger::run_worker_loop(
                 &client,
                 &config,
-                &NoopExecutor,
+                executor,
                 std::time::Duration::from_millis(30),
                 shutdown,
             )

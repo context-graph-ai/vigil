@@ -870,7 +870,8 @@ impl FabricRuntime {
             crate::detector_workclass::DETECTOR_CLASS_TAG.to_string(),
             format!("backend:{backend_tag}"),
         ];
-        let executor = DetectorWorkExecutor::new(backend, node_id.clone());
+        let executor: Arc<dyn WorkExecutor> =
+            Arc::new(DetectorWorkExecutor::new(backend, node_id.clone()));
         // This node's ledger writes are canonical exactly when it hosts the
         // hub over the same db (`hub_endpoint.is_some()`) — a ticket-only
         // edge still has a real hub to dial, so ticket presence alone is not
@@ -944,7 +945,7 @@ impl FabricRuntime {
             let _ = contextdb_server::work_ledger::run_worker_loop(
                 &client,
                 &config,
-                &executor,
+                executor,
                 std::time::Duration::from_secs(2),
                 shutdown,
             )

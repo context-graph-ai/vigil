@@ -22,13 +22,12 @@ use std::time::Duration;
 
 use contextdb_core::TenantId;
 use contextdb_engine::Database;
-use contextdb_engine::sync_types::{ConflictPolicies, ConflictPolicy};
 use contextdb_engine::work_ledger::{
     BlobHash, InputRef, JobSpec, JobState, MovementPolicy, install_work_ledger_schema, job_state,
     submit_job,
 };
 use contextdb_server::work_ledger::{
-    ClaimOutcome, PollOutcome, WorkerConfig, claim_job, poll_and_execute_once,
+    ClaimOutcome, PollOutcome, WorkExecutor, WorkerConfig, claim_job, poll_and_execute_once,
 };
 use contextdb_server::{FabricIdentity, InProcessBroker, SyncClient, SyncServer};
 
@@ -67,11 +66,10 @@ fn start_hub(
     tenant: &str,
 ) -> (Arc<Database>, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
     let hub_db = Arc::new(Database::open_memory());
-    let server = Arc::new(SyncServer::with_transport(
+    let server = Arc::new(SyncServer::with_authenticated_transport_for_test(
         hub_db.clone(),
-        broker.server(),
+        broker.server_as(&format!("hub-{tenant}")),
         TenantId::from(tenant),
-        ConflictPolicies::uniform(ConflictPolicy::LatestWins),
     ));
     let shutdown = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
@@ -193,8 +191,11 @@ async fn worker_death_midlease_falls_back_local_with_named_receipt() {
     let a_node = node_id_of(&a_key);
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client =
-        SyncClient::with_transport(a_db.clone(), broker.client(), TenantId::from(tenant));
+    let a_client = SyncClient::with_authenticated_transport_for_test(
+        a_db.clone(),
+        broker.client_as(&a_node),
+        TenantId::from(tenant),
+    );
 
     let deadline_ms = T0 + DEADLINE_OFFSET;
     submit_local_detector_job(&a_db, "job-fallback-01", &a_node, Some(deadline_ms));
@@ -209,8 +210,11 @@ async fn worker_death_midlease_falls_back_local_with_named_receipt() {
     let b_node = node_id_of(&b_key);
     let b_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&b_db).expect("B ledger schema");
-    let b_client =
-        SyncClient::with_transport(b_db.clone(), broker.client(), TenantId::from(tenant));
+    let b_client = SyncClient::with_authenticated_transport_for_test(
+        b_db.clone(),
+        broker.client_as(&b_node),
+        TenantId::from(tenant),
+    );
     within(b_client.pull_default())
         .await
         .expect("B pulls the job");
@@ -236,15 +240,16 @@ async fn worker_death_midlease_falls_back_local_with_named_receipt() {
 
     // Before the job's own deadline and before the lease has expired: node
     // A (deferring its own submissions) must not reclaim yet.
+    let early_executor: Arc<dyn WorkExecutor> = Arc::new(DetectorWorkExecutor::new(
+        Arc::new(SpyBackend {
+            calls: Mutex::new(0),
+        }),
+        a_node.clone(),
+    ));
     let too_early = within(poll_and_execute_once(
         &a_client,
         &deferring_config(&a_node),
-        &DetectorWorkExecutor::new(
-            Arc::new(SpyBackend {
-                calls: Mutex::new(0),
-            }),
-            a_node.clone(),
-        ),
+        early_executor,
         T0 + 500,
     ))
     .await
@@ -269,11 +274,12 @@ async fn worker_death_midlease_falls_back_local_with_named_receipt() {
     let backend = Arc::new(SpyBackend {
         calls: Mutex::new(0),
     });
-    let executor = DetectorWorkExecutor::new(backend.clone(), a_node.clone());
+    let executor: Arc<dyn WorkExecutor> =
+        Arc::new(DetectorWorkExecutor::new(backend.clone(), a_node.clone()));
     let outcome = within(poll_and_execute_once(
         &a_client,
         &deferring_config(&a_node),
-        &executor,
+        Arc::clone(&executor),
         after,
     ))
     .await
@@ -303,7 +309,7 @@ async fn worker_death_midlease_falls_back_local_with_named_receipt() {
     let continued = within(poll_and_execute_once(
         &a_client,
         &deferring_config(&a_node),
-        &executor,
+        Arc::clone(&executor),
         after + 1,
     ))
     .await

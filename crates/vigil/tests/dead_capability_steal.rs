@@ -31,7 +31,6 @@ use std::time::Duration;
 
 use contextdb_core::TenantId;
 use contextdb_engine::Database;
-use contextdb_engine::sync_types::{ConflictPolicies, ConflictPolicy};
 use contextdb_engine::work_ledger::{
     BlobHash, InputRef, JobSpec, JobState, MovementPolicy, install_work_ledger_schema, job_state,
     submit_job,
@@ -165,11 +164,10 @@ fn start_hub(
     tenant: &str,
 ) -> (Arc<Database>, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
     let hub_db = Arc::new(Database::open_memory());
-    let server = Arc::new(SyncServer::with_transport(
+    let server = Arc::new(SyncServer::with_authenticated_transport_for_test(
         hub_db.clone(),
-        broker.server(),
+        broker.server_as(&format!("hub-{tenant}")),
         TenantId::from(tenant),
-        ConflictPolicies::uniform(ConflictPolicy::LatestWins),
     ));
     let shutdown = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
@@ -313,8 +311,11 @@ async fn claim_and_die(broker: &InProcessBroker, tenant: &str, job_id: &str) -> 
     let b_node = node_id_of(&b_key);
     let b_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&b_db).expect("B ledger schema");
-    let b_client =
-        SyncClient::with_transport(b_db.clone(), broker.client(), TenantId::from(tenant));
+    let b_client = SyncClient::with_authenticated_transport_for_test(
+        b_db.clone(),
+        broker.client_as(&b_node),
+        TenantId::from(tenant),
+    );
     within(b_client.pull_default())
         .await
         .expect("B pulls the job");
@@ -353,8 +354,11 @@ async fn dead_worker_steal_reclaims_locally_with_named_receipt() {
     let a_node = node_id_of(&a_key);
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client =
-        SyncClient::with_transport(a_db.clone(), broker.client(), TenantId::from(tenant));
+    let a_client = SyncClient::with_authenticated_transport_for_test(
+        a_db.clone(),
+        broker.client_as(&a_node),
+        TenantId::from(tenant),
+    );
 
     let deadline_ms = T0 + HORIZON;
     submit_local_detector_job(&a_db, "job-steal-01", &a_node, Some(deadline_ms));
@@ -418,11 +422,12 @@ async fn dead_worker_steal_reclaims_locally_with_named_receipt() {
     let backend = Arc::new(SpyBackend {
         calls: Mutex::new(0),
     });
-    let executor = DetectorWorkExecutor::new(backend.clone(), a_node.clone());
+    let executor: Arc<dyn WorkExecutor> =
+        Arc::new(DetectorWorkExecutor::new(backend.clone(), a_node.clone()));
     let outcome = within(poll_and_execute_once(
         &a_client,
         &deferring_config(&a_node),
-        &executor,
+        executor,
         steal_at + 1,
     ))
     .await
@@ -478,8 +483,11 @@ async fn own_self_reclaimed_claim_is_never_stolen() {
     let a_node = node_id_of(&identity_file(&a_dir));
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client =
-        SyncClient::with_transport(a_db.clone(), broker.client(), TenantId::from(tenant));
+    let a_client = SyncClient::with_authenticated_transport_for_test(
+        a_db.clone(),
+        broker.client_as(&a_node),
+        TenantId::from(tenant),
+    );
 
     let deadline_ms = T0 + HORIZON;
     submit_local_detector_job(&a_db, "job-steal-04", &a_node, Some(deadline_ms));
@@ -529,8 +537,11 @@ async fn foreign_node_never_steals() {
     let a_node = node_id_of(&identity_file(&a_dir));
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client =
-        SyncClient::with_transport(a_db.clone(), broker.client(), TenantId::from(tenant));
+    let a_client = SyncClient::with_authenticated_transport_for_test(
+        a_db.clone(),
+        broker.client_as(&a_node),
+        TenantId::from(tenant),
+    );
 
     let deadline_ms = T0 + HORIZON;
     submit_local_detector_job(&a_db, "job-steal-02", &a_node, Some(deadline_ms));
@@ -544,8 +555,11 @@ async fn foreign_node_never_steals() {
     let c_node = node_id_of(&identity_file(&c_dir));
     let c_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&c_db).expect("C ledger schema");
-    let c_client =
-        SyncClient::with_transport(c_db.clone(), broker.client(), TenantId::from(tenant));
+    let c_client = SyncClient::with_authenticated_transport_for_test(
+        c_db.clone(),
+        broker.client_as(&c_node),
+        TenantId::from(tenant),
+    );
     within(c_client.pull_default())
         .await
         .expect("C pulls ledger");
@@ -582,8 +596,11 @@ async fn result_before_steal_makes_steal_a_noop() {
     let a_node = node_id_of(&identity_file(&a_dir));
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client =
-        SyncClient::with_transport(a_db.clone(), broker.client(), TenantId::from(tenant));
+    let a_client = SyncClient::with_authenticated_transport_for_test(
+        a_db.clone(),
+        broker.client_as(&a_node),
+        TenantId::from(tenant),
+    );
 
     let deadline_ms = T0 + HORIZON;
     submit_local_detector_job(&a_db, "job-steal-03", &a_node, Some(deadline_ms));
@@ -594,11 +611,15 @@ async fn result_before_steal_makes_steal_a_noop() {
     let b_node = node_id_of(&identity_file(&b_dir));
     let b_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&b_db).expect("B ledger schema");
-    let b_client =
-        SyncClient::with_transport(b_db.clone(), broker.client(), TenantId::from(tenant));
+    let b_client = SyncClient::with_authenticated_transport_for_test(
+        b_db.clone(),
+        broker.client_as(&b_node),
+        TenantId::from(tenant),
+    );
     within(b_client.pull_default())
         .await
         .expect("B pulls the job");
+    let executor: Arc<dyn WorkExecutor> = Arc::new(RemoteEchoExecutor);
     let done = within(poll_and_execute_once(
         &b_client,
         &WorkerConfig {
@@ -613,7 +634,7 @@ async fn result_before_steal_makes_steal_a_noop() {
             defer_own_submissions_until_deadline: true,
             writes_are_canonical: false,
         },
-        &RemoteEchoExecutor,
+        executor,
         T0 + 10,
     ))
     .await

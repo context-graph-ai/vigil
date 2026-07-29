@@ -16,12 +16,13 @@ use std::time::Duration;
 
 use contextdb_core::TenantId;
 use contextdb_engine::Database;
-use contextdb_engine::sync_types::{ConflictPolicies, ConflictPolicy};
 use contextdb_engine::work_ledger::{
     BlobHash, InputRef, JobSpec, JobState, MovementPolicy, advertise_capability,
     install_work_ledger_schema, job_state, submit_job,
 };
-use contextdb_server::work_ledger::{PollOutcome, WorkerConfig, poll_and_execute_once};
+use contextdb_server::work_ledger::{
+    PollOutcome, WorkExecutor, WorkerConfig, poll_and_execute_once,
+};
 use contextdb_server::{FabricIdentity, InProcessBroker, SyncClient, SyncServer};
 
 use vigil::DecodedRgbFrame;
@@ -57,11 +58,10 @@ fn start_hub(
     tenant: &str,
 ) -> (Arc<Database>, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
     let hub_db = Arc::new(Database::open_memory());
-    let server = Arc::new(SyncServer::with_transport(
+    let server = Arc::new(SyncServer::with_authenticated_transport_for_test(
         hub_db.clone(),
-        broker.server(),
+        broker.server_as(&format!("hub-{tenant}")),
         TenantId::from(tenant),
-        ConflictPolicies::uniform(ConflictPolicy::LatestWins),
     ));
     let shutdown = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
@@ -165,8 +165,11 @@ async fn one_node_submits_and_claims_in_one_run() {
     let a_node = node_id_of(&a_key);
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client =
-        SyncClient::with_transport(a_db.clone(), broker.client(), TenantId::from(tenant));
+    let a_client = SyncClient::with_authenticated_transport_for_test(
+        a_db.clone(),
+        broker.client_as(&a_node),
+        TenantId::from(tenant),
+    );
     let tags = vec![
         DETECTOR_CLASS_TAG.to_string(),
         "backend:burn-cpu".to_string(),
@@ -181,8 +184,11 @@ async fn one_node_submits_and_claims_in_one_run() {
     let b_node = node_id_of(&b_key);
     let b_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&b_db).expect("B ledger schema");
-    let b_client =
-        SyncClient::with_transport(b_db.clone(), broker.client(), TenantId::from(tenant));
+    let b_client = SyncClient::with_authenticated_transport_for_test(
+        b_db.clone(),
+        broker.client_as(&b_node),
+        TenantId::from(tenant),
+    );
 
     submit_local_detector_job(
         &b_db,
@@ -199,7 +205,8 @@ async fn one_node_submits_and_claims_in_one_run() {
     let backend = Arc::new(SpyBackend {
         calls: Mutex::new(Vec::new()),
     });
-    let executor = DetectorWorkExecutor::new(backend.clone(), a_node.clone());
+    let executor: Arc<dyn WorkExecutor> =
+        Arc::new(DetectorWorkExecutor::new(backend.clone(), a_node.clone()));
     let config = WorkerConfig {
         node_id: a_node.clone(),
         advertised_tags: tags,
@@ -220,7 +227,7 @@ async fn one_node_submits_and_claims_in_one_run() {
         let outcome = within(poll_and_execute_once(
             &a_client,
             &config,
-            &executor,
+            Arc::clone(&executor),
             T0 + 1 + step as i64,
         ))
         .await

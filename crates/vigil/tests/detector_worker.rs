@@ -22,14 +22,15 @@ use std::time::Duration;
 
 use contextdb_core::{TenantId, Value};
 use contextdb_engine::Database;
-use contextdb_engine::sync_types::{ConflictPolicies, ConflictPolicy};
 use contextdb_engine::work_ledger::{
     BlobHash, InputRef, JobSpec, JobState, MovementPolicy, advertise_capability, advertised_tags,
     install_work_ledger_schema, job_result, job_state, record_result, submit_job,
 };
 use contextdb_server::blob_resolver::BlobStore;
 use contextdb_server::transport::iroh::IrohServer;
-use contextdb_server::work_ledger::{PollOutcome, WorkerConfig, poll_and_execute_once};
+use contextdb_server::work_ledger::{
+    PollOutcome, WorkExecutor, WorkerConfig, poll_and_execute_once,
+};
 use contextdb_server::{FabricIdentity, InProcessBroker, SyncClient, SyncServer};
 use sha2::{Digest, Sha256};
 
@@ -70,11 +71,10 @@ fn start_hub(
     tenant: &str,
 ) -> (Arc<Database>, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
     let hub_db = Arc::new(Database::open_memory());
-    let server = Arc::new(SyncServer::with_transport(
+    let server = Arc::new(SyncServer::with_authenticated_transport_for_test(
         hub_db.clone(),
-        broker.server(),
+        broker.server_as(&format!("hub-{tenant}")),
         TenantId::from(tenant),
-        ConflictPolicies::uniform(ConflictPolicy::LatestWins),
     ));
     let shutdown = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
@@ -243,9 +243,9 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
 
     let holder_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&holder_db).expect("holder ledger schema");
-    let holder_client = Arc::new(SyncClient::with_transport(
+    let holder_client = Arc::new(SyncClient::with_authenticated_transport_for_test(
         holder_db.clone(),
-        broker.client(),
+        broker.client_as(&holder_node),
         TenantId::from(tenant),
     ));
     let holder_blob_service = Arc::new(BlobStore::new(
@@ -291,8 +291,11 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
 
     let worker_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&worker_db).expect("worker ledger schema");
-    let worker_client =
-        SyncClient::with_transport(worker_db.clone(), broker.client(), TenantId::from(tenant));
+    let worker_client = SyncClient::with_authenticated_transport_for_test(
+        worker_db.clone(),
+        broker.client_as(&worker_node),
+        TenantId::from(tenant),
+    );
     let worker_blob_service = Arc::new(BlobStore::new(
         worker_db.clone(),
         MovementPolicy {
@@ -322,7 +325,10 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
         model_sha256: "spy-model-sha".to_string(),
         calls: Mutex::new(Vec::new()),
     });
-    let executor = DetectorWorkExecutor::new(backend.clone(), worker_node.clone());
+    let executor: Arc<dyn WorkExecutor> = Arc::new(DetectorWorkExecutor::new(
+        backend.clone(),
+        worker_node.clone(),
+    ));
 
     let config = WorkerConfig {
         node_id: worker_node.clone(),
@@ -339,7 +345,7 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
     let outcome = within(poll_and_execute_once(
         &worker_client,
         &config,
-        &executor,
+        Arc::clone(&executor),
         T0 + 1,
     ))
     .await
@@ -430,7 +436,7 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
     let outcome = within(poll_and_execute_once(
         &worker_client,
         &config,
-        &executor,
+        Arc::clone(&executor),
         T0 + 4,
     ))
     .await

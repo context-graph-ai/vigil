@@ -48,6 +48,7 @@ jobs:
           VIGIL_SHA: ${{ inputs.vigil_sha }}
           CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
           CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+          CACHE_EPOCH: ${{ inputs.cache_epoch }}
         run: |
           case "$GITHUB_REF" in
             refs/heads/dev | refs/heads/dev-next) ;;
@@ -62,6 +63,10 @@ jobs:
               exit 1
             }
           done
+          [[ "$CACHE_EPOCH" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || {
+            echo "cache_epoch must be a 1-64 character cache-key token" >&2
+            exit 1
+          }
           test "$GITHUB_SHA" = "$VIGIL_SHA" || {
             echo "dev moved before HAOS artifact dispatch" >&2
             exit 1
@@ -93,6 +98,7 @@ jobs:
         id: identity
         env:
           GH_TOKEN: ${{ secrets.CG_CI_TOKEN }}
+          TRUSTED_BRANCH: ${{ github.ref_name }}
           EXPECTED_VIGIL_SHA: ${{ inputs.vigil_sha }}
           EXPECTED_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
           EXPECTED_CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
@@ -107,11 +113,15 @@ jobs:
           # branch, never an arbitrary commit: dev for shippable builds, and
           # dev-next so a change can be qualified on real hardware before it
           # merges.
-          test "$vigil_sha" = "$dev_sha" || test "$vigil_sha" = "$dev_next_sha"
+          case "$TRUSTED_BRANCH" in
+            dev) test "$vigil_sha" = "$dev_sha" ;;
+            dev-next) test "$vigil_sha" = "$dev_next_sha" ;;
+            *) exit 1 ;;
+          esac
           test "$context_graph_sha" = "$EXPECTED_CONTEXT_GRAPH_SHA"
           test "$contextdb_sha" = "$EXPECTED_CONTEXTDB_SHA"
-          test "$(gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$context_graph_sha"
-          test "$(gh api repos/context-graph-ai/contextdb/git/ref/heads/dev --jq '.object.sha')" = "$contextdb_sha"
+          test "$(gh api "repos/context-graph-ai/context-graph/git/ref/heads/$TRUSTED_BRANCH" --jq '.object.sha')" = "$context_graph_sha"
+          test "$(gh api "repos/context-graph-ai/contextdb/git/ref/heads/$TRUSTED_BRANCH" --jq '.object.sha')" = "$contextdb_sha"
           test -z "$(git -C vigil status --porcelain=v1)"
           test -z "$(git -C context-graph status --porcelain=v1)"
           test -z "$(git -C contextdb status --porcelain=v1)"
@@ -171,6 +181,8 @@ jobs:
         run: mkdir -p haos-output/receipts
       - name: Build and receipt the HAOS production binary
         working-directory: vigil
+        env:
+          CACHE_EPOCH: ${{ inputs.cache_epoch }}
         run: |
           ./scripts/verify release \
             --lane artifact-amd64 \
@@ -183,8 +195,8 @@ jobs:
               --platform linux/amd64 \
               --target vigil-hw-binary-amd64 \
               --file ../haos-context/vigil/Dockerfile.hardware \
-              --cache-from "type=gha,scope=vigil-haos-amd64-${{ inputs.cache_epoch }}" \
-              --cache-to "type=gha,mode=max,scope=vigil-haos-amd64-${{ inputs.cache_epoch }}" \
+              --cache-from "type=gha,scope=vigil-haos-amd64-$CACHE_EPOCH" \
+              --cache-to "type=gha,mode=max,scope=vigil-haos-amd64-$CACHE_EPOCH" \
               --output type=local,dest=../haos-output/binary \
               ../haos-context
       - name: Bind the artifact to its exact source tuple

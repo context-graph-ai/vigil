@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use bytes::Bytes;
 use context_graph::Store;
 use contextdb_engine::Database;
 use contextdb_engine::work_ledger::{ExecutionInputs, JobSnapshot};
@@ -185,6 +186,10 @@ impl<B: FabricDetectorBackend> WorkExecutor for DetectorWorkExecutor<B> {
                     WireVideoCodec::H264 => crate::VideoCodec::H264,
                     WireVideoCodec::H265 => crate::VideoCodec::H265,
                 };
+                // Wire-received bytes have no upstream sharing to preserve;
+                // wrap once here so the decode-side seam stays uniform with
+                // the local-capture path's `Bytes` units.
+                let units: Vec<Bytes> = units.into_iter().map(Into::into).collect();
                 match crate::media_pipeline::decode_encoded_units(codec, units, job_payload.fps.0) {
                     Ok(segment) => segment.frames,
                     Err(err) => {
@@ -335,7 +340,7 @@ impl FabricRuntime {
         data_dir: &Path,
         fabric_ticket: Option<&str>,
         fabric_hub: bool,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, FabricStartError> {
         std::fs::create_dir_all(data_dir).map_err(|err| {
             format!(
                 "fabric: create data directory {}: {err}",
@@ -352,10 +357,24 @@ impl FabricRuntime {
         let node_id = identity.node_id();
 
         let db_path = data_dir.join("fabric-ledger.db");
-        let db =
-            Arc::new(Database::open(&db_path).map_err(|err| {
-                format!("fabric: open ledger database {}: {err}", db_path.display())
-            })?);
+        let db = Arc::new(Database::open(&db_path).map_err(|err| {
+            let message = format!("fabric: open ledger database {}: {err}", db_path.display());
+            if matches!(err, contextdb_core::Error::DatabaseLocked { .. }) {
+                FabricStartError::DatabaseLocked { message }
+            } else {
+                FabricStartError::Other(message)
+            }
+        })?);
+        // The ledger's `peer_directory` table carries this node's own
+        // enrollment ticket (the same credential cached at `fabric/own-ticket`,
+        // 0600). contextdb creates the file at its own default mode
+        // (observed 0664 — group/world readable), so vigil tightens it here,
+        // in its own data dir, after open: chmod is idempotent against an fd
+        // already held open for continued writes (the mode lives on the
+        // inode, not reset per-write), so this holds for the life of the
+        // process, not just at creation. No upstream contextdb change — that
+        // work is closed by owner ruling.
+        tighten_fabric_ledger_permissions(&db_path)?;
         contextdb_engine::work_ledger::install_work_ledger_schema(&db)
             .map_err(|err| format!("fabric: install work ledger schema: {err}"))?;
         let _ = contextdb_engine::peer_directory::install_peer_directory_schema(&db);
@@ -366,6 +385,18 @@ impl FabricRuntime {
                 .await
                 .map_err(|err| format!("fabric: bind this node's endpoint: {err}"))?,
         );
+        // Best-effort local cache of this node's own ticket, read back by
+        // `run_ticket_command` when a live rebind fails because a running
+        // vigil process already holds this identity's sticky port — the
+        // ordinary case, since an operator only ever runs `vigil fabric
+        // ticket` while Vigil is up. A write failure here is never fatal:
+        // it only means that fallback path degrades to its own error.
+        write_own_ticket_cache(data_dir, &own_endpoint.ticket());
+        // Stamp the identity that produced the cached ticket, so a later
+        // fallback read can tell "this cache still belongs to the identity
+        // in play" from "this cache is a leftover from a since-rotated
+        // identity" — see `run_ticket_command`'s freshness check.
+        write_own_ticket_identity_stamp(data_dir, &node_id);
 
         let blob_store = Arc::new(contextdb_server::blob_resolver::BlobStore::new(
             db.clone(),
@@ -502,6 +533,17 @@ impl FabricRuntime {
         }
     }
 
+    /// This node's own enrollment ticket, regardless of whether it carries
+    /// the hub role: `own_endpoint` always binds at [`FabricRuntime::start`]
+    /// (so this node can serve its own submitted jobs' blobs node-to-node),
+    /// and it aliases `hub_endpoint` when this node IS the hub — so this
+    /// returns the exact same value a carried hub's `join_instruction`
+    /// advertises. The retrieval surface for `vigil fabric ticket`: a
+    /// deliberate local act, never served over HTTP.
+    pub fn own_ticket(&self) -> String {
+        self.own_endpoint.ticket()
+    }
+
     /// Validate a fabric ticket an operator supplied (config/env/CLI/HAOS
     /// options), before ever dialing it. A malformed or expired ticket
     /// returns a typed error whose text NAMES THE FIX (criterion C6 /
@@ -518,10 +560,14 @@ impl FabricRuntime {
         }
         match contextdb_server::PeerEndpointSpec::parse_detailed(trimmed) {
             Ok(Some(spec)) if spec.dial_ticket().is_some() => Ok(()),
-            Ok(_) => Err(format!(
-                "not a valid fabric enrollment ticket: {trimmed:?} — paste the exact ticket \
-                 printed by the hub node's fabric-join line, unedited"
-            )),
+            // The ticket itself is never reproduced here (a fabric ticket is
+            // an enrollment credential) — only that it was malformed and
+            // what to do about it.
+            Ok(_) => Err(
+                "not a valid fabric enrollment ticket — paste the exact ticket printed by the \
+                 hub node's fabric-join line, unedited"
+                    .to_string(),
+            ),
             Err(message) => Err(format!("invalid fabric enrollment ticket: {message}")),
         }
     }
@@ -542,7 +588,7 @@ impl FabricRuntime {
         clip_sha256: String,
         decoded_frames_sha256: String,
         model_id: String,
-        encoded_units: &[Vec<u8>],
+        encoded_units: &[Bytes],
         deadline_ms: Option<i64>,
     ) -> Result<String, String> {
         let framed = crate::detector_workclass::encode_length_framed_units(encoded_units);
@@ -1545,10 +1591,17 @@ pub(crate) fn fabric_bring_up(
                 worker_serving_reason,
             };
             let status_line = crate::offload_policy::render_fabric_status_receipt(&facts);
-            let join_line = format!("fabric-join={}", status_bundle.runtime.join_instruction());
+            // Ticket-free by construction: `join_advice` never touches
+            // `join_instruction` (the ticket-bearing startup-log string) at
+            // all — it only asks whether this node carries the hub role.
+            let join_advice = if status_bundle.runtime.hub_endpoint.is_some() {
+                crate::runtime_stats::FabricJoinAdvice::HubReady
+            } else {
+                crate::runtime_stats::FabricJoinAdvice::GrowHint
+            };
             status_stats.update(|stats| {
                 stats.fabric_status = status_line.clone();
-                stats.fabric_join = join_line.clone();
+                stats.fabric_join_advice = join_advice;
             });
             // Refresh promptly (1s): the worker-serving state settles shortly
             // after bring-up (detector loaded → serving, or no-model → the
@@ -1560,6 +1613,384 @@ pub(crate) fn fabric_bring_up(
     });
 
     Some(bundle)
+}
+
+/// Where this node's own ticket is cached, beside its identity key — read
+/// back by `run_ticket_command` when a live rebind is not possible because a
+/// running `vigil run` process already holds this identity's sticky sync
+/// port (the ordinary case: an operator only ever runs `vigil fabric
+/// ticket` while Vigil is up). Never printed, served, or logged from
+/// anywhere except the two sanctioned retrieval paths that read it or its
+/// live equivalent (this command, and the startup log via
+/// [`FabricRuntime::join_instruction`]).
+fn own_ticket_cache_path(fabric_data_dir: &Path) -> std::path::PathBuf {
+    fabric_data_dir.join("own-ticket")
+}
+
+/// Tighten the fabric ledger database to owner-read/write only (0600) after
+/// `Database::open` creates it. contextdb (closed upstream work, no edit
+/// here — see the owner ruling recorded for the fleet coordination handoff)
+/// creates the file at its own default mode; vigil owns this file inside its
+/// own data directory, so it re-asserts the mode itself.
+///
+/// A failure here is FATAL to bring-up: both persisted stores (this ledger
+/// and `fabric/own-ticket`) are contractually owner-only, and the ledger's
+/// `peer_directory` table carries this node's own enrollment ticket. Letting
+/// bring-up continue into schema installation, peer registration, and
+/// serving with the mode unsecured would silently write that credential at
+/// whatever permissions the file happens to hold — the standing ruling is
+/// that an impossible vigil-side tightening is a stop-and-report, never
+/// something routed past. The error names the path and the underlying
+/// reason; it never carries a credential (this step runs before any ticket
+/// is ever written to this file).
+#[cfg(unix)]
+fn tighten_fabric_ledger_permissions(db_path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(db_path, fs::Permissions::from_mode(0o600)).map_err(|err| {
+        format!(
+            "fabric: could not secure the ledger database at {} to owner-only permissions: {err}",
+            db_path.display()
+        )
+    })
+}
+
+#[cfg(not(unix))]
+fn tighten_fabric_ledger_permissions(_db_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+/// Persist the ticket cache with owner-only permissions via a same-directory
+/// temp file plus atomic rename, mirroring [`crate::camera_track::CameraQuerySalt::persist`]:
+/// the credential's mode is fixed at CREATE time (never widened by a later
+/// `fs::write` onto an existing file with a looser mode) and a reader can
+/// never observe a torn write.
+fn write_own_ticket_cache(fabric_data_dir: &Path, ticket: &str) {
+    let path = own_ticket_cache_path(fabric_data_dir);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let temp_path = path.with_extension("tmp");
+    let _ = fs::remove_file(&temp_path);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let write_result = options
+        .open(&temp_path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, ticket.as_bytes()));
+    if write_result.is_ok() {
+        let _ = fs::rename(&temp_path, &path);
+    } else {
+        let _ = fs::remove_file(&temp_path);
+    }
+}
+
+fn read_own_ticket_cache(fabric_data_dir: &Path) -> Option<String> {
+    let content = fs::read_to_string(own_ticket_cache_path(fabric_data_dir)).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Where the identity that PRODUCED the cached ticket is stamped — a
+/// companion to [`own_ticket_cache_path`], never the credential itself
+/// (holds only the identity's public `node_id`, the same value every other
+/// surface already prints unredacted). See [`write_own_ticket_identity_stamp`]
+/// for why this exists.
+fn own_ticket_identity_stamp_path(fabric_data_dir: &Path) -> std::path::PathBuf {
+    own_ticket_cache_path(fabric_data_dir).with_extension("node-id")
+}
+
+/// Record which identity's ticket is cached, so a later fallback read (see
+/// `run_ticket_command`) can distinguish "the cache still belongs to the
+/// identity in play" from "the cache is a leftover from a since-rotated
+/// identity" (the identity file was deleted and regenerated since the last
+/// successful start). Best-effort, like the ticket cache itself: a write
+/// failure here only means the freshness check degrades to "stamp absent",
+/// which the reader already treats as untrustworthy.
+///
+/// This is a PARTIAL freshness check, not a full one — see the doc comment
+/// on [`run_ticket_command`]'s freshness step for what it does and does not
+/// prove.
+fn write_own_ticket_identity_stamp(fabric_data_dir: &Path, node_id: &str) {
+    let path = own_ticket_identity_stamp_path(fabric_data_dir);
+    let _ = fs::write(path, node_id);
+}
+
+fn read_own_ticket_identity_stamp(fabric_data_dir: &Path) -> Option<String> {
+    let content = fs::read_to_string(own_ticket_identity_stamp_path(fabric_data_dir)).ok()?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// The freshness gate `run_ticket_command` applies before trusting the
+/// cached ticket on a `DatabaseLocked` fallback: `true` only when the
+/// identity stamped alongside the cache ([`write_own_ticket_identity_stamp`])
+/// still matches the identity `identity_path` loads TODAY. Absent stamp,
+/// unreadable identity, or a mismatch are all treated as untrustworthy
+/// (`false`) — a missing signal must never be read as "fresh." See the
+/// doc comment on [`run_ticket_command`] for what this does and does not
+/// prove (identity-current, not address-current).
+fn cached_ticket_identity_is_current(fabric_data_dir: &Path, identity_path: &Path) -> bool {
+    FabricIdentity::load_or_generate(identity_path)
+        .ok()
+        .map(|identity| identity.node_id())
+        .and_then(|current_node_id| {
+            read_own_ticket_identity_stamp(fabric_data_dir)
+                .map(|cached_node_id| cached_node_id == current_node_id)
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod ticket_cache_freshness_tests {
+    use super::{
+        cached_ticket_identity_is_current, write_own_ticket_cache, write_own_ticket_identity_stamp,
+    };
+
+    /// A stamp matching the identity currently on disk is trusted.
+    #[test]
+    fn fresh_when_the_stamped_identity_matches_the_identity_on_disk() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let identity_path = dir.path().join("fabric-identity.key");
+        let identity =
+            contextdb_server::FabricIdentity::load_or_generate(&identity_path).expect("identity");
+        write_own_ticket_cache(dir.path(), "irrelevant-to-this-check");
+        write_own_ticket_identity_stamp(dir.path(), &identity.node_id());
+
+        assert!(
+            cached_ticket_identity_is_current(dir.path(), &identity_path),
+            "a stamp matching the on-disk identity must be treated as fresh"
+        );
+    }
+
+    /// The identity file was replaced (rotated/regenerated) since the cache
+    /// was written: the stamp no longer matches, so the cache must be
+    /// refused rather than trusted.
+    #[test]
+    fn stale_when_the_identity_on_disk_has_rotated_since_the_stamp_was_written() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let identity_path = dir.path().join("fabric-identity.key");
+        write_own_ticket_cache(dir.path(), "irrelevant-to-this-check");
+        // Stamp a node id that does not, and will not, match anything this
+        // identity file ever loads — simulating a since-rotated identity.
+        write_own_ticket_identity_stamp(
+            dir.path(),
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+
+        assert!(
+            !cached_ticket_identity_is_current(dir.path(), &identity_path),
+            "a stamp from a rotated/different identity must never be treated as fresh"
+        );
+    }
+
+    /// No stamp was ever written (an older cache from before this check
+    /// existed, or a write failure): absence must be treated as
+    /// untrustworthy, never as an implicit pass.
+    #[test]
+    fn stale_when_no_identity_stamp_was_ever_written() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let identity_path = dir.path().join("fabric-identity.key");
+        write_own_ticket_cache(dir.path(), "irrelevant-to-this-check");
+
+        assert!(
+            !cached_ticket_identity_is_current(dir.path(), &identity_path),
+            "a missing identity stamp must never be treated as fresh"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod ledger_permission_tightening_tests {
+    use super::tighten_fabric_ledger_permissions;
+
+    /// A mode successfully applied to a real, owned file is not an error —
+    /// the sanity control for the failure case below.
+    #[test]
+    fn succeeds_and_leaves_the_file_owner_only_when_the_mode_can_be_set() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("fabric-ledger.db");
+        std::fs::write(&db_path, b"not a real ledger, just a file to chmod").expect("write file");
+
+        tighten_fabric_ledger_permissions(&db_path).expect("chmod on an owned, existing file");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&db_path)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "must leave the file owner-only, got {mode:o}");
+    }
+
+    /// The load-bearing propagation surface for the fatal-chmod fix: when
+    /// the mode genuinely cannot be secured (here, forced by pointing at a
+    /// path with no file behind it — a deterministic, root-free way to
+    /// force `set_permissions` to fail), this returns `Err` rather than
+    /// swallowing the failure and letting a caller believe the ledger is
+    /// secured when it is not. `FabricRuntime::start` now propagates this
+    /// `Err` with `?`, aborting bring-up before schema install, peer
+    /// registration, or serving ever run.
+    #[test]
+    fn returns_an_error_naming_the_path_when_the_mode_cannot_be_set() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("fabric-ledger.db");
+        // Deliberately never created: `set_permissions` on a nonexistent
+        // path fails, exercising the exact `Err` arm `FabricRuntime::start`
+        // now must abort on.
+        assert!(
+            !db_path.exists(),
+            "test setup sanity: the path must not exist, or this proves nothing about failure"
+        );
+
+        let result = tighten_fabric_ledger_permissions(&db_path);
+
+        let error = result.expect_err(
+            "tightening a nonexistent file's permissions must return Err, not silently succeed",
+        );
+        assert!(
+            error.contains(&db_path.display().to_string()),
+            "the error must name the path that could not be secured"
+        );
+    }
+}
+
+/// CLI entry point for `vigil fabric ticket` (docs/cli.md's "Fabric ticket"
+/// section): print THIS node's enrollment ticket to stdout, on explicit
+/// invocation only.
+///
+/// Tries a live bind first — the same identity file, same sticky-port
+/// convention under `<data-dir>/fabric` that [`fabric_bring_up`] uses — then
+/// reads [`FabricRuntime::own_ticket`] off the freshly bound endpoint: never
+/// a hub role, never a dial, just a bare bind to read back this node's own
+/// address-bearing ticket. A first invocation against an empty data dir
+/// generates a fresh identity (the same `FabricIdentity::load_or_generate`
+/// path a first `vigil run` takes) rather than erroring.
+///
+/// **While Vigil is running**, that live start necessarily contends for the
+/// SAME on-disk fabric ledger the running node's own `Database::open`
+/// already holds. In practice that contention is caught EARLY — at the
+/// ledger open, before this command ever reaches the endpoint bind step —
+/// and surfaces as a TYPED [`FabricStartError::DatabaseLocked`], carried
+/// through from `contextdb_core::Error::DatabaseLocked` at the exact call
+/// site that observes it ([`FabricRuntime::start`]'s `Database::open`)
+/// rather than flattened to a string and re-matched by substring here. That
+/// failure is the expected, ordinary case — this command exists
+/// specifically for an operator to run against a live node — so on exactly
+/// that lock-conflict failure this falls back to the ticket the running
+/// node itself cached the last time it started successfully
+/// ([`write_own_ticket_cache`]), which is byte-identical to what that
+/// node's own startup `fabric-join` line already advertised — PROVIDED:
+///
+/// 1. the cached content still parses as a structurally valid enrollment
+///    ticket (never returned unvalidated, so a corrupt or truncated cache
+///    file cannot silently masquerade as a live ticket), AND
+/// 2. the identity stamped alongside the cache ([`write_own_ticket_identity_stamp`])
+///    still matches the identity this data dir loads TODAY (never returned
+///    when the identity file was deleted and regenerated since the cache
+///    was written, which would make the cached ticket describe a node that
+///    no longer exists).
+///
+/// **What this freshness check does NOT prove, and why:** it proves the
+/// cache belongs to the identity currently in play, not that its encoded
+/// network address (direct addresses, relay homing) is what the running
+/// node would advertise if asked right now. Those addresses are discovered
+/// fresh at every bind and are only known to the live `IrohServer` inside
+/// the running process; the sticky-port record that pins the PORT half is
+/// tracked by `contextdb_server::transport::iroh` but not exposed publicly
+/// (`sticky_port_path`/`read_sticky_ports` are private to that module, and
+/// there is no public ticket-parsing API to recompute or compare against
+/// it from here). Establishing full address freshness without contending
+/// for the same lock needs one of: (a) a live query channel to the running
+/// process (e.g. a local IPC/health call it answers with its current
+/// ticket), or (b) a new PUBLIC contextdb-server API that lets a caller
+/// read back the current sticky-port record for an identity and compare it
+/// against a cached ticket's encoded port, without binding. Neither exists
+/// today; this is a genuine gap, not a rounding-off of a known-easy check.
+/// The identity-stamp check above is the freshness signal that IS available
+/// without either of those, and it does close the most severe staleness
+/// case (a leftover cache from a rotated identity describing a node that no
+/// longer exists at all).
+///
+/// Any OTHER start failure (a corrupt identity file, a database-open error
+/// unrelated to a live lock holder, a schema-install failure, an endpoint
+/// bind failure with no remembered lock contention, and so on) is unrelated
+/// to the running-node contention this fallback exists for, so it is
+/// surfaced verbatim rather than papered over with a possibly-stale cached
+/// value — a wrong "the ticket must be X" answer is worse than an honest
+/// error naming what actually broke.
+pub(crate) fn run_ticket_command(args: Vec<std::ffi::OsString>) -> Result<(), String> {
+    let config = crate::config::load(args)?;
+    let fabric_data_dir = config.data_dir.join("fabric");
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("vigil-fabric-ticket")
+        .enable_all()
+        .build()
+        .map_err(|error| format!("fabric ticket: start tokio runtime: {error}"))?;
+    match tokio_runtime.block_on(FabricRuntime::start(&fabric_data_dir, None, false)) {
+        Ok(runtime) => {
+            println!("ticket={}", runtime.own_ticket());
+            Ok(())
+        }
+        Err(bind_error @ FabricStartError::DatabaseLocked { .. }) => {
+            let identity_path = fabric_data_dir.join("fabric-identity.key");
+            if !cached_ticket_identity_is_current(&fabric_data_dir, &identity_path) {
+                return Err(format!("fabric ticket: {bind_error}"));
+            }
+            match read_own_ticket_cache(&fabric_data_dir) {
+                Some(ticket) if FabricRuntime::validate_fabric_ticket(&ticket).is_ok() => {
+                    println!("ticket={ticket}");
+                    Ok(())
+                }
+                _ => Err(format!("fabric ticket: {bind_error}")),
+            }
+        }
+        Err(bind_error) => Err(format!("fabric ticket: {bind_error}")),
+    }
+}
+
+/// Typed outcome of [`FabricRuntime::start`]. Every non-lock failure carries
+/// only a message (there is currently only one classification a caller
+/// needs to act on differently — see [`run_ticket_command`]'s fallback); a
+/// future caller that needs a second typed distinction adds a variant here
+/// rather than re-introducing string matching.
+#[derive(Debug)]
+pub enum FabricStartError {
+    /// `contextdb_core::Error::DatabaseLocked` observed at
+    /// `Database::open`, carried through as a type rather than flattened to
+    /// a string and re-parsed by substring at the call site that needs to
+    /// distinguish it.
+    DatabaseLocked { message: String },
+    /// Any other bring-up failure.
+    Other(String),
+}
+
+impl std::fmt::Display for FabricStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FabricStartError::DatabaseLocked { message } | FabricStartError::Other(message) => {
+                write!(f, "{message}")
+            }
+        }
+    }
+}
+
+impl From<String> for FabricStartError {
+    fn from(message: String) -> Self {
+        FabricStartError::Other(message)
+    }
 }
 
 /// Convert this crate's process-local work identity into the fabric wire

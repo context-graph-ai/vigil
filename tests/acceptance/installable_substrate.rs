@@ -72,9 +72,9 @@ fn vigil_standalone_version_reports_nonempty_build_identity() {
                 failures.push(format!("--help exited with {}", output.status));
             }
             let commands = help_section_tokens(&stdout, "Commands:");
-            if commands != ["run"] {
+            if commands != ["run", "fabric"] {
                 failures.push(format!(
-                    "--help commands were not exactly [run]: {commands:?}"
+                    "--help commands were not exactly [run, fabric]: {commands:?}"
                 ));
             }
             let options = help_section_tokens(&stdout, "Options:");

@@ -91,7 +91,7 @@ async fn main_prints_join_instruction_and_malformed_ticket_names_fix() {
         }
         Err(error) => {
             assert!(
-                error.to_ascii_lowercase().contains("ticket"),
+                error.to_string().to_ascii_lowercase().contains("ticket"),
                 "a malformed-ticket enrollment failure must name the fix: {error}"
             );
         }

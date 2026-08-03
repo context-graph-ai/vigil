@@ -61,6 +61,28 @@ fn help_flag_names_the_run_command() {
 }
 
 #[test]
+fn help_flag_names_the_fabric_ticket_command() {
+    // Owner ruling: a new command must never join the help under-report —
+    // `docs/cli.md` already carries a documented "Unavailable commands"
+    // section for names that deliberately do not exist; a command that
+    // works but is undiscoverable on `vigil --help` is a defect, not a
+    // minor omission. Pinned independently of the `fabric` cargo feature:
+    // discoverability must not depend on which artifact was built, the
+    // same way the `--fabric-ticket`/`--fabric-hub` run flags are already
+    // documented in every build.
+    let output = Command::new(vigil_binary_path())
+        .arg("--help")
+        .output()
+        .expect("spawn vigil --help");
+    assert!(output.status.success(), "vigil --help must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("fabric ticket"),
+        "vigil --help must document the `fabric ticket` command, got: {stdout:?}"
+    );
+}
+
+#[test]
 fn no_arguments_prints_help_and_exits_nonzero() {
     let output = Command::new(vigil_binary_path())
         .output()

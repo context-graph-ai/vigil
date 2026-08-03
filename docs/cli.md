@@ -27,6 +27,9 @@ Common options:
 | `--camera-name NAME` | Single-camera name | `camera-1` |
 | `--rtsp-url URL` | Detection stream | none |
 | `--live-rtsp-url URL` | Separate Home Assistant live stream | detection URL |
+| `--usb-device IDENTITY` | Legacy single-camera USB source | none |
+| `--csi-module IDENTITY` | Legacy single-camera CSI source | none |
+| `--mjpeg-url URL` | Legacy single-camera MJPEG source | none |
 | `--rtsp-username USER` | RTSP username outside the URL | none |
 | `--rtsp-password PASSWORD` | RTSP password outside the URL | none |
 | `--detector-model-id ID` | Model identity written to provenance | `yolox-tiny-burn-cpu` |
@@ -172,6 +175,32 @@ same relevant probes as feature-enabled runtime startup. The current mapped test
 logic directly and do not bind all three CLI-level assertions.
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`No direct doctor CLI acceptance jointly proves read-only execution, rendered operator actions, and reuse of runtime startup probes.` -->
+
+## Fabric ticket
+
+```console
+vigil fabric ticket [--data-dir PATH]
+```
+
+Prints this node's fabric enrollment ticket to stdout, on explicit invocation only. The ticket is a
+credential, held to a two-tier contract. On every displayed or served surface — logs, `vigil
+stats`, `vigil doctor`, the `/health` HTTP body — it is deliberately absent, with exactly two
+sanctioned retrieval paths: `vigil run`'s own startup log, which still prints it as a sanctioned
+operator-facing instruction, and this command, which falls back to the ticket the running node
+cached the last time it bound (since a live rebind opens the same on-disk fabric ledger the
+running node's own `Database::open` already holds, which fails fast with a typed database-locked
+error before this command ever reaches its own endpoint bind step). Separately, it is expected to
+sit in exactly two private, tight-permissioned (owner-read/write only) persisted stores: the
+`fabric/own-ticket` cache this command falls back to, and the fabric ledger
+(`fabric/fabric-ledger.db`), whose
+peer-directory table is the fleet's own coordination mechanism — reading either already requires
+filesystem access to this node's data directory.
+
+<!-- vigil-claim: `vigil.docs-cli.prints-this-nodes-fabric-enrollment-ticket-to` -->
+<!-- enforced by: `vigil-bin::fabric_ticket_command::fabric_ticket_command_prints_the_same_ticket_the_running_hub_advertised` -->
+<!-- enforced by: `vigil-bin::fabric_ticket_command::fabric_ticket_command_prints_the_same_ticket_while_the_hub_node_is_still_running` -->
+<!-- enforced by: `vigil-bin::fabric_ticket_single_retrieval_path::fabric_enrollment_ticket_appears_on_no_surface_except_the_two_sanctioned_retrieval_paths` -->
+<!-- enforced by: `vigil-bin::binary_cli_surface_smoke::help_flag_names_the_fabric_ticket_command` -->
 
 ## Detector probe
 

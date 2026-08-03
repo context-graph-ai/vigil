@@ -14,11 +14,15 @@ use std::sync::Mutex;
 
 use crate::workgraph::{StreamId, WorkId};
 
-/// The two acceleration stages this receipt model covers.
+/// The three acceleration stages this receipt model covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccelStage {
     Decode,
     Detection,
+    /// The shared camera-encoder seam (`crate::encode`): USB/CSI/MJPEG
+    /// producers' one H.264 encode. Kept distinct from `Decode` so an
+    /// encoder's receipt is never misclassified as a decode outcome.
+    Encode,
 }
 
 impl AccelStage {
@@ -26,6 +30,7 @@ impl AccelStage {
         match self {
             AccelStage::Decode => "decode",
             AccelStage::Detection => "detection",
+            AccelStage::Encode => "encode",
         }
     }
 }
@@ -178,6 +183,7 @@ pub fn render_receipt_block(receipt: &AccelerationReceipt) -> String {
     let header = match receipt.stage {
         AccelStage::Decode => "[decode.hardware]",
         AccelStage::Detection => "[detect.acceleration]",
+        AccelStage::Encode => "[encode.hardware]",
     };
     block.push_str(header);
     block.push('\n');

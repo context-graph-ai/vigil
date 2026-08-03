@@ -17,52 +17,63 @@ use chrono::{DateTime, Utc};
 use crate::media_pipeline::{DecodedRgbFrame, VideoCodec};
 use crate::workgraph::StreamId;
 
-/// One encoded access unit with everything a robust hardware decoder needs.
-/// Raw bytes alone are not enough for the hardware decode seam.
-#[derive(Debug, Clone)]
-pub struct EncodedAccessUnit {
-    pub stream_id: StreamId,
-    /// Stream epoch: bumped on reconnect/session restart. A decoder instance
-    /// is valid for exactly one epoch.
-    pub stream_epoch: u64,
-    pub codec: VideoCodec,
-    /// Parameter-set bytes (SPS/PPS/VPS or equivalent) when this unit
-    /// carries codec configuration; `None` otherwise.
-    pub codec_config: Option<Vec<u8>>,
-    /// This unit carries (part of) a random-access/keyframe picture.
-    pub keyframe: bool,
-    pub media_timestamp: Option<DateTime<Utc>>,
-    /// Monotonic per-epoch sequence number.
-    pub sequence: u64,
-    /// Set on the first unit after a reconnect or timeline break.
-    pub discontinuity: bool,
-    /// Set when the carried parameter sets differ from the previous ones
-    /// (resolution/format change boundary).
-    pub format_change: bool,
-    /// The segment this unit belongs to (segment assembly identity).
-    pub segment_sequence: u64,
-    pub data: Vec<u8>,
-}
+// The canonical encoded-unit type lives in `camera_track`; re-exported here
+// so every existing `crate::decode::EncodedAccessUnit` path keeps compiling
+// unchanged.
+pub use crate::camera_track::{CameraId, EncodedAccessUnit, MediaTiming, SourceRole, TimeBase};
 
 /// Derives the access-unit contract fields from raw depacketized units.
 /// Pure: same bytes in, same flags out.
+///
+/// Camera identity and source role are fixed for the lifetime of one
+/// assembler (set via [`AccessUnitAssembler::new`] or defaulted from the
+/// stream identity); real source `MediaTiming` is not derived here, so it
+/// stays `None` on the RTSP path. It is filled when the source producer
+/// learns the camera's media timeline, and is never substituted with the
+/// wall clock.
 pub struct AccessUnitAssembler {
     stream_id: StreamId,
     codec: VideoCodec,
     stream_epoch: u64,
+    camera: CameraId,
+    source_role: SourceRole,
     next_sequence: u64,
     previous_parameter_sets: Option<Vec<u8>>,
 }
 
 impl AccessUnitAssembler {
     pub fn new(stream_id: StreamId, codec: VideoCodec, stream_epoch: u64) -> Self {
+        // Defaulted camera identity from the stream identity: today's only
+        // caller (the retina capture path) has one stream per camera, so
+        // this is an honest placeholder, not a guess. A producer that knows
+        // its real camera/role should use `with_camera_role`. Built through
+        // the same durable-identity constructor every real source kind
+        // uses (never the removed unrestricted `CameraId::new`); the
+        // literal fallback only engages for a stream identity that cannot
+        // itself become a durable value (empty, or a transient `/dev/...`
+        // path), and can never fail.
+        let camera = CameraId::from_usb("unassigned", stream_id.as_str()).unwrap_or_else(|_| {
+            CameraId::from_usb("unassigned", "unnamed-stream")
+                .expect("a fixed non-empty, non-/dev/ literal always yields a durable identity")
+        });
         Self {
             stream_id,
             codec,
             stream_epoch,
+            camera,
+            source_role: SourceRole::Analysis,
             next_sequence: 0,
             previous_parameter_sets: None,
         }
+    }
+
+    /// Set the real camera identity and source role this assembler
+    /// produces units for. Chainable so a producer can set it right after
+    /// `new`.
+    pub fn with_camera_role(mut self, camera: CameraId, source_role: SourceRole) -> Self {
+        self.camera = camera;
+        self.source_role = source_role;
+        self
     }
 
     /// Wrap the next raw unit, deriving parameter-set presence, keyframe
@@ -70,7 +81,7 @@ impl AccessUnitAssembler {
     pub fn assemble(
         &mut self,
         data: Vec<u8>,
-        media_timestamp: Option<DateTime<Utc>>,
+        observed_at: Option<DateTime<Utc>>,
         discontinuity: bool,
         segment_sequence: u64,
     ) -> EncodedAccessUnit {
@@ -89,13 +100,16 @@ impl AccessUnitAssembler {
             stream_epoch: self.stream_epoch,
             codec: self.codec,
             keyframe: unit_carries_keyframe(self.codec, &data),
-            codec_config,
-            media_timestamp,
+            codec_config: codec_config.map(Into::into),
+            timing: None,
+            observed_at,
+            camera: self.camera.clone(),
+            source_role: self.source_role,
             sequence,
             discontinuity,
             format_change,
             segment_sequence,
-            data,
+            data: data.into(),
         }
     }
 }

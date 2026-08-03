@@ -286,9 +286,10 @@ pub fn detector_job_spec_fields(_job: &DetectorJob) -> DetectorJobSpecFields {
 /// Encode a set of encoded (compressed) NAL units as one length-framed blob
 /// suitable for content-addressed blob storage: each unit is prefixed with
 /// its length as a little-endian `u32`.
-pub fn encode_length_framed_units(units: &[Vec<u8>]) -> Vec<u8> {
-    let mut framed = Vec::with_capacity(units.iter().map(|unit| unit.len() + 4).sum());
+pub fn encode_length_framed_units<B: AsRef<[u8]>>(units: &[B]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(units.iter().map(|unit| unit.as_ref().len() + 4).sum());
     for unit in units {
+        let unit = unit.as_ref();
         let len = u32::try_from(unit.len())
             .expect("a single encoded unit must fit in a u32 length prefix");
         framed.extend_from_slice(&len.to_le_bytes());

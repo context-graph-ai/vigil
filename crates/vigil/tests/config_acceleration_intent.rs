@@ -3,14 +3,22 @@
 //! entry point, and absence means true. The booleans are INTENT — true means
 //! "probe and use only if a real probe succeeds", never "report active".
 //!
-//! Note on process hygiene: these tests mutate process environment variables
-//! and rely on the repo gate running them under nextest (one process per
-//! test).
+//! Every test here mutates process environment variables (VIGIL_HARDWARE_DECODING
+//! / VIGIL_ACCELERATED_DETECTION), which `cargo test`'s default parallelism runs
+//! as threads sharing one process, and `acceleration_intent_from_args` reads
+//! those variables via `config::load`. Serialized by `ENV_LOCK` (the same
+//! pattern `tests/fabric_worker_lease_knob.rs` already uses) so this binary's
+//! own tests cannot race each other under plain `cargo test`; the repo gate
+//! also runs under nextest, one process per test, where this race cannot fire
+//! at all — the lock exists for developer-facing `cargo test` runs.
 
 use std::ffi::OsString;
 use std::fs;
+use std::sync::Mutex;
 
 use vigil::acceleration_intent_from_args;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn args(list: &[&str]) -> Vec<OsString> {
     list.iter().map(OsString::from).collect()
@@ -25,6 +33,7 @@ fn clear_acceleration_env() {
 
 #[test]
 fn acceleration_booleans_default_true_everywhere() {
+    let _env_lock = ENV_LOCK.lock().expect("acceleration environment lock");
     clear_acceleration_env();
     let tmp = tempfile::tempdir().expect("tempdir");
 
@@ -51,6 +60,7 @@ fn acceleration_booleans_default_true_everywhere() {
 
 #[test]
 fn toml_config_can_disable_each_boolean_independently() {
+    let _env_lock = ENV_LOCK.lock().expect("acceleration environment lock");
     clear_acceleration_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("vigil.toml");
@@ -78,6 +88,7 @@ fn toml_config_can_disable_each_boolean_independently() {
 
 #[test]
 fn cli_flags_override_config_file() {
+    let _env_lock = ENV_LOCK.lock().expect("acceleration environment lock");
     clear_acceleration_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("vigil.toml");
@@ -105,6 +116,7 @@ fn cli_flags_override_config_file() {
 
 #[test]
 fn env_vars_are_understood() {
+    let _env_lock = ENV_LOCK.lock().expect("acceleration environment lock");
     clear_acceleration_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     // A MIXED pair: one false, one explicitly true. This can only pass when
@@ -140,6 +152,7 @@ fn env_vars_are_understood() {
 
 #[test]
 fn invalid_boolean_fails_loud() {
+    let _env_lock = ENV_LOCK.lock().expect("acceleration environment lock");
     clear_acceleration_env();
     let tmp = tempfile::tempdir().expect("tempdir");
     let config_path = tmp.path().join("vigil.toml");

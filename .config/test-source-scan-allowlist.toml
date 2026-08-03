@@ -11,6 +11,10 @@ path = "crates/vigil/tests/automation_handle_capability_scan.rs"
 reason = "Reviewed structural scan; proves no impl block for AutomationHandle regains set_manual/return_to_automatic, which the compile_fail doctests beside the type prove only unreachability for, not method absence."
 
 [[file]]
+path = "crates/vigil/tests/camera_hub_capability_scan.rs"
+reason = "Reviewed structural scan mirroring automation_handle_capability_scan.rs's core impl-block-scanning mechanism (not its full alias-detection sophistication, which closed a bypass class with no equivalent history here yet): proves CameraTrackHubProducer never regains Clone and no non-new method on CameraTrackHub ever names CameraTrackHubProducer in its signature, which the compile_fail doctests beside CameraTrackHubProducer prove only unreachability for today, not regression-proofing against a future edit."
+
+[[file]]
 path = "crates/vigil/tests/artifact_profile_honesty.rs"
 reason = "Legacy Docker/YAML/release-workflow scanner; retained until named image builds replace it."
 

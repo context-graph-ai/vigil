@@ -1,0 +1,14 @@
+--- a/crates/vigil/src/camera_hub.rs
++++ b/crates/vigil/src/camera_hub.rs
+@@ -879,8 +879,10 @@
+         // waker that re-enters the hub (a real async consumer's `Waker` can
+         // trivially do this) must find the lock free, not self-deadlocked
+         // on a recursive re-lock.
+-        drop(state);
++        // TEST-ESTATE PLANTED FAULT: invoke collected wakers BEFORE releasing
++        // the hub's lock, reproducing the self-deadlock a re-entrant waker hits.
+         wake_all(wakers);
++        drop(state);
+ 
+         Ok(())
+     }

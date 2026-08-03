@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "planted_fault": {
+    "id": "camera_hub.rs CameraTrackHubProducer::publish: invoke wake_all(wakers) before drop(state), reproducing a waker that re-enters the hub while the internal Mutex is still held. diff/source_sha256 are against the survivor's tree (this worktree, commit 0e5b9c7 plus the uncommitted detached-check fix); the removed run applied the identical one-line reorder, at its own line offset, to a pristine `git archive 0e5b9c7` checkout (source sha256:1d84c7b927b51ca75eecea9ce85df2ae8a147df04125d348f90bfa7bd0a7847e) so the now-deleted test could still be executed — the two source files differ only outside this function (the detached check and the two new tests), never in the reordered lines themselves.",
+    "source_sha256": "sha256:bc993505c873f202c7f242b609043567134579e19e77b23e20e29a4b023e8769",
+    "diff": ".config/test-estate-evidence/camera-hub-reentrant-waker-fold/planted-fault.diff",
+    "diff_sha256": "sha256:afcb8df35f68c3f048d7251467dd8edefde4221660736da661143b5feaf21804"
+  },
+  "removed": {
+    "test": "vigil::camera_hub_fanout::a_waker_invoked_from_inside_publish_can_safely_touch_the_hub_without_deadlocking",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --test camera_hub_fanout a_waker_invoked_from_inside_publish_can_safely_touch_the_hub_without_deadlocking -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 183.90
+  },
+  "survivor": {
+    "test": "vigil::camera_hub::tests::a_waker_invoked_from_inside_publish_finds_the_hub_state_lock_already_released",
+    "outcome": "CAUGHT",
+    "command": "cargo test -p vigil --lib camera_hub::tests::a_waker_invoked_from_inside_publish_finds_the_hub_state_lock_already_released -- --exact --nocapture",
+    "exit_code": 101,
+    "duration_seconds": 3.78
+  }
+}

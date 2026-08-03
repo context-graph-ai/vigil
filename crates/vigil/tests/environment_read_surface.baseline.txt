@@ -74,7 +74,7 @@ vigil/fabric.rs|fabric_bring_up|VIGIL_FABRIC_BRINGUP_DELAY_MS
 vigil/fabric.rs|fabric_bring_up|VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS
 vigil/detection_accel.rs|detection_probe_deadline|VIGIL_DETECTION_PROBE_DEADLINE_SECS
 vigil/detection_accel.rs|detection_late_window|VIGIL_DETECTION_LATE_WINDOW_SECS
-vigil/runtime.rs|register_generic_camera|SUPERVISOR_TOKEN
+vigil/ha_camera_registration.rs|register_generic_camera|SUPERVISOR_TOKEN
 vigil/runtime.rs|env_is|<dynamic>
 vigil/runtime.rs|env_u64|<dynamic>
 vigil/runtime.rs|start_rtsp_probe|VIGIL_DETECTOR_QUEUE_CAPACITY

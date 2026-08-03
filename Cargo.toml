@@ -34,8 +34,19 @@ burn-store = { version = "0.21.0", default-features = false, features = ["std", 
 burn-wgpu = { version = "0.21.0", features = ["vulkan"] }
 wgpu = "29"
 pollster = "0.4"
+bytes = "1.11"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 futures-util = "0.3"
+# HMAC-SHA256 keying for the per-node camera-query digest salt
+# (`crates/vigil/src/camera_track.rs`) — pinned to the 0.12 line because it
+# is the release compatible with the workspace's `sha2 = "0.10"` (both
+# depend on `digest ^0.10`); the newer 0.13 line requires `digest 0.11`
+# (and a `sha2` bump to match), which is out of scope for this change and
+# would touch every other `sha2` call site in the crate.
+hmac = "0.12"
+# OS randomness for the same per-node salt, same call pattern as
+# `contextdb-server`'s `FabricIdentity::generate` (`getrandom::fill`).
+getrandom = "0.3"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 imageproc = { version = "0.27.0", default-features = false }
 libc = "0.2"

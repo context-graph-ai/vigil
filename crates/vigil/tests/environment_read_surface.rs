@@ -1118,7 +1118,7 @@ const ORIGINAL_ENVIRONMENT_READ_SITES: &[(&str, &str, &str)] = &[
         "VIGIL_DETECTION_LATE_WINDOW_SECS",
     ),
     (
-        "vigil/runtime.rs",
+        "vigil/ha_camera_registration.rs",
         "register_generic_camera",
         "SUPERVISOR_TOKEN",
     ),

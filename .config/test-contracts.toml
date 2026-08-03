@@ -103,6 +103,7 @@ tests = [
   "vigil-bin::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::credentialed_existing_camera_rtsp_url_is_redacted_on_startup", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::credentialed_rtsp_url_is_redacted_when_a_live_detection_persists_it", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::detection_produces_observation_referencing_clip", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::detector_config_recorded_as_decision", # crates/vigil-bin/tests/first_light_loop.rs
@@ -209,8 +210,12 @@ sources = [
   "crates/vigil-bin/tests/boot_readiness.rs",
   "crates/vigil-bin/tests/cameraless_worker.rs",
   "crates/vigil-bin/tests/capability_delivery.rs",
+  "crates/vigil-bin/tests/fabric_ticket_command.rs",
+  "crates/vigil-bin/tests/fabric_ticket_health_exposure.rs",
+  "crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs",
   "crates/vigil-bin/tests/two_process_fabric.rs",
   "crates/vigil-bin/tests/worker_intent_loudness.rs",
+  "crates/vigil/src/fabric.rs",
   "crates/vigil/tests/capability_lifecycle.rs",
   "crates/vigil/tests/dead_capability_steal.rs",
   "crates/vigil/tests/detector_worker.rs",
@@ -232,6 +237,16 @@ tests = [
   "vigil-bin::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera", # crates/vigil-bin/tests/cameraless_worker.rs
   "vigil-bin::cameraless_worker::hub_sees_cameraless_worker_detector_capability_after_join", # crates/vigil-bin/tests/cameraless_worker.rs
   "vigil-bin::capability_delivery::failed_capability_push_emits_named_error", # crates/vigil-bin/tests/capability_delivery.rs
+  "vigil-bin::fabric_ticket_command::fabric_ticket_command_generates_a_fresh_identity_on_an_empty_data_dir", # crates/vigil-bin/tests/fabric_ticket_command.rs
+  "vigil-bin::fabric_ticket_command::fabric_ticket_command_never_mistakes_a_non_lock_failure_for_a_lock_conflict_from_path_text_alone", # crates/vigil-bin/tests/fabric_ticket_command.rs
+  "vigil-bin::fabric_ticket_command::fabric_ticket_command_prints_the_same_ticket_the_running_hub_advertised", # crates/vigil-bin/tests/fabric_ticket_command.rs
+  "vigil-bin::fabric_ticket_command::fabric_ticket_command_prints_the_same_ticket_while_the_hub_node_is_still_running", # crates/vigil-bin/tests/fabric_ticket_command.rs
+  "vigil-bin::fabric_ticket_command::fabric_ticket_command_surfaces_a_non_lock_failure_instead_of_masking_it_with_a_stale_cache", # crates/vigil-bin/tests/fabric_ticket_command.rs
+  "vigil-bin::fabric_ticket_health_exposure::health_body_never_carries_the_fabric_enrollment_ticket", # crates/vigil-bin/tests/fabric_ticket_health_exposure.rs
+  "vigil-bin::fabric_ticket_single_retrieval_path::fabric_enrollment_ticket_appears_on_no_surface_except_the_two_sanctioned_retrieval_paths", # crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs
+  "vigil-bin::fabric_ticket_single_retrieval_path::redact_marker_occurrences_removes_every_occurrence_of_a_repeated_marker_on_one_line", # crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs
+  "vigil-bin::fabric_ticket_single_retrieval_path::redact_ticket_removes_every_occurrence_on_a_doubled_instruction_line", # crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs
+  "vigil-bin::fabric_ticket_single_retrieval_path::sweep_detects_a_ticket_embedded_in_a_binary_non_utf8_file", # crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs
   "vigil-bin::two_process_fabric::two_real_processes_age_out_a_dead_worker_from_remote_detectors", # crates/vigil-bin/tests/two_process_fabric.rs
   "vigil-bin::two_process_fabric::two_real_processes_render_only_the_restarted_workers_current_backend", # crates/vigil-bin/tests/two_process_fabric.rs
   "vigil-bin::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_first", # crates/vigil-bin/tests/two_process_fabric.rs
@@ -248,6 +263,11 @@ tests = [
   "vigil::dead_capability_steal::result_before_steal_makes_steal_a_noop", # crates/vigil/tests/dead_capability_steal.rs
   "vigil::dead_capability_steal::should_steal_stranded_claim_decision_matrix", # crates/vigil/tests/dead_capability_steal.rs
   "vigil::detector_worker::worker_advertises_truthful_backend_claims_materializes_runs_records_once", # crates/vigil/tests/detector_worker.rs
+  "vigil::fabric::ledger_permission_tightening_tests::returns_an_error_naming_the_path_when_the_mode_cannot_be_set", # crates/vigil/src/fabric.rs
+  "vigil::fabric::ledger_permission_tightening_tests::succeeds_and_leaves_the_file_owner_only_when_the_mode_can_be_set", # crates/vigil/src/fabric.rs
+  "vigil::fabric::ticket_cache_freshness_tests::fresh_when_the_stamped_identity_matches_the_identity_on_disk", # crates/vigil/src/fabric.rs
+  "vigil::fabric::ticket_cache_freshness_tests::stale_when_no_identity_stamp_was_ever_written", # crates/vigil/src/fabric.rs
+  "vigil::fabric::ticket_cache_freshness_tests::stale_when_the_identity_on_disk_has_rotated_since_the_stamp_was_written", # crates/vigil/src/fabric.rs
   "vigil::fabric_enrollment::main_prints_join_instruction_and_malformed_ticket_names_fix", # crates/vigil/tests/fabric_enrollment.rs
   "vigil::fabric_worker_lease_knob::explicit_fabric_worker_lease_ms_flows_into_the_claimed_lease_deadline", # crates/vigil/tests/fabric_worker_lease_knob.rs
   "vigil::fabric_worker_lease_knob::worker_lease_defaults_to_five_minutes_when_unset", # crates/vigil/tests/fabric_worker_lease_knob.rs
@@ -267,6 +287,7 @@ sources = [
 evidence_kind = "integration"
 gate = "pull-request"
 tests = [
+  "vigil::health_watchdog_liveness::cameraless_node_stays_alive_for_the_watchdog", # crates/vigil/tests/health_watchdog_liveness.rs
   "vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog", # crates/vigil/tests/health_watchdog_liveness.rs
   "vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx", # crates/vigil/tests/health_watchdog_liveness.rs
   "vigil::health_watchdog_liveness::ready_runtime_is_alive_for_the_watchdog", # crates/vigil/tests/health_watchdog_liveness.rs
@@ -374,8 +395,10 @@ tests = [
   "vigil::media_pipeline::tests::explicit_rtsp_credentials_override_url_userinfo", # crates/vigil/src/media_pipeline.rs
   "vigil::media_pipeline::tests::playable_dimensions_cap_large_review_clips_without_upscaling", # crates/vigil/src/media_pipeline.rs
   "vigil::media_pipeline::tests::rtsp_credentials_debug_redacts_password_and_keeps_username_visible", # crates/vigil/src/media_pipeline.rs
-  "vigil::media_pipeline::tests::rtsp_url_redaction_removes_userinfo_from_parse_errors", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::rtsp_source_debug_redacts_the_query_token_in_session_url", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::rtsp_url_redaction_removes_the_password_but_keeps_the_username_in_parse_errors", # crates/vigil/src/media_pipeline.rs
   "vigil::media_pipeline::tests::separate_password_can_pair_with_url_username", # crates/vigil/src/media_pipeline.rs
+  "vigil::media_pipeline::tests::session_url_carries_a_query_token_raw_but_redact_rtsp_url_strips_it", # crates/vigil/src/media_pipeline.rs
 ]
 [[contract]]
 id = "mqtt-discovery-delivery-state-and-corrections"
@@ -409,10 +432,25 @@ sources = [
 evidence_kind = "behavioral-unit"
 gate = "pull-request"
 tests = [
+  "vigil::config::tests::a_keyframe_interval_min_equal_to_max_loads_successfully", # crates/vigil/src/config.rs
+  "vigil::config::tests::a_malformed_options_json_reports_key_and_location_never_the_offending_value", # crates/vigil/src/config.rs
   "vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line", # crates/vigil/src/config.rs
+  "vigil::config::tests::an_inverted_keyframe_interval_min_above_max_is_rejected_at_the_real_load_naming_both_values", # crates/vigil/src/config.rs
+  "vigil::config::tests::camera_entry_and_partial_debug_redact_url_credentials_and_token_but_keep_username", # crates/vigil/src/config.rs
+  "vigil::config::tests::keyframe_and_bitrate_settings_declare_with_ratified_defaults_and_real_surfaces", # crates/vigil/src/config.rs
   "vigil::config::tests::live_rtsp_url_is_distinct_from_detection_rtsp_url", # crates/vigil/src/config.rs
+  "vigil::config::tests::omitted_empty_invalid_and_unavailable_are_four_pairwise_distinct_field_outcomes", # crates/vigil/src/config.rs
+  "vigil::config::tests::redact_url_userinfo_does_not_mistake_an_at_sign_in_the_path_or_query_for_userinfo", # crates/vigil/src/config.rs
+  "vigil::config::tests::redact_url_userinfo_leaves_a_url_with_no_userinfo_unchanged", # crates/vigil/src/config.rs
+  "vigil::config::tests::redact_url_userinfo_leaves_a_username_with_no_password_visible", # crates/vigil/src/config.rs
+  "vigil::config::tests::redact_url_userinfo_persistence_policy_strips_every_userinfo_shape", # crates/vigil/src/config.rs
+  "vigil::config::tests::redact_url_userinfo_strips_a_query_token_even_with_no_userinfo_present", # crates/vigil/src/config.rs
+  "vigil::config::tests::redact_url_userinfo_strips_the_password_but_keeps_username_host_and_path", # crates/vigil/src/config.rs
+  "vigil::config::tests::resolve_camera_source_kind_accepts_a_kind_the_passed_in_registry_declares_supported", # crates/vigil/src/config.rs
+  "vigil::config::tests::resolve_camera_source_kind_refuses_a_kind_the_passed_in_registry_does_not_declare_supported", # crates/vigil/src/config.rs
   "vigil::config::tests::review_port_cli_override_is_documented_and_loaded", # crates/vigil/src/config.rs
   "vigil::config::tests::rtsp_password_resolves_identically_from_cli_file_and_env", # crates/vigil/src/config.rs
+  "vigil::config::tests::usb_csi_mjpeg_legacy_cli_flags_are_advertised_but_refused_like_the_cameras_list_route", # crates/vigil/src/config.rs
 ]
 [[contract]]
 id = "recognition-enrollment-matching-honesty-and-deletion"
@@ -482,7 +520,9 @@ sources = [
 evidence_kind = "structural"
 gate = "pull-request"
 tests = [
+  "vigil::addon_config_surface::addon_config_camera_schema_exposes_usb_csi_and_mjpeg_source_fields", # crates/vigil/tests/addon_config_surface.rs
   "vigil::addon_config_surface::addon_config_exposes_both_booleans_in_options_and_schema_defaulting_true", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::addon_config_exposes_keyframe_and_bitrate_options_and_schema_with_ratified_defaults", # crates/vigil/tests/addon_config_surface.rs
   "vigil::addon_config_surface::addon_config_maps_video_device_and_forbids_full_access", # crates/vigil/tests/addon_config_surface.rs
   "vigil::addon_config_surface::addon_config_states_accelerated_detection_gpu_with_cpu_fallback_in_help", # crates/vigil/tests/addon_config_surface.rs
   "vigil::artifact_profile_honesty::hardware_addon_image_carries_manifest_hardware_profile", # crates/vigil/tests/artifact_profile_honesty.rs
@@ -700,6 +740,7 @@ sources = [
 evidence_kind = "integration"
 gate = "pull-request"
 tests = [
+  "vigil-bin::binary_cli_surface_smoke::help_flag_names_the_fabric_ticket_command", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
   "vigil-bin::binary_cli_surface_smoke::help_flag_names_the_run_command", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
   "vigil-bin::binary_cli_surface_smoke::no_arguments_prints_help_and_exits_nonzero", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
   "vigil-bin::binary_cli_surface_smoke::version_flag_reports_core_crate_version", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
@@ -790,4 +831,252 @@ tests = [
   "vigil::site_channel::tests::recognized_camera_id_still_writes_the_disabled_marker", # crates/vigil/src/site_channel.rs
   "vigil::site_channel::tests::unrecognized_camera_id_containing_a_traversal_segment_never_escapes_the_disabled_dir", # crates/vigil/src/site_channel.rs
   "vigil::site_channel::tests::unrecognized_camera_id_is_a_no_op_and_never_touches_disk", # crates/vigil/src/site_channel.rs
+]
+[[contract]]
+id = "camera-track-encoded-unit-shared-buffer-contract"
+lineage = "The encoded-camera-track type carries camera identity/role, codec/codec-config, an immutable shared payload buffer (bytes::Bytes, cloning shares the same backing storage rather than copying it), independent source timing and wall-clock observation time, and epoch/discontinuity/format-change/sequence markers."
+sources = [
+  "crates/vigil/tests/camera_track_contract.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::camera_track_contract::cloning_a_unit_shares_the_original_payload_storage_rather_than_copying_it", # crates/vigil/tests/camera_track_contract.rs
+  "vigil::camera_track_contract::encoded_access_unit_carries_camera_identity_and_source_role", # crates/vigil/tests/camera_track_contract.rs
+  "vigil::camera_track_contract::encoded_access_unit_carries_codec_and_codec_configuration_bytes", # crates/vigil/tests/camera_track_contract.rs
+  "vigil::camera_track_contract::encoded_access_unit_carries_keyframe_epoch_discontinuity_format_change_and_sequence", # crates/vigil/tests/camera_track_contract.rs
+  "vigil::camera_track_contract::encoded_access_unit_carries_source_timing_with_timebase_decode_order_and_duration", # crates/vigil/tests/camera_track_contract.rs
+  "vigil::camera_track_contract::observed_at_and_source_timing_are_independent_and_never_derive_each_other", # crates/vigil/tests/camera_track_contract.rs
+  "vigil::camera_track_contract::payload_and_codec_config_are_immutable_shared_buffers_never_deep_copied_on_fan_out", # crates/vigil/tests/camera_track_contract.rs
+]
+[[contract]]
+id = "camera-hub-bounded-fanout-loss-contract-and-epochs"
+lineage = "The camera-track hub is bound at CONSTRUCTION to one stream, camera, source role, AND codec — never adopted from whatever unit happens to publish first (proven for all four bound values individually, including as the very first publish a fresh hub ever sees), so a wrong-identity rejection means something. It fans one publish out to N subscribers over the identical shared buffer; each subscriber declares its own loss contract (RejoinAtRandomAccess or FaultOnGap) and an optional explicit capacity (unset genuinely resolves to the automatic default derived from the stream's effective keyframe interval — proven by an EXACT fill at that bound and an EXACT FaultOnGap overflow boundary, never a `<=`-only check a do-nothing implementation would also satisfy, and never a parallel constant); queues are bounded with no unbounded growth, including the one event class that is never droppable (codec configuration), which is bounded/coalesced to the latest value rather than accumulating one entry per undrained epoch bump; a stalled/failed subscriber, an explicit detach, and a dropped Subscription handle are all detached without disturbing the producer or any other subscriber; a join lands on codec-config-then-keyframe (proven against a hub that retains nothing, by publishing the post-join keyframe with no codec_config of its own) and deterministically requests a producer keyframe (a dirty-flag signal that is also proven to be consumed on read, not sticky); a capacity-one subscriber, joined strictly BEFORE its keyframe is published, still receives both because codec configuration and faults sit outside the capacity budget; reconnect/format-change/discontinuity (all three EpochReason variants) each open a new epoch under a stable stream identity while resetting sequence numbering, discarding the prior epoch's retained data, and marking the new epoch's own first delivered unit's discontinuity/format_change regardless of what the producer authored; the exact lost range on a FaultOnGap overflow is proven at the FIRST lost sequence, not one extended past it, both for an explicit capacity and for the automatic default; and publish refuses a unit whose stream/epoch/camera/source-role/codec identity is wrong, not only a duplicate sequence."
+sources = [
+  "crates/vigil/src/camera_hub.rs",
+  "crates/vigil/tests/camera_hub_fanout.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::camera_hub::tests::automatic_capacity_floor_derives_from_the_keyframe_interval_min_frames_default", # crates/vigil/src/camera_hub.rs
+  "vigil::camera_hub_fanout::a_hub_constructed_for_one_camera_role_and_codec_never_adopts_a_different_first_publish", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_join_deterministically_requests_a_keyframe_from_the_producer", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_late_joining_subscriber_sees_the_format_change_marker_on_its_own_first_delivered_keyframe", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_late_joining_subscriber_sees_the_reconnect_marker_on_its_own_first_delivered_keyframe", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_subscription_at_capacity_one_still_receives_codec_config_and_its_keyframe_on_join", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_subscription_queue_never_grows_past_its_declared_capacity", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_subscription_with_no_explicit_capacity_receives_the_hubs_automatic_default", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::automatic_capacity_is_derived_from_the_effective_keyframe_interval_and_an_explicit_override_is_unaffected", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::begin_epoch_discontinuity_marks_the_new_epochs_first_delivered_unit_discontinuous", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::begin_epoch_discontinuity_opened_by_a_delta_lands_the_marker_on_the_first_keyframe_actually_delivered", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::begin_epoch_format_change_marks_the_new_epochs_first_delivered_unit_format_changed", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::begin_epoch_format_change_opened_by_a_delta_lands_the_marker_on_the_first_keyframe_actually_delivered", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::begin_epoch_reconnect_marks_the_new_epochs_first_delivered_unit_discontinuous", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::begin_epoch_reconnect_opened_by_a_delta_lands_the_marker_on_the_first_keyframe_actually_delivered", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::dropping_a_subscription_detaches_it_so_a_consumer_that_stops_holding_one_does_not_leak", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::explicit_detach_stops_the_victim_from_receiving_anything_after_and_does_not_disturb_others", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::fault_on_gap_surfaces_the_exact_lost_range_stays_bounded_and_is_terminal", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::join_delivers_codec_config_then_the_first_post_join_keyframe_never_an_intervening_delta", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::n_subscribers_receive_the_identical_payload_buffer_for_one_published_unit", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::payload_storage_stays_shared_for_one_publish_even_when_one_subscriber_still_owes_an_epoch_marker", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::per_consumer_loss_contract_is_honored_independently_at_the_same_capacity", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::publish_rejects_a_unit_naming_the_wrong_camera", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::publish_rejects_a_unit_naming_the_wrong_codec", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::publish_rejects_a_unit_naming_the_wrong_source_role", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::publish_rejects_a_unit_naming_the_wrong_stream", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::publish_rejects_a_unit_that_does_not_continue_the_epoch_monotonic_sequence", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::reconnect_and_format_change_each_open_a_new_epoch_resetting_state_under_the_same_identity", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::rejoin_at_random_access_discards_stale_data_and_resumes_at_the_exact_next_keyframe_on_overflow", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::repeated_epoch_bumps_without_draining_coalesce_codec_config_to_the_latest_not_grow_unbounded", # crates/vigil/tests/camera_hub_fanout.rs
+]
+[[contract]]
+id = "camera-hub-async-recv-and-explicit-terminal-events"
+lineage = "Subscription gains an async recv() alongside the existing synchronous drain(), so a consumer can await the next event instead of busy-polling — proven waker-driven and deterministic (poll, assert Pending and no wakeup, publish, assert the waker actually fired, poll again and assert the exact Ready value; never a sleep or a wall-clock deadline). Three terminal conditions are explicit and mutually distinguishable: CameraTrackHubProducer::end_source (the source closed normally), CameraTrackHubProducer::abandon_source (supervision abandoned the source after exhausting retries), and CameraTrackHub::shutdown (the hub itself going away) each raise their own SubscriptionEnd variant, proven distinct from one another and from the pre-existing per-subscriber FaultOnGap overflow TrackEvent::Fault. The load-bearing subtlety: a transient fault followed by a producer reconnect (begin_epoch) is proven NOT terminal across two successive retries — recv keeps yielding Track events into each new epoch, including the immediately-available retained codec configuration begin_epoch sets eagerly, and only an explicit abandon_source call ever raises SourceFault. Ordering is proven exactly: every TrackEvent already buffered for a subscription is delivered before its terminal, even when the terminal was raised before anything drained. The terminal is proven exactly-once and non-resurrecting: once yielded, every later recv() call — including on a fresh Subscription::recv() future, not merely a re-poll of the same one — resolves immediately to None across repeated calls, and abandon_source's own reason is proven to be the FIRST raised terminal's, unmodified by a later call with a different reason. The recv()/SubscriptionEnd/SubscriptionEvent/end_source/abandon_source/shutdown signatures this contract exercises live in crates/vigil/src/camera_hub.rs alongside the pre-existing publish/begin_epoch/drain surface the sibling `camera-hub-bounded-fanout-loss-contract-and-epochs` contract already owns; this contract's OWN registered tests are every one only in the test file below. Widened (RED, independent-review defects, not yet fixed): a terminal must reach a subscriber that joins AFTER end_source/shutdown already fired, and publish/begin_epoch must be refused once any terminal has fired (begin_epoch now returns Result<u64, PublishError> with a new PublishError::ProducerEnded(SubscriptionEnd) variant); a FaultOnGap coverage fault must be terminal under recv(), not only drain(); CameraTrackHub::detach must wake a parked recv() waker instead of dropping it; and a password-shaped SourceFault reason must never reach Debug output. Independent review found `raise_terminal` did not check `detached`, so a hub-wide terminal raised in the window between a FaultOnGap overflow and that subscriber's own next poll produced a second terminal; fixed by skipping already-detached subscribers, pinned by `a_hub_wide_terminal_raised_between_a_fault_on_gap_overflow_and_its_next_poll_never_yields_a_second_terminal`, which — unlike the pre-existing `a_detached_fault_on_gap_subscription_never_yields_a_second_terminal_after_a_later_hub_wide_terminal` — raises the hub-wide terminal BEFORE the detached subscriber's own first post-fault poll, the actual racy ordering. Separately, `a_waker_invoked_from_inside_publish_can_safely_touch_the_hub_without_deadlocking`'s liveness-by-bounded-spin evidence (200,000 cooperative yields on a spawned thread) was replaced by a deterministic unit-level `try_lock` assertion — `a_waker_invoked_from_inside_publish_finds_the_hub_state_lock_already_released`, in crates/vigil/src/camera_hub.rs's own `#[cfg(test)] mod tests`, the only place with access to the hub's private internal Mutex — proving the lock is genuinely released before any waker runs, with no thread and no spin."
+sources = [
+  "crates/vigil/src/camera_hub.rs",
+  "crates/vigil/tests/camera_hub_fanout.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::camera_hub::tests::a_waker_invoked_from_inside_publish_finds_the_hub_state_lock_already_released", # crates/vigil/src/camera_hub.rs
+  "vigil::camera_hub_fanout::a_detached_fault_on_gap_subscription_never_yields_a_second_terminal_after_a_later_hub_wide_terminal", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_hub_wide_terminal_raised_between_a_fault_on_gap_overflow_and_its_next_poll_never_yields_a_second_terminal", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_late_joining_subscriber_learns_hub_shutdown_raised_before_it_joined", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_late_joining_subscriber_learns_the_source_ended_terminal_raised_before_it_joined", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::a_transient_fault_and_reconnect_never_raises_a_terminal_and_delivery_survives_many_retries", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::abandon_source_is_terminal_carries_the_reason_and_the_first_raised_terminal_wins", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::begin_epoch_is_refused_once_the_hub_has_shut_down", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::detach_wakes_a_parked_recv_which_then_observes_the_end", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::fault_on_gap_is_terminal_under_recv_not_only_drain", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::hub_shutdown_is_terminal_for_every_attached_subscription_and_is_distinct_from_source_terminals", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::publish_is_refused_once_the_source_has_ended", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::recv_delivers_every_buffered_track_event_before_the_terminal_source_ended_event_then_stays_ended", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::recv_is_pending_until_a_publish_wakes_it_then_delivers_codec_config_before_the_access_unit", # crates/vigil/tests/camera_hub_fanout.rs
+  "vigil::camera_hub_fanout::source_fault_reason_cannot_leak_into_debug_output", # crates/vigil/tests/camera_hub_fanout.rs
+]
+[[contract]]
+id = "camera-hub-producer-consumer-split-is-structural"
+lineage = "The camera-track hub's publish and begin_epoch move off the single, shared CameraTrackHub type onto a distinct producer handle taking &mut self, so a second producer for the same track cannot be expressed by holding a shared reference; the consumer side keeps subscribe/detach/its query surface, stays Clone, and every clone observes the identical live producer state — a begin_epoch bump made through the producer is visible through a consumer clone made before OR after the bump, and a subscription made through one clone receives the identical Arc<EncodedAccessUnit> a subscription made through another clone receives for the same publish. The producer is provably a genuinely separate, singly-owned handle: it can be moved onto its own thread (mirroring a real source supervisor owning it there) while consumer clones stay usable on the caller thread. The three type-level guarantees the behavioral tests above cannot exercise — CameraTrackHubProducer is not Clone, no method on the consumer mints a producer, and &mut self specifically (not merely !Clone) is what blocks concurrent publication — are CLOSED by three compile_fail doctests beside CameraTrackHubProducer in camera_hub.rs, following the SettingHandle/AutomationHandle precedent in src/settings.rs, each verified genuinely fix-dependent by temporarily relaxing the real constraint and confirming the doctest then compiles before reverting; camera_hub_capability_scan.rs is the lexical backstop (mirroring automation_handle_capability_scan.rs's core impl-block-scanning mechanism, not its full alias-detection sophistication) that re-checks the two of the three a future edit could reopen without any doctest noticing."
+sources = [
+  "crates/vigil/tests/camera_hub_capability_scan.rs",
+  "crates/vigil/tests/camera_hub_producer_consumer_split.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::camera_hub_capability_scan::detector_agrees_the_real_producer_struct_carries_no_clone_derive", # crates/vigil/tests/camera_hub_capability_scan.rs
+  "vigil::camera_hub_capability_scan::detector_does_not_flag_the_real_shape_new_returning_a_producer_and_ordinary_methods", # crates/vigil/tests/camera_hub_capability_scan.rs
+  "vigil::camera_hub_capability_scan::detector_flags_a_planted_derive_clone_on_the_producer", # crates/vigil/tests/camera_hub_capability_scan.rs
+  "vigil::camera_hub_capability_scan::detector_flags_a_planted_manual_clone_impl_on_the_producer", # crates/vigil/tests/camera_hub_capability_scan.rs
+  "vigil::camera_hub_capability_scan::detector_flags_a_planted_method_on_the_consumer_that_returns_a_producer", # crates/vigil/tests/camera_hub_capability_scan.rs
+  "vigil::camera_hub_capability_scan::producer_never_gains_clone_and_consumer_never_mints_one", # crates/vigil/tests/camera_hub_capability_scan.rs
+  "vigil::camera_hub_producer_consumer_split::begin_epoch_through_the_producer_is_visible_through_every_consumer_clone", # crates/vigil/tests/camera_hub_producer_consumer_split.rs
+  "vigil::camera_hub_producer_consumer_split::cloning_the_consumer_lets_every_clone_observe_the_same_producers_publications", # crates/vigil/tests/camera_hub_producer_consumer_split.rs
+  "vigil::camera_hub_producer_consumer_split::splitting_the_hub_yields_a_producer_that_publishes_and_a_consumer_that_subscribes", # crates/vigil/tests/camera_hub_producer_consumer_split.rs
+  "vigil::camera_hub_producer_consumer_split::the_producer_can_be_moved_onto_its_own_thread_while_consumer_clones_stay_usable_here", # crates/vigil/tests/camera_hub_producer_consumer_split.rs
+]
+[[contract]]
+id = "camera-config-schema-single-source-kind-and-honest-refusal"
+lineage = "Driven through the real production config loader: one [[cameras]] entry declares exactly one source kind (native RTSP — rtsp:// or rtsps://, USB, CSI, or MJPEG), classified through the REAL four-outcome FieldOutcome path (Omitted/Empty/Invalid/Unavailable, each distinct — an operator who typed an empty value gets different text than one who never touched the field, and a malformed value gets different text than a well-formed one this artifact merely cannot carry); missing/empty/invalid/conflicting source fields are actionable camera-named errors; USB/CSI identity is durable-hardware-identity-keyed (rejecting a transient /dev/ device path as Invalid) with a display-only name; scheme validation accepts every scheme a real camera actually serves (rtsp AND rtsps for RTSP-over-TLS, http AND https for MJPEG) and refuses only a value that is not a URL at all; MJPEG/RTSP credentials never leak into an error message whether carried on the separate password field, embedded in a well-formed URL's userinfo (redacted to <redacted>@host, keeping the actionable host/path), embedded in a scheme-relative/bare-authority value that fails to parse as a URL at all (refused as Invalid with NO echo whatsoever, closing the redaction bypass a naive scheme://-only check left open), or carried in a URL's QUERY STRING with no userinfo at all (a common shape for a stream token, e.g. ?token=..., stripped unconditionally from ERROR TEXT — a separate concern from CameraId's own canonical-endpoint identity, which keeps the query); a malformed TOML file reports only a static category plus line/column, never anything derived from the error itself (not even its own bare message, which for a typed-deserialization failure can embed the offending scalar); and every well-formed adapter kind is honestly rejected unsupported_by_this_artifact (never conflated with Invalid) because no capture/encode lane exists yet, proven end to end through the same Result vigil run itself would get. An explicitly empty [[cameras]] list (a deliberate, legitimate cameraless node) produces no legacy single-camera synthesis, while an absent cameras field keeps that legacy synthesis unchanged; and a source kind this artifact cannot carry is refused identically whether it arrives through a [[cameras]] table entry or through the equivalent legacy --usb-device/--csi-module/--mjpeg-url CLI flag, never silently accepted on one route while the other honestly refuses it. Two [[cameras]] entries whose canonical RTSP analysis endpoints collide (by CameraId's own canonicalisation — case-folded host, default-port collapse — not merely byte-identical strings) are rejected as a duplicate camera, with an actionable message naming BOTH colliding entries; two entries with genuinely different paths on the same host (the ordinary multi-channel-NVR deployment) load as two distinct cameras; and an entry's `live_rtsp_url` never participates in duplicate detection — only its own `rtsp_url` (analysis endpoint) does, which is what keeps a single real camera's analysis+live pair from ever colliding with itself or with an unrelated entry that happens to reuse one of its URLs in the other role. Only RTSP is exercised end to end here because this artifact refuses every other source kind as unsupported before duplicate detection is ever reached."
+sources = [
+  "crates/vigil/tests/camera_config_schema.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::camera_config_schema::a_bare_authority_credentialed_mjpeg_url_is_refused_as_invalid_never_echoed", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_camera_entry_declaring_no_source_field_fails_the_real_load_naming_the_camera_and_the_fix", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_camera_entry_declaring_two_source_kinds_at_once_fails_the_real_load_as_a_conflict", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_credentialed_mjpeg_url_redacts_the_embedded_password_but_keeps_the_host_in_the_refusal", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_hostless_opaque_rtsp_url_is_rejected_at_the_real_load_with_an_actionable_message", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_malformed_toml_config_reports_location_only_never_the_offending_source_line", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_query_carried_token_in_an_mjpeg_url_never_leaks_into_the_real_loads_error_text", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_scheme_relative_credentialed_mjpeg_url_is_refused_as_invalid_never_echoed", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_transient_dev_video_path_for_usb_device_is_the_real_loads_invalid_outcome", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_well_formed_but_unsupported_mjpeg_url_is_the_real_loads_unavailable_outcome_not_invalid", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::a_whitespace_prefixed_dev_video_path_for_usb_device_is_rejected_as_non_durable", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_absent_cameras_list_still_synthesizes_the_legacy_single_camera_entry", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_entrys_live_rtsp_url_never_participates_in_duplicate_camera_detection", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_explicit_empty_cameras_list_produces_no_legacy_single_camera_fallback", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_explicitly_empty_source_field_is_rejected_even_alongside_a_valid_rtsp_url_naming_the_field", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_ordinary_hosted_rtsp_url_still_loads_unchanged_alongside_the_hostless_rejection", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_rtsp_only_camera_entry_resolves_and_loads_through_the_real_loader", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_rtsps_url_is_accepted_as_a_valid_encrypted_rtsp_scheme_not_invalid", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::an_unparsable_rtsp_url_is_the_real_loads_invalid_outcome_and_never_echoes_the_raw_value", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::csi_source_is_refused_identically_through_the_cameras_list_and_the_legacy_cli_flag", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::every_adapter_source_kind_is_honestly_rejected_by_the_real_load_as_unsupported_by_this_artifact", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::mjpeg_password_never_leaks_into_the_real_loads_error_text", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::mjpeg_source_is_refused_identically_through_the_cameras_list_and_the_legacy_cli_flag", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::omitted_and_empty_are_distinct_real_load_outcomes_with_different_messages", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::renaming_a_camera_never_changes_its_resolved_rtsp_identity", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::two_camera_entries_with_different_paths_on_the_same_rtsp_host_load_as_two_distinct_cameras", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::two_camera_entries_with_the_same_canonical_rtsp_analysis_endpoint_are_rejected_as_a_duplicate_camera_naming_both", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::two_camera_entries_with_the_same_hostless_opaque_rtsp_url_never_silently_load_as_two_distinct_cameras", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::usb_and_csi_identity_would_be_durable_hardware_identity_not_a_transient_device_path", # crates/vigil/tests/camera_config_schema.rs
+  "vigil::camera_config_schema::usb_source_is_refused_identically_through_the_cameras_list_and_the_legacy_cli_flag", # crates/vigil/tests/camera_config_schema.rs
+]
+[[contract]]
+id = "cameraless-node-health-states-no-cameras-configured"
+lineage = "Driven through the real composed vigil binary end to end (a spawned subprocess, its own real /health HTTP responder, never a helper reimplementing that logic): a config file declaring an explicit, deliberate cameras = [] loads through vigil run as a legitimate cameraless worker/discovery node; the liveness probe still answers 2xx (the node is alive, not dead), and the /health body's structural \"cameras_by_kind\" object (one entry per camera source kind — rtsp, usb, csi, mjpeg — each carrying a count and a per-camera list) reports zero cameras across EVERY kind, which IS the cameraless statement now (superseding the earlier bare-substring \"no cameras configured\" assertion, recorded as a ruling rather than a quiet drop); its status field is never the bare, unqualified \"ready\" label an ordinary camera-serving box reports — a camera product whose health check reports fine while it watches nothing is the worst failure mode there is, so a cameraless node must never present as ordinarily healthy. The companion file proves the same cameras_by_kind structure reports genuine non-zero counts for a node that actually has cameras configured, so the cameraless zeros cannot be a hardcoded shape."
+sources = [
+  "crates/vigil-bin/tests/camera_health_by_kind.rs",
+  "crates/vigil-bin/tests/cameraless_health_statement.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil-bin::camera_health_by_kind::configured_rtsp_cameras_are_counted_and_listed_by_kind_on_health", # crates/vigil-bin/tests/camera_health_by_kind.rs
+  "vigil-bin::cameraless_health_statement::a_cameraless_node_states_no_cameras_configured_on_health_and_never_bare_ready", # crates/vigil-bin/tests/cameraless_health_statement.rs
+]
+[[contract]]
+id = "shared-camera-encoder-seam-achieved-state-receipt"
+lineage = "The shared camera encoder seam is one trait with an openh264 software implementation behind it that genuinely encodes (proven by a real encode-then-decode round trip through the production software decoder, and a forced-keyframe test that cannot pass against a stub); the encoder returns encoded bytes/codec configuration/keyframe facts only, never a whole EncodedAccessUnit; and backend selection is reported as an achieved-state receipt (a distinct Encode acceleration stage) derived from what selection actually observed, never from the requested setting — including WHY a requested hardware backend was not achieved: since no hardware camera-encode backend is compiled into this seam at all, the honest failure code is UnsupportedByThisArtifact (with matching SelectedBackend evidence and an InstallSupportedArtifact action), never MissingRuntimeDependency, which would send an operator chasing a dependency that was never the actual problem."
+sources = [
+  "crates/vigil/src/encode.rs",
+  "crates/vigil/tests/encoder_seam_receipt.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::encode::tests::automatic_bitrate_bps_selects_by_resolution_class_from_the_given_table", # crates/vigil/src/encode.rs
+  "vigil::encode::tests::automatic_keyframe_interval_frames_uses_the_multiplier_and_clamps_to_the_given_bounds", # crates/vigil/src/encode.rs
+  "vigil::encoder_seam_receipt::a_real_encode_round_trips_through_the_production_software_decoder", # crates/vigil/tests/encoder_seam_receipt.rs
+  "vigil::encoder_seam_receipt::a_selection_on_a_build_with_no_hardware_encoder_reports_software_regardless_of_the_requested_setting", # crates/vigil/tests/encoder_seam_receipt.rs
+  "vigil::encoder_seam_receipt::disabled_intent_never_probes_and_is_reported_as_disabled_not_a_failure", # crates/vigil/tests/encoder_seam_receipt.rs
+  "vigil::encoder_seam_receipt::request_keyframe_forces_the_next_encoded_frame_to_be_a_keyframe", # crates/vigil/tests/encoder_seam_receipt.rs
+  "vigil::encoder_seam_receipt::the_camera_encoder_trait_and_the_openh264_software_backend_exist_behind_it", # crates/vigil/tests/encoder_seam_receipt.rs
+]
+[[contract]]
+id = "shared-camera-encoder-raw-frame-input-config-and-periodic-keyframe-scheduling"
+lineage = "The shared camera encoder seam gains a source-neutral raw-frame input (RawFrame/PixelFormat/PlaneLayout) so every non-H.264 adapter (USB/UVC, CSI, HTTP-MJPEG) hands the encoder its device's real memory layout — planes, strides, offsets, dimensions, pixel format covering at minimum NV12, YUYV, and RGB24 — directly through encode_raw, never converting to packed RGB itself first; an implementation that assumed a plane's stride equals width would silently corrupt output the moment a real V4L2/libcamera device pads a row wider than that, which a padded-vs-tightly-packed NV12 equality test exists specifically to catch. An EncoderConfig struct carries the effective per-stream frame rate, bitrate, and keyframe interval — operator-adjustable levers config::declare_settings already resolves onto RuntimeConfig — and Openh264SoftwareEncoder::with_config consumes them directly rather than deriving its own bitrate from the resolution-class automatic-default table new still uses unchanged for its pre-existing callers. Periodic keyframe scheduling is owned by the shared encoder itself inside encode_raw, never by an adapter, and is counted strictly by SUCCESSFULLY encoded output frames since the last keyframe — never by a timer and never advanced by an attempted input that failed to encode, which a deliberately mis-dimensioned encode attempt sandwiched between two real frames exists specifically to prove."
+sources = [
+  "crates/vigil/tests/encoder_config_and_keyframe_scheduling.rs",
+  "crates/vigil/tests/encoder_raw_frame_layout.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::encoder_config_and_keyframe_scheduling::a_failed_encode_attempt_never_advances_the_keyframe_interval_counter", # crates/vigil/tests/encoder_config_and_keyframe_scheduling.rs
+  "vigil::encoder_config_and_keyframe_scheduling::encode_raw_fires_an_automatic_keyframe_every_configured_interval_with_no_manual_request", # crates/vigil/tests/encoder_config_and_keyframe_scheduling.rs
+  "vigil::encoder_config_and_keyframe_scheduling::with_config_yields_a_materially_higher_long_run_achieved_bitrate_for_a_higher_configured_target", # crates/vigil/tests/encoder_config_and_keyframe_scheduling.rs
+  "vigil::encoder_raw_frame_layout::a_padded_stride_nv12_frame_encodes_identically_to_its_tightly_packed_equivalent", # crates/vigil/tests/encoder_raw_frame_layout.rs
+  "vigil::encoder_raw_frame_layout::encode_raw_produces_a_decodable_stream_for_nv12_yuyv_and_rgb_inputs", # crates/vigil/tests/encoder_raw_frame_layout.rs
+]
+[[contract]]
+id = "camera-identity-per-source-kind-fallible-canonicalising-constructors"
+lineage = "CameraId::new accepted any string, so parallel source lanes (native RTSP, USB/UVC, CSI-2, HTTP/MJPEG) could each invent a mutually incompatible identity scheme for the same physical camera with nothing to notice a disagreement. Four per-source-kind constructors make the durable-identity rule structural: CameraId::from_usb/from_csi take the owning node plus a durable hardware identity (vendor/product/serial for USB, module identity for CSI), refusing an empty value or a transient /dev/-style path rather than accepting a bad identity; CameraId::from_rtsp_url/from_mjpeg_url take the owning node plus the camera's endpoint URL, refusing a value that does not parse as an absolute URL with an allowed scheme (rtsp/rtsps; http/https). Canonicalisation is decided per kind and pinned by name: a URL identity keeps scheme, host (case folded), port (the RTSP default port 554 and the HTTP/HTTPS default ports normalised so an absent port and the explicit default collapse together), PATH, and QUERY — both are significant, not incidental, because two MJPEG cameras behind one NVR/hub at different paths (e.g. http://host/cam1 vs http://host/cam2) are the ordinary deployment, and a real NVR distinguishes channels by query (e.g. ?channel=1); only userinfo (a `user:pass@` credential) is stripped structurally, and the documented consequence is pinned directly: a rotating query-carried token rotates identity, so credentials belong in the entry's username/password fields, never the URL. A hardware identity is only whitespace-trimmed and explicitly keeps case (a USB/CSI serial can be genuinely case-sensitive, unlike a DNS host name, so folding it would risk collapsing two distinct devices). Every constructor scopes the result to the owning node, so the identical device/endpoint declared on two different nodes never collides into one camera. Role congruence (a camera declared with both an analysis stream `rtsp_url` and a separate live stream `live_rtsp_url` being ONE camera) is an ENTRY-level property, not a URL-level one — an entry's identity derives from its analysis endpoint alone, and `live_rtsp_url` never participates (pinned in the sibling `camera-config-schema-single-source-kind-and-honest-refusal` contract's duplicate-detection tests); at the raw-URL level pinned here, two distinct paths on the same host/port are two distinct camera ids, reversing the prior design that bought role congruence by discarding the path and thereby silently dropped a second, real, differently-pathed camera behind the same host."
+sources = [
+  "crates/vigil/tests/camera_identity_construction.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil::camera_identity_construction::camera_query_salt_load_or_generate_is_stable_across_repeated_loads", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::camera_query_salt_wiping_the_file_rekeys_query_distinguished_identity", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::distinct_paths_on_the_same_host_and_port_resolve_to_distinct_camera_ids", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_csi_includes_owning_node_so_two_nodes_never_collide", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_csi_is_stable_across_repeated_calls_with_the_same_inputs", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_csi_refuses_a_transient_dev_path", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_csi_refuses_an_empty_node_id", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_absent_and_empty_query_contribute_no_digest_component", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_canonicalizes_host_case_and_the_default_http_port", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_identity_never_leaks_the_raw_query_through_debug_either", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_keeps_the_path_as_significant_so_two_cameras_behind_one_nvr_stay_distinct", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_one_encoded_pair_does_not_collide_with_two_plain_pairs", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_query_carried_token_rotates_identity_as_documented_guidance", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_query_digest_is_insensitive_to_parameter_order", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_query_digest_still_distinguishes_different_channel_selectors", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_reduces_the_query_to_a_short_hex_digest_never_verbatim_text", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_refuses_a_non_http_scheme", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_refuses_an_empty_node_id", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_strips_credentials_via_userinfo_but_keeps_the_query_as_significant", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_mjpeg_url_treats_http_and_https_as_distinct_endpoints", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_absent_and_empty_query_contribute_no_digest_component", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_canonicalizes_host_case", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_canonicalizes_the_default_rtsp_port", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_distinct_decoded_pair_sets_produce_pairwise_distinct_identities", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_identity_never_leaks_the_raw_query_through_debug_either", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_keeps_the_path_as_significant_so_two_channels_on_one_host_stay_distinct", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_one_encoded_pair_does_not_collide_with_two_plain_pairs", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_query_carried_token_rotates_identity_as_documented_guidance", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_query_digest_differs_under_a_different_salt", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_query_digest_is_insensitive_to_parameter_order", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_query_digest_still_distinguishes_different_channel_selectors", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_query_less_identity_is_unaffected_by_the_salt", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_reduces_the_query_to_a_short_hex_digest_never_verbatim_text", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_refuses_a_non_rtsp_scheme", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_refuses_an_empty_node_id", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_refuses_an_unparsable_value", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_strips_credentials_via_userinfo_but_keeps_the_query_as_significant", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_rtsp_url_treats_rtsp_and_rtsps_as_distinct_endpoints", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_usb_includes_owning_node_so_two_nodes_never_collide", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_usb_is_stable_across_repeated_calls_with_the_same_inputs", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_usb_preserves_case_because_hardware_serials_can_be_case_sensitive", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_usb_refuses_a_transient_dev_video_path", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_usb_refuses_an_empty_hardware_identity", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_usb_refuses_an_empty_node_id", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::from_usb_trims_incidental_surrounding_whitespace", # crates/vigil/tests/camera_identity_construction.rs
+  "vigil::camera_identity_construction::the_same_raw_text_across_different_source_kinds_never_collides", # crates/vigil/tests/camera_identity_construction.rs
 ]

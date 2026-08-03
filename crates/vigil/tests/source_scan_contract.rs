@@ -184,11 +184,14 @@ fn generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url() {
     let root = workspace_root();
     let config_path = root.join("crates/vigil/src/config.rs");
     let runtime_path = root.join("crates/vigil/src/runtime.rs");
+    let ha_camera_registration_path = root.join("crates/vigil/src/ha_camera_registration.rs");
     let addon_config_path = root.join("addons/vigil/config.yaml");
     let config = fs::read_to_string(&config_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", config_path.display()));
     let runtime = fs::read_to_string(&runtime_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", runtime_path.display()));
+    let ha_camera_registration = fs::read_to_string(&ha_camera_registration_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", ha_camera_registration_path.display()));
     let addon_config = fs::read_to_string(&addon_config_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", addon_config_path.display()));
     let mut failures = Vec::new();
@@ -215,8 +218,15 @@ fn generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url() {
         "fn generic_camera_url(camera: &config::CameraEntry) -> Option<&str>",
         ".live_rtsp_url",
         ".or(camera.rtsp_url.as_deref())",
-        "register_generic_camera(&cam_id, generic_camera_url, &config.data_dir)",
     ] {
+        if !ha_camera_registration.contains(required) {
+            failures.push(format!(
+                "{} does not route Generic Camera registration through the live RTSP URL marker {required}",
+                ha_camera_registration_path.display()
+            ));
+        }
+    }
+    for required in ["register_generic_camera(&cam_id, generic_camera_url, &config.data_dir)"] {
         if !runtime.contains(required) {
             failures.push(format!(
                 "{} does not route Generic Camera registration through the live RTSP URL marker {required}",
@@ -233,10 +243,10 @@ fn generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url() {
 #[test]
 fn generic_camera_registration_confirms_home_assistant_preview_step() {
     let root = workspace_root();
-    let runtime_path = root.join("crates/vigil/src/runtime.rs");
+    let ha_camera_registration_path = root.join("crates/vigil/src/ha_camera_registration.rs");
     let supervisor_path = root.join("crates/vigil/src/supervisor.rs");
-    let runtime = fs::read_to_string(&runtime_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", runtime_path.display()));
+    let ha_camera_registration = fs::read_to_string(&ha_camera_registration_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", ha_camera_registration_path.display()));
     let supervisor = fs::read_to_string(&supervisor_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", supervisor_path.display()));
     let mut failures = Vec::new();
@@ -249,22 +259,22 @@ fn generic_camera_registration_confirms_home_assistant_preview_step() {
             ));
         }
     }
-    if !runtime.contains("build_generic_camera_flow_confirm_payload") {
+    if !ha_camera_registration.contains("build_generic_camera_flow_confirm_payload") {
         failures.push(format!(
             "{} does not call the Generic Camera confirmation payload builder",
-            runtime_path.display()
+            ha_camera_registration_path.display()
         ));
     }
-    if runtime.contains("supervisor_post_body(&step_url, &token, \"{}\")") {
+    if ha_camera_registration.contains("supervisor_post_body(&step_url, &token, \"{}\")") {
         failures.push(format!(
             "{} still submits an empty body to the Generic Camera confirmation step",
-            runtime_path.display()
+            ha_camera_registration_path.display()
         ));
     }
-    if runtime.contains("confirmed_ok") {
+    if ha_camera_registration.contains("confirmed_ok") {
         failures.push(format!(
             "{} should not inline the Generic Camera confirmation JSON; use the supervisor payload builder",
-            runtime_path.display()
+            ha_camera_registration_path.display()
         ));
     }
 
@@ -276,10 +286,10 @@ fn generic_camera_registration_confirms_home_assistant_preview_step() {
 #[test]
 fn generic_camera_registration_logs_validation_errors_and_deletes_failed_flows() {
     let root = workspace_root();
-    let runtime_path = root.join("crates/vigil/src/runtime.rs");
+    let ha_camera_registration_path = root.join("crates/vigil/src/ha_camera_registration.rs");
     let supervisor_path = root.join("crates/vigil/src/supervisor.rs");
-    let runtime = fs::read_to_string(&runtime_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", runtime_path.display()));
+    let ha_camera_registration = fs::read_to_string(&ha_camera_registration_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", ha_camera_registration_path.display()));
     let supervisor = fs::read_to_string(&supervisor_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", supervisor_path.display()));
     let mut failures = Vec::new();
@@ -291,10 +301,10 @@ fn generic_camera_registration_logs_validation_errors_and_deletes_failed_flows()
                 supervisor_path.display()
             ));
         }
-        if !runtime.contains(required) {
+        if !ha_camera_registration.contains(required) {
             failures.push(format!(
                 "{} does not use Generic Camera failed-flow helper {required}",
-                runtime_path.display()
+                ha_camera_registration_path.display()
             ));
         }
     }
@@ -302,10 +312,10 @@ fn generic_camera_registration_logs_validation_errors_and_deletes_failed_flows()
         "generic_camera_flow_step_validation_error",
         "generic_camera_flow_deleted",
     ] {
-        if !runtime.contains(required) {
+        if !ha_camera_registration.contains(required) {
             failures.push(format!(
                 "{} does not log Generic Camera failure marker {required}",
-                runtime_path.display()
+                ha_camera_registration_path.display()
             ));
         }
     }

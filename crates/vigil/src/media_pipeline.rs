@@ -52,10 +52,31 @@ impl From<RtspCredentials> for RetinaCredentials {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// `Debug` is hand-written, not derived: `session_url` has its USERINFO
+/// stripped at construction (`strip_url_credentials`, in
+/// `prepare_rtsp_source`) but NOT its query/fragment — a token-carrying
+/// query (`?token=...`) survives on it unchanged, exactly the same leak
+/// class fixed at `runtime.rs:819`'s `rtsp_log_url`. Routing through
+/// [`redact_rtsp_url`] here closes it at the type itself rather than
+/// relying on every future caller to remember to redact before printing.
+/// `credentials`'s own `Debug` (derived on [`RtspCredentials`]) already
+/// prints the username plainly and redacts the password via `Secret` —
+/// correct under the owner's ruling that a username is a diagnostic, not
+/// a secret — so it is left exactly as-is.
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct RtspSource {
     session_url: Url,
     credentials: Option<RtspCredentials>,
+}
+
+impl std::fmt::Debug for RtspSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RtspSource")
+            .field("session_url", &redact_rtsp_url(self.session_url.as_str()))
+            .field("credentials", &self.credentials)
+            .finish()
+    }
 }
 
 impl RtspSource {
@@ -88,17 +109,38 @@ pub(crate) fn prepare_rtsp_source(
     })
 }
 
+/// Redact an RTSP URL for DISPLAY — logs, `Debug` output, and
+/// parse-error text only. Delegates entirely to
+/// [`crate::config::redact_url_userinfo`] under
+/// [`crate::config::UrlRedactionPolicy::Display`], the ONE hardened
+/// redactor for the whole codebase: this function used to carry its own,
+/// weaker, second implementation (a `Url`-crate-based strip that dropped
+/// no query/fragment, plus a lossy string-split fallback that used the
+/// LAST `@` in the whole string rather than a bounded authority scan).
+/// Two redactors for the same job drift — and this was the weaker one,
+/// on the logging path.
+///
+/// Keeps the username visible (owner ruling: a username is a diagnostic,
+/// not a secret) and redacts only the password. **Never** route a value
+/// bound for the memory graph through this — see
+/// [`redact_rtsp_url_for_persistence`] for that surface, which strips the
+/// username too.
 pub(crate) fn redact_rtsp_url(rtsp_url: &str) -> String {
-    match Url::parse(rtsp_url) {
-        Ok(mut url) => {
-            if strip_url_credentials(&mut url).is_ok() {
-                url.to_string()
-            } else {
-                redact_rtsp_url_lossy(rtsp_url)
-            }
-        }
-        Err(_) => redact_rtsp_url_lossy(rtsp_url),
-    }
+    crate::config::redact_url_userinfo(rtsp_url, crate::config::UrlRedactionPolicy::Display)
+}
+
+/// Redact an RTSP URL for PERSISTENCE — anything written into the memory
+/// graph (runtime-memory/provenance, e.g. a camera entity's `rtsp_url`
+/// property in `runtime.rs`). Delegates to
+/// [`crate::config::redact_url_userinfo`] under
+/// [`crate::config::UrlRedactionPolicy::Persistence`]: owner ruling
+/// 2026-08-02, the entire userinfo — username AND password — is stripped
+/// before a camera URL is ever persisted, even though the username alone
+/// is not a secret on display surfaces. **Never** use this for a log line
+/// or `Debug` impl — see [`redact_rtsp_url`] for that surface, which
+/// keeps the username visible.
+pub(crate) fn redact_rtsp_url_for_persistence(rtsp_url: &str) -> String {
+    crate::config::redact_url_userinfo(rtsp_url, crate::config::UrlRedactionPolicy::Persistence)
 }
 
 fn resolve_rtsp_credentials(
@@ -148,16 +190,6 @@ fn strip_url_credentials(url: &mut Url) -> Result<(), String> {
     url.set_password(None)
         .map_err(|_| "RTSP URL cannot clear password for client session".to_string())?;
     Ok(())
-}
-
-fn redact_rtsp_url_lossy(rtsp_url: &str) -> String {
-    let Some((scheme, rest)) = rtsp_url.split_once("://") else {
-        return rtsp_url.to_string();
-    };
-    let Some((_, after_userinfo)) = rest.rsplit_once('@') else {
-        return rtsp_url.to_string();
-    };
-    format!("{scheme}://{after_userinfo}")
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -213,7 +245,7 @@ pub struct DecodedRgbFrame {
 #[derive(Clone)]
 pub(crate) struct DecodedVideoSegment {
     pub(crate) frames: Vec<DecodedRgbFrame>,
-    pub(crate) encoded_units: Vec<Vec<u8>>,
+    pub(crate) encoded_units: Vec<Bytes>,
     pub(crate) fps: f64,
     pub(crate) observed_at: Option<DateTime<Utc>>,
     /// The codec `encoded_units` are framed in. Threaded so a fabric offload
@@ -497,7 +529,7 @@ where
                     if !segment_started {
                         continue;
                     }
-                    encoded_units.push(unit.data);
+                    encoded_units.push(unit.data.clone());
                     if !unit_frames.is_empty() && decoded_frames.is_empty() {
                         segment_started_at.get_or_insert(last_video_at);
                     }
@@ -1042,7 +1074,7 @@ fn codec_for_stream(media: &str, encoding_name: &str) -> Option<VideoCodec> {
 
 fn decode_annex_b_file(path: &Path, codec: VideoCodec) -> Result<DecodedVideoSegment, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
-    decode_encoded_units(codec, vec![bytes], 0.0)
+    decode_encoded_units(codec, vec![bytes.into()], 0.0)
 }
 
 fn decode_mp4_file(path: &Path) -> Result<DecodedVideoSegment, String> {
@@ -1092,11 +1124,11 @@ fn decode_mp4_file(path: &Path) -> Result<DecodedVideoSegment, String> {
         return Err("MP4 H.265 demux is not implemented in the first-light decoder".to_string());
     }
 
-    let mut encoded_units = Vec::with_capacity(sample_count as usize + 1);
+    let mut encoded_units: Vec<Bytes> = Vec::with_capacity(sample_count as usize + 1);
     let mut parameter_unit = Vec::new();
     append_annex_b_nal(&mut parameter_unit, &sps);
     append_annex_b_nal(&mut parameter_unit, &pps);
-    encoded_units.push(parameter_unit);
+    encoded_units.push(parameter_unit.into());
     for sample_id in 1..=sample_count {
         let Some(sample) = reader
             .read_sample(track_id, sample_id)
@@ -1111,7 +1143,7 @@ fn decode_mp4_file(path: &Path) -> Result<DecodedVideoSegment, String> {
             append_annex_b_nal(&mut unit, nal);
         }
         if !unit.is_empty() {
-            encoded_units.push(unit);
+            encoded_units.push(unit.into());
         }
     }
     decode_encoded_units(VideoCodec::H264, encoded_units, fps)
@@ -1122,7 +1154,7 @@ fn decode_mp4_file(path: &Path) -> Result<DecodedVideoSegment, String> {
 /// resolved `encoded_units` blob the same way a local capture session does.
 pub(crate) fn decode_encoded_units(
     codec: VideoCodec,
-    encoded_units: Vec<Vec<u8>>,
+    encoded_units: Vec<Bytes>,
     fps: f64,
 ) -> Result<DecodedVideoSegment, String> {
     let decoded = match codec {
@@ -1141,7 +1173,7 @@ pub(crate) fn decode_encoded_units(
     })
 }
 
-fn decode_h264_units(encoded_units: &[Vec<u8>]) -> Result<Vec<DecodedRgbFrame>, String> {
+fn decode_h264_units(encoded_units: &[Bytes]) -> Result<Vec<DecodedRgbFrame>, String> {
     let config = H264DecoderConfig::new().flush_after_decode(Flush::NoFlush);
     let mut decoder = H264Decoder::with_api_config(openh264::OpenH264API::from_source(), config)
         .map_err(|error| format!("create OpenH264 decoder: {error}"))?;
@@ -1176,7 +1208,7 @@ fn decode_h264_units(encoded_units: &[Vec<u8>]) -> Result<Vec<DecodedRgbFrame>, 
     Ok(frames)
 }
 
-fn decode_h265_units(encoded_units: &[Vec<u8>]) -> Result<Vec<DecodedRgbFrame>, String> {
+fn decode_h265_units(encoded_units: &[Bytes]) -> Result<Vec<DecodedRgbFrame>, String> {
     let mut decoder = H265Decoder::new();
     let mut frames = Vec::new();
     let mut first_error = None;
@@ -1429,7 +1461,7 @@ mod tests {
             frames: (0..6)
                 .map(|index| synthetic_rgb_frame(index, 64, 48))
                 .collect(),
-            encoded_units: vec![b"raw-camera-evidence".to_vec()],
+            encoded_units: vec![b"raw-camera-evidence".to_vec().into()],
             fps: 6.0,
             observed_at: None,
             codec: VideoCodec::H264,
@@ -1558,14 +1590,106 @@ mod tests {
     }
 
     #[test]
-    fn rtsp_url_redaction_removes_userinfo_from_parse_errors() {
+    fn rtsp_url_redaction_removes_the_password_but_keeps_the_username_in_parse_errors() {
+        // Owner ruling: a username is a diagnostic, not a secret, and
+        // stays visible everywhere — this is the OPPOSITE of the property
+        // this test asserted before that ruling (it used to require the
+        // username hidden too).
         let error = prepare_rtsp_source("rtsp://admin:sec@ret@[", None, None)
             .expect_err("malformed host should fail");
 
-        assert!(!error.contains("admin"));
-        assert!(!error.contains("sec"));
-        assert!(!error.contains("ret"));
-        assert!(error.contains("rtsp://["));
+        assert!(
+            error.contains("admin"),
+            "the username is not a secret and must stay visible, got: {error}"
+        );
+        // The password half of the userinfo is everything after the
+        // FIRST `:` — here "sec@ret" — and must never appear.
+        assert!(!error.contains("sec@ret"));
+        // The consolidated redactor (`crate::config::redact_url_userinfo`,
+        // now the ONLY redactor in the codebase) renders a visible
+        // `admin:<redacted>@` marker — username kept, password redacted —
+        // the same format every other redaction call site in the
+        // codebase now produces.
+        assert!(error.contains("rtsp://admin:<redacted>@["));
+    }
+
+    /// `RtspSource::session_url()` has its USERINFO stripped
+    /// (`strip_url_credentials`, called inside `prepare_rtsp_source`) but
+    /// NOT its query/fragment — a token-carrying query survives there
+    /// unchanged. `runtime.rs`'s probe/open/play log lines build
+    /// `rtsp_log_url` from this value, so a caller that logs
+    /// `session_url()` RAW (the pre-fix shape at `runtime.rs:819`) leaks
+    /// the token; a caller that routes it through `redact_rtsp_url` (the
+    /// fix) does not. Both computations are exercised here on the SAME
+    /// prepared source, over the SAME production functions runtime.rs
+    /// calls, so this proves the mutation directly: the raw value the old
+    /// code used contains the token, and the redacted value the fixed
+    /// code now uses does not.
+    #[test]
+    fn session_url_carries_a_query_token_raw_but_redact_rtsp_url_strips_it() {
+        let source = prepare_rtsp_source(
+            "rtsp://admin:hunter2@camera.local:554/stream?token=abc123",
+            None,
+            None,
+        )
+        .expect("well-formed credentialed RTSP URL with a query token");
+
+        let raw = source.session_url();
+        assert!(
+            raw.contains("token=abc123"),
+            "sanity: session_url() itself does not strip the query — if it did, the log-line \
+             fix at runtime.rs:819 would have been unnecessary, got: {raw}"
+        );
+        assert!(
+            !raw.contains("hunter2"),
+            "sanity: session_url() DOES strip userinfo — only the query survives raw, got: {raw}"
+        );
+
+        // This is exactly what runtime.rs now computes for `rtsp_log_url`.
+        let logged = redact_rtsp_url(raw);
+        assert!(
+            !logged.contains("token=abc123"),
+            "the fix: routing session_url() through redact_rtsp_url must strip the query \
+             token before it ever reaches a probe/open/play log line, got: {logged}"
+        );
+        assert!(
+            logged.contains("camera.local:554/stream"),
+            "the host and path must survive — they are what makes the log line actionable, \
+             got: {logged}"
+        );
+    }
+
+    /// `RtspSource` used to derive `Debug`, which would print its
+    /// `session_url` field raw — and `session_url()` keeps the query
+    /// string (only userinfo is stripped at construction), so a token in
+    /// the URL reached any `{:?}` of an `RtspSource` value directly, the
+    /// same leak class fixed at `runtime.rs:819`'s `rtsp_log_url`. The
+    /// hand-written `Debug` now routes `session_url` through
+    /// `redact_rtsp_url` instead.
+    #[test]
+    fn rtsp_source_debug_redacts_the_query_token_in_session_url() {
+        let source = prepare_rtsp_source(
+            "rtsp://admin:hunter2@camera.local:554/stream?token=abc123",
+            None,
+            None,
+        )
+        .expect("well-formed credentialed RTSP URL with a query token");
+
+        let text = format!("{source:?}");
+        assert!(
+            !text.contains("token=abc123"),
+            "a token carried in the session URL's query must never appear in RtspSource's \
+             Debug output, got: {text}"
+        );
+        assert!(
+            !text.contains("hunter2"),
+            "the password must never appear either, got: {text}"
+        );
+        assert!(
+            text.contains("camera.local:554/stream"),
+            "the host and path must survive redaction — they are what makes Debug output \
+             actionable, got: {text}"
+        );
     }
 
     #[test]

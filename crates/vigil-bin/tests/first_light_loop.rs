@@ -4840,6 +4840,66 @@ fn credentialed_existing_camera_rtsp_url_is_redacted_on_startup() {
 }
 
 #[test]
+fn credentialed_rtsp_url_is_redacted_when_a_live_detection_persists_it() {
+    let world = authenticated_rtsp_url_world_or_fail();
+    let readiness = FixtureReadiness::probe(&world);
+    // Wait for the log line `record_one_event` only prints AFTER
+    // `record_detected_events` has called `maintain_runtime_memory` (the
+    // line-2033 persistence call) and durably written the Observation —
+    // never for a decoded frame alone. `detection_produces_observation_referencing_clip`
+    // establishes this is the load-bearing needle for proving the
+    // detection path, not just the startup path, actually ran.
+    let (runtime, store) = run_runtime_until_log_contains_and_open_store_with_env(
+        &world,
+        &[],
+        "observation_written=true",
+    );
+    let observations = list_observations(store.as_ref());
+    let mut failures = readiness.missing_messages();
+
+    assert_authenticated_rtsp_runtime(&world, &runtime, store.as_ref(), &mut failures);
+    if !world.rtsp_url.contains('@') {
+        failures.push("authenticated URL fixture did not exercise URL-embedded credentials".into());
+    }
+    if runtime.detector_invocations == 0 {
+        failures.push("detector was not invoked on decoded RTSP frames".to_string());
+    }
+    // The load-bearing proof that this is NOT vacuously passing against the
+    // startup write: an Observation exists only if `record_detected_events`
+    // ran past its empty-detections early return (runtime.rs:2026) and
+    // reached the line-2033 persistence call. If detections were empty this
+    // count would be zero and every assertion below would prove nothing
+    // about the detection-time redaction path this test exists to cover.
+    if observations.len() != 1 {
+        failures.push(format!(
+            "expected exactly one detection-backed Observation proving the detection path ran, \
+             found {}",
+            observations.len()
+        ));
+    }
+    let cameras = device_entities(store.as_ref());
+    match first_camera_rtsp(&cameras) {
+        Some(camera_rtsp_url) => {
+            if camera_rtsp_url.contains(RTSP_AUTH_USERNAME) {
+                failures.push(format!(
+                    "camera rtsp_url persisted by the detection-time write still carried the \
+                     username: {camera_rtsp_url:?}"
+                ));
+            }
+            if camera_rtsp_url.contains(RTSP_AUTH_PASSWORD) || camera_rtsp_url.contains('@') {
+                failures.push(format!(
+                    "camera rtsp_url persisted by the detection-time write still carried \
+                     userinfo: {camera_rtsp_url:?}"
+                ));
+            }
+        }
+        None => failures.push("detection-time write did not persist a camera entity".to_string()),
+    }
+
+    assert_contract(failures);
+}
+
+#[test]
 fn separate_rtsp_credentials_authenticate_without_url_userinfo() {
     let world = authenticated_rtsp_fields_world_or_fail();
     let readiness = FixtureReadiness::probe(&world);

@@ -22,6 +22,7 @@ use crate::config;
 #[cfg(test)]
 use crate::detection_accel::select_detection_acceleration;
 use crate::detector::Detector;
+use crate::ha_camera_registration::{generic_camera_url, register_generic_camera};
 use crate::health::{HealthServer, HealthState, HealthStatus};
 use crate::live_read;
 use crate::media_pipeline;
@@ -100,12 +101,18 @@ fn run_inner(
         stats.health = "ready".to_string();
         stats.processing_lag_bound_ms = 1.0;
     });
+    let camera_health_entries: Vec<config::CameraHealthEntry> = config
+        .cameras
+        .iter()
+        .map(config::CameraEntry::health_entry)
+        .collect();
     let server = HealthServer::bind(
         config.health_port,
         health.clone(),
         shutdown_flag.clone(),
         Some(accel.clone()),
-        Some(stats.clone()),
+        Some(crate::runtime_stats::HealthFabricStatus::from_state(&stats)),
+        camera_health_entries,
     )?;
     // A crash between staging write and cleanup strands files; staging is
     // ephemeral by definition, so sweep it every boot.
@@ -233,7 +240,19 @@ fn run_inner(
             println!("store opened path={}", store.path.display());
             println!("{}", store.trace);
             println!("runtime loop ready");
-            health.set(HealthStatus::Ready, "store open and runtime loop ready");
+            if config.cameras.is_empty() {
+                // A legitimate worker/discovery deployment with zero cameras
+                // must never present as an ordinary, camera-serving,
+                // unqualified "ready" box (the worst failure mode on a
+                // camera product is a box that reports it is fine while
+                // watching nothing) — still a live, healthy 2xx answer.
+                health.set(
+                    HealthStatus::NoCamerasConfigured,
+                    "no cameras configured: this deployment is a worker/discovery node with zero [[cameras]] entries",
+                );
+            } else {
+                health.set(HealthStatus::Ready, "store open and runtime loop ready");
+            }
             let owner_store = store.handle.clone();
             let owner_stats = stats.clone();
             let read_handler: context_graph::ControlHandler = Arc::new(move |request: String| {
@@ -282,7 +301,7 @@ fn run_inner(
                 camera_flags.insert(cam_id.clone(), Arc::clone(&enabled));
 
                 if let Some(url) = &camera.rtsp_url {
-                    let memory_url = media_pipeline::redact_rtsp_url(url);
+                    let memory_url = media_pipeline::redact_rtsp_url_for_persistence(url);
                     // Clone config and patch per-camera fields so existing sub-functions
                     // (maintain_runtime_memory, record_detected_events) see the right camera.
                     let mut cam_config = config.clone();
@@ -448,146 +467,6 @@ fn validate_compiled_capability_requests(
     }
     let _ = (fabric_ticket_configured, fabric_hub_requested);
     Ok(())
-}
-
-/// Register each camera as an HA Generic Camera config entry via the Core config-flow API.
-///
-/// The MQTT camera platform is image-only (no `stream_source` key), so live video requires
-/// a real streaming camera entity. This creates one Generic Camera per camera, pointed at
-/// the camera's configured live RTSP URL when present, otherwise its detection RTSP URL.
-/// HA Core reaches the camera directly and serves the entity over WebRTC via its built-in
-/// go2rtc (2024.11+) with no separate stream registration.
-///
-/// Flow:
-/// 1. Sentinel guard — if `data_dir/generic_camera_<slug>.registered` exists, skip.
-/// 2. POST /core/api/config/config_entries/flow `{"handler":"generic"}` → flow_id.
-/// 3. POST .../flow/<flow_id> with `stream_source` + the required `advanced` object
-///    (`framerate` / `verify_ssl` / `rtsp_transport:"tcp"`).
-/// 4. If HA returns an intermediate "form" step (confirm/preview), submit `{}`.
-/// 5. On `"type":"create_entry"`, write the sentinel and log success.
-///
-/// HA version floor: 2024.11 (built-in go2rtc + WebRTC).  Below that, the entity falls back
-/// to HLS (laggier but functional).  H.265 sources register but don't negotiate WebRTC.
-///
-/// Failures are logged and never panic; the add-on continues without live view.
-// SUPERVISOR_TOKEN is an enumerated, reviewed read
-// (`environment_read_surface.baseline.txt`), not an ad-hoc one — it is
-// injected by the Home Assistant Supervisor, not user-adjustable.
-#[allow(clippy::disallowed_methods)]
-fn register_generic_camera(cam_slug: &str, rtsp_url: &str, data_dir: &std::path::Path) {
-    // ── Sentinel-based idempotency ─────────────────────────────────────────
-    // The Generic Camera config-flow API is NOT inherently idempotent — calling it
-    // twice creates duplicate camera entities.  Write a marker the first time we
-    // succeed so subsequent add-on restarts skip the API call entirely.
-    let sentinel = data_dir.join(format!("generic_camera_{cam_slug}.registered"));
-    if sentinel.exists() {
-        println!("generic_camera_already_registered camera={cam_slug}");
-        return;
-    }
-
-    let Ok(token) = std::env::var("SUPERVISOR_TOKEN") else {
-        println!("generic_camera_skip_no_supervisor_token camera={cam_slug}");
-        return;
-    };
-
-    // ── Start config-flow ─────────────────────────────────────────────────
-    let start_payload = crate::supervisor::build_generic_camera_flow_start_payload();
-    let flow_resp = match crate::supervisor::supervisor_post_body(
-        "http://supervisor/core/api/config/config_entries/flow",
-        &token,
-        &start_payload,
-    ) {
-        Ok(resp) => resp,
-        Err(e) => {
-            println!("generic_camera_flow_start_error camera={cam_slug} error={e}");
-            return;
-        }
-    };
-
-    let flow_id = match crate::supervisor::parse_flow_id(&flow_resp) {
-        Some(id) => id,
-        None => {
-            println!(
-                "generic_camera_flow_id_missing camera={cam_slug} response={}",
-                &flow_resp[..flow_resp.len().min(200)]
-            );
-            return;
-        }
-    };
-
-    // ── Submit stream_source user step ────────────────────────────────────
-    // stream_source is the camera's own RTSP URL, reached directly by HA Core;
-    // HA serves WebRTC via its built-in go2rtc with no separate registration.
-    let step_payload = crate::supervisor::build_generic_camera_flow_step_payload(rtsp_url, None);
-    let step_url = format!("http://supervisor/core/api/config/config_entries/flow/{flow_id}");
-    let step_resp = match crate::supervisor::supervisor_post_body(&step_url, &token, &step_payload)
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            println!("generic_camera_flow_step_error camera={cam_slug} error={e}");
-            delete_generic_camera_flow(cam_slug, &flow_id, &token);
-            return;
-        }
-    };
-    if let Some(errors) = crate::supervisor::flow_step_errors(&step_resp) {
-        println!("generic_camera_flow_step_validation_error camera={cam_slug} errors={errors}");
-        delete_generic_camera_flow(cam_slug, &flow_id, &token);
-        return;
-    }
-
-    // ── Handle optional confirm/preview intermediate step ─────────────────
-    // Some HA versions present an extra preview/confirm form before completing
-    // the entry. Accept it explicitly.
-    let final_resp = if crate::supervisor::is_flow_create_entry(&step_resp) {
-        step_resp
-    } else {
-        let confirm_payload = crate::supervisor::build_generic_camera_flow_confirm_payload();
-        match crate::supervisor::supervisor_post_body(&step_url, &token, &confirm_payload) {
-            Ok(resp) => resp,
-            Err(e) => {
-                println!("generic_camera_flow_confirm_error camera={cam_slug} error={e}");
-                delete_generic_camera_flow(cam_slug, &flow_id, &token);
-                return;
-            }
-        }
-    };
-
-    if crate::supervisor::is_flow_create_entry(&final_resp) {
-        // Write sentinel so we skip on next restart.
-        if let Err(e) = std::fs::write(&sentinel, b"ok") {
-            println!("generic_camera_sentinel_write_error camera={cam_slug} error={e}");
-        }
-        println!("generic_camera_registered camera={cam_slug}");
-    } else {
-        if let Some(errors) = crate::supervisor::flow_step_errors(&final_resp) {
-            println!(
-                "generic_camera_flow_confirm_validation_error camera={cam_slug} errors={errors}"
-            );
-        }
-        println!(
-            "generic_camera_flow_unexpected_result camera={cam_slug} response={}",
-            &final_resp[..final_resp.len().min(300)]
-        );
-        delete_generic_camera_flow(cam_slug, &flow_id, &token);
-    }
-}
-
-fn delete_generic_camera_flow(cam_slug: &str, flow_id: &str, token: &str) {
-    match crate::supervisor::delete_flow(flow_id, token) {
-        Ok(()) => println!("generic_camera_flow_deleted camera={cam_slug} flow_id={flow_id}"),
-        Err(error) => {
-            println!(
-                "generic_camera_flow_delete_error camera={cam_slug} flow_id={flow_id} error={error}"
-            );
-        }
-    }
-}
-
-fn generic_camera_url(camera: &config::CameraEntry) -> Option<&str> {
-    camera
-        .live_rtsp_url
-        .as_deref()
-        .or(camera.rtsp_url.as_deref())
 }
 
 fn log_startup(config: &config::RuntimeConfig) {
@@ -816,7 +695,12 @@ pub fn start_rtsp_probe(
                     return;
                 }
             };
-            let rtsp_log_url = rtsp_source.session_url().to_string();
+            // `session_url()` has its userinfo stripped (`strip_url_credentials`)
+            // but NOT its query/fragment — a token-carrying query
+            // (`?token=...`) survives unchanged there. Route through the
+            // hardened redactor so a token never reaches the probe/open/play
+            // log lines below.
+            let rtsp_log_url = media_pipeline::redact_rtsp_url(rtsp_source.session_url());
             println!("rtsp probe starting url={rtsp_log_url}");
             // The detector sits behind the engine-neutral trait: the pipeline sees
             // `dyn Detector`, the engine lives in the implementation.
@@ -2146,7 +2030,7 @@ pub(crate) fn record_detected_events(
     let rtsp_url = config
         .rtsp_url
         .as_deref()
-        .map(media_pipeline::redact_rtsp_url)
+        .map(media_pipeline::redact_rtsp_url_for_persistence)
         .unwrap_or_default();
     let nodes = match maintain_runtime_memory(store, config, &rtsp_url) {
         Ok(nodes) => nodes,
@@ -2842,9 +2726,10 @@ use crate::fabric::{FabricBundle, PendingOffloadSegment, fabric_bring_up, try_of
 mod tests {
     use super::{
         DetectorSegmentDecision, LatestSegmentQueue, LatestSegmentRecv, decision_delay_from_env,
-        detector_segment_decision, generic_camera_url,
+        detector_segment_decision,
     };
     use crate::config;
+    use crate::ha_camera_registration::generic_camera_url;
     use std::time::Duration;
 
     #[test]
@@ -3031,6 +2916,10 @@ mod tests {
             live_rtsp_url: Some("rtsp://camera/live".to_string()),
             username: None,
             password: None,
+            usb_device: None,
+            csi_module: None,
+            mjpeg_url: None,
+            source_kind: Some(config::CameraSourceKind::Rtsp),
         };
 
         assert_eq!(generic_camera_url(&camera), Some("rtsp://camera/live"));
@@ -3044,6 +2933,10 @@ mod tests {
             live_rtsp_url: None,
             username: None,
             password: None,
+            usb_device: None,
+            csi_module: None,
+            mjpeg_url: None,
+            source_kind: Some(config::CameraSourceKind::Rtsp),
         };
 
         assert_eq!(generic_camera_url(&camera), Some("rtsp://camera/main"));

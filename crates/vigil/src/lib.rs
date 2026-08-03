@@ -4,6 +4,8 @@
 #![cfg_attr(feature = "detect-burn-wgpu", recursion_limit = "256")]
 
 pub mod acceleration;
+pub mod camera_hub;
+pub mod camera_track;
 mod clock;
 mod config;
 mod control_socket;
@@ -15,8 +17,10 @@ pub mod detection_accel;
 mod detector;
 pub mod detector_workclass;
 pub mod doctor;
+pub mod encode;
 #[cfg(feature = "fabric")]
 pub mod fabric;
+mod ha_camera_registration;
 mod health;
 mod http_data_plane;
 mod live_read;
@@ -73,10 +77,28 @@ pub fn acceleration_intent_from_args(args: Vec<OsString>) -> Result<Acceleration
 
 /// The operator-facing fabric enrollment intent (criterion C10): every
 /// knob has a sane default and resolves with nothing provided.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written, not derived: `fabric_ticket` is an enrollment
+/// credential, following the same discipline `config::RuntimeConfig`/
+/// `PartialConfig`/`CliOverrides`/`FabricFileConfig` already apply to the
+/// identical field.
+#[derive(Clone, PartialEq, Eq)]
 pub struct FabricIntent {
     pub fabric_ticket: Option<String>,
     pub fabric_hub: bool,
+}
+
+impl std::fmt::Debug for FabricIntent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FabricIntent")
+            .field(
+                "fabric_ticket",
+                &self.fabric_ticket.as_ref().map(|_| "<redacted>"),
+            )
+            .field("fabric_hub", &self.fabric_hub)
+            .finish()
+    }
 }
 
 /// Resolve the fabric enrollment intent exactly as `vigil run` would from
@@ -108,6 +130,139 @@ pub fn fabric_tuning_intent_from_args(args: Vec<OsString>) -> Result<FabricTunin
         fabric_worker_lease_ms: config.fabric_worker_lease_ms,
         fabric_fallback_horizon_ms: config.fabric_fallback_horizon_ms,
     })
+}
+
+/// One `[[cameras]]` entry's resolved source, exactly as `config::load`
+/// determined it — a projection of the real `CameraEntry`/
+/// `CameraSourceKind` resolution (`config::resolve_camera_source_kind`,
+/// `config::artifact_supports_source_kind`), not a second config surface.
+/// Mirrors the [`FabricIntent`]/[`FabricTuningIntent`] precedent above:
+/// test/tooling support for driving the real loader from an integration
+/// test without exposing the full `RuntimeConfig`/`CameraEntry` surface.
+/// Never carries a raw secret — MJPEG credentials via the separate
+/// `password` field are represented only as `has_password`.
+///
+/// `Debug` is hand-written, not derived: `rtsp_url`/`live_rtsp_url`/
+/// `endpoint_url` can carry an embedded PASSWORD in their userinfo the
+/// same way the real `mjpeg_url`/`rtsp_url` config fields can (this is
+/// this run's OWN new type, so unlike `CameraEntry` there is no
+/// pre-existing shape to preserve — the derive was simply wrong from the
+/// start). The separate `username` field is a diagnostic, not a secret
+/// (owner ruling), and prints plainly — only `has_password` stands in for
+/// the real password, exactly as the type's own doc above says.
+/// `PartialEq`/`Eq` stay derived and compare the real, unredacted values,
+/// so equality assertions in tests are unaffected; only how the type
+/// PRINTS changes.
+#[derive(Clone, PartialEq, Eq)]
+pub enum CameraSourceSummary {
+    Rtsp {
+        rtsp_url: String,
+        live_rtsp_url: Option<String>,
+    },
+    Usb {
+        hardware_identity: String,
+    },
+    Csi {
+        hardware_identity: String,
+    },
+    Mjpeg {
+        endpoint_url: String,
+        username: Option<String>,
+        has_password: bool,
+    },
+}
+
+impl std::fmt::Debug for CameraSourceSummary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CameraSourceSummary::Rtsp {
+                rtsp_url,
+                live_rtsp_url,
+            } => formatter
+                .debug_struct("Rtsp")
+                .field(
+                    "rtsp_url",
+                    &config::redact_url_userinfo(rtsp_url, config::UrlRedactionPolicy::Display),
+                )
+                .field(
+                    "live_rtsp_url",
+                    &live_rtsp_url.as_deref().map(|url| {
+                        config::redact_url_userinfo(url, config::UrlRedactionPolicy::Display)
+                    }),
+                )
+                .finish(),
+            CameraSourceSummary::Usb { hardware_identity } => formatter
+                .debug_struct("Usb")
+                .field("hardware_identity", hardware_identity)
+                .finish(),
+            CameraSourceSummary::Csi { hardware_identity } => formatter
+                .debug_struct("Csi")
+                .field("hardware_identity", hardware_identity)
+                .finish(),
+            CameraSourceSummary::Mjpeg {
+                endpoint_url,
+                username,
+                has_password,
+            } => formatter
+                .debug_struct("Mjpeg")
+                .field(
+                    "endpoint_url",
+                    &config::redact_url_userinfo(endpoint_url, config::UrlRedactionPolicy::Display),
+                )
+                .field("username", username)
+                .field("has_password", has_password)
+                .finish(),
+        }
+    }
+}
+
+/// Load camera configuration exactly as `vigil run` would (config file,
+/// options.json, environment, CLI overrides), resolving each configured
+/// camera's real source kind through the SAME path the runtime uses —
+/// `config::load`, which itself calls `config::resolve_camera_source_kind`
+/// and `config::artifact_supports_source_kind`. A camera whose source kind
+/// this artifact cannot carry, or whose fields are missing/conflicting,
+/// makes the WHOLE load fail with `config::load`'s own actionable error —
+/// there is no way to obtain a partial or best-effort camera list here that
+/// production code does not also see.
+pub fn camera_source_summaries_from_args(
+    args: Vec<OsString>,
+) -> Result<Vec<CameraSourceSummary>, String> {
+    let loaded = config::load(args)?;
+    Ok(loaded
+        .cameras
+        .into_iter()
+        .map(|camera| {
+            if let Some(rtsp_url) = camera.rtsp_url {
+                CameraSourceSummary::Rtsp {
+                    rtsp_url,
+                    live_rtsp_url: camera.live_rtsp_url,
+                }
+            } else if let Some(hardware_identity) = camera.usb_device {
+                CameraSourceSummary::Usb { hardware_identity }
+            } else if let Some(hardware_identity) = camera.csi_module {
+                CameraSourceSummary::Csi { hardware_identity }
+            } else if let Some(endpoint_url) = camera.mjpeg_url {
+                CameraSourceSummary::Mjpeg {
+                    endpoint_url,
+                    username: camera.username,
+                    has_password: camera.password.is_some(),
+                }
+            } else {
+                // Unreachable in practice: `config::load` never constructs
+                // a `CameraEntry` whose kind failed
+                // `resolve_camera_source_kind` (it returns `Err` first),
+                // and the single-camera legacy fallback either carries
+                // `rtsp_url` or is the well-known "no source configured"
+                // default — never a `[[cameras]]`-list entry, which is the
+                // only path that reaches this closure at all.
+                CameraSourceSummary::Rtsp {
+                    rtsp_url: String::new(),
+                    live_rtsp_url: None,
+                }
+            }
+        })
+        .collect())
 }
 
 use std::ffi::OsString;
@@ -202,6 +357,25 @@ where
                 ExitCode::from(2)
             }
         },
+        Some(command) if command == "fabric" => {
+            match args
+                .next()
+                .and_then(|arg| arg.into_string().ok())
+                .as_deref()
+            {
+                Some("ticket") => match run_fabric_ticket_command(args.collect()) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        eprintln!("{error}");
+                        ExitCode::from(2)
+                    }
+                },
+                _ => {
+                    eprintln!("usage: vigil fabric ticket [--data-dir PATH]");
+                    ExitCode::from(2)
+                }
+            }
+        }
         Some(command) if command == "detector-probe" => runtime::run_detector_probe(args.collect()),
         Some(command) if command == "run" => runtime::run(args.collect(), factory),
         _ => {
@@ -356,8 +530,32 @@ fn print_help() {
     println!();
     println!("Commands:");
     println!("  run");
+    println!("  fabric ticket");
     println!();
     println!("Options:");
     println!("  --help");
     println!("  --version");
+}
+
+/// `vigil fabric ticket`'s dispatch target, named regardless of whether this
+/// artifact was built with the `fabric` cargo feature (discoverability on
+/// `--help` must not depend on which artifact was built, the same way
+/// `--fabric-ticket`/`--fabric-hub` are documented in every `vigil run`
+/// build). A build without the feature names the fix, exactly like
+/// `run`'s own `validate_compiled_capability_requests`.
+fn run_fabric_ticket_command(args: Vec<OsString>) -> Result<(), String> {
+    #[cfg(feature = "fabric")]
+    {
+        fabric::run_ticket_command(args)
+    }
+    #[cfg(not(feature = "fabric"))]
+    {
+        let _ = args;
+        Err(
+            "fabric was configured, but this Vigil binary was built without the fabric \
+             capability; use an amd64/aarch64 normal release artifact or rebuild with \
+             --features fabric"
+                .to_string(),
+        )
+    }
 }

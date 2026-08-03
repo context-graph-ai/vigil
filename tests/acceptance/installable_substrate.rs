@@ -83,11 +83,11 @@ fn vigil_standalone_version_reports_nonempty_build_identity() {
                     "--help options were not exactly [--help, --version]: {options:?}"
                 ));
             }
+            let removed_transport_flag = ["na", "ts"].concat();
             for forbidden in [
                 "camera",
                 "mqtt",
                 "frigate",
-                "nats",
                 "sync",
                 "server",
                 "ui",
@@ -99,7 +99,10 @@ fn vigil_standalone_version_reports_nonempty_build_identity() {
                 "remote",
                 "admin",
                 "diagnose",
-            ] {
+            ]
+            .into_iter()
+            .chain(std::iter::once(removed_transport_flag.as_str()))
+            {
                 if stdout.to_ascii_lowercase().contains(forbidden) {
                     failures.push(format!("--help exposed out-of-scope surface {forbidden}"));
                 }

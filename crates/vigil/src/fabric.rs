@@ -266,7 +266,7 @@ pub struct FabricRuntime {
     pub node_id: String,
     /// `Some` only when this node carries the hub (`fabric_hub == true`) —
     /// Design decision E: the hub is embedded in the main vigil process
-    /// (`SyncServer::with_transport` enables relay internally), never a
+    /// (`SyncServer::new` starts ContextDB's typed authenticated Iroh hub), never a
     /// separate hub process.
     pub hub_endpoint: Option<Arc<contextdb_server::PeerEndpoint>>,
     /// This node's own bound endpoint, regardless of hub role — so it can
@@ -409,13 +409,10 @@ impl FabricRuntime {
 
         let tenant = contextdb_core::TenantId::from(FABRIC_TENANT);
         let hub_endpoint = if fabric_hub {
-            let server = contextdb_server::SyncServer::with_transport(
+            let server = contextdb_server::SyncServer::new(
                 db.clone(),
-                own_endpoint.transport(),
+                own_endpoint.as_ref(),
                 tenant.clone(),
-                contextdb_engine::sync_types::ConflictPolicies::uniform(
-                    contextdb_engine::sync_types::ConflictPolicy::LatestWins,
-                ),
             );
             // Detached: this hub serves for the life of the process. Standing
             // this up is bring-up, not a call the tests drain — no shutdown

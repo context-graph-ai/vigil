@@ -41,6 +41,14 @@ options:
   fabric_allow_frame_offload: true
   fabric_worker_lease_ms: 300000
   fabric_fallback_horizon_ms: 5000
+  keyframe_interval_fps_multiplier: 2
+  keyframe_interval_min_frames: 15
+  keyframe_interval_max_frames: 300
+  bitrate_bps_up_to_640x480: 1000000
+  bitrate_bps_up_to_1280x720: 2000000
+  bitrate_bps_up_to_1920x1080: 4000000
+  bitrate_bps_up_to_2560x1440: 6000000
+  bitrate_bps_above_2560x1440: 10000000
 schema:
   store_path: str
   health_port: int
@@ -58,6 +66,9 @@ schema:
       live_rtsp_url: str?
       username: str?
       password: str?
+      usb_device: str?
+      csi_module: str?
+      mjpeg_url: str?
   hardware_decoding: bool
   accelerated_detection: bool
   decode_probe_deadline_secs: int?
@@ -67,6 +78,14 @@ schema:
   fabric_allow_frame_offload: bool?
   fabric_worker_lease_ms: int?
   fabric_fallback_horizon_ms: int?
+  keyframe_interval_fps_multiplier: int
+  keyframe_interval_min_frames: int
+  keyframe_interval_max_frames: int
+  bitrate_bps_up_to_640x480: int
+  bitrate_bps_up_to_1280x720: int
+  bitrate_bps_up_to_1920x1080: int
+  bitrate_bps_up_to_2560x1440: int
+  bitrate_bps_above_2560x1440: int
 apparmor: true
 # Host networking is REQUIRED for the fabric (distributed compute): the iroh
 # sync/blob endpoint is QUIC over UDP on a dynamically bound port, and the

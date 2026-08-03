@@ -189,6 +189,50 @@ artifact work.
 
 <!-- vigil-unenforced: classification=external-procedure; reason=`Released images lack a supported detector-checkpoint delivery or upload procedure.` -->
 
+## Video encoding fields
+
+Vigil's shared camera encoder seam (`crate::encode`, not yet wired to a running capture path) derives
+an automatic keyframe interval and an automatic bitrate. Both are operator-adjustable through the
+typed settings registry, the same mechanism `detector_stationary_interval_secs` uses: an untouched
+field keeps its automatic default, and a configured value is an explicit pin.
+| Field | Default | Validation and behavior |
+|---|---:|---|
+| `keyframe_interval_fps_multiplier` | `2` | Must be between 1 and 10. Multiplied by a stream's effective output frame rate to derive its automatic keyframe interval, in output frames. |
+| `keyframe_interval_min_frames` | `15` | Must be between 1 and 1800. The automatic keyframe interval's lower clamp, in output frames. |
+| `keyframe_interval_max_frames` | `300` | Must be between 1 and 3600. The automatic keyframe interval's upper clamp, in output frames. |
+| `bitrate_bps_up_to_640x480` | `1000000` | Must be between 100000 and 100000000. Automatic bitrate, in bits per second, for a stream at or below 640x480. |
+| `bitrate_bps_up_to_1280x720` | `2000000` | Automatic bitrate for a stream above 640x480 and at or below 1280x720. |
+| `bitrate_bps_up_to_1920x1080` | `4000000` | Automatic bitrate for a stream above 1280x720 and at or below 1920x1080. |
+| `bitrate_bps_up_to_2560x1440` | `6000000` | Automatic bitrate for a stream above 1920x1080 and at or below 2560x1440. |
+| `bitrate_bps_above_2560x1440` | `10000000` | Automatic bitrate for a stream above 2560x1440. |
+
+<!-- vigil-claim: `vigil.docs-configuration.field-default-validation-and-behavior-keyframeintervalfpsmultiplier-2` -->
+<!-- enforced by: `vigil::config::tests::keyframe_and_bitrate_settings_declare_with_ratified_defaults_and_real_surfaces` -->
+<!-- enforced by: `vigil::encode::tests::automatic_keyframe_interval_frames_uses_the_multiplier_and_clamps_to_the_given_bounds` -->
+<!-- enforced by: `vigil::encode::tests::automatic_bitrate_bps_selects_by_resolution_class_from_the_given_table` -->
+<!-- enforced by: `vigil::settings_surface_coverage::declared_settings_are_covered_by_every_promised_surface` -->
+
+The Home Assistant add-on schema exposes all eight fields above under the same names. None of the
+eight has a command-line flag or an environment variable; the add-on options and a standalone TOML
+file are the only surfaces, matching the `cameras` list and `recognition_covered_classes` precedent.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No table-driven test binds the absence of a CLI flag or environment variable for these eight fields specifically.` -->
+
+A camera's live subscriber queue capacity is not itself a separate setting: it is always
+`max(effective_keyframe_interval_frames, 15)`, so a subscriber that may drop and rejoin always has a
+retained window containing at least one full keyframe to resume from. The `15` floor is the same
+`keyframe_interval_min_frames` automatic default above, not an independent number.
+
+<!-- vigil-claim: `vigil.docs-configuration.a-cameras-live-subscriber-queue-capacity-is-not` -->
+<!-- enforced by: `vigil::camera_hub::tests::automatic_capacity_floor_derives_from_the_keyframe_interval_min_frames_default` -->
+<!-- enforced by: `vigil::camera_hub_fanout::automatic_capacity_is_derived_from_the_effective_keyframe_interval_and_an_explicit_override_is_unaffected` -->
+
+Vigil's frame rate is not a configurable field: the runtime carries one output frame per input frame
+at the source's own reported rate, with no resampling step anywhere in the media pipeline. There is
+nothing to pin because there is no second rate to choose between.
+
+<!-- vigil-unenforced: classification=product-decision; reason=`Frame rate follows the source with no resampling step, so there is no operator-adjustable parameter to expose.` -->
+
 ## Recognition fields
 
 Recognition is off unless `recognition_weights_dir` points to locally staged SigLIP weights. The

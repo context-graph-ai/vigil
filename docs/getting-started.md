@@ -80,9 +80,12 @@ curl http://HOST:8099/health
 
 A ready runtime returns HTTP 200. Store-open and ingest-failed states return non-success, while
 `keep-pace-failed` remains successful so Home Assistant Supervisor does not restart-loop a live but
-degraded CPU detector.
+degraded CPU detector, and a deployment with zero `[[cameras]]` entries (a legitimate
+worker/discovery node) also stays successful — a restart cannot conjure a camera, so
+restart-looping it would only cause harm.
 
 <!-- vigil-claim: `vigil.docs-getting-started.a-ready-runtime-returns-a-successful-http` -->
+<!-- enforced by: `vigil::health_watchdog_liveness::cameraless_node_stays_alive_for_the_watchdog` -->
 <!-- enforced by: `vigil::health_watchdog_liveness::ready_runtime_is_alive_for_the_watchdog` -->
 <!-- enforced by: `vigil::health_watchdog_liveness::genuinely_dead_states_answer_non_2xx` -->
 <!-- enforced by: `vigil::health_watchdog_liveness::detector_behind_on_cpu_fallback_stays_alive_for_the_watchdog` -->

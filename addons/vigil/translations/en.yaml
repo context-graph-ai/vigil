@@ -13,3 +13,19 @@ configuration:
     description: "Turn this node into the fabric hub that other Vigil nodes join by pasting its ticket. Defaults off, so no new network listener opens on an existing install. Once enabled, this node's status and doctor output print the join ticket to share with other nodes."
   fabric_allow_frame_offload:
     description: "Once joined to a fabric, an ephemeral compressed clip of a motion event from THIS camera moves to same-tenant Vigil nodes by default when this node's detector queue is under pressure. Turn this off to keep this camera's clips on this node always, even while still joined (this node can still accept offloaded work from other nodes)."
+  keyframe_interval_fps_multiplier:
+    description: "How often a recorded/live video stream inserts a full picture an app can start playback from, expressed as a multiple of the camera's own frame rate. Left alone, Vigil inserts one every 2 seconds' worth of frames, so opening a live view or scrubbing a recording never waits long for a playable point. Raising this number makes that wait longer but shrinks file size slightly; lowering it (down to 1) makes playback start faster at a small file-size cost."
+  keyframe_interval_min_frames:
+    description: "The shortest gap Vigil will ever leave between those playback-start points, in frames, no matter how slow a camera's frame rate is. Left alone this is 15 frames, so even a very low-frame-rate camera still gets a full picture inserted often enough to join or scrub smoothly."
+  keyframe_interval_max_frames:
+    description: "The longest gap Vigil will ever leave between those playback-start points, in frames, no matter how fast a camera's frame rate is. Left alone this is 300 frames, capping how long a viewer could wait to start playback on a very high-frame-rate camera."
+  bitrate_bps_up_to_640x480:
+    description: "How much data per second Vigil spends encoding video at 640x480 resolution or smaller. Left alone this is 1 Mbps, a size chosen to look reasonable at that resolution without wasting storage. Raising it improves picture quality at the cost of more storage and network use; lowering it saves storage at the cost of a blockier picture."
+  bitrate_bps_up_to_1280x720:
+    description: "How much data per second Vigil spends encoding video above 640x480 and up to 1280x720 (HD) resolution. Left alone this is 2 Mbps. Raising it improves picture quality at the cost of more storage and network use; lowering it saves storage at the cost of a blockier picture."
+  bitrate_bps_up_to_1920x1080:
+    description: "How much data per second Vigil spends encoding video above 1280x720 and up to 1920x1080 (Full HD) resolution. Left alone this is 4 Mbps. Raising it improves picture quality at the cost of more storage and network use; lowering it saves storage at the cost of a blockier picture."
+  bitrate_bps_up_to_2560x1440:
+    description: "How much data per second Vigil spends encoding video above 1920x1080 and up to 2560x1440 (2K) resolution. Left alone this is 6 Mbps. Raising it improves picture quality at the cost of more storage and network use; lowering it saves storage at the cost of a blockier picture."
+  bitrate_bps_above_2560x1440:
+    description: "How much data per second Vigil spends encoding video above 2560x1440 resolution. Left alone this is 10 Mbps. Raising it improves picture quality at the cost of more storage and network use; lowering it saves storage at the cost of a blockier picture."

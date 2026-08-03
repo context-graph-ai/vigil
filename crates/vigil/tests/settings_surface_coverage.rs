@@ -36,6 +36,14 @@ fn pilot_entry(entries: &[SettingCoverageEntry]) -> SettingCoverageEntry {
 fn probe_value_for(setting_name: &str) -> &'static str {
     match setting_name {
         "detector_stationary_interval_secs" => "45",
+        "keyframe_interval_fps_multiplier" => "3",
+        "keyframe_interval_min_frames" => "20",
+        "keyframe_interval_max_frames" => "240",
+        "bitrate_bps_up_to_640x480" => "1500000",
+        "bitrate_bps_up_to_1280x720" => "2500000",
+        "bitrate_bps_up_to_1920x1080" => "4500000",
+        "bitrate_bps_up_to_2560x1440" => "6500000",
+        "bitrate_bps_above_2560x1440" => "12000000",
         other => panic!(
             "settings surface coverage has no config-file probe value registered for {other}; add one alongside its declaration"
         ),
@@ -57,6 +65,16 @@ fn documentation_claim_id_for(setting_name: &str) -> &'static str {
     match setting_name {
         "detector_stationary_interval_secs" => {
             "vigil.docs-configuration.field-default-validation-and-behavior-detectormodelid-yoloxtinyburncpu"
+        }
+        "keyframe_interval_fps_multiplier"
+        | "keyframe_interval_min_frames"
+        | "keyframe_interval_max_frames"
+        | "bitrate_bps_up_to_640x480"
+        | "bitrate_bps_up_to_1280x720"
+        | "bitrate_bps_up_to_1920x1080"
+        | "bitrate_bps_up_to_2560x1440"
+        | "bitrate_bps_above_2560x1440" => {
+            "vigil.docs-configuration.field-default-validation-and-behavior-keyframeintervalfpsmultiplier-2"
         }
         other => panic!(
             "settings surface coverage has no documentation-claim id registered for {other}; add one alongside its declaration"

@@ -198,6 +198,92 @@ fn addon_config_exposes_both_booleans_in_options_and_schema_defaulting_true() {
 }
 
 #[test]
+fn addon_config_camera_schema_exposes_usb_csi_and_mjpeg_source_fields() {
+    // Unfakeable in the same way as the boolean test above: the three
+    // source-kind fields already exist on the real Rust config types
+    // (CameraEntry/CameraEntryPartial), but were entirely absent from the
+    // add-on's `cameras` list schema until this test's own fix landed —
+    // this reads the real per-camera schema block, not a copy.
+    let path = repo_root().join(ADDON_CONFIG_PATH);
+    let text = fs::read_to_string(&path);
+    assert!(
+        text.is_ok(),
+        "add-on config must be readable at {}",
+        path.display()
+    );
+    let Ok(text) = text else {
+        return;
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let schema_line = lines
+        .iter()
+        .position(|line| *line == "schema:")
+        .expect("add-on config has a top-level schema section");
+    let cameras_line = lines[schema_line..]
+        .iter()
+        .position(|line| *line == "  cameras:")
+        .map(|offset| schema_line + offset)
+        .expect("schema section has a cameras list");
+    // The camera-item block runs from the line after `  cameras:` up to
+    // (but not including) the next line indented at the SAME two-space
+    // top-level-key depth — never a naive substring search, which cannot
+    // distinguish "starts with two spaces" (a sibling top-level key) from
+    // "starts with two spaces, followed by two more" (a nested list-item
+    // field, which must stay inside the block).
+    let block_end = lines[cameras_line + 1..]
+        .iter()
+        .position(|line| !line.starts_with("    "))
+        .map(|offset| cameras_line + 1 + offset)
+        .unwrap_or(lines.len());
+    let camera_item_schema = lines[cameras_line..block_end].join("\n");
+    for field in ["usb_device: str?", "csi_module: str?", "mjpeg_url: str?"] {
+        assert!(
+            camera_item_schema.contains(field),
+            "the add-on's per-camera schema must declare `{field}`, got:\n{camera_item_schema}"
+        );
+    }
+}
+
+#[test]
+fn addon_config_exposes_keyframe_and_bitrate_options_and_schema_with_ratified_defaults() {
+    // Unfakeable the same way as the boolean-defaults test: options and
+    // schema are checked independently, and the ratified numeric default
+    // must be the exact value under `options`, not merely present.
+    let path = repo_root().join(ADDON_CONFIG_PATH);
+    let text = fs::read_to_string(&path);
+    assert!(
+        text.is_ok(),
+        "add-on config must be readable at {}",
+        path.display()
+    );
+    let Ok(text) = text else {
+        return;
+    };
+
+    for (key, expected_default) in [
+        ("keyframe_interval_fps_multiplier", "2"),
+        ("keyframe_interval_min_frames", "15"),
+        ("keyframe_interval_max_frames", "300"),
+        ("bitrate_bps_up_to_640x480", "1000000"),
+        ("bitrate_bps_up_to_1280x720", "2000000"),
+        ("bitrate_bps_up_to_1920x1080", "4000000"),
+        ("bitrate_bps_up_to_2560x1440", "6000000"),
+        ("bitrate_bps_above_2560x1440", "10000000"),
+    ] {
+        assert_eq!(
+            section_scalar(&text, "options", key).as_deref(),
+            Some(expected_default),
+            "{key} must default to its ratified automatic value under options"
+        );
+        assert_eq!(
+            section_scalar(&text, "schema", key).as_deref(),
+            Some("int"),
+            "{key} must be present under schema as an integer"
+        );
+    }
+}
+
+#[test]
 fn addon_config_maps_video_device_and_forbids_full_access() {
     // Unfakeable because broad access and absent device mapping are checked
     // separately; either shortcut fails.

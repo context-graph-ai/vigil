@@ -61,6 +61,29 @@ tests do not enforce that no-proxy boundary.
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`The Generic Camera URL-selection tests do not prove that Vigil never proxies or transcodes the selected live stream.` -->
 
+## USB, CSI, and MJPEG source fields
+
+Every `[[cameras]]` entry declares exactly one of four source kinds: `rtsp_url` (native RTSP,
+`rtsp://` or `rtsps://`), `usb_device` (a USB/UVC camera), `csi_module` (a MIPI CSI-2 camera), or
+`mjpeg_url` (an HTTP/HTTPS multipart-MJPEG camera, the ESP32-CAM class of device). `usb_device` and
+`csi_module` must be a durable hardware identity — a vendor:product:serial string or a stable module
+identity — never a transient `/dev/...` device path, because a transient path is not guaranteed to
+name the same physical camera across a reboot or a USB re-enumeration.
+The add-on options schema and this file's TOML surface both accept all four fields today. Filling in
+`usb_device`, `csi_module`, or `mjpeg_url` is **rejected when Vigil loads its configuration**, before
+any camera starts: this artifact carries no USB, CSI, or MJPEG capture/encode path yet (the shared
+encoder seam in `crate::encode` has no producer wired to it), so the load fails loud, naming the
+camera and the field, with the text `unsupported_by_this_artifact` — the identical honest-rejection
+shape a well-formed value this artifact merely cannot carry always gets, never conflated with a
+malformed value. Configure `rtsp_url` today; a USB/CSI/MJPEG capture path is future work.
+
+<!-- vigil-claim: `vigil.docs-cameras.every-cameras-entry-declares-exactly-one-of` -->
+<!-- enforced by: `vigil::camera_config_schema::every_adapter_source_kind_is_honestly_rejected_by_the_real_load_as_unsupported_by_this_artifact` -->
+<!-- enforced by: `vigil::camera_config_schema::usb_and_csi_identity_would_be_durable_hardware_identity_not_a_transient_device_path` -->
+<!-- enforced by: `vigil::camera_config_schema::a_transient_dev_video_path_for_usb_device_is_the_real_loads_invalid_outcome` -->
+<!-- enforced by: `vigil::camera_config_schema::a_well_formed_but_unsupported_mjpeg_url_is_the_real_loads_unavailable_outcome_not_invalid` -->
+<!-- enforced by: `vigil::addon_config_surface::addon_config_camera_schema_exposes_usb_csi_and_mjpeg_source_fields` -->
+
 ## Credentials
 
 Credentials can be embedded in an RTSP URL or supplied as separate `username` and `password`
@@ -79,7 +102,7 @@ password = "replace-me"
 <!-- enforced by: `vigil-bin::first_light_loop::separate_rtsp_credentials_authenticate_without_url_userinfo` -->
 <!-- enforced by: `vigil-bin::first_light_loop::credentialed_rtsp_url_authenticates_and_redacts_runtime_surface` -->
 <!-- enforced by: `vigil::media_pipeline::tests::explicit_rtsp_credentials_override_url_userinfo` -->
-<!-- enforced by: `vigil::media_pipeline::tests::rtsp_url_redaction_removes_userinfo_from_parse_errors` -->
+<!-- enforced by: `vigil::media_pipeline::tests::rtsp_url_redaction_removes_the_password_but_keeps_the_username_in_parse_errors` -->
 
 Do not put a password on the command line. The current binary still accepts a legacy
 `--rtsp-password` flag, but the release contract removes it because process arguments can be read

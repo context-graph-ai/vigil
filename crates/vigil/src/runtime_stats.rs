@@ -64,10 +64,11 @@ pub(crate) struct RuntimeStats {
     /// configured, so this line never appears on an unenrolled node.
     #[serde(default)]
     pub(crate) fabric_status: String,
-    /// The ready-to-use join instruction (or, when this node carries no
-    /// hub, the one-line grow instruction) — criterion C6.
+    /// Non-secret fabric join advice (criterion C6) — structurally
+    /// incapable of carrying the enrollment ticket. See
+    /// [`FabricJoinAdvice`].
     #[serde(default)]
-    pub(crate) fabric_join: String,
+    pub(crate) fabric_join_advice: FabricJoinAdvice,
     /// Recent work-graph stage receipts (bounded, newest last).
     #[serde(default)]
     pub(crate) recent_work_receipts: Vec<String>,
@@ -121,7 +122,7 @@ impl Default for RuntimeStats {
             decode_receipt_blocks: std::collections::BTreeMap::new(),
             detector_queue: String::new(),
             fabric_status: String::new(),
-            fabric_join: String::new(),
+            fabric_join_advice: FabricJoinAdvice::default(),
             recent_work_receipts: Vec::new(),
         }
     }
@@ -160,6 +161,75 @@ impl RuntimeStatsState {
             stats.clone()
         };
         let _ = write_snapshot_path(&self.path, &snapshot);
+    }
+}
+
+/// Non-secret fabric join advice, printed on `vigil stats`/`vigil doctor`
+/// and persisted to `runtime-stats.json`. Unlike the join instruction
+/// [`crate::fabric::FabricRuntime::join_instruction`] prints on the
+/// sanctioned startup log (which embeds the current ticket as a
+/// `ticket=<value>` field), this type carries exactly three FIXED
+/// variants and has no field of any kind — no `String`, no wrapped value —
+/// that any future edit could ever assign the ticket to. Retrieving the
+/// actual ticket is confined to that startup log and the deliberate
+/// `vigil fabric ticket` command
+/// ([`crate::fabric::FabricRuntime::own_ticket`]); this type structurally
+/// cannot become a fourth path no matter what it grows.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) enum FabricJoinAdvice {
+    /// Fabric is not configured on this node — nothing to print.
+    #[default]
+    NotConfigured,
+    /// This node does not carry the hub role: the one-line instruction for
+    /// growing it into a join point. Never carries a ticket (there is
+    /// nothing yet to advertise).
+    GrowHint,
+    /// This node carries the hub role and has a ticket ready — the fixed,
+    /// ticket-free pointer to the retrieval command.
+    HubReady,
+}
+
+impl FabricJoinAdvice {
+    /// The fixed line to print, or `None` when there is nothing to say
+    /// ([`FabricJoinAdvice::NotConfigured`]).
+    pub(crate) fn render(self) -> Option<&'static str> {
+        match self {
+            FabricJoinAdvice::NotConfigured => None,
+            FabricJoinAdvice::GrowHint => Some(
+                "fabric-join grow this node into a fabric join point by enabling the hub role \
+                 (fabric_hub = true) — once enrolled, retrieve a ready-to-use join instruction \
+                 with `vigil fabric ticket`",
+            ),
+            FabricJoinAdvice::HubReady => {
+                Some("fabric-join ready=true retrieve-with=\"vigil fabric ticket\"")
+            }
+        }
+    }
+}
+
+/// A live view onto the non-secret `fabric-status=` line alone. Unlike
+/// [`RuntimeStats`] (whose `fabric_join` field carries the fabric enrollment
+/// ticket — a credential), this type has no field and no accessor that can
+/// ever yield the join instruction or the ticket it carries. `/health`'s HTTP
+/// responder is threaded this handle rather than the full stats snapshot, so
+/// it structurally cannot serve the ticket regardless of what fields
+/// `RuntimeStats` grows later.
+#[derive(Clone)]
+pub(crate) struct HealthFabricStatus {
+    inner: RuntimeStatsState,
+}
+
+impl HealthFabricStatus {
+    pub(crate) fn from_state(state: &RuntimeStatsState) -> Self {
+        Self {
+            inner: state.clone(),
+        }
+    }
+
+    /// The current `fabric-status=` line, read live — empty when fabric is
+    /// not configured.
+    pub(crate) fn read(&self) -> String {
+        self.inner.snapshot().fabric_status
     }
 }
 
@@ -271,8 +341,8 @@ telemetry-sink=local\n",
     if !stats.fabric_status.is_empty() {
         out.push_str(&format!("{}\n", stats.fabric_status));
     }
-    if !stats.fabric_join.is_empty() {
-        out.push_str(&format!("{}\n", stats.fabric_join));
+    if let Some(line) = stats.fabric_join_advice.render() {
+        out.push_str(&format!("{line}\n"));
     }
     for receipt in &stats.recent_work_receipts {
         out.push_str(&format!("work-receipt={receipt}\n"));

@@ -270,6 +270,7 @@ pub fn acceleration_report(request: &DoctorRequest, facts: &dyn HostFacts) -> Do
         active_backend: match stage {
             AccelStage::Decode => "software".to_string(),
             AccelStage::Detection => "burn-cpu".to_string(),
+            AccelStage::Encode => "openh264-software".to_string(),
         },
         hardware_accelerated: false,
         selected_device: None,
@@ -616,8 +617,8 @@ pub fn run(args: Vec<std::ffi::OsString>) -> Result<(), String> {
         if !stats.fabric_status.is_empty() {
             println!("{}", stats.fabric_status);
         }
-        if !stats.fabric_join.is_empty() {
-            println!("{}", stats.fabric_join);
+        if let Some(line) = stats.fabric_join_advice.render() {
+            println!("{line}");
         }
     }
     Ok(())

@@ -21,12 +21,35 @@ use crate::secret::Secret;
 
 /// A remote endpoint Vigil may connect out to. Carries only what any network
 /// client needs — no vocabulary from any particular integration.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written, not derived: `password` is a secret on this
+/// surface and must never print raw (the `Secret` wrapper handles that
+/// itself), while `username` is a DIAGNOSTIC, not a secret (owner ruling)
+/// and prints plainly — knowing which account a connection is configured
+/// to use is exactly the kind of thing an operator needs from a log line.
+/// Redacting a config type that merely WRAPS this one (e.g.
+/// `RuntimeConfig.mqtt: Option<ConnectionEndpoint>`) would be defeated if
+/// the inner type's own derive still printed the password raw — the
+/// redaction has to live at the type that owns the field, not only at
+/// every outer type that happens to embed it.
+#[derive(Clone)]
 pub struct ConnectionEndpoint {
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<Secret>,
+}
+
+impl std::fmt::Debug for ConnectionEndpoint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectionEndpoint")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password)
+            .finish()
+    }
 }
 
 /// One resolved camera, as an integration needs to announce it.

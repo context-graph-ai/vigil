@@ -19,6 +19,11 @@ pub enum HealthStatus {
     IngestFailed,
     DiskFull,
     KeepPaceFailed,
+    /// Alive and functioning, but this deployment declares zero cameras — a
+    /// legitimate worker/discovery node. Kept distinct from `Ready` so a box
+    /// watching nothing can never present as an ordinary, camera-serving,
+    /// unqualified "ready" box (still a 2xx liveness answer).
+    NoCamerasConfigured,
 }
 
 impl HealthStatus {
@@ -33,6 +38,7 @@ impl HealthStatus {
             Self::IngestFailed => 3,
             Self::DiskFull => 4,
             Self::KeepPaceFailed => 5,
+            Self::NoCamerasConfigured => 6,
         }
     }
 
@@ -43,6 +49,7 @@ impl HealthStatus {
             3 => Self::IngestFailed,
             4 => Self::DiskFull,
             5 => Self::KeepPaceFailed,
+            6 => Self::NoCamerasConfigured,
             _ => Self::Starting,
         }
     }
@@ -58,7 +65,7 @@ impl HealthStatus {
     /// contract). The precise degraded state stays named in the `/health` body.
     pub fn liveness_status_code(self) -> u16 {
         match self {
-            Self::Ready | Self::KeepPaceFailed => 200,
+            Self::Ready | Self::KeepPaceFailed | Self::NoCamerasConfigured => 200,
             Self::Starting | Self::StoreOpenFailed | Self::IngestFailed | Self::DiskFull => 503,
         }
     }
@@ -71,6 +78,7 @@ impl HealthStatus {
             Self::IngestFailed => "ingest_failed",
             Self::DiskFull => "disk-full",
             Self::KeepPaceFailed => "keep-pace-failed",
+            Self::NoCamerasConfigured => "no_cameras_configured",
         }
     }
 }
@@ -113,15 +121,89 @@ impl HealthState {
     }
 }
 
+/// The fixed camera-source-kind vocabulary the `/health` body's
+/// `cameras_by_kind` object always carries an entry for, in this order —
+/// every kind this artifact knows about, whether or not it can currently
+/// load one (`config::artifact_supports_source_kind`), so the structure is
+/// complete rather than only covering whichever kind happens to be
+/// configured.
+const CAMERA_SOURCE_KINDS: [crate::config::CameraSourceKind; 4] = [
+    crate::config::CameraSourceKind::Rtsp,
+    crate::config::CameraSourceKind::Usb,
+    crate::config::CameraSourceKind::Csi,
+    crate::config::CameraSourceKind::Mjpeg,
+];
+
+/// Camera names grouped by resolved source kind, in [`CAMERA_SOURCE_KINDS`]
+/// order — computed once at bind time from the loaded config (the by-kind
+/// grouping is a configuration fact, fixed for the process lifetime) and
+/// reused on every `/health` request. Only the per-camera `status` field
+/// varies per request, filled in from the same live snapshot every other
+/// field on the body reads.
+fn group_cameras_by_kind(
+    cameras: &[crate::config::CameraHealthEntry],
+) -> Vec<(&'static str, Vec<String>)> {
+    CAMERA_SOURCE_KINDS
+        .iter()
+        .map(|kind| {
+            let names = cameras
+                .iter()
+                .filter(|camera| camera.kind == Some(*kind))
+                .map(|camera| camera.name.clone())
+                .collect();
+            (kind.as_str(), names)
+        })
+        .collect()
+}
+
+/// Render the `cameras_by_kind` object as a leading-comma JSON fragment
+/// (composes with `acceleration_field` the same way), reporting every
+/// camera at the given request's current status label — the runtime
+/// tracks one shared liveness state today, so a per-camera entry must
+/// never invent a diverging value from the same snapshot's top-level
+/// `status`.
+fn render_cameras_by_kind(groups: &[(&'static str, Vec<String>)], status_label: &str) -> String {
+    let mut out = String::from(r#","cameras_by_kind":{"#);
+    for (kind_index, (kind, names)) in groups.iter().enumerate() {
+        if kind_index > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(kind);
+        out.push_str(r#"":{"count":"#);
+        out.push_str(&names.len().to_string());
+        out.push_str(r#","cameras":["#);
+        for (camera_index, name) in names.iter().enumerate() {
+            if camera_index > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                r#"{{"name":"{}","status":"{}"}}"#,
+                json_escape(name),
+                status_label
+            ));
+        }
+        out.push_str("]}");
+    }
+    out.push('}');
+    out
+}
+
 pub(crate) struct HealthServer {
     handle: Option<JoinHandle<()>>,
 }
 
 impl HealthServer {
-    /// `stats`, when given, lets `/health` render the SAME fabric-status /
-    /// fabric-join lines `vigil stats`/`vigil doctor` do (criterion C7) —
-    /// read from the live snapshot, never re-derived, so the three surfaces
-    /// structurally cannot disagree.
+    /// `stats`, when given, lets `/health` render the SAME non-secret
+    /// `fabric-status=` line `vigil stats`/`vigil doctor` do (criterion C7) —
+    /// read from the live snapshot, never re-derived, so the surfaces
+    /// structurally cannot disagree. The fabric enrollment ticket (the
+    /// `fabric-join` line's credential) is a separate matter: `stats` is
+    /// [`crate::runtime_stats::HealthFabricStatus`], a type with no field or
+    /// accessor that can ever yield it — `/health` cannot serve the ticket
+    /// no matter what `RuntimeStats` grows later. Retrieving the ticket is a
+    /// deliberate local act (`vigil fabric ticket`) or the sanctioned
+    /// startup log instruction, never this served HTTP surface.
     // VIGIL_TEST_EPHEMERAL_HEALTH_PORT is an enumerated, reviewed test-only
     // read (`environment_read_surface.baseline.txt`), not an ad-hoc one.
     #[allow(clippy::disallowed_methods)]
@@ -130,7 +212,8 @@ impl HealthServer {
         state: HealthState,
         shutdown: Arc<AtomicBool>,
         acceleration: Option<Arc<crate::acceleration::AccelerationState>>,
-        stats: Option<crate::runtime_stats::RuntimeStatsState>,
+        stats: Option<crate::runtime_stats::HealthFabricStatus>,
+        cameras: Vec<crate::config::CameraHealthEntry>,
     ) -> Result<Self, String> {
         let test_ephemeral_bind =
             port == 0 && std::env::var("VIGIL_TEST_EPHEMERAL_HEALTH_PORT").as_deref() == Ok("1");
@@ -157,12 +240,17 @@ impl HealthServer {
         if test_ephemeral_bind {
             println!("test_health_port_receipt=bound address=127.0.0.1 port={bound_port}");
         }
+        let cameras_by_kind = group_cameras_by_kind(&cameras);
         let handle = thread::spawn(move || {
             while !shutdown.load(Ordering::SeqCst) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
-                        handle_client(stream, &state, acceleration.as_deref(), stats.as_ref())
-                    }
+                    Ok((stream, _)) => handle_client(
+                        stream,
+                        &state,
+                        acceleration.as_deref(),
+                        stats.as_ref(),
+                        &cameras_by_kind,
+                    ),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(20));
                     }
@@ -186,7 +274,8 @@ fn handle_client(
     mut stream: TcpStream,
     state: &HealthState,
     acceleration: Option<&crate::acceleration::AccelerationState>,
-    stats: Option<&crate::runtime_stats::RuntimeStatsState>,
+    stats: Option<&crate::runtime_stats::HealthFabricStatus>,
+    cameras_by_kind: &[(&'static str, Vec<String>)],
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     let mut buffer = [0_u8; 1024];
@@ -243,12 +332,14 @@ fn handle_client(
             )
         })
         .unwrap_or_default();
+    let cameras_by_kind_field = render_cameras_by_kind(cameras_by_kind, status.label());
     let mut body = format!(
-        r#"{{"status":"{}","version":"{}","detail":"{}"{}}}"#,
+        r#"{{"status":"{}","version":"{}","detail":"{}"{}{}}}"#,
         status.label(),
         env!("CARGO_PKG_VERSION"),
         json_escape(&detail),
-        acceleration_field
+        acceleration_field,
+        cameras_by_kind_field
     );
     // A Home Assistant user reading /health gets the same honest,
     // fixed-format acceleration block doctor renders — not just the
@@ -260,17 +351,15 @@ fn handle_client(
             body.push_str(&crate::acceleration::render_receipt_block(&receipt));
         }
     }
-    // Same fabric-status/fabric-join lines `vigil stats`/`vigil doctor`
+    // The same non-secret fabric-status line `vigil stats`/`vigil doctor`
     // print (criterion C7) — read from the live snapshot, never re-derived.
+    // The fabric-join credential is never threaded here at all; see
+    // `HealthServer::bind`'s doc comment.
     if let Some(stats) = stats {
-        let snapshot = stats.snapshot();
-        if !snapshot.fabric_status.is_empty() {
+        let fabric_status = stats.read();
+        if !fabric_status.is_empty() {
             body.push('\n');
-            body.push_str(&snapshot.fabric_status);
-        }
-        if !snapshot.fabric_join.is_empty() {
-            body.push('\n');
-            body.push_str(&snapshot.fabric_join);
+            body.push_str(&fabric_status);
         }
     }
     write_response(&mut stream, status.liveness_status_code(), &body);

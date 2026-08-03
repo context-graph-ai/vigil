@@ -44,6 +44,26 @@ fn ready_runtime_is_alive_for_the_watchdog() {
 }
 
 #[test]
+fn cameraless_node_stays_alive_for_the_watchdog() {
+    // A deployment with zero [[cameras]] entries is a legitimate
+    // worker/discovery node (HealthStatus::NoCamerasConfigured), alive and
+    // functioning even though it watches nothing. This status is grouped
+    // with the successful/alive states at `crates/vigil/src/health.rs`
+    // (`Ready | KeepPaceFailed | NoCamerasConfigured => 200`), but that
+    // grouping had no direct test coverage naming NoCamerasConfigured
+    // itself — only Ready and KeepPaceFailed were named here, and the two
+    // "dead" states were iterated as an explicit list that never included
+    // it. Restarting a cameraless node cannot fix "zero cameras configured"
+    // (a restart cannot conjure a camera), so restart-looping it would be
+    // pure harm with no possible recovery.
+    let code = HealthStatus::NoCamerasConfigured.liveness_status_code();
+    assert_eq!(
+        code, 200,
+        "a legitimate cameraless worker/discovery node must answer the watchdog with 200 — a restart cannot fix zero configured cameras, so restart-looping it would only hurt, but the status code was {code}"
+    );
+}
+
+#[test]
 fn genuinely_dead_states_answer_non_2xx() {
     // A restart can plausibly help these: the store never opened, or the
     // ingest/detector pipeline failed or panicked. The watchdog SHOULD see a

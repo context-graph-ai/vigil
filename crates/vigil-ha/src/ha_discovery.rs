@@ -336,6 +336,7 @@ pub(crate) fn map_health_to_running_condition(health: HealthStatus) -> &'static 
         HealthStatus::IngestFailed => "ingest-failed",
         HealthStatus::DiskFull => "disk-full",
         HealthStatus::KeepPaceFailed => "keep-pace-failed",
+        HealthStatus::NoCamerasConfigured => "running",
     }
 }
 

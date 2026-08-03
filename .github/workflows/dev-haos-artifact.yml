@@ -99,10 +99,15 @@ jobs:
         run: |
           vigil_sha="$(git -C vigil rev-parse HEAD)"
           dev_sha="$(git -C vigil rev-parse origin/dev)"
+          dev_next_sha="$(git -C vigil rev-parse origin/dev-next)"
           context_graph_sha="$(git -C context-graph rev-parse HEAD)"
           contextdb_sha="$(git -C contextdb rev-parse HEAD)"
           test "$vigil_sha" = "$EXPECTED_VIGIL_SHA"
-          test "$vigil_sha" = "$dev_sha"
+          # The artifact is only ever built from the CURRENT TIP of a trusted
+          # branch, never an arbitrary commit: dev for shippable builds, and
+          # dev-next so a change can be qualified on real hardware before it
+          # merges.
+          test "$vigil_sha" = "$dev_sha" || test "$vigil_sha" = "$dev_next_sha"
           test "$context_graph_sha" = "$EXPECTED_CONTEXT_GRAPH_SHA"
           test "$contextdb_sha" = "$EXPECTED_CONTEXTDB_SHA"
           test "$(gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$context_graph_sha"

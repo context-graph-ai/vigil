@@ -49,10 +49,13 @@ jobs:
           CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
           CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
         run: |
-          test "$GITHUB_REF" = "refs/heads/dev" || {
-            echo "dispatch HAOS deploy artifacts from trusted dev with --ref dev" >&2
-            exit 1
-          }
+          case "$GITHUB_REF" in
+            refs/heads/dev | refs/heads/dev-next) ;;
+            *)
+              echo "dispatch HAOS deploy artifacts from trusted dev or dev-next" >&2
+              exit 1
+              ;;
+          esac
           for value in "$VIGIL_SHA" "$CONTEXT_GRAPH_SHA" "$CONTEXTDB_SHA"; do
             [[ "$value" =~ ^[0-9a-fA-F]{40}$ ]] || {
               echo "HAOS deploy artifact requires three exact commit identities" >&2

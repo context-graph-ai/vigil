@@ -4291,10 +4291,16 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
             "vigil_sha:",
             "context_graph_sha:",
             "contextdb_sha:",
-            "test \"$GITHUB_REF\" = \"refs/heads/dev\"",
+            "case \"$GITHUB_REF\" in",
+            "refs/heads/dev | refs/heads/dev-next) ;;",
             "test \"$GITHUB_SHA\" = \"$VIGIL_SHA\"",
-            "repos/context-graph-ai/context-graph/git/ref/heads/dev",
-            "repos/context-graph-ai/contextdb/git/ref/heads/dev",
+            "TRUSTED_BRANCH: ${{ github.ref_name }}",
+            "dev_sha=\"$(git -C vigil rev-parse origin/dev)\"",
+            "dev_next_sha=\"$(git -C vigil rev-parse origin/dev-next)\"",
+            "dev) test \"$vigil_sha\" = \"$dev_sha\" ;;",
+            "dev-next) test \"$vigil_sha\" = \"$dev_next_sha\" ;;",
+            "repos/context-graph-ai/context-graph/git/ref/heads/$TRUSTED_BRANCH",
+            "repos/context-graph-ai/contextdb/git/ref/heads/$TRUSTED_BRANCH",
             "docker/setup-buildx-action@v3",
             "Stage the bounded production source context",
             "./scripts/verify release",
@@ -6661,6 +6667,30 @@ jobs:
                 .iter()
                 .any(|item| item.contains("non-publishing"))
         );
+        for weakened in [
+            haos_artifact.replacen(
+                "refs/heads/dev | refs/heads/dev-next) ;;",
+                "refs/heads/dev) ;;",
+                1,
+            ),
+            haos_artifact.replacen(
+                "refs/heads/dev | refs/heads/dev-next) ;;",
+                "refs/heads/dev | refs/heads/dev-next | refs/heads/main) ;;",
+                1,
+            ),
+            haos_artifact.replacen(
+                "dev-next) test \"$vigil_sha\" = \"$dev_next_sha\" ;;",
+                "dev-next) : ;;",
+                1,
+            ),
+        ] {
+            let mut weakened_violations = Vec::new();
+            audit_dev_haos_artifact_workflow(&weakened, &mut weakened_violations);
+            assert!(
+                !weakened_violations.is_empty(),
+                "HAOS artifact audit accepted a weakened dev/dev-next trust boundary: {weakened}"
+            );
+        }
 
         let haos_hardware_dockerfile = include_str!("../../Dockerfile.hardware");
         let mut accepted_haos_hardware = Vec::new();

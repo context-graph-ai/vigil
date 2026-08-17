@@ -168,6 +168,13 @@ losing the camera entity. A successful reconnect restores ingest health.
 <!-- vigil-claim: `vigil.docs-cameras.a-transient-rtsp-drop-changes-health-retries` -->
 <!-- enforced by: `vigil-bin::first_light_loop::transient_rtsp_drop_recovers_without_losing_camera` -->
 
+The backoff is exponential: the first retry waits `rtsp_retry_initial_ms` (default `2000`
+milliseconds), and each further failure doubles the wait up to a ceiling of `rtsp_retry_max_ms`
+(default `30000`). A successful reconnect resets the wait back to `rtsp_retry_initial_ms` for the
+next drop. Both values are whole milliseconds between `1` and `86400000` (one day).
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`retry_and_probe_setting_authoring.rs proves both values reach the loader from a real file; no adjacent contract binds the doubling/reset/range behavior described here in one place.` -->
+
 If a source is empty or undecodable, Vigil must not fabricate a detection event.
 
 <!-- vigil-claim: `vigil.docs-cameras.if-a-source-is-empty-or-undecodable` -->
@@ -200,7 +207,7 @@ Detection event payloads currently carry no `zone` field, and the add-on accepts
 `masks` configuration block.
 
 <!-- vigil-claim: `vigil.docs-cameras.zones-and-masks-are-not-yet-available` -->
-<!-- enforced by: `vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema` -->
+<!-- enforced by: `vigil::source_scan_contract::recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry` -->
 <!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 
 Polygon-zone matching, privacy and motion masks, precedence, and per-zone rules are future release

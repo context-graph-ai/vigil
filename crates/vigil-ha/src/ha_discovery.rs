@@ -337,6 +337,12 @@ pub(crate) fn map_health_to_running_condition(health: HealthStatus) -> &'static 
         HealthStatus::DiskFull => "disk-full",
         HealthStatus::KeepPaceFailed => "keep-pace-failed",
         HealthStatus::NoCamerasConfigured => "running",
+        // Running, and the condition says which kind of running it is: the
+        // cameras are watched and alerts are on their way, while recording,
+        // review, corrections and settings changes are gone. Publishing a bare
+        // "running" here would tell Home Assistant a node that cannot remember
+        // anything is an ordinary one.
+        HealthStatus::RunningUnmanaged => "running-unmanaged",
     }
 }
 

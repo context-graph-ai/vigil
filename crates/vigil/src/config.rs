@@ -718,6 +718,21 @@ impl CameraEntry {
 /// exactly as capable of carrying an embedded credential.
 #[derive(Clone)]
 pub(crate) struct RuntimeConfig {
+    /// What the file surface — a named config file, or the add-on options —
+    /// asserted on its OWN, before the command line and the environment were
+    /// merged over it. The store is the source of truth and input surfaces are
+    /// authors that write into it, so what a surface says has to survive the
+    /// merge that produces the resolved values: a merged value cannot say
+    /// which surface it came from, and per-surface records are the whole
+    /// reason a config file never silently reverts a `vigil settings` change
+    /// at the next boot.
+    pub(crate) file_surface: Option<SurfaceAssertions>,
+    /// What the startup options assert. Its own surface with its own record:
+    /// a flag the service passes and a `vigil settings` change a person made
+    /// later are two different people speaking, and collapsing them into one
+    /// record is what would let the service's command line silently revert
+    /// that change at every restart.
+    pub(crate) startup_surface: Option<SurfaceAssertions>,
     pub(crate) data_dir: PathBuf,
     pub(crate) store_path: PathBuf,
     pub(crate) health_port: u16,
@@ -742,13 +757,35 @@ pub(crate) struct RuntimeConfig {
     /// broker is configured (e.g. via HA Supervisor MQTT service or env vars
     /// MQTT_HOST / MQTT_PORT).
     pub(crate) mqtt: Option<ConnectionEndpoint>,
-    /// Stable service identifier derived from site_name or explicitly configured
-    /// via VIGIL_SERVICE_ID.  Used as the MQTT topic namespace and HA device id.
+    /// This node's stable service identifier: the MQTT topic namespace and the
+    /// Home Assistant device id. Carries what the deployment supplied and is
+    /// otherwise EMPTY until startup resolves the persisted identity — which
+    /// is derived once, at first start, and never recomputed from the site
+    /// name again, because recomputing it renames the device and orphans the
+    /// history hanging off the old one.
     pub(crate) service_id: String,
     /// Recognition: crop → embed → enroll → match. Off unless a weights
     /// directory is configured; a configured-but-missing weights dir fails
     /// loud at startup, never silently.
     pub(crate) recognition: crate::recognition::RecognitionConfig,
+    /// The class indices every detector this runtime builds emits, resolved
+    /// from the detection class setting in the store once the store is open.
+    /// Until then it carries Vigil's own default subset, which is what a run
+    /// with no store behind it keeps. It lives here so every construction site
+    /// reads ONE resolved value rather than each deriving its own — the shape
+    /// that let recognition decide the detector's class breadth.
+    pub(crate) detector_class_indices: Vec<usize>,
+    /// How many captured segments the detector queue holds — the OPERATOR
+    /// control, resolved from the store. Its other leg, the deterministic
+    /// pressure lever the owner smoke uses, stays in the environment and
+    /// overrides this one for that run only: two different things sharing one
+    /// spelling, and this is the one a person configures.
+    pub(crate) detector_queue_capacity: usize,
+    /// How long vigil waits before retrying a dropped camera stream, and the
+    /// widest that wait gets as it backs off. Both resolved from the store:
+    /// how patiently a node re-approaches a camera is a thing an operator sets.
+    pub(crate) rtsp_retry_initial_ms: u64,
+    pub(crate) rtsp_retry_max_ms: u64,
     /// Acceleration intent: probe and use hardware decode only when a real
     /// startup probe succeeds; missing means true.
     pub(crate) hardware_decoding: bool,
@@ -862,6 +899,10 @@ impl fmt::Debug for RuntimeConfig {
             .field("mqtt", &self.mqtt)
             .field("service_id", &self.service_id)
             .field("recognition", &self.recognition)
+            .field("detector_class_indices", &self.detector_class_indices)
+            .field("detector_queue_capacity", &self.detector_queue_capacity)
+            .field("rtsp_retry_initial_ms", &self.rtsp_retry_initial_ms)
+            .field("rtsp_retry_max_ms", &self.rtsp_retry_max_ms)
             .field("hardware_decoding", &self.hardware_decoding)
             .field("accelerated_detection", &self.accelerated_detection)
             .field("fabric_ticket", &debug_redacted_ticket(&self.fabric_ticket))
@@ -928,6 +969,13 @@ pub(crate) struct CameraEntryPartial {
     usb_device: Option<String>,
     csi_module: Option<String>,
     mjpeg_url: Option<String>,
+    /// What THIS camera's motion gate runs at, which is the whole reason the
+    /// setting is declared twice: turning the driveway down for a tree in the
+    /// wind must not turn the hallway down with it. Read here so a value typed
+    /// into the camera's own row on the add-on options page authors a record at
+    /// that camera's scope, exactly as the deployment-wide field authors one at
+    /// the node's.
+    motion_sensitivity: Option<i64>,
 }
 
 impl fmt::Debug for CameraEntryPartial {
@@ -942,6 +990,7 @@ impl fmt::Debug for CameraEntryPartial {
             .field("usb_device", &self.usb_device)
             .field("csi_module", &self.csi_module)
             .field("mjpeg_url", &debug_redacted_url(&self.mjpeg_url))
+            .field("motion_sensitivity", &self.motion_sensitivity)
             .finish()
     }
 }
@@ -988,8 +1037,44 @@ struct PartialConfig {
     recognition_space_id: Option<String>,
     recognition_threshold: Option<f64>,
     recognition_covered_classes: Option<Vec<String>>,
+    /// The classes Vigil looks for. Its own field rather than a second reading
+    /// of the recognition list: what the machine detects and what recognition
+    /// puts a name to are two choices a person makes separately, and one field
+    /// serving both means widening either silently widens the other.
+    detector_classes: Option<Vec<String>>,
+    /// How long a stream session gathers real video before it chooses a decode
+    /// path — a knob a Home Assistant user sets as an add-on option. It authors
+    /// into the store like any other behavior value; the decode probe reads
+    /// what the runtime resolved.
+    decode_probe_deadline_secs: Option<u64>,
+    /// The other startup-probe deadline, alongside the one above it: how long
+    /// the hardware probe is given before decode falls back visibly.
+    hardware_probe_deadline_secs: Option<u64>,
+    /// The first and widest waits between attempts to reach a camera whose
+    /// stream has dropped. An operator with a slow camera lengthens them.
+    rtsp_retry_initial_ms: Option<u64>,
+    rtsp_retry_max_ms: Option<u64>,
     hardware_decoding: Option<bool>,
     accelerated_detection: Option<bool>,
+    /// The deployment-wide motion sensitivity every camera without one of its
+    /// own runs at — the node-scope half of [`CameraEntryPartial`]'s field of
+    /// the same name.
+    motion_sensitivity: Option<i64>,
+    /// Whether Vigil, having mirrored a value onto the add-on options page,
+    /// also takes the restart that makes the container's own copy of the file
+    /// agree. An ordinary setting, read off a surface like any other.
+    restart_on_reflect: Option<bool>,
+    /// The third of the rate controls, beside `detector_sample_frames` and
+    /// `detector_confidence_threshold` above: how deep the detector queue holds
+    /// work.
+    detector_queue_capacity: Option<usize>,
+    /// The two values automatic management chooses, so an operator who turns
+    /// that automation off has something left to set. Loose strings, never an
+    /// enumeration of backend names: which backends exist is a property of the
+    /// build, and the store refuses one this artifact does not carry rather
+    /// than this reader guessing at the roster.
+    detection_backend: Option<String>,
+    decode_backend: Option<String>,
     fabric_ticket: Option<String>,
     fabric_hub: Option<bool>,
     fabric_allow_frame_offload: Option<bool>,
@@ -1052,8 +1137,20 @@ impl fmt::Debug for PartialConfig {
                 "recognition_covered_classes",
                 &self.recognition_covered_classes,
             )
+            .field("detector_classes", &self.detector_classes)
+            .field(
+                "hardware_probe_deadline_secs",
+                &self.hardware_probe_deadline_secs,
+            )
+            .field("rtsp_retry_initial_ms", &self.rtsp_retry_initial_ms)
+            .field("rtsp_retry_max_ms", &self.rtsp_retry_max_ms)
             .field("hardware_decoding", &self.hardware_decoding)
             .field("accelerated_detection", &self.accelerated_detection)
+            .field("motion_sensitivity", &self.motion_sensitivity)
+            .field("restart_on_reflect", &self.restart_on_reflect)
+            .field("detector_queue_capacity", &self.detector_queue_capacity)
+            .field("detection_backend", &self.detection_backend)
+            .field("decode_backend", &self.decode_backend)
             .field("fabric_ticket", &debug_redacted_ticket(&self.fabric_ticket))
             .field("fabric_hub", &self.fabric_hub)
             .field(
@@ -1233,80 +1330,384 @@ fn read_fabric_toml(data_dir: &Path) -> FabricFileConfig {
     })
 }
 
+/// One input surface's own assertions: which surface it is, and the settings
+/// it names right now with the values it gives them. Named for the surface
+/// rather than for files because the startup options are one of these too — a
+/// flag a person passed is a thing that surface says, and it keeps its own
+/// record like any other.
+#[derive(Debug, Clone)]
+pub(crate) struct SurfaceAssertions {
+    pub(crate) surface: crate::settings_model::Surface,
+    pub(crate) entries: Vec<(String, crate::settings_model::SettingValue)>,
+    /// What the surface says about each camera it lists, camera by camera, kept
+    /// apart from the deployment-wide entries because they are records at a
+    /// different scope: a value in the driveway's own row governs the driveway
+    /// and nothing else. Every listed camera appears here even when it names no
+    /// setting of its own — that is what makes deleting a camera's value clear
+    /// that camera's record, the same way deleting a deployment-wide key clears
+    /// the deployment's.
+    pub(crate) camera_entries: Vec<(String, Vec<(String, crate::settings_model::SettingValue)>)>,
+}
+
+/// The settings this arc carries that an input surface can assert, read off
+/// the partial that surface alone produced. A field the surface did not name is
+/// absent rather than defaulted, which is what makes "this surface no longer
+/// says anything about this setting" expressible at all — and, for a file
+/// surface, what makes clearing by absence possible. Startup options never
+/// clear by absence; the store enforces that per surface, so one reader serves
+/// both.
+fn surface_assertions(
+    surface: crate::settings_model::Surface,
+    partial: &PartialConfig,
+) -> SurfaceAssertions {
+    use crate::settings_model::{
+        DETECTOR_CONFIDENCE_THRESHOLD_SETTING, DETECTOR_SAMPLE_FRAMES_SETTING,
+        DETECTOR_STATIONARY_INTERVAL_SETTING, SettingValue,
+    };
+    let mut entries: Vec<(String, SettingValue)> = Vec::new();
+    if let Some(frames) = partial.detector_sample_frames {
+        entries.push((
+            DETECTOR_SAMPLE_FRAMES_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(frames).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(interval) = partial.detector_stationary_interval_secs {
+        entries.push((
+            DETECTOR_STATIONARY_INTERVAL_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(interval).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(threshold) = partial.detector_confidence_threshold {
+        entries.push((
+            DETECTOR_CONFIDENCE_THRESHOLD_SETTING.to_string(),
+            SettingValue::Float(threshold),
+        ));
+    }
+    // The values that used to arrive through the environment. A surface that
+    // names one of them authors a record for it like any other, so the operator
+    // surface can answer WHO chose this node's ports, its model, or its site
+    // name — which a merged value could never say.
+    if let Some(name) = partial.site_name.as_ref() {
+        entries.push((
+            crate::settings_model::SITE_NAME_SETTING.to_string(),
+            SettingValue::text(name.clone()),
+        ));
+    }
+    if let Some(name) = partial.camera_name.as_ref() {
+        entries.push((
+            crate::settings_model::CAMERA_NAME_SETTING.to_string(),
+            SettingValue::text(name.clone()),
+        ));
+    }
+    if let Some(port) = partial.health_port {
+        entries.push((
+            crate::settings_model::HEALTH_PORT_SETTING.to_string(),
+            SettingValue::Int(i64::from(port)),
+        ));
+    }
+    if let Some(port) = partial.review_port {
+        entries.push((
+            crate::settings_model::REVIEW_PORT_SETTING.to_string(),
+            SettingValue::Int(i64::from(port)),
+        ));
+    }
+    if let Some(model) = partial.detector_model_id.as_ref() {
+        entries.push((
+            crate::settings_model::DETECTOR_MODEL_ID_SETTING.to_string(),
+            SettingValue::text(model.clone()),
+        ));
+    }
+    if let Some(path) = partial.detector_model_path.as_ref() {
+        entries.push((
+            crate::settings_model::DETECTOR_MODEL_PATH_SETTING.to_string(),
+            SettingValue::text(path.display().to_string()),
+        ));
+    }
+    if let Some(path) = partial.recognition_weights_dir.as_ref() {
+        entries.push((
+            crate::settings_model::RECOGNITION_WEIGHTS_DIR_SETTING.to_string(),
+            SettingValue::text(path.display().to_string()),
+        ));
+    }
+    if let Some(space) = partial.recognition_space_id.as_ref() {
+        entries.push((
+            crate::settings_model::RECOGNITION_SPACE_ID_SETTING.to_string(),
+            SettingValue::text(space.clone()),
+        ));
+    }
+    if let Some(threshold) = partial.recognition_threshold {
+        entries.push((
+            crate::settings_model::RECOGNITION_THRESHOLD_SETTING.to_string(),
+            SettingValue::Float(threshold),
+        ));
+    }
+    if let Some(on) = partial.fabric_hub {
+        entries.push((
+            crate::settings_model::FABRIC_HUB_SETTING.to_string(),
+            SettingValue::Bool(on),
+        ));
+    }
+    if let Some(on) = partial.fabric_allow_frame_offload {
+        entries.push((
+            crate::settings_model::FABRIC_ALLOW_FRAME_OFFLOAD_SETTING.to_string(),
+            SettingValue::Bool(on),
+        ));
+    }
+    if let Some(lease) = partial.fabric_worker_lease_ms {
+        entries.push((
+            crate::settings_model::FABRIC_WORKER_LEASE_MS_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(lease).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(horizon) = partial.fabric_fallback_horizon_ms {
+        entries.push((
+            crate::settings_model::FABRIC_FALLBACK_HORIZON_MS_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(horizon).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(secs) = partial.decode_probe_deadline_secs {
+        entries.push((
+            crate::settings_model::DECODE_PROBE_DEADLINE_SECS_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(secs) = partial.hardware_probe_deadline_secs {
+        entries.push((
+            crate::settings_model::HARDWARE_PROBE_DEADLINE_SECS_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(secs).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(wait) = partial.rtsp_retry_initial_ms {
+        entries.push((
+            crate::settings_model::RTSP_RETRY_INITIAL_MS_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(wait).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(wait) = partial.rtsp_retry_max_ms {
+        entries.push((
+            crate::settings_model::RTSP_RETRY_MAX_MS_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(wait).unwrap_or(i64::MAX)),
+        ));
+    }
+    // The camera stream stays OUT of this list deliberately, unlike everything
+    // above it. A stream URL carries the camera's credentials in its userinfo,
+    // and a settings record is read back on an operator surface — so the one
+    // value whose spelling is a secret is not authored as an ordinary setting.
+
+    // The two class lists, each authoring its own setting and nothing else.
+    // Naming the classes to look for is what an operator does when they want
+    // vehicles detected; naming the classes recognition covers is what they do
+    // when they want a face put to a person. Routing both through one field
+    // means a person who widens either one silently widens the other, and
+    // leaves someone who wants detection without recognition no field to say it
+    // in. The detector resolves its allowlist from its own record in the store,
+    // never from the recognition configuration.
+    if let Some(classes) = partial.detector_classes.as_ref() {
+        entries.push((
+            crate::settings_model::DETECTOR_CLASSES_SETTING.to_string(),
+            SettingValue::list(classes.iter().map(String::as_str)),
+        ));
+    }
+    if let Some(classes) = partial.recognition_covered_classes.as_ref() {
+        entries.push((
+            crate::settings_model::RECOGNITION_COVERED_CLASSES_SETTING.to_string(),
+            SettingValue::list(classes.iter().map(String::as_str)),
+        ));
+    }
+    if let Some(on) = partial.hardware_decoding {
+        entries.push((
+            crate::settings_domains::HARDWARE_DECODING_DOMAIN.to_string(),
+            SettingValue::Bool(on),
+        ));
+    }
+    if let Some(on) = partial.accelerated_detection {
+        entries.push((
+            crate::settings_domains::ACCELERATED_DETECTION_DOMAIN.to_string(),
+            SettingValue::Bool(on),
+        ));
+    }
+    // The rate controls and the two governed backends. A surface that declares
+    // a key owes the person who edits it a record or a refusal they can read;
+    // a key the reader cannot see is an edit that goes nowhere and says nothing,
+    // which is the one outcome this whole model exists to refuse. The backends
+    // are carried through as the text the surface holds — the store is what
+    // knows which backends this build carries, and refuses the rest by name.
+    if let Some(sensitivity) = partial.motion_sensitivity {
+        entries.push((
+            crate::settings_model::MOTION_SENSITIVITY_SETTING.to_string(),
+            SettingValue::Int(sensitivity),
+        ));
+    }
+    if let Some(on) = partial.restart_on_reflect {
+        entries.push((
+            crate::settings_reflection::RESTART_ON_REFLECT_SETTING.to_string(),
+            SettingValue::Bool(on),
+        ));
+    }
+    if let Some(capacity) = partial.detector_queue_capacity {
+        entries.push((
+            crate::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING.to_string(),
+            SettingValue::Int(i64::try_from(capacity).unwrap_or(i64::MAX)),
+        ));
+    }
+    if let Some(backend) = partial.detection_backend.as_ref() {
+        entries.push((
+            crate::settings_backends::DETECTION_BACKEND_SETTING.to_string(),
+            SettingValue::text(backend.clone()),
+        ));
+    }
+    if let Some(backend) = partial.decode_backend.as_ref() {
+        entries.push((
+            crate::settings_backends::DECODE_BACKEND_SETTING.to_string(),
+            SettingValue::text(backend.clone()),
+        ));
+    }
+    SurfaceAssertions {
+        surface,
+        entries,
+        camera_entries: camera_surface_entries(partial),
+    }
+}
+
+/// What each camera this surface lists says about itself. A camera contributes
+/// an entry whether or not it names a setting, because a camera that has gone
+/// quiet is exactly what clears the record it used to author — the same
+/// clearing the deployment-wide half gets, one scope down.
+fn camera_surface_entries(
+    partial: &PartialConfig,
+) -> Vec<(String, Vec<(String, crate::settings_model::SettingValue)>)> {
+    use crate::settings_model::SettingValue;
+
+    let Some(cameras) = partial.cameras.as_ref() else {
+        return Vec::new();
+    };
+    cameras
+        .iter()
+        // A camera with no name cannot be addressed, so it is not a scope
+        // anything can be said about.
+        .filter(|camera| !camera.name.trim().is_empty())
+        .map(|camera| {
+            let mut entries: Vec<(String, SettingValue)> = Vec::new();
+            if let Some(sensitivity) = camera.motion_sensitivity {
+                entries.push((
+                    crate::settings_model::MOTION_SENSITIVITY_SETTING.to_string(),
+                    SettingValue::Int(sensitivity),
+                ));
+            }
+            (camera.name.clone(), entries)
+        })
+        .collect()
+}
+
 pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     let cli = parse_cli(args)?;
     let mut partial = PartialConfig::default();
 
+    let mut file_surface = None;
     if let Some(path) = cli.config_path.as_ref() {
-        merge(&mut partial, read_toml_config(path)?);
+        let from_file = read_toml_config(path)?;
+        file_surface = Some(surface_assertions(
+            crate::settings_model::Surface::ConfigFile,
+            &from_file,
+        ));
+        merge(&mut partial, from_file);
     } else {
         let options_path = default_options_json_path();
         if options_path.exists() {
-            merge(&mut partial, read_options_json(&options_path)?);
+            let from_options = read_options_json(&options_path)?;
+            file_surface = Some(surface_assertions(
+                crate::settings_model::Surface::AddonOptions,
+                &from_options,
+            ));
+            merge(&mut partial, from_options);
         }
     }
 
-    merge(
-        &mut partial,
-        PartialConfig {
-            data_dir: cli.data_dir,
-            store_path: cli.store_path,
-            health_port: cli.health_port,
-            review_port: cli.review_port,
-            site_name: cli.site_name,
-            camera_name: cli.camera_name,
-            rtsp_url: cli.rtsp_url,
-            live_rtsp_url: cli.live_rtsp_url,
-            rtsp_username: cli.rtsp_username,
-            rtsp_password: cli.rtsp_password,
-            usb_device: cli.usb_device,
-            csi_module: cli.csi_module,
-            mjpeg_url: cli.mjpeg_url,
-            detector_model_id: cli.detector_model_id,
-            detector_model_path: cli.detector_model_path,
-            detector_confidence_threshold: cli.detector_confidence_threshold,
-            detector_sample_frames: cli.detector_sample_frames,
-            detector_stationary_interval_secs: cli.detector_stationary_interval_secs,
-            // Multi-camera list not exposed as CLI flags; comes from config file or options.json.
-            cameras: None,
-            // MQTT fields are not exposed as CLI flags; they come from env vars or options.json.
-            mqtt_host: None,
-            mqtt_port: None,
-            mqtt_username: None,
-            mqtt_password: None,
-            service_id: None,
-            recognition_weights_dir: cli.recognition_weights_dir,
-            recognition_space_id: None,
-            recognition_threshold: None,
-            recognition_covered_classes: None,
-            hardware_decoding: cli.hardware_decoding,
-            accelerated_detection: cli.accelerated_detection,
-            fabric_worker_lease_ms: cli.fabric_worker_lease_ms,
-            fabric_fallback_horizon_ms: cli.fabric_fallback_horizon_ms,
-            // Fabric enrollment knobs are deliberately left OUT of this
-            // merge (unlike every other CLI flag above): their precedence
-            // is CLI > env > options.json/fabric.toml, the REVERSE of this
-            // merge's CLI-before-env order — applied explicitly, below,
-            // once `data_dir` (needed for fabric.toml) is resolved.
-            fabric_ticket: None,
-            fabric_hub: None,
-            // The per-source offload opt-out follows the SAME precedence as
-            // hardware_decoding/accelerated_detection above (CLI here, env
-            // last) — it is not a fabric.toml-eligible knob.
-            fabric_allow_frame_offload: cli.fabric_allow_frame_offload,
-            // The four video-encoding levers have no CLI flag (like
-            // `cameras`/`recognition_covered_classes` above): config file
-            // or add-on options only.
-            keyframe_interval_fps_multiplier: None,
-            keyframe_interval_min_frames: None,
-            keyframe_interval_max_frames: None,
-            bitrate_bps_up_to_640x480: None,
-            bitrate_bps_up_to_1280x720: None,
-            bitrate_bps_up_to_1920x1080: None,
-            bitrate_bps_up_to_2560x1440: None,
-            bitrate_bps_above_2560x1440: None,
-        },
-    );
+    let from_cli = PartialConfig {
+        data_dir: cli.data_dir,
+        store_path: cli.store_path,
+        health_port: cli.health_port,
+        review_port: cli.review_port,
+        site_name: cli.site_name,
+        camera_name: cli.camera_name,
+        rtsp_url: cli.rtsp_url,
+        live_rtsp_url: cli.live_rtsp_url,
+        rtsp_username: cli.rtsp_username,
+        rtsp_password: cli.rtsp_password,
+        usb_device: cli.usb_device,
+        csi_module: cli.csi_module,
+        mjpeg_url: cli.mjpeg_url,
+        detector_model_id: cli.detector_model_id,
+        detector_model_path: cli.detector_model_path,
+        detector_confidence_threshold: cli.detector_confidence_threshold,
+        detector_sample_frames: cli.detector_sample_frames,
+        detector_stationary_interval_secs: cli.detector_stationary_interval_secs,
+        // Multi-camera list not exposed as CLI flags; comes from config file or options.json.
+        cameras: None,
+        // MQTT fields are not exposed as CLI flags; they come from env vars or options.json.
+        mqtt_host: None,
+        mqtt_port: None,
+        mqtt_username: None,
+        mqtt_password: None,
+        service_id: None,
+        recognition_weights_dir: cli.recognition_weights_dir,
+        recognition_space_id: None,
+        recognition_threshold: None,
+        recognition_covered_classes: None,
+        // Neither class list has a command-line flag: like `cameras`, they come
+        // from the configuration file or the add-on options.
+        detector_classes: None,
+        decode_probe_deadline_secs: None,
+        // The two probe deadlines and the two stream-retry waits have no
+        // command-line flag: the configuration file or the add-on options is
+        // where they are set, like the four video-encoding levers below.
+        hardware_probe_deadline_secs: None,
+        rtsp_retry_initial_ms: None,
+        rtsp_retry_max_ms: None,
+        hardware_decoding: cli.hardware_decoding,
+        accelerated_detection: cli.accelerated_detection,
+        fabric_worker_lease_ms: cli.fabric_worker_lease_ms,
+        fabric_fallback_horizon_ms: cli.fabric_fallback_horizon_ms,
+        // Fabric enrollment knobs are deliberately left OUT of this
+        // merge (unlike every other CLI flag above): their precedence
+        // is CLI > env > options.json/fabric.toml, the REVERSE of this
+        // merge's CLI-before-env order — applied explicitly, below,
+        // once `data_dir` (needed for fabric.toml) is resolved.
+        fabric_ticket: None,
+        fabric_hub: None,
+        // The per-source offload opt-out follows the SAME precedence as
+        // hardware_decoding/accelerated_detection above (CLI here, env
+        // last) — it is not a fabric.toml-eligible knob.
+        fabric_allow_frame_offload: cli.fabric_allow_frame_offload,
+        // The rate controls and the two governed backends have no CLI flag
+        // either: they are set on the add-on options page or in the config
+        // file, and changed live through `vigil settings`.
+        motion_sensitivity: None,
+        restart_on_reflect: None,
+        detector_queue_capacity: None,
+        detection_backend: None,
+        decode_backend: None,
+        // The four video-encoding levers have no CLI flag (like
+        // `cameras`/`recognition_covered_classes` above): config file
+        // or add-on options only.
+        keyframe_interval_fps_multiplier: None,
+        keyframe_interval_min_frames: None,
+        keyframe_interval_max_frames: None,
+        bitrate_bps_up_to_640x480: None,
+        bitrate_bps_up_to_1280x720: None,
+        bitrate_bps_up_to_1920x1080: None,
+        bitrate_bps_up_to_2560x1440: None,
+        bitrate_bps_above_2560x1440: None,
+    };
+    // The startup options author before they are merged, so the record carries
+    // what the command line ITSELF said rather than the merged result of every
+    // surface — a merged value cannot say which surface it came from, and that
+    // attribution is the whole point of keeping per-surface records.
+    let startup_surface = Some(surface_assertions(
+        crate::settings_model::Surface::StartupOptions,
+        &from_cli,
+    ));
+    merge(&mut partial, from_cli);
     merge(&mut partial, env_overrides()?);
 
     // If MQTT_HOST was not supplied via options.json or env, attempt Supervisor services API.
@@ -1331,15 +1732,21 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     let store_path = partial
         .store_path
         .unwrap_or_else(|| data_dir.join("store.contextgraph"));
-    let health_port = partial.health_port.unwrap_or(8099);
-    let review_port = partial.review_port.unwrap_or(8098);
-    let site_name = partial.site_name.unwrap_or_else(|| "site-1".to_string());
+    let health_port = partial
+        .health_port
+        .unwrap_or(crate::settings_backends::automatic::HEALTH_PORT as u16);
+    let review_port = partial
+        .review_port
+        .unwrap_or(crate::settings_backends::automatic::REVIEW_PORT as u16);
+    let site_name = partial
+        .site_name
+        .unwrap_or_else(|| crate::settings_backends::automatic::SITE_NAME.to_string());
     let camera_name = partial
         .camera_name
-        .unwrap_or_else(|| "camera-1".to_string());
+        .unwrap_or_else(|| crate::settings_backends::automatic::CAMERA_NAME.to_string());
     let detector_model_id = partial
         .detector_model_id
-        .unwrap_or_else(|| "yolox-tiny-burn-cpu".to_string());
+        .unwrap_or_else(|| crate::settings_backends::automatic::DETECTOR_MODEL_ID.to_string());
     let detector_confidence_threshold =
         validate_confidence_threshold(partial.detector_confidence_threshold.unwrap_or(0.5))?;
     let detector_sample_frames = validate_detector_sample_frames(
@@ -1492,8 +1899,12 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     // `lease_duration_ms: 5 * 60_000` and `OffloadPolicyConfig::default()`'s
     // `fallback_horizon_ms: 5_000`) — inert scaffold, neither is consumed
     // yet.
-    let fabric_worker_lease_ms = partial.fabric_worker_lease_ms.unwrap_or(300_000);
-    let fabric_fallback_horizon_ms = partial.fabric_fallback_horizon_ms.unwrap_or(5_000);
+    let fabric_worker_lease_ms = partial
+        .fabric_worker_lease_ms
+        .unwrap_or(crate::settings_backends::automatic::FABRIC_WORKER_LEASE_MS as u64);
+    let fabric_fallback_horizon_ms = partial
+        .fabric_fallback_horizon_ms
+        .unwrap_or(crate::settings_backends::automatic::FABRIC_FALLBACK_HORIZON_MS as u64);
 
     // Outbound connection: present when a host is configured. The password
     // stays wrapped in `Secret` all the way out of config resolution — an
@@ -1506,10 +1917,14 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         password: partial.mqtt_password,
     });
 
-    // Stable service identifier — explicit override or derived from site_name.
-    let service_id = partial
-        .service_id
-        .unwrap_or_else(|| config_slug(&site_name));
+    // This node's service identifier, as the deployment supplied it. Empty
+    // when nothing named this node: the identity is then derived once, at the
+    // first start that has a store to persist it into, and read back from that
+    // record on every later start. Deriving a fallback here as well would give
+    // the product two derivations, and the one that runs earliest — this one —
+    // is the one that follows the site name and moves the Home Assistant
+    // device every time the site is renamed.
+    let service_id = partial.service_id.unwrap_or_default();
 
     // Build the canonical multi-camera list.
     // If a `cameras` KEY is present in config/JSON it supersedes the single
@@ -1568,6 +1983,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
             usb_device: partial.usb_device.clone(),
             csi_module: partial.csi_module.clone(),
             mjpeg_url: partial.mjpeg_url.clone(),
+            // The legacy single-camera form has no per-camera field of its
+            // own; what such a deployment sets deployment-wide is what its one
+            // camera runs.
+            motion_sensitivity: None,
         };
         let declares_no_source = legacy_entry.rtsp_url.is_none()
             && legacy_entry.usb_device.is_none()
@@ -1598,8 +2017,18 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
 
     reject_duplicate_camera_analysis_endpoints(&cameras).map_err(|error| error.message)?;
 
-    // Recognition switches on when a weights directory is configured.
-    let mut recognition = crate::recognition::RecognitionConfig::default();
+    // Recognition switches on when a weights directory is configured. Class
+    // coverage is independent of detection: it starts from its own default
+    // (`settings_backends::default_recognition_covered_classes`), never
+    // `RecognitionConfig::default()`'s wider engine baseline, so widening
+    // `detector_classes` never silently widens what recognition covers too.
+    let mut recognition = crate::recognition::RecognitionConfig {
+        covered_classes: crate::settings_backends::default_recognition_covered_classes()
+            .iter()
+            .map(|class| (*class).to_string())
+            .collect(),
+        ..crate::recognition::RecognitionConfig::default()
+    };
     if let Some(weights_dir) = partial.recognition_weights_dir {
         recognition.enabled = true;
         recognition.weights_dir = Some(weights_dir);
@@ -1615,6 +2044,8 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
     }
 
     Ok(RuntimeConfig {
+        file_surface,
+        startup_surface,
         data_dir,
         store_path,
         health_port,
@@ -1633,6 +2064,10 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         mqtt,
         service_id,
         recognition,
+        detector_class_indices: crate::settings_backends::automatic_detection_class_indices(),
+        detector_queue_capacity: crate::settings_backends::AUTOMATIC_DETECTOR_QUEUE_CAPACITY,
+        rtsp_retry_initial_ms: crate::settings_backends::automatic::RTSP_RETRY_INITIAL_MS as u64,
+        rtsp_retry_max_ms: crate::settings_backends::automatic::RTSP_RETRY_MAX_MS as u64,
         // Intent booleans: absent means true (probe, use only on a
         // passed probe, fall back visibly).
         hardware_decoding: partial.hardware_decoding.unwrap_or(true),
@@ -1790,20 +2225,6 @@ fn parse_intent_bool(value: &str) -> Option<bool> {
         "true" => Some(true),
         "false" => Some(false),
         _ => None,
-    }
-}
-
-// This wrapper's own callers are baselined legacy reads (see
-// `env_overrides` below), enumerated in
-// `environment_read_surface.baseline.txt`, pending migration to the
-// settings registry — not a declared setting today.
-#[allow(clippy::disallowed_methods)]
-fn env_intent_bool(name: &str) -> Result<Option<bool>, String> {
-    match std::env::var(name) {
-        Ok(value) => parse_intent_bool(&value)
-            .map(Some)
-            .ok_or_else(|| format!("{name} must be true or false, got {value}")),
-        Err(_) => Ok(None),
     }
 }
 
@@ -2189,59 +2610,6 @@ fn describe_toml_parse_error(text: &str, error: &toml::de::Error) -> String {
     }
 }
 
-/// Add-on start path for the two startup-probe deadline knobs. A Home
-/// Assistant user sets `decode_probe_deadline_secs` /
-/// `detection_probe_deadline_secs` as add-on options; this writes them to the
-/// `VIGIL_DECODE_PROBE_DEADLINE_SECS` / `VIGIL_DETECTION_PROBE_DEADLINE_SECS`
-/// environment variables the decode and detection startup probes read, so the
-/// option value wins over a manually set environment variable and an unset
-/// option keeps the source default. The add-on's entry point is the vigil
-/// binary itself (it reads `/data/options.json`), so this export lives here
-/// instead of a separate shell run script; it is a no-op when no options file
-/// is present (a non-add-on deployment).
-pub(crate) fn apply_addon_probe_deadline_env() {
-    let options_path = default_options_json_path();
-    if !options_path.exists() {
-        return;
-    }
-    let Ok(text) = fs::read_to_string(&options_path) else {
-        return;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return;
-    };
-    for (option, env_var) in [
-        (
-            "decode_probe_deadline_secs",
-            "VIGIL_DECODE_PROBE_DEADLINE_SECS",
-        ),
-        (
-            "detection_probe_deadline_secs",
-            "VIGIL_DETECTION_PROBE_DEADLINE_SECS",
-        ),
-    ] {
-        if let Some(secs) = value.get(option).and_then(option_deadline_secs_string) {
-            // SAFETY: called once at process start (top of `run_cli`), before
-            // any camera or acceleration-probe thread is spawned, so no
-            // concurrent env access races this write.
-            unsafe {
-                std::env::set_var(env_var, secs);
-            }
-        }
-    }
-}
-
-fn option_deadline_secs_string(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::Number(number) => Some(number.to_string()),
-        serde_json::Value::String(text) => {
-            let text = text.trim();
-            (!text.is_empty()).then(|| text.to_string())
-        }
-        _ => None,
-    }
-}
-
 fn read_options_json(path: &Path) -> Result<PartialConfig, String> {
     let text = fs::read_to_string(path)
         .map_err(|error| format!("could not read options {}: {error}", path.display()))?;
@@ -2319,82 +2687,55 @@ fn json_key_before_column(line: &str, column: usize) -> Option<String> {
 // function that gathers the rest, not an ad-hoc scattering.
 #[allow(clippy::disallowed_methods)]
 fn env_overrides() -> Result<PartialConfig, String> {
+    // What the environment is still for, now that it is not a settings surface:
+    // the bootstrap locations that must be readable before the store can be
+    // opened, the secrets that stay settable per process, the platform's own
+    // injected service discovery, and this node's identity. Every behavior
+    // value that used to be read here is a setting now — written through the
+    // add-on options, the config file, the startup options, or a `vigil
+    // settings` change, and resolved from the store. Naming one of them in the
+    // environment is reported as ignored rather than silently doing nothing
+    // (`settings_environment::ignored_behavior_variables`).
     Ok(PartialConfig {
+        // Bootstrap locations: a store cannot say where the store is.
         data_dir: std::env::var_os("VIGIL_DATA_DIR").map(PathBuf::from),
         store_path: std::env::var_os("VIGIL_STORE_PATH").map(PathBuf::from),
-        health_port: match std::env::var("VIGIL_HEALTH_PORT") {
-            Ok(value) => Some(
-                value
-                    .parse::<u16>()
-                    .map_err(|error| format!("VIGIL_HEALTH_PORT must be a TCP port: {error}"))?,
-            ),
-            Err(_) => None,
-        },
-        review_port: match std::env::var("VIGIL_REVIEW_PORT") {
-            Ok(value) => Some(
-                value
-                    .parse::<u16>()
-                    .map_err(|error| format!("VIGIL_REVIEW_PORT must be a TCP port: {error}"))?,
-            ),
-            Err(_) => None,
-        },
-        site_name: std::env::var("VIGIL_SITE_NAME").ok(),
-        camera_name: std::env::var("VIGIL_CAMERA_NAME").ok(),
-        rtsp_url: std::env::var("VIGIL_RTSP_URL").ok(),
-        live_rtsp_url: std::env::var("VIGIL_LIVE_RTSP_URL").ok(),
-        // Deliberately NOT given an env-var read here, unlike rtsp_url/
-        // live_rtsp_url above: crates/vigil/tests/environment_read_surface.rs
-        // freezes today's ad-hoc std::env::var call sites as a baseline
-        // that may only shrink, never grow — its own module doc states the
-        // product rule this guard enforces ("an adjustable value must be a
-        // declared setting... not an ad-hoc environment-variable read").
-        // Adding VIGIL_USB_DEVICE/VIGIL_CSI_MODULE/VIGIL_MJPEG_URL sites
-        // here would be exactly the new-site growth that guard exists to
-        // refuse. The CLI flag and config-file field are still real
-        // surfaces for these three fields; only the environment-variable
-        // leg of the usual three-surface pattern is withheld, and for a
-        // structural reason, not an oversight.
+        health_port: None,
+        review_port: None,
+        site_name: None,
+        camera_name: None,
+        rtsp_url: None,
+        live_rtsp_url: None,
         usb_device: None,
         csi_module: None,
         mjpeg_url: None,
+        // Secrets: settable through the ordinary surfaces AND here, with the
+        // environment winning, because a rotation just handed this run a
+        // credential and a stored value shadowing it is the silent
+        // stale-credential failure the model refuses everywhere else.
         rtsp_username: std::env::var("VIGIL_RTSP_USERNAME").ok(),
         rtsp_password: std::env::var("VIGIL_RTSP_PASSWORD").ok().map(Secret::new),
-        detector_model_id: std::env::var("VIGIL_DETECTOR_MODEL_ID").ok(),
-        detector_model_path: std::env::var_os("VIGIL_DETECTOR_MODEL_PATH").map(Into::into),
-        recognition_weights_dir: std::env::var_os("VIGIL_RECOGNITION_WEIGHTS_DIR").map(Into::into),
-        recognition_space_id: std::env::var("VIGIL_RECOGNITION_SPACE_ID").ok(),
-        recognition_threshold: match std::env::var("VIGIL_RECOGNITION_THRESHOLD") {
-            Ok(value) => Some(value.parse::<f64>().map_err(|error| {
-                format!("VIGIL_RECOGNITION_THRESHOLD must be a number: {error}")
-            })?),
-            Err(_) => None,
-        },
+        detector_model_id: None,
+        detector_model_path: None,
+        recognition_weights_dir: None,
+        recognition_space_id: None,
+        recognition_threshold: None,
         recognition_covered_classes: None,
-        detector_confidence_threshold: match std::env::var("VIGIL_DETECTOR_CONFIDENCE_THRESHOLD") {
-            Ok(value) => Some(value.parse::<f64>().map_err(|error| {
-                format!("VIGIL_DETECTOR_CONFIDENCE_THRESHOLD must be a number: {error}")
-            })?),
-            Err(_) => None,
-        },
-        detector_sample_frames: match std::env::var("VIGIL_DETECTOR_SAMPLE_FRAMES") {
-            Ok(value) => Some(validate_detector_sample_frames(
-                value.parse::<usize>().map_err(|error| {
-                    format!("VIGIL_DETECTOR_SAMPLE_FRAMES must be an integer: {error}")
-                })?,
-                "VIGIL_DETECTOR_SAMPLE_FRAMES",
-            )?),
-            Err(_) => None,
-        },
-        detector_stationary_interval_secs: match std::env::var(
-            "VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS",
-        ) {
-            Ok(value) => Some(value.parse::<u64>().map_err(|error| {
-                format!("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS must be an integer: {error}")
-            })?),
-            Err(_) => None,
-        },
-        // MQTT credentials — HA Supervisor injects these via env when `services: [mqtt:want]`
-        // is declared in the add-on config.yaml.
+        detector_classes: None,
+        decode_probe_deadline_secs: None,
+        // Behavior settings are never expressed through the environment, so
+        // the environment asserts nothing about any of these three.
+        hardware_probe_deadline_secs: None,
+        rtsp_retry_initial_ms: None,
+        rtsp_retry_max_ms: None,
+        detector_confidence_threshold: None,
+        detector_sample_frames: None,
+        detector_stationary_interval_secs: None,
+        // Platform-injected service discovery: the Supervisor sets these
+        // because the add-on declares MQTT as a wanted service. Nobody typed
+        // them, and pinning them would let a rotated broker password be
+        // shadowed forever by a stale record — taking down event delivery,
+        // silently.
         mqtt_host: std::env::var("MQTT_HOST").ok(),
         mqtt_port: match std::env::var("MQTT_PORT") {
             Ok(value) => Some(
@@ -2408,28 +2749,26 @@ fn env_overrides() -> Result<PartialConfig, String> {
             .ok()
             .or_else(|| std::env::var("MQTT_USERNAME").ok()),
         mqtt_password: std::env::var("MQTT_PASSWORD").ok().map(Secret::new),
+        // Bootstrap identity: it names this node's messaging topics and its
+        // Home Assistant device, so it is derived once and persisted rather
+        // than recomputed, and it is readable before the store opens.
         service_id: std::env::var("VIGIL_SERVICE_ID").ok(),
-        hardware_decoding: env_intent_bool("VIGIL_HARDWARE_DECODING")?,
-        accelerated_detection: env_intent_bool("VIGIL_ACCELERATED_DETECTION")?,
+        hardware_decoding: None,
+        accelerated_detection: None,
+        // Behavior values, every one of them: they are settings now, and the
+        // environment is not a surface that authors settings.
+        motion_sensitivity: None,
+        restart_on_reflect: None,
+        detector_queue_capacity: None,
+        detection_backend: None,
+        decode_backend: None,
+        // An enrollment credential, on the same footing as a camera password.
         fabric_ticket: std::env::var("VIGIL_FABRIC_TICKET").ok(),
-        fabric_hub: env_intent_bool("VIGIL_FABRIC_HUB")?,
-        fabric_allow_frame_offload: env_intent_bool("VIGIL_FABRIC_ALLOW_FRAME_OFFLOAD")?,
-        fabric_worker_lease_ms: match std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS") {
-            Ok(value) => Some(value.parse::<u64>().map_err(|error| {
-                format!("VIGIL_FABRIC_WORKER_LEASE_MS must be an integer: {error}")
-            })?),
-            Err(_) => None,
-        },
-        fabric_fallback_horizon_ms: match std::env::var("VIGIL_FABRIC_FALLBACK_HORIZON_MS") {
-            Ok(value) => Some(value.parse::<u64>().map_err(|error| {
-                format!("VIGIL_FABRIC_FALLBACK_HORIZON_MS must be an integer: {error}")
-            })?),
-            Err(_) => None,
-        },
-        // Multi-camera list is not configurable via env vars; comes from config file only.
+        fabric_hub: None,
+        fabric_allow_frame_offload: None,
+        fabric_worker_lease_ms: None,
+        fabric_fallback_horizon_ms: None,
         cameras: None,
-        // The four video-encoding levers have no environment variable
-        // (like `cameras` above): config file or add-on options only.
         keyframe_interval_fps_multiplier: None,
         keyframe_interval_min_frames: None,
         keyframe_interval_max_frames: None,
@@ -2502,6 +2841,21 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.recognition_covered_classes.is_some() {
         target.recognition_covered_classes = source.recognition_covered_classes;
     }
+    if source.detector_classes.is_some() {
+        target.detector_classes = source.detector_classes;
+    }
+    if source.decode_probe_deadline_secs.is_some() {
+        target.decode_probe_deadline_secs = source.decode_probe_deadline_secs;
+    }
+    if source.hardware_probe_deadline_secs.is_some() {
+        target.hardware_probe_deadline_secs = source.hardware_probe_deadline_secs;
+    }
+    if source.rtsp_retry_initial_ms.is_some() {
+        target.rtsp_retry_initial_ms = source.rtsp_retry_initial_ms;
+    }
+    if source.rtsp_retry_max_ms.is_some() {
+        target.rtsp_retry_max_ms = source.rtsp_retry_max_ms;
+    }
     if source.detector_sample_frames.is_some() {
         target.detector_sample_frames = source.detector_sample_frames;
     }
@@ -2571,20 +2925,6 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.bitrate_bps_above_2560x1440.is_some() {
         target.bitrate_bps_above_2560x1440 = source.bitrate_bps_above_2560x1440;
     }
-}
-
-/// Derive a stable lowercase slug from a human-readable string.
-/// Used to turn site_name into a service_id when no explicit id is configured.
-fn config_slug(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 fn default_data_dir() -> PathBuf {
@@ -2723,6 +3063,7 @@ mod tests {
             usb_device: None,
             csi_module: None,
             mjpeg_url: Some(credentialed_mjpeg),
+            motion_sensitivity: None,
         };
         let rendered_partial = format!("{partial:?}");
         assert!(
@@ -2999,6 +3340,7 @@ mod tests {
             usb_device: None,
             csi_module: None,
             mjpeg_url: None,
+            motion_sensitivity: None,
         }
     }
 

@@ -11,7 +11,7 @@
 //! a stable contract.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -331,7 +331,10 @@ pub enum QueueRecv<T> {
 pub struct BoundedStageQueue<T> {
     state: Mutex<QueueState<T>>,
     signal: Condvar,
-    capacity: usize,
+    /// How deep this queue holds work. An operator can change it while the
+    /// machine runs, so it is read on each push rather than fixed at
+    /// construction.
+    capacity: AtomicUsize,
     counters: QueueCountersState,
 }
 
@@ -356,13 +359,21 @@ impl<T> BoundedStageQueue<T> {
                 closed: false,
             }),
             signal: Condvar::new(),
-            capacity: capacity.max(1),
+            capacity: AtomicUsize::new(capacity.max(1)),
             counters: QueueCountersState::default(),
         }
     }
 
     pub fn capacity(&self) -> usize {
-        self.capacity
+        self.capacity.load(Ordering::SeqCst)
+    }
+
+    /// Hold work `capacity` deep from the next push onward. A queue already
+    /// holding more than the new depth is not truncated: work already accepted
+    /// is work already promised, and the depth takes effect as the queue
+    /// drains.
+    pub fn set_capacity(&self, capacity: usize) {
+        self.capacity.store(capacity.max(1), Ordering::SeqCst);
     }
 
     /// Push, keeping the NEWEST work when full: the oldest pending item is
@@ -376,7 +387,7 @@ impl<T> BoundedStageQueue<T> {
                 .fetch_add(1, Ordering::SeqCst);
             return Err(item);
         }
-        let replaced = if state.pending.len() >= self.capacity {
+        let replaced = if state.pending.len() >= self.capacity() {
             self.counters
                 .replaced_dropped_total
                 .fetch_add(1, Ordering::SeqCst);

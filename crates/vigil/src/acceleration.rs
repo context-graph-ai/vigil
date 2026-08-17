@@ -115,10 +115,16 @@ impl ActionKind {
     }
 }
 
-/// Whether the probed path is live, fell back, or was skipped by intent.
+/// Whether the probed path is live, still being prepared, fell back, or was
+/// skipped by intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeStatus {
     Active,
+    /// Work that has neither completed nor reported an error is still under
+    /// way. It is not a fallback the machine settled for and not a failure:
+    /// the processor is running detection meanwhile, and only the
+    /// preparation's own outcome moves it off this.
+    Preparing,
     Fallback,
     Disabled,
 }
@@ -127,11 +133,27 @@ impl ProbeStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             ProbeStatus::Active => "active",
+            ProbeStatus::Preparing => "preparing",
             ProbeStatus::Fallback => "fallback",
             ProbeStatus::Disabled => "disabled",
         }
     }
 }
+
+/// The field naming when a preparation began, so a surface can say how long it
+/// has been going. Read once, at the start; never compared against anything.
+pub const PREPARING_SINCE_FIELD: &str = "preparing_since_ms";
+
+/// The field carrying the last thing a preparation said about itself, which is
+/// what tells a person waiting apart from a person stuck.
+pub const LATEST_PROGRESS_FIELD: &str = "latest_progress";
+
+/// The field naming which selection this receipt belongs to: the stream epoch
+/// the session opened under. A camera that reconnects because the operator
+/// named a different decode path opens a new session under a new epoch, and
+/// that session's selection is its own event — the proof line for it must not
+/// be swallowed as a repeat of an outcome an earlier session already reported.
+pub const SELECTION_EPOCH_FIELD: &str = "selection_epoch";
 
 /// One decode or detection acceleration attempt, fully described.
 #[derive(Debug, Clone)]
@@ -255,6 +277,11 @@ pub struct AccelerationState {
 struct AccelerationStateInner {
     receipts: Vec<AccelerationReceipt>,
     log_budget: BTreeMap<String, u64>,
+    /// The last thing a preparation said about itself, per stage. Held here
+    /// rather than only on the receipt because a preparation can report
+    /// progress before the receipt saying it is under way has been recorded,
+    /// and a note that arrived first must not be lost.
+    progress: BTreeMap<&'static str, String>,
 }
 
 impl AccelerationState {
@@ -275,12 +302,26 @@ impl AccelerationState {
         )
     }
 
-    /// What a log line for this receipt would deduplicate on: the slot plus
-    /// the observed outcome (status + failure + active backend).
+    /// What a log line for this receipt would deduplicate on: the slot, the
+    /// selection this receipt belongs to, and the observed outcome (status +
+    /// failure + active backend).
+    ///
+    /// The selection is part of the key because a session is its own event. A
+    /// camera reopened under a decode path the operator just named selects
+    /// afresh, and that selection may land on an outcome an earlier session
+    /// already reported — leaving the operator unable to tell the change they
+    /// asked for from nothing happening at all. Repeats WITHIN one selection
+    /// share the key and stay suppressed, which is the per-frame spam this
+    /// budget exists to prevent.
     fn log_key(receipt: &AccelerationReceipt) -> String {
         format!(
-            "{}::{}::{}::{}::{}",
+            "{}::{}::{}::{}::{}::{}",
             Self::slot_key(receipt),
+            receipt
+                .evidence_fields
+                .get(SELECTION_EPOCH_FIELD)
+                .map(String::as_str)
+                .unwrap_or(""),
             receipt.codec.as_deref().unwrap_or(""),
             receipt.probe_status.as_str(),
             receipt.failure_code.as_str(),
@@ -288,9 +329,42 @@ impl AccelerationState {
         )
     }
 
-    /// Record the latest receipt for its (stream, stage) slot.
-    pub fn record(&self, receipt: AccelerationReceipt) {
+    /// Record what a preparation last said about itself.
+    ///
+    /// Saying something does not end a preparation and does not restart it: the
+    /// note lands beside the moment it began, so a person reading the surface
+    /// can tell a slow first build from a wedged one without the machine
+    /// deciding on their behalf.
+    pub fn record_progress(&self, stage: AccelStage, note: &str) {
         let mut inner = self.inner.lock().expect("acceleration state lock");
+        inner.progress.insert(stage.as_str(), note.to_string());
+        for receipt in inner.receipts.iter_mut().filter(|receipt| {
+            receipt.stage == stage && receipt.probe_status == ProbeStatus::Preparing
+        }) {
+            receipt
+                .evidence_fields
+                .insert(LATEST_PROGRESS_FIELD.to_string(), note.to_string());
+        }
+    }
+
+    /// Record the latest receipt for its (stream, stage) slot.
+    pub fn record(&self, mut receipt: AccelerationReceipt) {
+        let mut inner = self.inner.lock().expect("acceleration state lock");
+        if receipt.probe_status == ProbeStatus::Preparing {
+            // A note the preparation reported before this receipt existed
+            // belongs on it: the order the two arrive in is a race, and losing
+            // the note would leave the surface silent about work that has
+            // spoken.
+            if let Some(note) = inner.progress.get(receipt.stage.as_str()) {
+                receipt
+                    .evidence_fields
+                    .insert(LATEST_PROGRESS_FIELD.to_string(), note.clone());
+            }
+        } else {
+            // The preparation ended, so what it said on the way is no longer
+            // what is going on.
+            inner.progress.remove(receipt.stage.as_str());
+        }
         let key = Self::slot_key(&receipt);
         let log_key = Self::log_key(&receipt);
         *inner.log_budget.entry(log_key).or_insert(0) += 1;

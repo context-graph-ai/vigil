@@ -22,7 +22,7 @@ paragraph_sha256 = "sha256:e825f3d97e298c4073ecda86a46e83eb0079e019a9f8e7dcffd2e
 evidence_tier = "integration"
 tests = [
   "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
-  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
+  "vigil::source_scan_contract::recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry",
 ]
 reviewed = true
 reviewed_by = "Independent documentation repair review, 2026-07-21"
@@ -75,7 +75,7 @@ evidence_tier = "integration"
 tests = [
   "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
-  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
+  "vigil::source_scan_contract::recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry",
 ]
 reviewed = true
 reviewed_by = "Independent documentation repair review, 2026-07-21"
@@ -341,7 +341,7 @@ paragraph_sha256 = "sha256:5ff0d00940cae37325813a0c71110f2c6b6f39ec9b38d2519cebb
 evidence_tier = "integration"
 tests = [
   "vigil::detector_worker::worker_advertises_truthful_backend_claims_materializes_runs_records_once",
-  "vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset",
+  "vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_sane_defaults_and_work_unset",
   "vigil::kill_worker_fallback::worker_death_midlease_falls_back_local_with_named_receipt",
 ]
 reviewed = true
@@ -449,15 +449,15 @@ rationale = "Independent review confirmed that the real empty and undecodable st
 [[claim]]
 id = "vigil.docs-cli.the-confidence-threshold-must-be-between-00"
 document = "docs/cli.md"
-paragraph_sha256 = "sha256:fb30e16dc1e658199b6e4e367034563e9d2a538f764efab9401c2f1ec3394b67"
+paragraph_sha256 = "sha256:f6810f315f76996423cbf31ed855f998ea696c7c4264cdb4ae9cae5037157cd7"
 evidence_tier = "integration"
 tests = [
   "vigil::config::tests::review_port_cli_override_is_documented_and_loaded",
   "vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output",
 ]
 reviewed = true
-reviewed_by = "Independent documentation repair review, 2026-07-21"
-rationale = "Independent review confirmed that the configuration test rejects the documented invalid threshold, sample-count, and boolean values and that the detector test proves threshold filtering."
+reviewed_by = "Independent documentation repair review, 2026-07-21; paragraph re-verified 2026-08-13 after the docs lane's service-identity wording fix"
+rationale = "Independent review confirmed that the configuration test rejects the documented invalid threshold, sample-count, and boolean values and that the detector test proves threshold filtering. The paragraph's service-identity sentence named `vigil settings set service_identity` as the way to set the identity, which is false -- that ordinary verb is refused (identity_refusal_through_settings_cli.rs); corrected to name the real deliberate operation, `vigil settings identity change <identifier> --confirm`, matching configuration.md's own service_id section."
 
 # docs/cli.md:64
 [[claim]]
@@ -619,7 +619,7 @@ evidence_tier = "integration"
 tests = [
   "vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field",
   "vigil::http_data_plane::event_list_serves_full_review_row_fieldset",
-  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema",
+  "vigil::source_scan_contract::recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry",
 ]
 reviewed = true
 reviewed_by = "Independent documentation repair review, 2026-07-21"
@@ -751,7 +751,7 @@ rationale = "Independent review confirmed that the named canonical tests directl
 [[claim]]
 id = "vigil.docs-configuration.field-default-validation-and-behavior-detectormodelid-yoloxtinyburncpu"
 document = "docs/configuration.md"
-paragraph_sha256 = "sha256:810b810cee3450c9cc7d181eaa4f6aa9ecb8e1c463da81b9093b80201cd6a510"
+paragraph_sha256 = "sha256:8bbc5733c86dada9b2da6c456b4c94ad6b33328fc906113caf2f6bebccc12ab8"
 evidence_tier = "integration"
 tests = [
   "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback",
@@ -795,32 +795,52 @@ reviewed = true
 reviewed_by = "Independent documentation review, 2026-07-21"
 rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
 
-# docs/configuration.md:176
+# docs/configuration.md:347
 [[claim]]
-id = "vigil.docs-configuration.the-addon-schema-accepts-optional-decodeprobedeadlinesecs-and"
+id = "vigil.docs-configuration.the-addon-schema-accepts-optional-decodeprobedeadlinesecs"
 document = "docs/configuration.md"
-paragraph_sha256 = "sha256:ccf07047604585620fe5f60ede998aee61750529c2af967bbc16052f8a88e45f"
+paragraph_sha256 = "sha256:d2036b08aedea448625af1f62e4c139ddfe29c220082261f57144319aacba416"
 evidence_tier = "integration"
 tests = [
-  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface",
-  "vigil::probe_deadline_knob_surface::addon_config_declares_both_probe_deadline_knobs_as_optional_integers",
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_completed_preparation_promotes_and_the_same_account_reaches_every_surface",
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_preparation_still_working_is_never_ended_for_it",
+  "vigil::detection_preparation_promotes_when_it_completes::a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes",
+  "vigil::probe_deadline_knob_surface::addon_config_declares_the_decode_probe_sample_wait_as_an_optional_integer",
+  "vigil::probe_deadline_knob_surface::addon_help_documents_decode_probe_deadline_option",
+  "vigil::probe_deadline_knob_surface::the_decode_probe_sample_wait_defaults_to_the_documented_number_of_seconds",
+  "vigil::probe_timer_removal::neither_detection_timer_is_offered_as_an_add_on_option",
 ]
 reviewed = true
-reviewed_by = "Independent documentation review, 2026-07-21"
-rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+reviewed_by = "Independent semantic-mapping review, 2026-08-15"
+rationale = "Independent review read the paragraph sentence by sentence against every named test and confirms each is honestly held. That the schema accepts the option and that it is optional is held by addon_config_declares_the_decode_probe_sample_wait_as_an_optional_integer, which asserts the schema declares it int? and that it is absent from the default options block so leaving it unset keeps the source default. The documented default of 5 is bound at both ends: addon_help_documents_decode_probe_deadline_option asserts the shipped operator help names a 5-second default for this option, and the_decode_probe_sample_wait_defaults_to_the_documented_number_of_seconds asserts the value a deployment resolves with nobody having set it is that same number, read off the setting itself against the documented one. That the option bounds a stream session gathering real video before it chooses a decode path, and not normal frame processing, is held at the operator surface by the same help test, which requires the description to say the knob is a probe wait ending in a fallback; the negative half of that sentence has no test of its own and was confirmed by reading the source instead - the resolved value is consumed at exactly one site, the startup probe drain at decode_gstreamer.rs:178, resolved once at runtime.rs:452-470, and reaches no frame-processing path. That detection offers no equivalent is held by neither_detection_timer_is_offered_as_an_add_on_option, and that a preparation ends only on its own outcome by a_preparation_still_working_is_never_ended_for_it, which reads the surface repeatedly while the preparation is demonstrably unfinished and sees it stay Preparing with no failure classification. The closing sentence is held by the two tests bound to it: a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes asserts the receipt carries both when the preparation began and the last thing it reported about itself and that completion swaps the detector live onto the accelerated backend, and a_completed_preparation_promotes_and_the_same_account_reaches_every_surface asserts the health and statistics surfaces both name the accelerated backend and agree with each other. Superseded mapping note - the earlier list bound the whole paragraph to three tests that held only its first three sentences. The paragraph's closing sentence - that the surfaces report a preparation under way, since when, and the last thing it reported, and that on completion the detector is swapped live and every surface moves together - is now bound to the two tests that hold it: a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes for preparing-since and latest progress, and a_completed_preparation_promotes_and_the_same_account_reaches_every_surface for the surfaces moving together. The default of 5 is bound at both ends: addon_help_documents_decode_probe_deadline_option asserts the shipped operator help names a 5-second default for this option, and the_decode_probe_sample_wait_defaults_to_the_documented_number_of_seconds asserts the value a deployment resolves with nobody having set it is that same number, read off the setting itself against the documented one."
 
-# docs/configuration.md:202
+# docs/configuration.md:333
 [[claim]]
-id = "vigil.docs-configuration.the-current-parser-reads-vigilhardwaredecoding-and-vigilaccelerateddetection"
+id = "vigil.docs-configuration.environment-variables-no-longer-steer-hardware-decoding"
 document = "docs/configuration.md"
-paragraph_sha256 = "sha256:036e320e7ad9ed5e21004ca802cf5ccb310f4de070c88145b7ffcf0c537ef34b"
+paragraph_sha256 = "sha256:d900ce3b6f7b7cefe76e00e2a7c7a7498b3d7ea352c253594883fa877d9e887b"
 evidence_tier = "integration"
 tests = [
-  "vigil::config_acceleration_intent::env_vars_are_understood",
+  "vigil::config_acceleration_intent::environment_variables_no_longer_steer_acceleration",
 ]
 reviewed = true
-reviewed_by = "Independent documentation review, 2026-07-21"
-rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+reviewed_by = "Independent documentation review, 2026-08-11"
+rationale = "Independent review confirmed that the named test directly enforces the adjacent shipped claim, which states the truthful contract superseding the prior environment-variable-precedence claim this entry previously bound."
+
+# docs/configuration.md:448
+[[claim]]
+id = "vigil.docs-configuration.the-one-documented-exception-is-vigil-detector-queue-capacity"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:cde11523ea269a5c8aa7e21cd75848c57e20df646c6d6073a34eb31385c26fc9"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-bin::settings_queue_capacity_environment_attribution_live::a_cameraless_node_still_names_the_lever_that_supplied_its_queue_depth",
+  "vigil-bin::settings_queue_capacity_environment_attribution_live::an_unpinned_node_shadows_the_depth_vigil_chose_for_itself_not_an_operator_pin",
+  "vigil-bin::settings_queue_capacity_environment_attribution_live::the_queue_depth_a_camera_node_reports_names_its_lever_from_the_first_moment_it_can_be_asked",
+]
+reviewed = true
+reviewed_by = "Wave-15 closeout documentation pass, 2026-08-17"
+rationale = "Read the paragraph sentence by sentence against all three named tests. That the surface attributes the in-force capacity to the variable rather than reporting it as ignored or as the stored value is held by all three: each spawns a real vigil run carrying VIGIL_DETECTOR_QUEUE_CAPACITY=3 and asserts running=3 on the detector_queue_capacity line read back through a separate vigil settings process that does not itself carry the variable. That it does so from the first moment the surface can be asked is held by construction rather than by wording: all three ask the instant the control socket accepts a connection, with no sleep and no retry, so a rendering that only became true later would fail. That it holds on a node with no cameras configured is held by a_cameraless_node_still_names_the_lever_that_supplied_its_queue_depth, which runs the same assertions against a cameras = [] deployment. The two named tokens are asserted by their declared spellings imported from settings_projection. The shadowed-setting sentence now states both halves of what the projection key promises, and each half has its own test. Where the operator pinned a depth, the token carries that pin: the two pinned arms configure detector_queue_capacity = 1 against a lever of 3, so a line echoing the lever back at itself as the shadowed value cannot pass. Where they pinned nothing, the token carries the depth Vigil chose for itself: an_unpinned_node_shadows_the_depth_vigil_chose_for_itself_not_an_operator_pin runs a deployment whose configuration does not name the setting at all -- asserted before the run starts -- and requires the token to carry settings_backends::AUTOMATIC_DETECTOR_QUEUE_CAPACITY, imported rather than written out. This replaces the wave-15 registration review's narrowing of the paragraph, whose stated reason was wrong: the shipped code does render the token on an unpinned node, because the value it compares the lever against is detector_queue_capacity_in_force, which falls back to the automatic depth when nothing is pinned. Only the two pinned arms existed then, so nothing in the estate could show it, and the paragraph was narrowed to a claim the code does not make -- that the token is always the operator's own stored pin -- which is the documentation gap this pass closes."
 
 # docs/detection.md:12
 [[claim]]
@@ -893,18 +913,32 @@ reviewed = true
 reviewed_by = "Independent documentation review, 2026-07-21"
 rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
 
-# docs/detection.md:88
+# docs/detection.md:113
 [[claim]]
-id = "vigil.docs-detection.a-slow-first-shader-compilation-can-outlive"
+id = "vigil.docs-detection.a-first-shader-compilation-can-take-minutes"
 document = "docs/detection.md"
-paragraph_sha256 = "sha256:4884fdf05cb956bc1874927b7fca2fab92f4ecbe09fbd00843bfa2f1b0d6944c"
+paragraph_sha256 = "sha256:2e36916eda8d0a11622d3506292c9c0a208604db80d7ff623abe657e61d694a7"
 evidence_tier = "integration"
 tests = [
-  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface",
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_preparation_still_working_is_never_ended_for_it",
+  "vigil::detection_preparation_promotes_when_it_completes::a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes",
 ]
 reviewed = true
-reviewed_by = "Independent documentation review, 2026-07-21"
-rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+reviewed_by = "Independent semantic-mapping review, 2026-08-15"
+rationale = "Independent review read the paragraph against both named tests and confirms each sentence is enforced: a_preparation_still_working_is_never_ended_for_it reads the surface repeatedly while the preparation is demonstrably unfinished and asserts it stays Preparing with no failure classification and the processor still running, then releases it and sees it complete, so nothing cuts a preparation short; a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes asserts the startup answer returns Preparing on the processor while the preparation is still held, that the receipt carries both when the preparation began and the last thing it reported about itself, that completion swaps the detector live onto the accelerated backend, and that the resulting action names no restart and no knob to raise."
+
+# docs/detection.md:124
+[[claim]]
+id = "vigil.docs-detection.a-preparation-that-reports-an-error-leaves"
+document = "docs/detection.md"
+paragraph_sha256 = "sha256:596038892720201ef8d18c0d405ef68f3bfc0e7d54effdf7f22fa62c94b78c3b"
+evidence_tier = "integration"
+tests = [
+  "vigil::detection_fallback_action_truth::probe_failure_action_names_real_next_steps_when_accelerated_backend_is_compiled",
+]
+reviewed = true
+reviewed_by = "Independent semantic-mapping review, 2026-08-15"
+rationale = "Independent review confirms the named test enforces the claim's operative half: a forward probe that reports an error classifies as a probe failure rather than a missing backend, carries an action the operator can act on, names checking that the graphics device is usable by this container, and is asserted to contain no offer to lengthen a deadline, a late window, or any other wait - which is exactly the next step the paragraph promises. That the processor keeps running detection through such an error is enforced by the adjacent claim on the same page and by the preparation suite's own error case."
 
 # docs/detection.md:100
 [[claim]]
@@ -1861,18 +1895,18 @@ reviewed = true
 reviewed_by = "Independent documentation review, 2026-07-21"
 rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
 
-# docs/why-vigil.md:69
+# docs/why-vigil.md:84
 [[claim]]
-id = "vigil.docs-why-vigil.the-tested-latepromotion-seam-can-swap-a"
+id = "vigil.docs-why-vigil.the-tested-promotion-seam-can-swap-a"
 document = "docs/why-vigil.md"
-paragraph_sha256 = "sha256:1008889b62eaf45d0515f9f6c9bd86acf0309cae894ec7700b138f86600b2135"
+paragraph_sha256 = "sha256:fb82c6decc27cec250651e717b9db222311ad4e91826c83d0930632558efb37a"
 evidence_tier = "integration"
 tests = [
-  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface",
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_completed_preparation_promotes_and_the_same_account_reaches_every_surface",
 ]
 reviewed = true
-reviewed_by = "Independent documentation review, 2026-07-21"
-rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
+reviewed_by = "Independent semantic-mapping review, 2026-08-15"
+rationale = "Independent review confirms the named test enforces the claim as scoped: a_completed_preparation_promotes_and_the_same_account_reaches_every_surface drives a preparation that is still held, sees the startup answer come back with the processor running, releases the preparation, and then asserts the detector is promoted and that the health and statistics surfaces both name the accelerated backend and agree with each other. The paragraph itself limits the deterministic evidence to an injected preparation and receipt sink and refers running-worker promotion to smoke evidence, which matches what the test does and does not do."
 
 # docs/why-vigil.md:82
 [[claim]]
@@ -1933,3 +1967,20 @@ tests = [
 reviewed = true
 reviewed_by = "Independent documentation review, video-encoding settings pass, 2026-08-01"
 rationale = "Independent review confirmed the max(effective_keyframe_interval_frames, 15) derivation and its single-sourced floor are accurate against camera_hub.rs, and that the named tests prove both the derivation itself and the automatic-capacity behavior it feeds."
+
+# docs/configuration.md:35
+[[claim]]
+id = "vigil.docs-configuration.settings-do-not-resolve-by-merging-surfaces"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:6e8686def339d9882a5fcbd38367aaca5385fc186692ba9b4dd4ded9e8fa22f9"
+evidence_tier = "integration"
+tests = [
+  "vigil::settings_authority_ranking::an_older_local_pin_outranks_a_newer_pushed_record",
+  "vigil::settings_authority_ranking::an_older_pushed_record_outranks_a_newer_automatic_adjustment",
+  "vigil::settings_authority_ranking::the_most_specific_scope_wins_within_one_author_before_authors_are_compared",
+  "vigil::settings_record_coexistence::between_local_surfaces_the_most_recent_author_wins",
+  "vigil::environment_behavior_var_reported_ignored::an_environment_variable_naming_a_behavior_setting_is_reported_as_ignored_with_the_reason_and_where_to_set_it",
+]
+reviewed = true
+reviewed_by = "Independent documentation review, 2026-08-11"
+rationale = "Independent review confirmed the paragraph's authority-and-scope ranking, most-recent-author tie-break between local surfaces, and the environment's zero rank are each proved by the named tests, matching the settings authority model this arc shipped."

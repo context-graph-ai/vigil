@@ -21,9 +21,10 @@ use std::time::Duration;
 
 use vigil::{CorrectionRequest, CorrectionType, HealthState, HealthStatus};
 use vigil_ha::{
-    CameraConfig, MqttConfig, ServiceConfig, WiredSubscriberConfig, generate_discovery_payloads,
-    mqtt_connect_intent, publish_discovery_to_broker, spawn_detection_publisher,
-    spawn_production_subscriber,
+    CONTROL_COMMAND_TOPIC, CORRECTION_COMMAND_TOPIC, CameraConfig, MqttConfig, ServiceConfig,
+    WiredSubscriberConfig, generate_discovery_payloads, mqtt_connect_intent,
+    publish_discovery_to_broker, spawn_detection_publisher, spawn_production_subscriber,
+    spawn_site_presence,
 };
 
 // Reused from the core crate rather than copied: this generic TCP/process
@@ -677,6 +678,220 @@ fn outbound_detection_publish_is_nonblocking_and_overflow_is_loud() {
         "overflow must flip health to KeepPaceFailed; \
          wrong impl leaves health unchanged — got status={status:?}"
     );
+}
+
+// ── Storeless presence: a degraded start reaches Home Assistant ────────────
+// (cold-review-r4 finding 1) ────────────────────────────────────────────────
+
+fn presence_cfg(
+    broker: &MosquittoFixture,
+    service_id: &str,
+    health: HealthState,
+) -> WiredSubscriberConfig {
+    let config = ServiceConfig {
+        service_name: "Vigil".to_string(),
+        service_id: service_id.to_string(),
+        cameras: vec![CameraConfig {
+            camera_id: "cam-lower-gate".to_string(),
+            camera_label: "lower gate".to_string(),
+        }],
+    };
+    WiredSubscriberConfig {
+        mqtt: broker.mqtt_config(),
+        service_id: service_id.to_string(),
+        client_id: format!("vigil-{service_id}-presence"),
+        availability_topic: format!("vigil/{service_id}/availability"),
+        condition_topic: format!("vigil/{service_id}/running-condition"),
+        discovery_payloads: generate_discovery_payloads(&config),
+        health,
+    }
+}
+
+/// Unfakeable because it drives the SAME public entry point a storeless run
+/// calls instead of `spawn_production_subscriber` (`spawn_site_presence`, no
+/// `SiteControl` handed in at all — structurally nothing to dispatch a
+/// command onto) and observes the real broker traffic: retained discovery
+/// under `homeassistant/#`, retained `online` availability, and the
+/// health-mapped running condition — the three things a degraded start used
+/// to leave unpublished because they lived only in `listen`, never in
+/// `connect` (finding 1).
+#[test]
+fn storeless_presence_publishes_discovery_availability_and_running_condition() {
+    let broker =
+        MosquittoFixture::start().expect("Mosquitto must start for the presence publish test");
+    let service_id = "presence-publish-svc";
+
+    let health = HealthState::new();
+    health.declare_unmanaged("store unreadable: presence publish test");
+    health.set(HealthStatus::RunningUnmanaged, "storeless start");
+
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[
+            "homeassistant/#",
+            &format!("vigil/{service_id}/availability"),
+            &format!("vigil/{service_id}/running-condition"),
+        ],
+        Duration::from_secs(2),
+    )
+    .expect("presence probe must receive SUBACKs");
+
+    let handle = spawn_site_presence(presence_cfg(&broker, service_id, health));
+
+    probe
+        .recv_matching(
+            "a Home Assistant discovery publish from the presence connection",
+            Duration::from_secs(3),
+            |message| message.topic.starts_with("homeassistant/") && !message.payload.is_empty(),
+        )
+        .expect("a storeless start must publish discovery, exactly as a healthy start does");
+    probe
+        .recv_matching(
+            "retained online availability from the presence connection",
+            Duration::from_secs(3),
+            |message| {
+                message.topic == format!("vigil/{service_id}/availability")
+                    && message.payload == b"online"
+            },
+        )
+        .expect(
+            "a storeless start must publish retained `online` availability, not leave every \
+             entity unavailable",
+        );
+    probe
+        .recv_matching(
+            "the running-unmanaged condition from the presence connection",
+            Duration::from_secs(3),
+            |message| {
+                message.topic == format!("vigil/{service_id}/running-condition")
+                    && message.payload == b"running-unmanaged"
+            },
+        )
+        .expect(
+            "the RunningUnmanaged mapping this arc added must actually reach the condition \
+             topic on a storeless start, not sit unreachable",
+        );
+
+    handle.shutdown_and_join();
+}
+
+/// Unfakeable in the same way as `camera_enabled_switch_state_is_retained_and_updates_on_control_commands`
+/// above: a well-formed control command is published to the broker while
+/// the presence connection is the only subscriber that could act on it, and
+/// the camera's retained enabled-state topic — the one observable surface a
+/// dispatched command would touch — never changes. A build that quietly wired
+/// `spawn_site_presence` to the same command handling as
+/// `spawn_production_subscriber` would fail this the moment a real command
+/// landed.
+#[test]
+fn storeless_presence_never_reflects_a_control_command_it_has_no_door_to_serve() {
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for the no-command test");
+    let service_id = "presence-no-command-svc";
+    let state_topic = format!("vigil/{service_id}/cam-lower-gate/enabled");
+
+    let health = HealthState::new();
+    health.declare_unmanaged("store unreadable: no-command test");
+    health.set(HealthStatus::RunningUnmanaged, "storeless start");
+
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[
+            format!("vigil/{service_id}/availability").as_str(),
+            state_topic.as_str(),
+        ],
+        Duration::from_secs(2),
+    )
+    .expect("presence probe must receive SUBACKs");
+
+    let handle = spawn_site_presence(presence_cfg(&broker, service_id, health));
+    probe
+        .recv_matching(
+            "the presence connection online before sending the command",
+            Duration::from_secs(3),
+            |message| {
+                message.topic == format!("vigil/{service_id}/availability")
+                    && message.payload == b"online"
+            },
+        )
+        .expect("presence must be connected before the command is sent");
+
+    probe
+        .publish_qos1(
+            CONTROL_COMMAND_TOPIC,
+            r#"{"service_id":"presence-no-command-svc","camera_id":"cam-lower-gate","action":"disable"}"#,
+        )
+        .expect("publish a control command the presence connection is not subscribed to serve");
+    // A correction command too, on general principle: neither command topic
+    // has a listener behind a presence-only connection.
+    probe
+        .publish_qos1(
+            CORRECTION_COMMAND_TOPIC,
+            r#"{"detection_id":"aabbccdd-1111-2222-3333-444455556666","correction_type":"false_alarm","label":null}"#,
+        )
+        .expect("publish a correction command the presence connection is not subscribed to serve");
+
+    let reflected = probe.recv_matching(
+        "an enabled-state reflection that must never arrive from a presence-only connection",
+        Duration::from_millis(700),
+        |message| message.topic == state_topic,
+    );
+    handle.shutdown_and_join();
+    assert!(
+        reflected.is_err(),
+        "the presence connection dispatched a command it has no SiteControl door to serve: \
+         {reflected:?}"
+    );
+}
+
+/// Unfakeable because it observes the broker's OWN last-will publish, not a
+/// client-side claim: the presence connection is torn down the same way an
+/// unclean process death would (`shutdown_and_join` drops the client without
+/// issuing a DISCONNECT), and only the broker firing the last-will it was
+/// configured with at CONNECT time can make `offline` appear, retained, on
+/// the availability topic afterward.
+#[test]
+fn storeless_presence_carries_a_last_will_that_marks_it_offline_on_unclean_disconnect() {
+    let broker = MosquittoFixture::start().expect("Mosquitto must start for the last-will test");
+    let service_id = "presence-last-will-svc";
+    let availability_topic = format!("vigil/{service_id}/availability");
+
+    let health = HealthState::new();
+    health.declare_unmanaged("store unreadable: last-will test");
+    health.set(HealthStatus::RunningUnmanaged, "storeless start");
+
+    let mut probe = MqttProbe::connect_and_subscribe(
+        &broker.host,
+        broker.port,
+        &[availability_topic.as_str()],
+        Duration::from_secs(2),
+    )
+    .expect("last-will probe must receive SUBACK");
+
+    let handle = spawn_site_presence(presence_cfg(&broker, service_id, health));
+    probe
+        .recv_matching(
+            "retained online availability before the unclean disconnect",
+            Duration::from_secs(3),
+            |message| message.topic == availability_topic && message.payload == b"online",
+        )
+        .expect("presence must announce online before it is torn down");
+
+    // No clean DISCONNECT is sent on this path — the broker sees the TCP
+    // connection drop and fires the last-will it recorded at CONNECT time.
+    handle.shutdown_and_join();
+
+    probe
+        .recv_matching(
+            "the broker's own last-will publish of retained offline availability",
+            Duration::from_secs(5),
+            |message| message.topic == availability_topic && message.payload == b"offline",
+        )
+        .expect(
+            "an unclean death of the presence connection must leave `offline` retained on the \
+             availability topic, so Home Assistant marks this node's entities unavailable",
+        );
 }
 
 // ── GAP 3: motion binary_sensor active feed ───────────────────────────────

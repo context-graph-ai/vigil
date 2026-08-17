@@ -201,6 +201,7 @@ fn hardware_backend_failure_activates_software_fallback_with_visible_reason() {
         &StreamId::new("front-yard"),
         VideoCodec::H264,
         1,
+        0,
         true,
         &sample,
     )
@@ -228,6 +229,7 @@ fn hardware_backend_failure_activates_software_fallback_with_visible_reason() {
         &StreamId::new("front-yard"),
         VideoCodec::H264,
         1,
+        0,
         false,
         &sample,
     )

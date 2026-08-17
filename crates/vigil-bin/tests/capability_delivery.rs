@@ -82,11 +82,16 @@ fn spawn_worker_against_dead_ticket(
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("run")
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--review-port")
+        .arg(review_port.to_string())
+        .arg("--detector-model-path")
+        .arg(model_path)
         .env("VIGIL_DATA_DIR", data_dir)
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", review_port.to_string())
         .env("VIGIL_FABRIC_TICKET", ticket)
-        .env("VIGIL_DETECTOR_MODEL_PATH", model_path)
+        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
+        // env per the settings-authority census (still no flag/config seam).
         .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", 20_000.to_string())
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_HUB")

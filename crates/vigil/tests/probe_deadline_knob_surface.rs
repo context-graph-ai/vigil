@@ -4,21 +4,21 @@ use std::path::{Path, PathBuf};
 const ADDON_CONFIG_PATH: &str = "addons/vigil/config.yaml";
 const ADDON_TRANSLATIONS_PATH: &str = "addons/vigil/translations/en.yaml";
 
-// The two startup-probe deadlines are env vars today (VIGIL_DECODE_PROBE_DEADLINE_SECS
-// in decode_gstreamer.rs, VIGIL_DETECTION_PROBE_DEADLINE_SECS in detection_accel.rs).
-// A Home Assistant user cannot see or set an env var; these must be documented add-on
-// options that the start path exports to those env vars.
+// The two startup-probe deadlines are declared store settings under the
+// settings-authority model (`DECODE_PROBE_DEADLINE_SECS_SETTING` /
+// `DETECTION_PROBE_DEADLINE_SECS_SETTING` in settings_model.rs, resolved
+// through settings_backends.rs like any other behavior value) — a Home
+// Assistant user reaches them as an add-on option, which authors into the
+// store the same way `vigil settings set` or a config-file field would.
+// `*_ENV_VAR` below are no longer a real surface: the old env vars are
+// deleted and reported-as-ignored (settings_environment.rs), kept here only
+// so the help text is asserted to have dropped the now-false promise that it
+// used to make about them.
 const DECODE_OPTION: &str = "decode_probe_deadline_secs";
-const DETECTION_OPTION: &str = "detection_probe_deadline_secs";
 const DECODE_ENV_VAR: &str = "VIGIL_DECODE_PROBE_DEADLINE_SECS";
-const DETECTION_ENV_VAR: &str = "VIGIL_DETECTION_PROBE_DEADLINE_SECS";
-// Effective defaults the shipped source must document: decode stays
-// Duration::from_secs(5) => 5 seconds; the detection default rises to
-// Duration::from_secs(60) => 60 seconds so a real GPU's cold shader compile
-// (measured ~44.5 s) can reach ACTIVE at the default instead of being
-// misclassified as a failed probe.
+// The effective default the shipped source must document: decode gathers real
+// video for Duration::from_secs(5) => 5 seconds before it decides.
 const DECODE_DEFAULT_SECS: &str = "5";
-const DETECTION_DEFAULT_SECS: &str = "60";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -131,26 +131,56 @@ fn read_translations() -> Option<String> {
 }
 
 #[test]
-fn addon_config_declares_both_probe_deadline_knobs_as_optional_integers() {
-    // The probe deadlines must be schema options a Home Assistant user can find,
-    // and optional (absent from the default options block) so leaving them unset
-    // keeps the source default.
+fn addon_config_declares_the_decode_probe_sample_wait_as_an_optional_integer() {
+    // How long a stream session gathers real video before choosing a decode
+    // path is a knob a Home Assistant user can find, and optional (absent from
+    // the default options block) so leaving it unset keeps the source default.
+    //
+    // Detection has no equivalent. Its preparation is decided by its own
+    // outcome, so there is no waiting period for anyone to lengthen and no
+    // knob to offer; `probe_timer_removal.rs` holds that absence.
     let Some(text) = read_config() else {
         return;
     };
 
-    for option in [DECODE_OPTION, DETECTION_OPTION] {
-        assert_eq!(
-            section_scalar(&text, "schema", option).as_deref(),
-            Some("int?"),
-            "{option} must be a schema option declared as an optional integer (int?) so a Home Assistant user can set the probe deadline"
-        );
-        assert_eq!(
-            section_scalar(&text, "options", option),
-            None,
-            "{option} is optional and must not appear in the default options block, so leaving it unset keeps the source default"
-        );
-    }
+    let option = DECODE_OPTION;
+    assert_eq!(
+        section_scalar(&text, "schema", option).as_deref(),
+        Some("int?"),
+        "{option} must be a schema option declared as an optional integer (int?) so a Home Assistant user can set how long a stream gathers real video before choosing a decode path"
+    );
+    assert_eq!(
+        section_scalar(&text, "options", option),
+        None,
+        "{option} is optional and must not appear in the default options block, so leaving it unset keeps the source default"
+    );
+}
+
+#[test]
+fn the_decode_probe_sample_wait_defaults_to_the_documented_number_of_seconds() {
+    // The help beside the option tells an operator what leaving it unset gets
+    // them, and this reads that same number off the setting itself. Without
+    // it, the documented default and the one a deployment actually resolves
+    // are two independent statements, and a person who trusts the first is the
+    // one who finds out they disagree.
+    let (value, reason) = vigil::settings_backends::automatic_default(
+        vigil::settings_model::DECODE_PROBE_DEADLINE_SECS_SETTING,
+    )
+    .expect("vigil owns a default for the decode probe sample wait");
+    assert_eq!(
+        value,
+        vigil::settings_model::SettingValue::Int(
+            DECODE_DEFAULT_SECS
+                .parse::<i64>()
+                .expect("the documented default is a whole number of seconds")
+        ),
+        "the value a deployment resolves with nobody having set this must be the one the add-on \
+         help documents"
+    );
+    assert!(
+        !reason.trim().is_empty(),
+        "a value vigil chooses for itself names why it chose it"
+    );
 }
 
 #[test]
@@ -164,20 +194,6 @@ fn addon_help_documents_decode_probe_deadline_option() {
         DECODE_ENV_VAR,
         DECODE_DEFAULT_SECS,
         "decode",
-    );
-}
-
-#[test]
-fn addon_help_documents_detection_probe_deadline_option() {
-    let Some(text) = read_translations() else {
-        return;
-    };
-    assert_probe_deadline_help(
-        &text,
-        DETECTION_OPTION,
-        DETECTION_ENV_VAR,
-        DETECTION_DEFAULT_SECS,
-        "detection",
     );
 }
 
@@ -222,24 +238,59 @@ fn assert_probe_deadline_help(
         "description must say the probe falls back when the deadline passes: {description}"
     );
 
-    // (c) precedence: the option is written to the env var at add-on start, so it
-    // wins over a manually set env var, and leaving it unset keeps the default.
+    // (c) superseded contract note: this used to require the description name
+    // the env var and claim the option "wins over" a manually set one. Under
+    // the settings-authority direction the env var is deleted and
+    // reported-as-ignored — the option authors straight into the store like
+    // any other setting, so there is no environment variable left to win
+    // against. Surviving content: the option stays discoverable and honest —
+    // no reference to the old env var, no environment-variable-precedence
+    // claim of any kind, and leaving it unset still keeps the default, which
+    // is still true (it's the resolved setting's automatic floor now, not an
+    // export target).
     assert!(
-        description.contains(env_var),
-        "description must name the {env_var} environment variable so a docker or bare-binary user can map the option: {description}"
+        !description.contains(env_var),
+        "description must not name the deleted {env_var} environment variable, which is no longer a real surface: {description}"
     );
     assert!(
-        lower.contains("environment variable") || lower.contains("env var"),
-        "description must state the option is written to the environment variable at add-on start: {description}"
+        !lower.contains("environment variable") && !lower.contains("env var"),
+        "description must not claim environment-variable behavior — the env var is deleted and reported as ignored, not written to at add-on start: {description}"
     );
     assert!(
-        lower.contains("wins") || lower.contains("overrides") || lower.contains("takes precedence"),
-        "description must state the option value wins over a manually set environment variable: {description}"
+        !(lower.contains("wins")
+            || lower.contains("overrides")
+            || lower.contains("takes precedence")),
+        "description must not claim the option wins over or overrides an environment variable that no longer exists: {description}"
     );
     assert!(
         (lower.contains("unset") || lower.contains("not set") || lower.contains("leave it"))
-            && lower.contains("default"),
-        "description must state that leaving the option unset keeps the default: {description}"
+            && (lower.contains("default")
+                || lower.contains("automatic")
+                || lower.contains("vigil's own")),
+        "description must state that leaving the option unset keeps Vigil's own value — the settings-authority model calls this state Automatic, so \"default\" is not the only honest wording: {description}"
+    );
+    // (c1) the description must name the real setting spelling — the same
+    // key `vigil settings set` and the config file both address it by — so a
+    // user reading the option screen and a user reading `vigil settings
+    // list` are looking at the same named thing, not two unrelated surfaces
+    // that happen to agree by coincidence.
+    assert!(
+        description.contains(option),
+        "description must name the real setting spelling ({option}) so the option screen and `vigil settings` agree on what this is called: {description}"
+    );
+
+    // (c2) accuracy about where the setting lives beyond this one option
+    // screen: a Home Assistant user reads this description once, but the
+    // same setting is also reachable through the config file and
+    // `vigil settings`, and staying silent about that would be its own
+    // inaccuracy now that the setting is store-backed rather than
+    // env-exported. Loose phrasing on purpose — the wording is the doc
+    // author's call, this only checks the surfaces are named somewhere.
+    assert!(
+        lower.contains("config file")
+            || lower.contains("vigil settings")
+            || lower.contains("settings command"),
+        "description must name at least one other surface this setting is reachable through (the config file or `vigil settings`), the same way `ignored_behavior_variables`'s message names every surface a behavior setting lives on: {description}"
     );
 
     // (d) no internal planning vocabulary in shipped user help.

@@ -147,9 +147,10 @@ latest detector image can be requested through the snapshot button.
 
 The current detector path is not the final release behavior for busy scenes: it does not yet
 guarantee one event for every above-threshold subject in a segment. Multi-detection, indexed
-duplicate suppression, zones, masks, and explicit detector-class selection are pre-OSS work.
+duplicate suppression, zones, and masks are pre-OSS work; detector-class selection is already
+configurable — see [Configuration](configuration.md#detection-fields).
 
-<!-- vigil-unenforced: classification=implementation-blocker; reason=`Multi-subject events, deduplication, zones, masks, and class control remain incomplete.` -->
+<!-- vigil-unenforced: classification=implementation-blocker; reason=`Multi-subject events, deduplication, zones, and masks remain incomplete.` -->
 
 ## Review what happened
 

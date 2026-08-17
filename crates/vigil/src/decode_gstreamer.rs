@@ -65,16 +65,13 @@ enum ProbeDrainOutcome {
 /// cold hardware decoder's first-frame latency (VA-API/NVDEC init inside a
 /// container, in particular — the documented failure this bound exists to
 /// fix) without hanging startup indefinitely; a box whose decoder needs
-/// even longer can raise it via `VIGIL_DECODE_PROBE_DEADLINE_SECS`. An
-/// unparseable or non-positive value falls back to the default.
+/// even longer sets `decode_probe_deadline_secs` through the ordinary settings
+/// surfaces.
 fn decode_probe_deadline() -> Duration {
-    const DEFAULT: Duration = Duration::from_secs(5);
-    std::env::var("VIGIL_DECODE_PROBE_DEADLINE_SECS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<f64>().ok())
-        .filter(|secs| secs.is_finite() && *secs > 0.0)
-        .map(Duration::from_secs_f64)
-        .unwrap_or(DEFAULT)
+    Duration::from_secs(crate::settings_backends::resolved_secs(
+        crate::settings_model::DECODE_PROBE_DEADLINE_SECS_SETTING,
+        crate::settings_backends::automatic::DECODE_PROBE_DEADLINE_SECS,
+    ))
 }
 
 /// Decoder factories that are known CPU/software implementations. Anything
@@ -200,8 +197,8 @@ impl GstreamerDecodeBackend {
                     "error".to_string(),
                     format!(
                         "no decoded frame within {:.1}s probe window; a slow decoder cold \
-                         start can exceed it - raise VIGIL_DECODE_PROBE_DEADLINE_SECS and \
-                         restart to retry",
+                         start can exceed it - raise the decode_probe_deadline_secs setting \
+                         and restart to retry",
                         deadline.as_secs_f64()
                     ),
                 );

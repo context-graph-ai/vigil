@@ -244,7 +244,12 @@ impl StoreBackedEventsResponse {
     }
 }
 
-pub(crate) fn handle_owner_request(store: &Store, stats: &RuntimeStats, request: &str) -> String {
+pub(crate) fn handle_owner_request(
+    store: &Store,
+    stats: &RuntimeStats,
+    data_dir: &std::path::Path,
+    request: &str,
+) -> String {
     let request = request.trim();
     let mut parts = request.splitn(2, ' ');
     let command = parts.next().unwrap_or_default();
@@ -259,6 +264,10 @@ pub(crate) fn handle_owner_request(store: &Store, stats: &RuntimeStats, request:
             Err(error) => format!("events-error {error}\n"),
         },
         "stats" => format_stats(stats),
+        // The runtime owns the store while it runs, so it is the one that can
+        // answer. It answers through the same projection a stopped deployment
+        // reads directly — one rendering, two ways in.
+        "settings" => crate::settings_command::answer(data_dir, argument),
         "enroll" => {
             // "enroll <detection-id> <name...>" — the same enrollment the card
             // correction drives, via the shared correction seam.
@@ -299,8 +308,54 @@ pub(crate) fn handle_owner_request(store: &Store, stats: &RuntimeStats, request:
         }
         _ => format!("owner-error unknown-command={command}\n"),
     };
-    format!("served-by=af_unix\n{body}")
+    format!("{OWNER_SERVED_PREFIX}{body}")
 }
+
+/// The control-socket answer from a runtime with no store behind it.
+///
+/// It answers everything, because a degraded run that stopped answering would
+/// leave an operator staring at a connection error instead of an explanation.
+/// The settings listing goes through the same command the store-backed path
+/// uses, so the unmanaged statement is rendered once, in one projection;
+/// everything that needs the store comes back as the one degraded refusal
+/// naming the capability it is refusing.
+pub(crate) fn handle_degraded_request(
+    stats: &RuntimeStats,
+    data_dir: &std::path::Path,
+    request: &str,
+) -> String {
+    let request = request.trim();
+    let mut parts = request.splitn(2, ' ');
+    let command = parts.next().unwrap_or_default();
+    let argument = parts.next().unwrap_or_default().trim();
+    let body = match command {
+        "settings" => {
+            let answer = crate::settings_command::answer(data_dir, argument);
+            // A run that degraded for a reason other than the store answers
+            // from a store that opens, so the settings surface works and says
+            // nothing about this run being unmanaged on its own. It says it
+            // here: what landed, and what cannot be in force until the node is
+            // repaired.
+            match crate::settings_degraded::not_in_force_line() {
+                Some(line) => format!("{answer}{line}"),
+                None => answer,
+            }
+        }
+        other => match crate::settings_degraded::capability_for_command(other) {
+            Some(capability) => crate::settings_degraded::refusal_line(capability),
+            // `stats` is the one live read that needs no store: the counters
+            // are this process's own memory, and a degraded run has them.
+            None if other == "stats" => format_stats(stats),
+            None => format!("owner-error unknown-command={other}\n"),
+        },
+    };
+    format!("{OWNER_SERVED_PREFIX}{body}")
+}
+
+/// The marker every answer served by the running runtime's control socket
+/// carries, so a caller can tell an owner-served answer from a direct read
+/// without re-spelling it. Declared here, beside the one place that writes it.
+pub const OWNER_SERVED_PREFIX: &str = "served-by=af_unix\n";
 
 pub(crate) fn handle_why_read(
     store: &Store,

@@ -158,7 +158,7 @@ In a fabric build, explicitly configured nodes can advertise detector capability
 work, and fall back locally if a claimed remote worker dies before returning its result.
 
 <!-- vigil-claim: `vigil.docs-architecture.distributed-detector-work-is-compiled-only-with` -->
-<!-- enforced by: `vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset` -->
+<!-- enforced by: `vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_sane_defaults_and_work_unset` -->
 <!-- enforced by: `vigil::detector_worker::worker_advertises_truthful_backend_claims_materializes_runs_records_once` -->
 <!-- enforced by: `vigil::kill_worker_fallback::worker_death_midlease_falls_back_local_with_named_receipt` -->
 

@@ -1,12 +1,60 @@
 configuration:
+  store_path:
+    description: "Where Vigil's context-graph store lives on disk. A store cannot say where itself is, so this has no packaged default and must be set; the add-on ships it as /data/store.contextgraph."
+  site_name:
+    description: "The site or context name this Vigil node reports events and settings under. Defaults to site-1."
+  health_port:
+    description: "The TCP port Vigil's health endpoint listens on. Defaults to 8099."
+  review_port:
+    description: "The TCP port Vigil's review and media data-plane endpoint listens on. Defaults to 8098."
+  detector_model_id:
+    description: "The model identifier written into detector-config provenance for each detection. Defaults to yolox-tiny-burn-cpu."
+  detector_model_path:
+    description: "An optional local checkpoint path for the object detector to load instead of the bundled weights. Leave unset to use the bundled model."
+  detector_stationary_interval_secs:
+    description: "How often, in seconds, Vigil re-scans an otherwise motion-free scene for a stationary person or object. Defaults to 30; set to 0 to only look on movement."
+  recognition_weights_dir:
+    description: "A local directory of staged SigLIP recognition weights. Recognition is off until this is set; leave unset to keep recognition disabled."
+  recognition_space_id:
+    description: "The embedding-space identifier recognition matches face/object references against. Required only when recognition_weights_dir is set."
+  recognition_threshold:
+    description: "The similarity score a recognition match must clear to be reported. Must be between 0.0 and 1.0; defaults to 0.90."
+  detector_classes:
+    description: "Which object classes the detector looks for, as a loose list of class names (for example person, dog, car). Validated against the bundled detector's compiled class set; defaults to person alone."
+  recognition_covered_classes:
+    description: "Which of the detected classes recognition also attempts to put a name to, as a loose list of class names. Defaults to person and dog when unset. Independent of detector_classes — widening this does not widen what the detector looks for."
+  cameras:
+    description: "The list of cameras this node runs, each with its own name, stream source, and optional per-camera overrides (for example motion_sensitivity)."
+  motion_sensitivity:
+    description: "The deployment-wide motion sensitivity every camera uses unless it sets its own, on a 1-10 scale. Defaults to 5."
+  hardware_probe_deadline_secs:
+    description: "How long the startup hardware-decode probe waits to collect a buffer of real stream units before deciding on whatever it has, so a low-fps camera still gets a backend decision instead of hanging. Defaults to 10 seconds."
+  rtsp_retry_initial_ms:
+    description: "How long, in milliseconds, Vigil waits before the first reconnect attempt after a camera stream drops. Defaults to 2000; doubles on each further attempt up to rtsp_retry_max_ms."
+  rtsp_retry_max_ms:
+    description: "The longest gap, in milliseconds, between reconnect attempts after a camera stream drops. Defaults to 30000."
+  restart_on_reflect:
+    description: "Whether Vigil also triggers a container restart when it mirrors an effective value back onto this options page, so the running container's own copy of the file catches up immediately. Defaults on; turned off, the value is still mirrored here but the container keeps the old value until the next restart."
+  detector_queue_capacity:
+    description: "How many segments the detector's work queue holds before newer work replaces older, for when the machine cannot keep up. Defaults to 1."
+  detector_sample_frames:
+    description: "How many frames Vigil samples per motion-positive segment for detection. Must be between 1 and 64; defaults to 5."
+  detector_confidence_threshold:
+    description: "The minimum detector confidence, from 0.0 to 1.0, a result must clear to be emitted as a detection. Defaults to 0.5."
+  detection_backend:
+    description: "Pin which detection backend runs (for example burn-cpu or burn-wgpu), or leave unset to let Vigil probe and choose automatically. A pin naming a backend this artifact does not carry is refused."
+  decode_backend:
+    description: "Pin which decode backend runs (software or hardware), or leave unset to let Vigil probe and choose automatically. A pin naming a backend this artifact does not carry is refused; pinning hardware still goes through the probe before it is used."
+  fabric_worker_lease_ms:
+    description: "How long, in milliseconds, this node reserves offloaded fabric detector work before treating the lease as expired. Defaults to 300000 (five minutes)."
+  fabric_fallback_horizon_ms:
+    description: "How long, in milliseconds, this node waits for a remote fabric result before falling back to running detection locally. Defaults to 5000."
   hardware_decoding:
     description: "Use the mapped graphics device for hardware video decode. Defaults on; falls back to software decode automatically if no device is mapped or reachable."
   accelerated_detection:
     description: "Defaults on. Accelerates object detection on a usable GPU, and falls back to CPU detection with a receipt naming why when no usable GPU is present."
   decode_probe_deadline_secs:
-    description: "How long the startup hardware decode probe waits for the mapped graphics device before it falls back to software decode. Defaults to 5 seconds. Set this option to write the VIGIL_DECODE_PROBE_DEADLINE_SECS environment variable at add-on start, so it wins over a manually set environment variable; leave it unset to keep the 5 second default."
-  detection_probe_deadline_secs:
-    description: "How long the startup accelerated-detection probe waits for a usable GPU before it falls back to CPU detection. Defaults to 60 seconds, enough for a real GPU's first cold shader compile. Set this option to write the VIGIL_DETECTION_PROBE_DEADLINE_SECS environment variable at add-on start, so it wins over a manually set environment variable; leave it unset to keep the 60 second default."
+    description: "How long the startup hardware decode probe waits for the mapped graphics device before it falls back to software decode. Vigil's own value is 5 seconds; leave this unset to keep it, and the setting reads Automatic. Setting it here records it as the decode_probe_deadline_secs setting, attributed to the add-on options, and it takes effect at the next start; you can also set it in the config file or with `vigil settings set decode_probe_deadline_secs`. A slow decoder cold start that times out says so, and names this setting."
   fabric_ticket:
     description: "Paste the join ticket printed by another Vigil node's status output here to join its distributed compute fabric, so this node can offload detection work to (or accept offloaded work from) that node under queue pressure. Leave blank to run standalone; a malformed ticket is reported with the fix and this node keeps running standalone."
   fabric_hub:

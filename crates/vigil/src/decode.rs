@@ -371,7 +371,81 @@ pub struct DecoderSelection {
 /// Select the decode backend for a stream honoring `hardware_decoding`
 /// intent: false skips hardware probes entirely; true probes and falls back
 /// visibly on any failure or non-hardware classification.
+/// The decode path this node runs when no probe is involved at all — hardware
+/// decoding is off and nobody has pinned the hardware path — or nothing while
+/// the answer still depends on a probe.
+///
+/// With the automation off the operator holds the wheel, so their pin decides
+/// which path is attempted. A pin naming the hardware path still goes through
+/// the probe: hardware is entered off a probe that passes on the machine in
+/// front of you, never off a stored name.
+pub fn settled_decode_backend(hardware_decoding: bool) -> Option<&'static str> {
+    let pinned_hardware = crate::settings_application::pinned_backend(
+        crate::settings_backends::DECODE_BACKEND_SETTING,
+    )
+    .is_some_and(|pin| pin == crate::settings_backends::HARDWARE_DECODE_BACKEND);
+    (!hardware_decoding && !pinned_hardware)
+        .then_some(crate::settings_backends::SOFTWARE_DECODE_BACKEND)
+}
+
+/// Whether the live path must collect real stream units before deciding a
+/// decode backend: the effective intent, not the bare automatic-domain
+/// switch. Automatic hardware decoding being on asks for a real verdict, and
+/// so does an operator turning that domain off and pinning the hardware path
+/// themselves — a pin is entitled to be tested against real camera data, not
+/// refused on an empty sample. This is the single source both the probe gate
+/// and `settled_decode_backend` read, so the two can never disagree: an
+/// answer that settles without a probe is exactly an answer needing no
+/// units.
+pub fn real_probe_units_required(hardware_decoding: bool) -> bool {
+    settled_decode_backend(hardware_decoding).is_none()
+}
+
+/// Select the decode path for one session.
+///
+/// `stream_epoch` and `decode_epoch` are two different identities and are
+/// deliberately not one parameter: the stream epoch says which run of units
+/// this session is assembling, while the decode epoch says which decode answer
+/// the session opened under — the request its outcome is allowed to settle.
 pub fn select_decode_backend(
+    stream_id: &StreamId,
+    codec: VideoCodec,
+    stream_epoch: u64,
+    decode_epoch: u64,
+    hardware_decoding: bool,
+    probe_sample: &[EncodedAccessUnit],
+) -> Result<DecoderSelection, String> {
+    let mut selection = select_decode_path(
+        stream_id,
+        codec,
+        stream_epoch,
+        hardware_decoding,
+        probe_sample,
+    )?;
+    // Which session this answer belongs to. A camera reopened under a decode
+    // path the operator just named selects afresh, and a reverse lands on the
+    // outcome an earlier session already reported — so without this the proof
+    // line for a genuinely new, working session is swallowed as a repeat and
+    // the operator cannot tell their change from nothing happening.
+    selection.receipt.evidence_fields.insert(
+        crate::acceleration::SELECTION_EPOCH_FIELD.to_string(),
+        stream_epoch.to_string(),
+    );
+    // This is where the decode path is decided, so this is where the node
+    // reports which one it is running. A name in the store is a request; what
+    // came out of the selection is the answer — and reporting it is what ends
+    // the transition the operator's command started, so the two are one act.
+    // Reported under the decode answer this session opened with, so a session
+    // that was already opening when the operator's command landed reports
+    // nothing as this node's running path: it is answering an older request.
+    crate::live_backends::settle_decode_selection(
+        decode_epoch,
+        selection.receipt.hardware_accelerated,
+    );
+    Ok(selection)
+}
+
+fn select_decode_path(
     stream_id: &StreamId,
     codec: VideoCodec,
     stream_epoch: u64,
@@ -410,7 +484,7 @@ pub fn select_decode_backend(
         action_payload: None,
     };
 
-    if !hardware_decoding {
+    if settled_decode_backend(hardware_decoding).is_some() {
         // Intent says software: no hardware probe is attempted at all.
         let backend = SoftwareDecodeBackend::new(stream_id.clone(), codec, stream_epoch)?;
         let mut receipt = base_receipt("software");

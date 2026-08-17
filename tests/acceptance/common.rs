@@ -13,6 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use context_graph::{EmbedderConfig, Store, StoreConfig};
 use tempfile::TempDir;
+use vigil::settings_model::{SERVICE_IDENTITY_SETTING, SettingRecord};
+use vigil::settings_store::SettingsStore;
 
 pub(crate) struct VigilBinary {
     path: PathBuf,
@@ -131,7 +133,8 @@ impl VigilProcess {
             .arg("run")
             .arg("--config")
             .arg(config_path)
-            .env("VIGIL_HEALTH_PORT", health_port.to_string())
+            .arg("--health-port")
+            .arg(health_port.to_string())
             .env("HTTP_PROXY", "http://127.0.0.1:9")
             .env("HTTPS_PROXY", "http://127.0.0.1:9")
             .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -425,12 +428,28 @@ impl StoreProbe {
         let metadata = fs::metadata(&self.path).ok()?;
         Some(StoreIdentity {
             path: self.path.clone(),
-            len: metadata.len(),
             #[cfg(unix)]
             dev: metadata.dev(),
             #[cfg(unix)]
             ino: metadata.ino(),
         })
+    }
+
+    /// A content fingerprint that does not depend on the store FILE's byte
+    /// length. redb legitimately reclaims freed pages on a later open: a
+    /// repeated open-and-close with no row added, removed, or edited was
+    /// observed to shrink `store.contextgraph` on disk while every stored
+    /// record read back identical, so file length can no longer stand in
+    /// for "the same content." This reads
+    /// the persisted service-identity setting through vigil's own
+    /// settings-store reader (never re-deriving its table/column shape here)
+    /// and returns every stored record for it, across all three record
+    /// tables, in the reader's own stable sort order — a value that changes
+    /// if and only if a row for this setting was added, removed, or edited.
+    pub(crate) fn service_identity_marker(&self) -> Option<Vec<SettingRecord>> {
+        let data_dir = self.path.parent()?;
+        let store = SettingsStore::open(data_dir).ok()?;
+        store.records(SERVICE_IDENTITY_SETTING).ok()
     }
 
     pub(crate) fn live_lock_held(&self) -> StoreLockProbeResult {
@@ -657,10 +676,15 @@ impl ProcessTreeOwnerProbeResult {
     }
 }
 
+/// The store file's identity — whether the second open reused the same
+/// inode rather than recreating it. Deliberately excludes file length: redb
+/// legitimately reclaims freed pages across opens with zero row change, so
+/// two byte counts differing is not evidence of anything (see
+/// `StoreProbe::service_identity_marker`, which carries the content leg of
+/// this comparison instead).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoreIdentity {
     pub(crate) path: PathBuf,
-    pub(crate) len: u64,
     #[cfg(unix)]
     pub(crate) dev: u64,
     #[cfg(unix)]

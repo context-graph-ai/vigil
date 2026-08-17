@@ -23,7 +23,7 @@ use crate::config;
 use crate::detection_accel::select_detection_acceleration;
 use crate::detector::Detector;
 use crate::ha_camera_registration::{generic_camera_url, register_generic_camera};
-use crate::health::{HealthServer, HealthState, HealthStatus};
+use crate::health::{CameraCondition, HealthServer, HealthState, HealthStatus};
 use crate::live_read;
 use crate::media_pipeline;
 use crate::privilege;
@@ -32,7 +32,6 @@ use crate::shutdown;
 use crate::store;
 use crate::yolox_detector;
 
-const DETECTOR_QUEUE_CAPACITY: usize = 1;
 const DETECTOR_INPUT_WIDTH: u32 = 640;
 const DETECTOR_INPUT_HEIGHT: u32 = 640;
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -48,6 +47,736 @@ pub(crate) fn run(
             ExitCode::from(2)
         }
     }
+}
+
+/// Write what this deployment's input surfaces assert into the settings store,
+/// at its own scope: the file (or add-on options) surface and the startup
+/// options, each authoring its OWN record. Keeping them apart is what stops a
+/// config file from silently reverting a `vigil settings` change at every
+/// restart, and what lets the operator surface name which surface a value came
+/// from.
+///
+/// A failure here is reported and never fatal: the cameras are the point, and a
+/// settings write that could not land is a thing to say out loud rather than a
+/// reason to stop watching.
+fn apply_input_surfaces(config: &crate::config::RuntimeConfig) {
+    apply_surface(config, config.file_surface.as_ref());
+    apply_surface(config, config.startup_surface.as_ref());
+}
+
+fn apply_surface(
+    config: &crate::config::RuntimeConfig,
+    assertions: Option<&crate::config::SurfaceAssertions>,
+) {
+    let Some(assertions) = assertions else {
+        return;
+    };
+    // A present surface that names no setting is not the same thing as no
+    // surface at all. Deleting the last key out of a config file or the add-on
+    // options leaves a file that still speaks and now says nothing — which is
+    // exactly what clears that surface's records, and deleting the last key has
+    // to behave like deleting any other one. Only a surface that cannot clear
+    // by absence (the startup options) has nothing to do when it names nothing.
+    if assertions.entries.is_empty()
+        && assertions.camera_entries.is_empty()
+        && !assertions.surface.clears_by_absence()
+    {
+        return;
+    }
+    let store = match crate::settings_store::SettingsStore::open(&config.data_dir) {
+        Ok(store) => store,
+        Err(error) => {
+            println!(
+                "settings-surface-error surface={:?} {error}",
+                assertions.surface
+            );
+            return;
+        }
+    };
+    let snapshot = crate::settings_store::SurfaceSnapshot {
+        surface: assertions.surface,
+        scope: crate::settings_model::Scope::node(deployment_scope_name(&config.data_dir)),
+        present_and_parsing: true,
+        entries: assertions.entries.clone(),
+        declared_defaults: Vec::new(),
+    };
+    report_surface_outcome(assertions.surface, store.apply_surface_snapshot(&snapshot));
+    // What the same surface says about each camera it lists, authored at that
+    // camera's own scope. A camera that names nothing still gets its pass, so a
+    // value deleted out of one camera's row clears that camera's record and
+    // leaves every other camera — and the deployment-wide value it now inherits
+    // — exactly where they were.
+    // A camera the surface has stopped listing altogether gets the same pass
+    // with nothing to say, so removing a camera's whole row clears what that
+    // row authored rather than leaving a value behind for a camera of that name
+    // to inherit if it ever comes back.
+    let mut camera_passes = assertions.camera_entries.clone();
+    if assertions.surface.clears_by_absence() {
+        match store.camera_scopes_authored_through(assertions.surface) {
+            Ok(cameras) => {
+                for camera in cameras {
+                    if !camera_passes.iter().any(|(named, _)| named == &camera) {
+                        camera_passes.push((camera, Vec::new()));
+                    }
+                }
+            }
+            Err(error) => println!(
+                "settings-surface-error surface={:?} {error}",
+                assertions.surface
+            ),
+        }
+    }
+    for (camera, entries) in &camera_passes {
+        let camera_snapshot = crate::settings_store::SurfaceSnapshot {
+            surface: assertions.surface,
+            scope: crate::settings_model::Scope::camera(camera.clone()),
+            present_and_parsing: true,
+            entries: entries.clone(),
+            declared_defaults: Vec::new(),
+        };
+        report_surface_outcome(
+            assertions.surface,
+            store.apply_camera_surface_snapshot(&camera_snapshot),
+        );
+    }
+}
+
+/// Say out loud what applying one surface snapshot did to the store. A value
+/// the surface names and Vigil cannot take is reported per setting, never
+/// silently dropped, and a store that could not be written is reported once.
+fn report_surface_outcome(
+    surface: crate::settings_model::Surface,
+    outcome: Result<
+        Vec<crate::settings_store::SurfaceChange>,
+        crate::settings_model::SettingsError,
+    >,
+) {
+    match outcome {
+        Ok(changes) => {
+            for change in changes {
+                if let crate::settings_store::SurfaceChange::Refused { setting, error } = change {
+                    println!("settings-refused setting={setting} {error}");
+                }
+            }
+        }
+        Err(error) => println!("settings-surface-error surface={surface:?} {error}"),
+    }
+}
+
+/// Resolve every setting the store governs and put each where the runtime
+/// reads it. Called once at startup, after the input surfaces have authored and
+/// before any camera thread or detector exists, so ONE resolved value reaches
+/// every consumer rather than each deriving its own.
+///
+/// A value is taken from the store when a real author stands behind it — a
+/// person at this deployment, or a management server. Where nothing has been
+/// authored, the setting reads Automatic and the loader's own default stays,
+/// which is the same value Vigil's automatic floor would give: the store is the
+/// authority for what someone CHOSE, and Vigil's own choice is the floor
+/// beneath it either way.
+///
+/// A failure to read the store is reported and never fatal. The cameras are the
+/// point, and a settings read that could not land is a thing to say out loud
+/// rather than a reason to stop watching.
+fn apply_resolved_settings(config: &mut crate::config::RuntimeConfig) {
+    use crate::settings_model::{Author, SettingValue};
+
+    let store = match crate::settings_store::SettingsStore::open(&config.data_dir) {
+        Ok(store) => store,
+        Err(error) => {
+            println!("settings-unresolved {error}");
+            return;
+        }
+    };
+    let name = deployment_scope_name(&config.data_dir);
+    let target = crate::settings_model::ScopeTarget {
+        tenant: name.clone(),
+        site: name.clone(),
+        node: name,
+        camera: None,
+    };
+
+    // The class list is resolved through the construction seam rather than the
+    // raw value: the detector is built from indices, and binding the indices
+    // here is what makes "what the detector emits" and "what the operator
+    // chose" the same fact.
+    match store.detector_class_allowlist(&target) {
+        // An empty resolution is not an instruction to detect nothing: an
+        // explicitly empty list is refused when it is written, so nothing valid
+        // can produce one here, and Vigil's own choice keeps running.
+        Ok(indices) if !indices.is_empty() => config.detector_class_indices = indices,
+        Ok(_) => {}
+        Err(error) => println!("settings-unresolved setting=detector_classes {error}"),
+    }
+
+    let authored = |setting: &str| -> Option<SettingValue> {
+        match store.resolve(setting, &target) {
+            // Automatic means nobody has chosen: the loader's default stands,
+            // and overwriting it here would let the floor outrank a value that
+            // reached this process through a surface that has not authored yet.
+            Ok(effective) if effective.author == Author::Automatic => None,
+            Ok(effective) => Some(effective.requested),
+            Err(error) => {
+                println!("settings-unresolved setting={setting} {error}");
+                None
+            }
+        }
+    };
+
+    if let Some(SettingValue::Int(frames)) =
+        authored(crate::settings_model::DETECTOR_SAMPLE_FRAMES_SETTING)
+        && let Ok(frames) = usize::try_from(frames)
+    {
+        config.detector_sample_frames = frames;
+    }
+    if let Some(SettingValue::Int(interval)) =
+        authored(crate::settings_model::DETECTOR_STATIONARY_INTERVAL_SETTING)
+        && let Ok(interval) = u64::try_from(interval)
+    {
+        config.detector_stationary_interval_secs = interval;
+    }
+    if let Some(SettingValue::Float(threshold)) =
+        authored(crate::settings_model::DETECTOR_CONFIDENCE_THRESHOLD_SETTING)
+    {
+        config.detector_confidence_threshold = threshold;
+    }
+    if let Some(SettingValue::Int(capacity)) =
+        authored(crate::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING)
+        && let Ok(capacity) = usize::try_from(capacity)
+    {
+        config.detector_queue_capacity = capacity;
+    }
+    if let Some(SettingValue::Int(initial)) =
+        authored(crate::settings_model::RTSP_RETRY_INITIAL_MS_SETTING)
+        && let Ok(initial) = u64::try_from(initial)
+    {
+        config.rtsp_retry_initial_ms = initial;
+    }
+    if let Some(SettingValue::Int(widest)) =
+        authored(crate::settings_model::RTSP_RETRY_MAX_MS_SETTING)
+        && let Ok(widest) = u64::try_from(widest)
+    {
+        config.rtsp_retry_max_ms = widest;
+    }
+    if let Some(SettingValue::Float(threshold)) =
+        authored(crate::settings_model::RECOGNITION_THRESHOLD_SETTING)
+    {
+        config.recognition.match_threshold = threshold;
+    }
+    if let Some(SettingValue::Bool(allowed)) =
+        authored(crate::settings_model::FABRIC_ALLOW_FRAME_OFFLOAD_SETTING)
+    {
+        config.fabric_allow_frame_offload = allowed;
+    }
+    // The three fabric values. Bring-up is spawned after this resolution
+    // precisely so they can be resolved here: fabric attaches off the
+    // readiness-critical path, so its configuration is taken once the store has
+    // answered and an operator has nothing to wait for.
+    if let Some(SettingValue::Bool(hub)) = authored(crate::settings_model::FABRIC_HUB_SETTING) {
+        config.fabric_hub = hub;
+    }
+    if let Some(SettingValue::Int(lease)) =
+        authored(crate::settings_model::FABRIC_WORKER_LEASE_MS_SETTING)
+        && let Ok(lease) = u64::try_from(lease)
+    {
+        config.fabric_worker_lease_ms = lease;
+    }
+    if let Some(SettingValue::Int(horizon)) =
+        authored(crate::settings_model::FABRIC_FALLBACK_HORIZON_MS_SETTING)
+        && let Ok(horizon) = u64::try_from(horizon)
+    {
+        config.fabric_fallback_horizon_ms = horizon;
+    }
+    if let Some(SettingValue::Text(model)) =
+        authored(crate::settings_model::DETECTOR_MODEL_ID_SETTING)
+    {
+        config.detector_model_id = model;
+    }
+    // The two domain switches are ordinary settings, resolved like any other.
+    if let Some(SettingValue::Bool(on)) =
+        authored(crate::settings_domains::HARDWARE_DECODING_DOMAIN)
+    {
+        config.hardware_decoding = on;
+    }
+    if let Some(SettingValue::Bool(on)) =
+        authored(crate::settings_domains::ACCELERATED_DETECTION_DOMAIN)
+    {
+        config.accelerated_detection = on;
+    }
+
+    // The deployment's own names. Both reach real consumers already — every
+    // event this node reports carries them — but they reached them through the
+    // loader, which merges the command line, the environment and the options
+    // file BEFORE this store is open. Resolving them here is what makes a name
+    // an operator sets the name the machine uses.
+    if let Some(SettingValue::Text(name)) = authored(crate::settings_model::SITE_NAME_SETTING)
+        && !name.is_empty()
+    {
+        config.site_name = name;
+    }
+    let stored_camera_name = match authored(crate::settings_model::CAMERA_NAME_SETTING) {
+        Some(SettingValue::Text(name)) if !name.is_empty() => Some(name),
+        _ => None,
+    };
+    if let Some(name) = stored_camera_name.as_ref() {
+        config.camera_name = name.clone();
+    }
+    // The two camera endpoints. Which camera this node watches, and which
+    // stream a person is shown, are values an operator sets — so the store
+    // outranks the file for them exactly as it does for everything else. They
+    // are carried to the camera set below rather than assigned here, because
+    // the camera entries are what a camera thread is actually built from.
+    let stored_camera = StoredCameraIdentity {
+        name: stored_camera_name,
+        analysis: match authored(crate::settings_model::RTSP_URL_SETTING) {
+            Some(SettingValue::Text(endpoint)) if !endpoint.is_empty() => Some(endpoint),
+            _ => None,
+        },
+        live: match authored(crate::settings_model::LIVE_RTSP_URL_SETTING) {
+            Some(SettingValue::Text(endpoint)) if !endpoint.is_empty() => Some(endpoint),
+            _ => None,
+        },
+    };
+    if let Some(SettingValue::Text(path)) =
+        authored(crate::settings_model::DETECTOR_MODEL_PATH_SETTING)
+        && !path.is_empty()
+    {
+        config.detector_model_path = Some(std::path::PathBuf::from(path));
+    }
+    // Which classes recognition covers. It never widens or narrows the
+    // detector's own class list; it decides which of the classes vigil already
+    // detects get a name put to them.
+    match authored(crate::settings_model::RECOGNITION_COVERED_CLASSES_SETTING) {
+        Some(SettingValue::List(classes)) if !classes.is_empty() => {
+            config.recognition.covered_classes = classes;
+        }
+        Some(SettingValue::Text(class)) if !class.is_empty() => {
+            config.recognition.covered_classes = vec![class];
+        }
+        _ => {}
+    }
+    // The motion sensitivity the gate runs at. It is read from what this
+    // process has in force on every decoded segment, so it is brought into
+    // force here rather than copied onto a configuration nothing reads.
+    let motion_sensitivity = match authored(crate::settings_model::MOTION_SENSITIVITY_SETTING) {
+        Some(SettingValue::Int(sensitivity)) => sensitivity,
+        _ => crate::settings_application::AUTOMATIC_MOTION_SENSITIVITY,
+    };
+    crate::settings_application::bring_into_force(
+        crate::settings_model::MOTION_SENSITIVITY_SETTING,
+        SettingValue::Int(motion_sensitivity),
+    );
+    // The operator's backend pins, published for the selection seams that run
+    // deep in the decode and detection paths where no configuration is
+    // threaded. A pin is what the store says; what runs is what the selection
+    // makes of it, and the selection is what reports the running backend.
+    for setting in [
+        crate::settings_backends::DETECTION_BACKEND_SETTING,
+        crate::settings_backends::DECODE_BACKEND_SETTING,
+    ] {
+        let pin = match authored(setting) {
+            Some(SettingValue::Text(backend)) if !backend.is_empty() => Some(backend),
+            _ => None,
+        };
+        crate::settings_application::publish_pinned_backend(setting, pin);
+    }
+    // Where the answer no longer depends on a probe — the automation is off and
+    // nobody pinned a path a probe has to open — what this node runs is settled
+    // the moment the store has answered, and a node that has settled it says so
+    // rather than leaving the operator's surface blank until a camera happens
+    // to connect. The same rule the selection applies, asked once here.
+    if let Some(backend) =
+        crate::detection_accel::settled_detection_backend(config.accelerated_detection)
+    {
+        crate::settings_application::bring_into_force(
+            crate::settings_backends::DETECTION_BACKEND_SETTING,
+            SettingValue::text(backend),
+        );
+    }
+    if let Some(backend) = crate::decode::settled_decode_backend(config.hardware_decoding) {
+        crate::settings_application::bring_into_force(
+            crate::settings_backends::DECODE_BACKEND_SETTING,
+            SettingValue::text(backend),
+        );
+    }
+
+    // What this process actually applied, recorded as it applies it, so the
+    // operator surface can answer requested and running side by side without
+    // either standing in for the other.
+    crate::settings_projection::record_running(
+        crate::settings_model::DETECTOR_SAMPLE_FRAMES_SETTING,
+        SettingValue::Int(config.detector_sample_frames as i64),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::DETECTOR_STATIONARY_INTERVAL_SETTING,
+        SettingValue::Int(config.detector_stationary_interval_secs as i64),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::DETECTOR_CONFIDENCE_THRESHOLD_SETTING,
+        SettingValue::Float(config.detector_confidence_threshold),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING,
+        SettingValue::Int(config.detector_queue_capacity as i64),
+    );
+    // The one environment lever over a behavior setting is published in the
+    // same startup act as every other running value, before the control
+    // listener binds. It used to be recorded where the queue is built — on a
+    // camera thread, after detector construction — so the operator surface
+    // could answer `running=` with the pin and no attribution at all for as
+    // long as that thread took to arrive, and forever on a node with no
+    // cameras. What runs is a property of the process, not of any camera.
+    if let Some(levered_capacity) = detector_queue_capacity_lever() {
+        let pinned = crate::settings_application::detector_queue_capacity_in_force(
+            config.detector_queue_capacity,
+        );
+        crate::settings_projection::record_running_from_environment(
+            crate::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING,
+            DETECTOR_QUEUE_CAPACITY_VARIABLE,
+            SettingValue::Int(levered_capacity as i64),
+            (pinned != levered_capacity).then_some(SettingValue::Int(pinned as i64)),
+        );
+        if pinned != levered_capacity {
+            println!(
+                "detector_queue_capacity_environment_override=true \
+                 variable={DETECTOR_QUEUE_CAPACITY_VARIABLE} running={levered_capacity} \
+                 shadowed_setting={pinned}"
+            );
+        }
+    }
+    crate::settings_projection::record_running(
+        crate::settings_model::RTSP_RETRY_INITIAL_MS_SETTING,
+        SettingValue::Int(config.rtsp_retry_initial_ms as i64),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::RTSP_RETRY_MAX_MS_SETTING,
+        SettingValue::Int(config.rtsp_retry_max_ms as i64),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::RECOGNITION_THRESHOLD_SETTING,
+        SettingValue::Float(config.recognition.match_threshold),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::FABRIC_ALLOW_FRAME_OFFLOAD_SETTING,
+        SettingValue::Bool(config.fabric_allow_frame_offload),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::FABRIC_HUB_SETTING,
+        SettingValue::Bool(config.fabric_hub),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::FABRIC_WORKER_LEASE_MS_SETTING,
+        SettingValue::Int(config.fabric_worker_lease_ms as i64),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::FABRIC_FALLBACK_HORIZON_MS_SETTING,
+        SettingValue::Int(config.fabric_fallback_horizon_ms as i64),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_model::DETECTOR_MODEL_ID_SETTING,
+        SettingValue::text(config.detector_model_id.clone()),
+    );
+    // The decode deadlines are consumed deep in the decode path, where no
+    // configuration is threaded — they are read back from what this process
+    // recorded here, so one resolution reaches every site rather than each site
+    // resolving its own.
+    for (setting, automatic) in [
+        (
+            crate::settings_model::DECODE_PROBE_DEADLINE_SECS_SETTING,
+            crate::settings_backends::automatic::DECODE_PROBE_DEADLINE_SECS,
+        ),
+        (
+            crate::settings_model::HARDWARE_PROBE_DEADLINE_SECS_SETTING,
+            crate::settings_backends::automatic::HARDWARE_PROBE_DEADLINE_SECS,
+        ),
+    ] {
+        let seconds = match authored(setting) {
+            Some(SettingValue::Int(secs)) => secs,
+            Some(SettingValue::Float(secs)) if secs.is_finite() && secs > 0.0 => secs as i64,
+            _ => automatic,
+        };
+        crate::settings_projection::record_running(setting, SettingValue::Int(seconds.max(1)));
+    }
+    crate::settings_projection::record_running(
+        crate::settings_domains::HARDWARE_DECODING_DOMAIN,
+        SettingValue::Bool(config.hardware_decoding),
+    );
+    crate::settings_projection::record_running(
+        crate::settings_domains::ACCELERATED_DETECTION_DOMAIN,
+        SettingValue::Bool(config.accelerated_detection),
+    );
+    // The camera set this run watches, derived from the values just resolved,
+    // and the detection model every detector this run builds loads from.
+    adopt_resolved_camera_set(config, &stored_camera);
+    // Each of those cameras' own motion sensitivity, put where that camera's
+    // gate reads it. A camera with no value of its own runs what it inherits.
+    let watched: Vec<String> = config
+        .cameras
+        .iter()
+        .map(|camera| camera.name.clone())
+        .collect();
+    crate::settings_application::adopt_camera_scoped_settings(&store, &target, &watched);
+    adopt_resolved_detector_model(config);
+    // The classes recognition puts a name to, where recognition reads them.
+    crate::settings_application::bring_into_force(
+        crate::settings_model::RECOGNITION_COVERED_CLASSES_SETTING,
+        SettingValue::list(config.recognition.covered_classes.clone()),
+    );
+    crate::settings_application::bring_into_force(
+        crate::settings_model::SITE_NAME_SETTING,
+        SettingValue::text(config.site_name.clone()),
+    );
+    // The values the NEXT start has to read before it can open this store, put
+    // where that start can read them. The store stays the truth; this is what
+    // it last resolved.
+    crate::settings_cache::refresh(&store, &config.data_dir, &target);
+}
+
+/// What the store authored for the single-camera shape, carried from resolution
+/// to the camera set that is built out of it. Each field is present only when a
+/// real author stands behind it, so a deployment that named its cameras in a
+/// list keeps the names it gave them.
+struct StoredCameraIdentity {
+    name: Option<String>,
+    analysis: Option<String>,
+    live: Option<String>,
+}
+
+/// Put the resolved camera identity onto the camera this run brings up, and
+/// report what it is watching.
+///
+/// The camera name and the two endpoints are the single-camera shape — "the
+/// first camera's name", "the first camera's stream" — so a stored value lands
+/// on the first camera entry, which is what a camera thread is built from. The
+/// endpoints are answered for as a SOURCE and never as a value: their spelling
+/// carries the camera's credentials.
+fn adopt_resolved_camera_set(
+    config: &mut crate::config::RuntimeConfig,
+    stored: &StoredCameraIdentity,
+) {
+    use crate::settings_model::SettingValue;
+
+    if let Some(endpoint) = stored.analysis.as_ref() {
+        config.rtsp_url = Some(endpoint.clone());
+    }
+    if let Some(first) = config.cameras.first_mut() {
+        if let Some(name) = stored.name.as_ref() {
+            first.name = name.clone();
+        }
+        // Only onto a camera that is reached over a stream: naming an endpoint
+        // on a USB or CSI camera would give it two sources, which is refused
+        // when a camera is loaded and would be no better here.
+        if first.rtsp_url.is_some() {
+            if let Some(endpoint) = stored.analysis.as_ref() {
+                first.rtsp_url = Some(endpoint.clone());
+            }
+            if let Some(endpoint) = stored.live.as_ref() {
+                first.live_rtsp_url = Some(endpoint.clone());
+            }
+        }
+    }
+    let live_endpoint = config
+        .cameras
+        .first()
+        .and_then(|camera| camera.live_rtsp_url.clone())
+        .or_else(|| stored.live.clone());
+    crate::settings_application::bring_into_force(
+        crate::settings_model::CAMERA_NAME_SETTING,
+        SettingValue::text(config.camera_name.clone()),
+    );
+    crate::settings_application::bring_into_force(
+        crate::settings_model::RTSP_URL_SETTING,
+        SettingValue::text(endpoint_source(
+            stored.analysis.is_some(),
+            config.rtsp_url.is_some(),
+        )),
+    );
+    crate::settings_application::bring_into_force(
+        crate::settings_model::LIVE_RTSP_URL_SETTING,
+        SettingValue::text(endpoint_source(
+            stored.live.is_some(),
+            live_endpoint.is_some(),
+        )),
+    );
+}
+
+/// Where the endpoint this run took on came from — a stored record somebody
+/// authored, this run's own configuration, or nowhere at all.
+fn endpoint_source(from_store: bool, present: bool) -> &'static str {
+    if from_store {
+        crate::settings_projection::SOURCE_STORED
+    } else if present {
+        crate::settings_projection::SOURCE_CONFIGURED
+    } else {
+        crate::settings_projection::ABSENT
+    }
+}
+
+/// Register the resolved detection model where every detector this run builds
+/// loads it from, replacing the registration made before the store was open.
+fn adopt_resolved_detector_model(config: &crate::config::RuntimeConfig) {
+    crate::detection_accel::register_detector_model_path(config.detector_model_path.clone());
+    crate::detection_accel::register_detector_class_indices(&config.detector_class_indices);
+    crate::settings_application::bring_into_force(
+        crate::settings_model::DETECTOR_MODEL_PATH_SETTING,
+        crate::settings_model::SettingValue::text(
+            config
+                .detector_model_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        ),
+    );
+}
+
+/// Build a detector under a named backend, from the model file and class list
+/// this camera resolved.
+///
+/// One builder, two callers: the late acceleration probe promoting a running
+/// detector, and an operator naming a backend while the node runs. Both load
+/// through the same `yolox_detector` path initial construction uses, so a
+/// replaced detector can never be built from a different model or a different
+/// class list than the one it replaced.
+fn detector_build_for(
+    model_path: Option<std::path::PathBuf>,
+    class_indices: Vec<usize>,
+) -> impl Fn(&str) -> Result<Box<dyn crate::detector::Detector>, String> + Send + Sync + 'static {
+    move |backend: &str| {
+        if backend == crate::detection_accel::ACCELERATED_DETECTION_BACKEND {
+            #[cfg(feature = "detect-burn-wgpu")]
+            {
+                return yolox_detector::load_accelerated_detector_with_classes(
+                    model_path.as_deref(),
+                    &class_indices,
+                )
+                .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>);
+            }
+            #[cfg(not(feature = "detect-burn-wgpu"))]
+            {
+                // Said as what it is rather than quietly loaded on the
+                // processor: an operator who named a backend this artifact does
+                // not carry is owed the refusal, not a different detector.
+                return Err(format!("this artifact carries no {backend} detector"));
+            }
+        }
+        yolox_detector::load_cpu_detector_with_classes(model_path.as_deref(), &class_indices)
+            .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
+    }
+}
+
+/// Where a detection selection receipt lands so every operator surface reads
+/// the same account of which detector is running.
+///
+/// One sink, two callers, for the same reason the builder above has two: a
+/// backend that moved after startup — late probe or operator pin — has to reach
+/// `vigil stats` and the worker provenance, or those surfaces keep naming the
+/// detector this run happened to construct first.
+fn detection_receipt_sink(
+    stats: RuntimeStatsState,
+) -> impl Fn(&crate::acceleration::AccelerationReceipt) + Send + Sync + 'static {
+    move |receipt: &crate::acceleration::AccelerationReceipt| {
+        stats.update(|stats| {
+            stats.active_detector_backend = receipt.active_backend.clone();
+            stats.detection_acceleration = format!(
+                "{}{}",
+                receipt.probe_status.as_str(),
+                match receipt.failure_code {
+                    crate::acceleration::FailureCode::None => String::new(),
+                    code => format!(":{}", code.as_str()),
+                }
+            );
+            stats.detection_receipt_block = crate::acceleration::render_receipt_block(receipt);
+        });
+    }
+}
+
+/// What the review surface is actually answering on, recorded once it is
+/// serving. A port this process never bound has nothing to report as running.
+fn record_running_review_port(port: u16) {
+    crate::settings_projection::record_running(
+        crate::settings_model::REVIEW_PORT_SETTING,
+        crate::settings_model::SettingValue::Int(i64::from(port)),
+    );
+}
+
+/// Start fabric bring-up, on its own thread, with the configuration this run
+/// resolved.
+///
+/// Fabric attaches ASYNCHRONOUSLY, off the readiness-critical path. Opening the
+/// fabric ledger (Database::open) can take minutes on a large ledger, and a node
+/// with a camera must serve NVR duty (store + camera + detector + /health ready)
+/// without waiting for it — otherwise the Supervisor watchdog kills a slow boot
+/// and reloops. So the NVR pipeline comes up first and /health reports ready
+/// before fabric is done; the fabric wiring (offload seam, worker loop,
+/// result-consumer, status task) lands in the SAME state the old synchronous
+/// path produced, just later, published through the shared slot. Every
+/// downstream consumer already tolerates absent fabric (fabric is optional
+/// config), so reads of an unattached slot behave exactly like an unenrolled
+/// node.
+///
+/// Being off that path is also what lets the three fabric values be ordinary
+/// store settings: nothing here runs until the store has answered, so the
+/// snapshot this bring-up carries is the resolved one.
+#[cfg(feature = "fabric")]
+fn spawn_fabric_bring_up(
+    config: &crate::config::RuntimeConfig,
+    stats: &RuntimeStatsState,
+    accel: &Arc<crate::acceleration::AccelerationState>,
+    fabric_slot: &Arc<std::sync::OnceLock<Arc<FabricBundle>>>,
+    worker_detector_candidate: &Arc<
+        std::sync::OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
+    >,
+) {
+    if config.fabric_ticket.is_none() && !config.fabric_hub {
+        return;
+    }
+    // Honest transient status until the async attach completes: every
+    // operator surface (stats/doctor/health) reads this persisted line, so
+    // it must say "starting" rather than look like an unenrolled node or a
+    // healthy enrolled one. The async status task overwrites it with the
+    // real enrolled/hub line once attached.
+    stats.update(|stats| {
+        stats.fabric_status = "fabric-status=starting fabric=starting \
+             reason=fabric-bringup-in-progress remote-detectors=- in-use=false \
+             fabric-worker-serving=false"
+            .to_string();
+    });
+    println!("boot_phase=fabric-bringup-start");
+    let bringup_config = config.clone();
+    let bringup_stats = stats.clone();
+    let bringup_accel = accel.clone();
+    let bringup_slot = fabric_slot.clone();
+    let bringup_candidate = worker_detector_candidate.clone();
+    thread::spawn(move || {
+        let started = Instant::now();
+        match fabric_bring_up(
+            &bringup_config,
+            &bringup_stats,
+            &bringup_accel,
+            bringup_candidate,
+        ) {
+            Some(bundle) => {
+                let _ = bringup_slot.set(bundle);
+                println!(
+                    "boot_phase=fabric-bringup-done elapsed_ms={} attached=true",
+                    started.elapsed().as_millis()
+                );
+            }
+            None => {
+                println!(
+                    "boot_phase=fabric-bringup-done elapsed_ms={} attached=false",
+                    started.elapsed().as_millis()
+                );
+            }
+        }
+    });
+}
+
+/// The scope name this deployment records at. The operator surface resolves at
+/// the same name, so a value written here is a value `vigil settings` reads
+/// back rather than one resolved at a subtly different node.
+fn deployment_scope_name(data_dir: &std::path::Path) -> String {
+    crate::node_key::scope_name(data_dir)
 }
 
 pub(crate) fn run_detector_probe(args: Vec<OsString>) -> ExitCode {
@@ -69,30 +798,34 @@ fn run_inner(
     site_channel: &dyn crate::site_channel::SiteChannelFactory,
 ) -> Result<(), String> {
     let boot_started = Instant::now();
-    let config = config::load(args)?;
+    // Mutable for exactly one reason: once the store opens, the detection class
+    // list is resolved from it and replaces the automatic default the loader
+    // carried in. The store is the source of truth for that setting, and the
+    // configuration is where every detector construction site reads it.
+    let mut config = config::load(args)?;
+    // What the store last resolved for the values consumed before it opens.
+    // Anything a surface named on this start already stands; this only fills
+    // the gap where nothing was said, and the store replaces it below.
+    crate::settings_cache::apply_cached_startup_values(&mut config);
     validate_compiled_capability_requests(config.fabric_ticket.is_some(), config.fabric_hub)?;
     privilege::prepare_runtime_user(&config.store_path)?;
+    // This process runs the cameras, so a value it resolves is a value in force
+    // and a change it is handed applies to a live machine.
+    crate::settings_application::mark_running_process();
     let mut shutdown = shutdown::install()?;
     let shutdown_flag = shutdown.flag();
     let health = HealthState::new();
     let accel = Arc::new(crate::acceleration::AccelerationState::new());
+    // Where a preparation's progress lands beside the moment it began, so the
+    // receipt an operator reads carries both while a cold build is going on.
+    crate::live_backends::attend_acceleration_state(&accel);
     let stage_receipts = Arc::new(crate::workgraph::StageReceiptLog::new(64));
     // Registered once, before any camera thread starts: the production
     // detection probe (constructed with no path parameter, mirroring the
     // decode seam's host-facts-free shape) reads the same checkpoint the
     // live per-camera detector loads through this slot.
     crate::detection_accel::register_detector_model_path(config.detector_model_path.clone());
-    // Persist the wgpu/Vulkan shader cache under the data root once, before any
-    // camera-thread detection probe compiles shaders, so a first boot's cold
-    // compile survives restarts instead of being re-paid every start.
-    #[cfg(feature = "detect-burn-wgpu")]
-    if let Err(error) = crate::detection_accel::configure_persistent_shader_cache(&config.data_dir)
-    {
-        println!(
-            "shader_cache_setup_failed=true path={} error={error}",
-            config.data_dir.display()
-        );
-    }
+    crate::detection_accel::register_detector_class_indices(&config.detector_class_indices);
     // Created before the health server binds so `/health` can render the
     // same fabric-status/fabric-join lines `vigil stats`/`vigil doctor` do
     // (criterion C7).
@@ -114,30 +847,13 @@ fn run_inner(
         Some(crate::runtime_stats::HealthFabricStatus::from_state(&stats)),
         camera_health_entries,
     )?;
-    // A crash between staging write and cleanup strands files; staging is
-    // ephemeral by definition, so sweep it every boot.
-    let staging_dir = config.data_dir.join("staging");
-    if staging_dir.exists()
-        && let Err(error) = fs::remove_dir_all(&staging_dir)
-    {
-        println!(
-            "staging_sweep_failed=true path={} error={error}",
-            staging_dir.display()
-        );
-    }
-
-    // Fabric attaches ASYNCHRONOUSLY, off the readiness-critical path. Opening
-    // the fabric ledger (Database::open) can take minutes on a large ledger, and
-    // a node with a camera must serve NVR duty (store + camera + detector +
-    // /health ready) without waiting for it — otherwise the Supervisor watchdog
-    // kills a slow boot and reloops. So the NVR pipeline comes up first and
-    // /health reports ready before fabric is done; the fabric wiring (offload
-    // seam, worker loop, result-consumer, status task) lands in the SAME state
-    // the old synchronous path produced, just later, published through this
-    // shared slot. Every downstream consumer already tolerates absent fabric
-    // (fabric is optional config), so reads of an unattached slot behave exactly
-    // like an unenrolled node.
-    //
+    // What this process is actually serving the liveness surface on, which is
+    // what the operator surface reports as running beside the value the store
+    // holds — a value stored while this run is up is pending, never effective.
+    crate::settings_projection::record_running(
+        crate::settings_model::HEALTH_PORT_SETTING,
+        crate::settings_model::SettingValue::Int(i64::from(server.port())),
+    );
     // `worker_detector_candidate` is created HERE, before both the cameras and
     // the fabric bring-up, and shared with both: a camera's detector may load
     // before fabric finishes attaching, so it publishes its detector into this
@@ -151,49 +867,6 @@ fn run_inner(
     let worker_detector_candidate: Arc<
         std::sync::OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
     > = Arc::new(std::sync::OnceLock::new());
-    #[cfg(feature = "fabric")]
-    if config.fabric_ticket.is_some() || config.fabric_hub {
-        // Honest transient status until the async attach completes: every
-        // operator surface (stats/doctor/health) reads this persisted line, so
-        // it must say "starting" rather than look like an unenrolled node or a
-        // healthy enrolled one. The async status task overwrites it with the
-        // real enrolled/hub line once attached.
-        stats.update(|stats| {
-            stats.fabric_status = "fabric-status=starting fabric=starting \
-                 reason=fabric-bringup-in-progress remote-detectors=- in-use=false \
-                 fabric-worker-serving=false"
-                .to_string();
-        });
-        println!("boot_phase=fabric-bringup-start");
-        let bringup_config = config.clone();
-        let bringup_stats = stats.clone();
-        let bringup_accel = accel.clone();
-        let bringup_slot = fabric_slot.clone();
-        let bringup_candidate = worker_detector_candidate.clone();
-        thread::spawn(move || {
-            let started = Instant::now();
-            match fabric_bring_up(
-                &bringup_config,
-                &bringup_stats,
-                &bringup_accel,
-                bringup_candidate,
-            ) {
-                Some(bundle) => {
-                    let _ = bringup_slot.set(bundle);
-                    println!(
-                        "boot_phase=fabric-bringup-done elapsed_ms={} attached=true",
-                        started.elapsed().as_millis()
-                    );
-                }
-                None => {
-                    println!(
-                        "boot_phase=fabric-bringup-done elapsed_ms={} attached=false",
-                        started.elapsed().as_millis()
-                    );
-                }
-            }
-        });
-    }
 
     log_startup(&config);
 
@@ -201,7 +874,12 @@ fn run_inner(
     let mut camera_handles: Vec<JoinHandle<()>> = Vec::new();
     let mut command_listener: Option<Box<dyn crate::site_channel::CommandListener>> = None;
     let mut detection_publisher: Option<Arc<dyn crate::site_channel::DetectionChannel>> = None;
+    let mut site_presence: Option<Box<dyn crate::site_channel::SitePresence>> = None;
     let mut review_server = None;
+    // Set when the run has no store behind it and keeps watching anyway,
+    // carrying WHY: an unreadable store and a component that failed to load
+    // are different faults with different repairs, and the surfaces say which.
+    let mut unmanaged_start: Option<(crate::settings_degraded::DegradedCause, String)> = None;
     println!(
         "boot_phase=store-open-start path={}",
         config.store_path.display()
@@ -215,16 +893,65 @@ fn run_inner(
             );
             if embedder.is_some() {
                 println!("{}", recognition_enabled_startup_line(&config.recognition));
+                // The store is open WITH this embedder, so these two are in
+                // force for as long as this run lasts: what the operator
+                // surface reports as running, beside whatever the store holds.
+                if let Some(weights_dir) = config.recognition.weights_dir.as_ref() {
+                    crate::settings_projection::record_running(
+                        crate::settings_model::RECOGNITION_WEIGHTS_DIR_SETTING,
+                        crate::settings_model::SettingValue::text(
+                            weights_dir.display().to_string(),
+                        ),
+                    );
+                }
+                crate::settings_projection::record_running(
+                    crate::settings_model::RECOGNITION_SPACE_ID_SETTING,
+                    crate::settings_model::SettingValue::text(
+                        config.recognition.embedding_space_id.clone(),
+                    ),
+                );
             }
             Some((store, embedder))
         }
-        Err(error) => {
+        Err(failure) => {
+            let detail = failure.detail();
             println!(
-                "store open error path={} error={}",
+                "store open error path={} error={detail}",
                 config.store_path.display(),
-                error
             );
-            health.set(HealthStatus::StoreOpenFailed, "store open failed");
+            match failure {
+                // The store was never reached: a component the runtime loads
+                // first is what failed. The property is still watched, and the
+                // operator is sent to the thing that actually broke rather than
+                // to a store that is perfectly fine.
+                store::StartupOpenFailure::Component { component, detail } => {
+                    println!("component_load_failed=true component={component} error={detail}");
+                    unmanaged_start = Some((
+                        crate::settings_degraded::DegradedCause::ComponentUnavailable {
+                            component: component.to_string(),
+                        },
+                        detail,
+                    ));
+                }
+                store::StartupOpenFailure::Store(detail)
+                    if crate::is_database_locked_error(&detail) =>
+                {
+                    // Another runtime owns this data directory. Two runtimes on
+                    // one store is not a configuration problem, and degrading
+                    // over it would put a second writer behind the first one's
+                    // back.
+                    health.set(HealthStatus::StoreOpenFailed, "store open failed");
+                }
+                store::StartupOpenFailure::Store(detail) => {
+                    // The store exists and cannot be read. A camera system going
+                    // blind because a settings database is unreadable is the worse
+                    // outcome, so this run keeps watching and says so.
+                    unmanaged_start = Some((
+                        crate::settings_degraded::DegradedCause::StoreUnreadable,
+                        detail,
+                    ));
+                }
+            }
             None
         }
     };
@@ -239,6 +966,72 @@ fn run_inner(
             println!("{state} path={}", store.path.display());
             println!("store opened path={}", store.path.display());
             println!("{}", store.trace);
+            // This run has a store behind it, so its counters are worth
+            // recording and the data directory is Vigil's to write in. Both
+            // stay untouched until here: a run that turns out to have no store
+            // must never leave a trace that makes it look recorded.
+            stats.begin_persisting();
+            // A crash between staging write and cleanup strands files; staging
+            // is ephemeral by definition, so sweep it every boot.
+            let staging_dir = config.data_dir.join("staging");
+            if staging_dir.exists()
+                && let Err(error) = fs::remove_dir_all(&staging_dir)
+            {
+                println!(
+                    "staging_sweep_failed=true path={} error={error}",
+                    staging_dir.display()
+                );
+            }
+            // Persist the wgpu/Vulkan shader cache under the data root once,
+            // before any camera-thread detection probe compiles shaders, so a
+            // first boot's cold compile survives restarts instead of being
+            // re-paid every start.
+            #[cfg(feature = "detect-burn-wgpu")]
+            if let Err(error) =
+                crate::detection_accel::configure_persistent_shader_cache(&config.data_dir)
+            {
+                println!(
+                    "shader_cache_setup_failed=true path={} error={error}",
+                    config.data_dir.display()
+                );
+            }
+            // Step three of the startup path: the surfaces write what they
+            // assert into the store, as records naming the surface they came
+            // from, and the runtime then resolves from the store. A surface
+            // authors only when what it says now differs from what it last
+            // said, so an unchanged file re-asserts nothing and re-wins
+            // nothing at every boot.
+            apply_input_surfaces(&config);
+            // Step four: resolve every setting the store governs — what the
+            // cameras look for, how hard they look, and the two automatic
+            // management switches — before any detector or camera thread
+            // exists, so what runs is what the store says rather than what a
+            // merge produced.
+            apply_resolved_settings(&mut config);
+            // Step four and a half: this node's identity, resolved from its
+            // persisted record before anything announces it — the site
+            // announcement below, the outbound channel, and the operator
+            // surface all name the same value.
+            resolve_service_identity(&mut config, true);
+            log_resolved_startup(&config);
+            // The store may have named a fabric role this artifact does not
+            // carry, and the check that refuses one ran before the store could
+            // answer. It runs again on the resolved value, and it stays loud:
+            // coming up as if a role had been taken would be the quiet failure
+            // the check exists to prevent.
+            validate_compiled_capability_requests(
+                config.fabric_ticket.is_some(),
+                config.fabric_hub,
+            )?;
+            // Step five: fabric bring-up, which reads the values just resolved.
+            #[cfg(feature = "fabric")]
+            spawn_fabric_bring_up(
+                &config,
+                &stats,
+                &accel,
+                &fabric_slot,
+                &worker_detector_candidate,
+            );
             println!("runtime loop ready");
             if config.cameras.is_empty() {
                 // A legitimate worker/discovery deployment with zero cameras
@@ -255,9 +1048,14 @@ fn run_inner(
             }
             let owner_store = store.handle.clone();
             let owner_stats = stats.clone();
+            // The deployment directory travels with the handler because the
+            // settings answer is about the deployment, not about the memory
+            // graph: opening a second store inside the handler would re-derive
+            // what this process already holds.
+            let owner_data_dir = config.data_dir.clone();
             let read_handler: context_graph::ControlHandler = Arc::new(move |request: String| {
                 let stats = owner_stats.snapshot();
-                live_read::handle_owner_request(&owner_store, &stats, &request)
+                live_read::handle_owner_request(&owner_store, &stats, &owner_data_dir, &request)
             });
             let control_socket_path = crate::control_socket::control_socket_path(&config.data_dir);
             control =
@@ -269,6 +1067,7 @@ fn run_inner(
             ) {
                 Ok(handle) => {
                     println!("review_data_plane_started=true port={}", config.review_port);
+                    record_running_review_port(config.review_port);
                     review_server = Some(handle);
                 }
                 Err(error) => {
@@ -324,7 +1123,7 @@ fn run_inner(
                     let handle = start_rtsp_probe(
                         url.clone(),
                         cam_config,
-                        store.handle.clone(),
+                        Some(store.handle.clone()),
                         stats.clone(),
                         health.clone(),
                         shutdown_flag.clone(),
@@ -418,7 +1217,193 @@ fn run_inner(
             );
             Some(store.handle)
         }
-        None => None,
+        // This run has no store behind it. Everything that needs one is
+        // unavailable and says so; everything that does not need one keeps
+        // running, because someone watching a property still has to see what is
+        // happening and still has to be told about it. Nothing here writes —
+        // not a stats snapshot, not a Home Assistant camera registration, not
+        // the persisted service identity — so an unmanaged run can never later
+        // be mistaken for a recorded one.
+        None => {
+            if let Some((cause, error)) = unmanaged_start.clone() {
+                // Declared before anything states it, so every surface names
+                // the fault that actually happened rather than the one the
+                // storeless seam was first written for.
+                crate::settings_degraded::declare_cause(cause.clone());
+                let statement = crate::settings_degraded::unmanaged_statement();
+                println!(
+                    "{} {statement}",
+                    crate::settings_projection::UNMANAGED_LINE_PREFIX
+                );
+                let health_detail = match &cause {
+                    crate::settings_degraded::DegradedCause::StoreUnreadable => {
+                        println!(
+                            "store_unreadable=true path={} error={error}",
+                            config.store_path.display()
+                        );
+                        "store unreadable: live view, detection and alerting are running unmanaged"
+                    }
+                    crate::settings_degraded::DegradedCause::ComponentUnavailable { .. } => {
+                        println!(
+                            "store_unreadable=false component_unavailable=true path={} \
+                             error={error}",
+                            config.store_path.display()
+                        );
+                        "a component failed to load, so no store was opened: live view, \
+                         detection and alerting are running unmanaged"
+                    }
+                };
+                // Declared before the status is set, so the first `/health`
+                // answer that reports this run already carries the statement.
+                health.declare_unmanaged(statement);
+                health.set(HealthStatus::RunningUnmanaged, health_detail);
+                // A run with no store behind it still says what it came up on:
+                // there is nothing to resolve from, so these are the values its
+                // own surfaces carried in — including an identity derived for
+                // this run only and written nowhere.
+                resolve_service_identity(&mut config, false);
+                log_resolved_startup(&config);
+
+                // Fabric brings up on the values this run resolved from its
+                // surfaces: there is no store to resolve them from, and a node
+                // that can still reach its fabric is one more capability the
+                // degraded path keeps rather than loses.
+                #[cfg(feature = "fabric")]
+                spawn_fabric_bring_up(
+                    &config,
+                    &stats,
+                    &accel,
+                    &fabric_slot,
+                    &worker_detector_candidate,
+                );
+
+                // The operator surface answers over the same control socket it
+                // always does — that is where the unmanaged statement is read,
+                // so it is the last thing a degraded run may lose.
+                let handler_stats = stats.clone();
+                let handler_data_dir = degraded_control_data_dir(&config);
+                let read_handler: context_graph::ControlHandler =
+                    Arc::new(move |request: String| {
+                        let stats = handler_stats.snapshot();
+                        live_read::handle_degraded_request(&stats, &handler_data_dir, &request)
+                    });
+                let control_socket_path =
+                    crate::control_socket::control_socket_path(&config.data_dir);
+                control = start_control_listener(
+                    &control_socket_path,
+                    shutdown_flag.clone(),
+                    read_handler,
+                );
+
+                // The review surfaces answer too, and what they answer is why
+                // they cannot serve what was asked for. A port refusing
+                // connections would leave an operator with a transport error
+                // instead of the cause.
+                match crate::http_data_plane::spawn_degraded_review_plane(config.review_port) {
+                    Ok(handle) => {
+                        println!(
+                            "review_data_plane_started=true port={} unmanaged=true",
+                            config.review_port
+                        );
+                        record_running_review_port(config.review_port);
+                        review_server = Some(handle);
+                    }
+                    Err(error) => {
+                        println!(
+                            "review_data_plane_start_failed=true port={} error={error}",
+                            config.review_port
+                        );
+                    }
+                }
+
+                // Alerting: the outbound detection channel is connected before
+                // any camera thread starts, exactly as it is on the
+                // store-backed path, so a detection made in the first seconds
+                // still reaches Home Assistant.
+                if let Some(ref endpoint) = config.mqtt {
+                    detection_publisher =
+                        site_channel.connect(endpoint, &config.service_id, health.clone());
+                }
+                // No owner-command listener: the commands it carries are
+                // corrections, and corrections are exactly what this run
+                // cannot record.
+
+                for camera in &config.cameras {
+                    let cam_id = camera_slug(&camera.name);
+                    let disable_marker = config.data_dir.join("camera-disabled").join(&cam_id);
+                    let is_disabled = disable_marker.exists();
+                    let enabled = Arc::new(AtomicBool::new(!is_disabled));
+                    if is_disabled {
+                        println!("camera_disabled_at_startup camera={cam_id}");
+                    }
+                    if let Some(url) = &camera.rtsp_url {
+                        let mut cam_config = config.clone();
+                        cam_config.camera_name = camera.name.clone();
+                        cam_config.rtsp_url = Some(url.clone());
+                        cam_config.rtsp_username = camera.username.clone();
+                        cam_config.rtsp_password = camera.password.clone();
+                        let handle = start_rtsp_probe(
+                            url.clone(),
+                            cam_config,
+                            // No store: detections are published best-effort
+                            // and nothing is recorded.
+                            None,
+                            stats.clone(),
+                            health.clone(),
+                            shutdown_flag.clone(),
+                            Arc::clone(&enabled),
+                            detection_publisher.clone(),
+                            // Recognition matches against the site library,
+                            // which lives in the store.
+                            None,
+                            accel.clone(),
+                            stage_receipts.clone(),
+                            #[cfg(feature = "fabric")]
+                            fabric_slot.clone(),
+                            #[cfg(feature = "fabric")]
+                            worker_detector_candidate.clone(),
+                        );
+                        camera_handles.push(handle);
+                    }
+                    // No Home Assistant generic-camera registration here: it
+                    // writes a file that outlives the run, and what this run
+                    // leaves behind is exactly nothing. This run does put
+                    // files under the data directory while it lives — its
+                    // control socket, and capture segments it writes and
+                    // deletes as it goes — but it never adds to, or creates,
+                    // the store data a healthy run would have persisted.
+                }
+
+                // Presence: the same entities, the same availability, the same
+                // running condition and the same last will a healthy run
+                // announces — announced here too, because the person watching
+                // the property is the reason this run kept going, and an
+                // integration that never heard of this node shows them nothing.
+                // What is NOT brought up is the owner-command listener: the
+                // commands it carries are corrections, and corrections are
+                // exactly what this run cannot record.
+                if let Some(ref endpoint) = config.mqtt {
+                    let site = crate::site_channel::SiteAnnouncement {
+                        service_name: config.site_name.clone(),
+                        service_id: config.service_id.clone(),
+                        cameras: config
+                            .cameras
+                            .iter()
+                            .map(|camera| crate::site_channel::CameraAnnouncement {
+                                id: camera_slug(&camera.name),
+                                label: camera.name.clone(),
+                            })
+                            .collect(),
+                    };
+                    site_presence = site_channel.announce(endpoint, site, health.clone());
+                }
+                println!(
+                    "boot_phase=pipeline-up elapsed_ms={} unmanaged=true",
+                    boot_started.elapsed().as_millis()
+                );
+            }
+            None
+        }
     };
 
     shutdown.wait();
@@ -434,6 +1419,12 @@ fn run_inner(
     if let Some(listener) = command_listener {
         listener.shutdown_and_join();
         println!("mqtt_subscriber_stopped=true");
+    }
+    // The presence connection stands where the listener does on a store-backed
+    // run, and comes down in the same place for the same reason.
+    if let Some(presence) = site_presence {
+        presence.shutdown_and_join();
+        println!("mqtt_presence_stopped=true");
     }
     // Camera handles exit first so their detection-channel senders are all dropped.
     for handle in camera_handles {
@@ -479,12 +1470,6 @@ fn log_startup(config: &config::RuntimeConfig) {
     println!("store_path={}", display(&config.store_path));
     println!("health_port={}", config.health_port);
     println!("review_port={}", config.review_port);
-    if let Some(rtsp_url) = config.rtsp_url.as_ref() {
-        println!("rtsp_url={}", media_pipeline::redact_rtsp_url(rtsp_url));
-    }
-    println!("site_name={}", config.site_name);
-    println!("service_id={}", config.service_id);
-    println!("camera_name={}", config.camera_name);
     println!("detector_model_id={}", config.detector_model_id);
     println!(
         "detector_confidence_threshold={}",
@@ -495,9 +1480,6 @@ fn log_startup(config: &config::RuntimeConfig) {
         "detector_stationary_interval_secs={}",
         config.detector_stationary_interval_secs
     );
-    if let Some(model_path) = config.detector_model_path.as_ref() {
-        println!("detector_model_path={}", display(model_path));
-    }
     if let Some(mqtt) = config.mqtt.as_ref() {
         println!("mqtt_host={}", mqtt.host);
         println!("mqtt_port={}", mqtt.port);
@@ -507,6 +1489,132 @@ fn log_startup(config: &config::RuntimeConfig) {
         );
     } else {
         println!("mqtt=disabled");
+    }
+}
+
+/// Put this node's persisted service identity into the configuration every
+/// consumer reads it from, before anything announces it.
+///
+/// The identity names the Home Assistant device and the messaging topics, so
+/// it is derived ONCE — at the first start that has a store to persist it into
+/// — and read back from that record on every later start. A site rename after
+/// that changes a display name and nothing else. Where the deployment supplied
+/// an identifier itself, that value seeds the first start; it does not move an
+/// identity that has already named a device, because moving one is its own
+/// deliberate operation and this is not it.
+///
+/// A store that cannot answer leaves the run with an identity derived for this
+/// run only, which is what the storeless path uses and says so.
+fn resolve_service_identity(config: &mut config::RuntimeConfig, store_backed: bool) {
+    let configured = config.service_id.clone();
+    let resolved = if !store_backed {
+        Err(None)
+    } else if configured.is_empty() {
+        crate::service_identity::resolve_persisted(&config.store_path, &config.site_name)
+            .map_err(|error| Some(error.to_string()))
+    } else {
+        crate::service_identity::resolve_persisted_configured(&config.store_path, &configured)
+            .map_err(|error| Some(error.to_string()))
+    };
+    let identity = match resolved {
+        Ok(identity) => identity,
+        Err(error) => {
+            if let Some(error) = error {
+                println!("service_identity_unresolved={error}");
+            }
+            resolve_ephemeral_identity(config)
+        }
+    };
+    if !configured.is_empty() && identity.value != configured {
+        // Said out loud rather than applied silently: the deployment asked for
+        // one identifier and this node already answers to another one it
+        // persisted earlier, which only the deliberate change operation moves.
+        println!(
+            "service_identity_configured_ignored={configured} in_force={}",
+            identity.value
+        );
+    }
+    // Two lines, because each carries one whole value: an operator grepping
+    // for the identifier this node announces must read it without having to
+    // cut a longer line apart.
+    println!("service_id={}", identity.value);
+    println!(
+        "service_identity_derivation={}",
+        crate::settings_projection::derivation_token(&identity.derivation)
+    );
+    // One resolution, read by every later surface in this process: the operator
+    // surface answers with the identity this run is announcing rather than
+    // working the question out again from the deployment directory's name.
+    crate::service_identity::record_in_force(&identity);
+    config.service_id = identity.value;
+}
+
+/// The deployment directory a run with no store behind it answers from.
+///
+/// Derived from the configured store path's parent, exactly as the
+/// store-backed path derives it from the opened store's own location: an
+/// operator-overridden `--store-path` need not live under `data_dir`, and a
+/// degraded run that answered from `data_dir` instead would resolve a settings
+/// change against a place no store lives — creating a fresh, healthy store
+/// there and writing into it, which is precisely the write an unmanaged run
+/// must never make.
+fn degraded_control_data_dir(config: &config::RuntimeConfig) -> PathBuf {
+    config
+        .store_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config.data_dir.clone())
+}
+
+/// The identity a run with no store behind it uses: derived for this run only
+/// and written nowhere, so an unmanaged run can never be mistaken for a
+/// recorded one.
+fn resolve_ephemeral_identity(
+    config: &config::RuntimeConfig,
+) -> crate::service_identity::ServiceIdentity {
+    if config.service_id.is_empty() {
+        crate::service_identity::resolve_ephemeral(&config.site_name)
+    } else {
+        crate::service_identity::ServiceIdentity {
+            value: config.service_id.clone(),
+            // The deployment named this node. Nothing persisted it, because
+            // there is no store to persist it into — but it was stated, not
+            // worked out, and the surface says which of the two happened.
+            derivation: crate::service_identity::IdentityDerivation::ConfiguredNotYetPersisted,
+        }
+    }
+}
+
+/// Which camera streams this run came up on, announced once the store has
+/// answered.
+///
+/// They are announced HERE rather than beside the ports because they are not
+/// settled until the store has been resolved: a line printed before that says
+/// what the configuration file asked for, which is exactly the value a stored
+/// record outranks. Printing it early would have this run name a camera it does
+/// not bring up.
+///
+/// The endpoints and the model file are what this names, and the deployment's
+/// names are not: an operator reads a name off `vigil settings`, with who set
+/// it and what is running beside it, while the two endpoints are answered for
+/// there as a SOURCE — their spelling carries the camera's credentials — so the
+/// redacted line here is the only place a person can see which stream this run
+/// actually opened.
+fn log_resolved_startup(config: &config::RuntimeConfig) {
+    if let Some(rtsp_url) = config.rtsp_url.as_ref() {
+        println!("rtsp_url={}", media_pipeline::redact_rtsp_url(rtsp_url));
+    }
+    if let Some(camera) = config.cameras.first()
+        && let Some(live_rtsp_url) = camera.live_rtsp_url.as_ref()
+    {
+        println!(
+            "live_rtsp_url={}",
+            media_pipeline::redact_rtsp_url(live_rtsp_url)
+        );
+    }
+    if let Some(model_path) = config.detector_model_path.as_ref() {
+        println!("detector_model_path={}", display(model_path));
     }
 }
 
@@ -547,12 +1655,24 @@ fn display(path: &Path) -> String {
 /// logged loudly and returns `None`; the caller then renders a named
 /// `fabric-worker-serving=false reason=no-model` line with the staging fix,
 /// never a silent no-op and never a panic.
+/// What the detector a node runs distributed work on is called, where a
+/// camera's handle is called by the camera's own name.
+#[cfg(feature = "fabric")]
+const WORKER_DETECTOR_HANDLE: &str = "distributed-work";
+
 #[cfg(feature = "fabric")]
 pub(crate) fn bootstrap_worker_detector(
     config: &config::RuntimeConfig,
     accel: &Arc<crate::acceleration::AccelerationState>,
     stats: &RuntimeStatsState,
 ) -> Option<(Arc<crate::detector::PromotableDetector>, String)> {
+    // The fabric bring-up took its snapshot of the configuration before the
+    // store opened, so this path resolves the class list itself rather than
+    // building a worker detector that looks for something narrower than the
+    // cameras on the same node do.
+    let mut resolved = config.clone();
+    apply_resolved_settings(&mut resolved);
+    let config = &resolved;
     let selection = crate::detection_accel::select_detection_acceleration(
         config.accelerated_detection,
         &config.detector_model_id,
@@ -562,43 +1682,34 @@ pub(crate) fn bootstrap_worker_detector(
     let active_backend_tag = receipt.active_backend.clone();
     let accelerated_selected =
         selection.backend == crate::detection_accel::ACCELERATED_DETECTION_BACKEND;
+    // One input decides which classes this detector emits: the resolved class
+    // setting, carried on the configuration. Recognition is not consulted here
+    // and has no branch — that coupling is what made a widened class list
+    // detect nothing.
     let detector_load: Result<Box<dyn crate::detector::Detector>, String> = if accelerated_selected
     {
         #[cfg(feature = "detect-burn-wgpu")]
         {
-            if config.recognition.enabled {
-                yolox_detector::load_accelerated_detector_with_classes(
-                    config.detector_model_path.as_deref(),
-                    &crate::recognition::covered_class_indices(&config.recognition),
-                )
-                .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-            } else {
-                yolox_detector::load_accelerated_detector(config.detector_model_path.as_deref())
-                    .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-            }
+            yolox_detector::load_accelerated_detector_with_classes(
+                config.detector_model_path.as_deref(),
+                &config.detector_class_indices,
+            )
+            .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
         }
         #[cfg(not(feature = "detect-burn-wgpu"))]
         {
-            if config.recognition.enabled {
-                yolox_detector::load_cpu_detector_with_classes(
-                    config.detector_model_path.as_deref(),
-                    &crate::recognition::covered_class_indices(&config.recognition),
-                )
-                .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-            } else {
-                yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
-                    .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-            }
+            yolox_detector::load_cpu_detector_with_classes(
+                config.detector_model_path.as_deref(),
+                &config.detector_class_indices,
+            )
+            .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
         }
-    } else if config.recognition.enabled {
+    } else {
         yolox_detector::load_cpu_detector_with_classes(
             config.detector_model_path.as_deref(),
-            &crate::recognition::covered_class_indices(&config.recognition),
+            &config.detector_class_indices,
         )
         .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-    } else {
-        yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
-            .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
     };
 
     match detector_load {
@@ -621,10 +1732,27 @@ pub(crate) fn bootstrap_worker_detector(
                 stats.detection_receipt_block = crate::acceleration::render_receipt_block(&receipt);
             });
             accel.record(receipt);
-            Some((
-                Arc::new(crate::detector::PromotableDetector::new(detector)),
-                active_backend_tag,
-            ))
+            let handle = Arc::new(crate::detector::PromotableDetector::new(detector));
+            // The detector this node runs distributed work on is registered
+            // like any other, so a backend move reaches it. On a node that
+            // watches cameras this work runs on the camera detectors, and the
+            // coordinator keeps no second handle for it — which is what stops
+            // a camera node preparing a second model for work already done.
+            crate::live_backends::register_work_detector(
+                &handle,
+                crate::detection_transition::HandleKind::DistributedWork,
+                crate::live_backends::DetectorRebuild {
+                    camera: WORKER_DETECTOR_HANDLE.to_string(),
+                    model_id: config.detector_model_id.clone(),
+                    accelerated_detection: config.accelerated_detection,
+                    build: Arc::new(detector_build_for(
+                        config.detector_model_path.clone(),
+                        config.detector_class_indices.clone(),
+                    )),
+                    receipt: Arc::new(detection_receipt_sink(stats.clone())),
+                },
+            );
+            Some((handle, active_backend_tag))
         }
         Err(error) => {
             // Loud, named, non-fatal: no executable capability, so this node
@@ -644,7 +1772,9 @@ pub(crate) fn bootstrap_worker_detector(
 pub fn start_rtsp_probe(
     rtsp_url: String,
     config: config::RuntimeConfig,
-    store: Store,
+    // `None` when this run has no store behind it: the camera is watched and
+    // its detections are published best-effort, and nothing is recorded.
+    store: Option<Store>,
     stats: RuntimeStatsState,
     health: HealthState,
     shutdown: Arc<AtomicBool>,
@@ -668,6 +1798,7 @@ pub fn start_rtsp_probe(
         // /health keeps saying Ready: catch it, latch ingest-failed, log.
         let panic_health = health.clone();
         let panic_stats = stats.clone();
+        let panic_camera = config.camera_name.clone();
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             // Wait until enabled (respects startup disable marker).
             while !shutdown.load(Ordering::SeqCst) && !enabled.load(Ordering::SeqCst) {
@@ -692,6 +1823,7 @@ pub fn start_rtsp_probe(
                         mark_health_condition(&mut stats.health, "ingest_failed");
                     });
                     health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
+                    health.set_camera(&config.camera_name, CameraCondition::IngestFailed);
                     return;
                 }
             };
@@ -704,9 +1836,13 @@ pub fn start_rtsp_probe(
             println!("rtsp probe starting url={rtsp_log_url}");
             // The detector sits behind the engine-neutral trait: the pipeline sees
             // `dyn Detector`, the engine lives in the implementation.
-            // Person-only by default (baseline NVR, first-light contract); widen to
-            // the covered COCO classes when recognition is on, so dog/vehicle
-            // sightings reach the match path.
+            // Person-only by default (baseline NVR, first-light contract), and
+            // it stays that way until an operator says otherwise: what the
+            // detector looks for comes from the detection class setting alone.
+            // Turning recognition on, or widening what it covers, neither
+            // widens nor narrows detection — the two are separate choices a
+            // person makes, and one field serving both would mean widening
+            // either silently widened the other.
             // Capture must not report Ready while no detector is running:
             // load failure and detector-thread panic clear this flag, and
             // the per-segment health refresh consults it.
@@ -717,43 +1853,18 @@ pub fn start_rtsp_probe(
             // always means an accelerated detector actually runs, and any
             // fallback selection always means the CPU detector runs, even
             // with the accel feature compiled in.
-            // Live promotion: a deferred handle the (late-fired) promote closure
-            // swaps once the worker's detector is built below. The closure loads
-            // the accelerated detector through the SAME load path used at initial
-            // construction and swaps the live handle, so a cold compile that
-            // finishes after the startup deadline upgrades the running detector
-            // without a restart. The paired stats sink writes the same late
-            // receipt to RuntimeStats so `vigil stats` and the worker provenance
-            // agree with /health on every late outcome.
-            #[cfg(feature = "detect-burn-wgpu")]
-            let promotable_slot: Arc<
-                std::sync::OnceLock<Arc<crate::detector::PromotableDetector>>,
-            > = Arc::new(std::sync::OnceLock::new());
+            // Live promotion: the startup preparation moves every registered
+            // detector itself, through the one transition machinery an operator
+            // command goes through — one physical build per camera, through the
+            // seam that camera registered, and the instance the preparation
+            // forward-tested is the instance installed. This closure loads
+            // nothing and installs nothing: it is this camera's account of a
+            // move that has already landed. The paired stats sink writes the
+            // same late receipt to RuntimeStats so `vigil stats` and the worker
+            // provenance agree with /health on every late outcome.
             #[cfg(feature = "detect-burn-wgpu")]
             let selection = {
-                let slot = Arc::clone(&promotable_slot);
-                let promote_model_path = config.detector_model_path.clone();
-                let promote_recognition = config.recognition.clone();
                 let promote = move || -> Result<(), String> {
-                    let accelerated: Box<dyn crate::detector::Detector> = if promote_recognition
-                        .enabled
-                    {
-                        yolox_detector::load_accelerated_detector_with_classes(
-                            promote_model_path.as_deref(),
-                            &crate::recognition::covered_class_indices(&promote_recognition),
-                        )
-                        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)?
-                    } else {
-                        yolox_detector::load_accelerated_detector(promote_model_path.as_deref())
-                            .map(|detector| {
-                                Box::new(detector) as Box<dyn crate::detector::Detector>
-                            })?
-                    };
-                    let handle = slot.get().ok_or_else(|| {
-                        "promotable detector handle not initialised before late promotion"
-                            .to_string()
-                    })?;
-                    handle.promote(accelerated);
                     println!(
                         "detection_promoted_live backend={}",
                         crate::detection_accel::ACCELERATED_DETECTION_BACKEND
@@ -765,22 +1876,7 @@ pub fn start_rtsp_probe(
                 // write below, so `vigil stats` and the per-detection worker
                 // provenance read stop claiming burn-cpu after a real promotion
                 // (and stay honest CPU on a failed one).
-                let stats_for_late = stats.clone();
-                let on_late_receipt = move |receipt: &crate::acceleration::AccelerationReceipt| {
-                    stats_for_late.update(|stats| {
-                        stats.active_detector_backend = receipt.active_backend.clone();
-                        stats.detection_acceleration = format!(
-                            "{}{}",
-                            receipt.probe_status.as_str(),
-                            match receipt.failure_code {
-                                crate::acceleration::FailureCode::None => String::new(),
-                                code => format!(":{}", code.as_str()),
-                            }
-                        );
-                        stats.detection_receipt_block =
-                            crate::acceleration::render_receipt_block(receipt);
-                    });
-                };
+                let on_late_receipt = detection_receipt_sink(stats.clone());
                 crate::detection_accel::spawn_detection_probe_with_promotion(
                     config.accelerated_detection,
                     &config.detector_model_id,
@@ -803,56 +1899,38 @@ pub fn start_rtsp_probe(
             let receipt = selection.receipt;
             let accelerated_selected =
                 selection.backend == crate::detection_accel::ACCELERATED_DETECTION_BACKEND;
+            // The class allowlist comes from the resolved setting on the
+            // configuration, whichever backend runs. Recognition has no branch
+            // here: which classes Vigil looks for is one setting an operator
+            // owns, and a detector built from recognition's covered classes is
+            // the coupling that made a widened class list detect nothing.
             let detector_load: Result<Box<dyn crate::detector::Detector>, String> =
                 if accelerated_selected {
                     #[cfg(feature = "detect-burn-wgpu")]
                     {
-                        if config.recognition.enabled {
-                            yolox_detector::load_accelerated_detector_with_classes(
-                                config.detector_model_path.as_deref(),
-                                &crate::recognition::covered_class_indices(&config.recognition),
-                            )
-                            .map(|detector| {
-                                Box::new(detector) as Box<dyn crate::detector::Detector>
-                            })
-                        } else {
-                            yolox_detector::load_accelerated_detector(
-                                config.detector_model_path.as_deref(),
-                            )
-                            .map(|detector| {
-                                Box::new(detector) as Box<dyn crate::detector::Detector>
-                            })
-                        }
+                        yolox_detector::load_accelerated_detector_with_classes(
+                            config.detector_model_path.as_deref(),
+                            &config.detector_class_indices,
+                        )
+                        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
                     }
                     #[cfg(not(feature = "detect-burn-wgpu"))]
                     {
                         // The selection cannot report accelerated without the
                         // feature compiled in; unreachable in practice, but
                         // stays on the honest CPU path if it somehow did.
-                        if config.recognition.enabled {
-                            yolox_detector::load_cpu_detector_with_classes(
-                                config.detector_model_path.as_deref(),
-                                &crate::recognition::covered_class_indices(&config.recognition),
-                            )
-                            .map(|detector| {
-                                Box::new(detector) as Box<dyn crate::detector::Detector>
-                            })
-                        } else {
-                            yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
-                                .map(|detector| {
-                                    Box::new(detector) as Box<dyn crate::detector::Detector>
-                                })
-                        }
+                        yolox_detector::load_cpu_detector_with_classes(
+                            config.detector_model_path.as_deref(),
+                            &config.detector_class_indices,
+                        )
+                        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
                     }
-                } else if config.recognition.enabled {
+                } else {
                     yolox_detector::load_cpu_detector_with_classes(
                         config.detector_model_path.as_deref(),
-                        &crate::recognition::covered_class_indices(&config.recognition),
+                        &config.detector_class_indices,
                     )
                     .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-                } else {
-                    yolox_detector::load_cpu_detector(config.detector_model_path.as_deref())
-                        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
                 };
             #[cfg(feature = "fabric")]
             let active_backend_tag = receipt.active_backend.clone();
@@ -899,18 +1977,41 @@ pub fn start_rtsp_probe(
                         mark_health_condition(&mut stats.health, "ingest_failed");
                     });
                     health.set(HealthStatus::IngestFailed, "detector model load failed");
+                    // The detector is this camera's: without one, this camera
+                    // is watching nothing, whatever the others are doing.
+                    health.set_camera(&config.camera_name, CameraCondition::IngestFailed);
                     None
                 }
             };
             // Wrap the worker's detector in the swappable handle so a late
-            // acceleration probe can promote it live; register it with the
-            // deferred slot the promote closure reads. The late recorder only
-            // fires after the startup deadline (>= 60 s), long after this set.
+            // acceleration probe can promote it live. Registration is the only
+            // way that promotion reaches this camera, and it is what closes the
+            // window a deferred slot left open: a preparation that finishes
+            // before this line runs finds no handle to move, and the
+            // registration below is what asks for that move again — so nothing
+            // depends on the probe finishing after this point.
             let detector: Option<Arc<crate::detector::PromotableDetector>> =
                 detector.map(|detector| {
                     let handle = Arc::new(crate::detector::PromotableDetector::new(detector));
-                    #[cfg(feature = "detect-burn-wgpu")]
-                    let _ = promotable_slot.set(Arc::clone(&handle));
+                    // The same handle, registered where a live backend change
+                    // can reach it. An operator who takes the wheel gets the
+                    // detector REPLACED under the backend they named, through
+                    // the same load path this construction used — the late
+                    // acceleration probe above is the other caller of the very
+                    // same swap.
+                    crate::live_backends::register_live_detector(
+                        &handle,
+                        crate::live_backends::DetectorRebuild {
+                            camera: config.camera_name.clone(),
+                            model_id: config.detector_model_id.clone(),
+                            accelerated_detection: config.accelerated_detection,
+                            build: Arc::new(detector_build_for(
+                                config.detector_model_path.clone(),
+                                config.detector_class_indices.clone(),
+                            )),
+                            receipt: Arc::new(detection_receipt_sink(stats.clone())),
+                        },
+                    );
                     // First camera detector ready wins the fabric worker
                     // loop's backend (the worker claims/executes ANY node's
                     // job, not one per camera — see `FabricBundle`'s doc).
@@ -924,13 +2025,30 @@ pub fn start_rtsp_probe(
                         .set((Arc::clone(&handle), active_backend_tag.clone()));
                     handle
                 });
-            let detector_queue_capacity = env_u64("VIGIL_DETECTOR_QUEUE_CAPACITY")
-                .map(|capacity| capacity.max(1) as usize)
-                .unwrap_or(DETECTOR_QUEUE_CAPACITY);
+            // Two legs, one spelling. The operator's queue depth is the
+            // resolved setting on the configuration; the environment variable
+            // is the deterministic pressure lever the owner smoke uses to make
+            // an overflow reproducible without waiting on live scene traffic,
+            // and it overrides for that run only.
+            let queue_capacity_lever = detector_queue_capacity_lever();
             let detector_work_delay =
                 Duration::from_millis(env_u64("VIGIL_DETECTOR_WORK_DELAY_MS").unwrap_or_default());
             let detector_queue: Arc<LatestSegmentQueue<CapturedSegment>> =
-                Arc::new(LatestSegmentQueue::new(detector_queue_capacity));
+                Arc::new(match queue_capacity_lever {
+                    // The lever's depth was already published at startup, with
+                    // the value it stands in front of named beside it. The
+                    // queue built here does not read that publication back: it
+                    // re-derives the same depth from the same source, the
+                    // process environment, which no longer changes once the
+                    // process is up. What matters is that the surface no
+                    // longer waits on this line to learn the depth.
+                    Some(capacity) => LatestSegmentQueue::new(capacity),
+                    None => LatestSegmentQueue::following_the_setting(
+                        crate::settings_application::detector_queue_capacity_in_force(
+                            config.detector_queue_capacity,
+                        ),
+                    ),
+                });
             let active_stream_generation = Arc::new(AtomicU64::new(0));
             let detector_handle = detector.map(|detector| {
                 let config = config.clone();
@@ -954,6 +2072,7 @@ pub fn start_rtsp_probe(
                 // considered — byte-identical to an unenrolled node.
                 #[cfg(feature = "fabric")]
                 let mut offload_seam: Option<crate::offload_policy::RuntimeOffloadSeam> = None;
+                let panic_camera = config.camera_name.clone();
                 thread::spawn(move || {
                     let panic_health = health.clone();
                     let panic_stats = stats.clone();
@@ -1031,7 +2150,7 @@ pub fn start_rtsp_probe(
                                     let counters = detector_queue.counters();
                                     let lifetime = crate::offload_policy::LifetimeQueueSnapshot {
                                         depth: counters.current_depth,
-                                        capacity: detector_queue_capacity as u64,
+                                        capacity: detector_queue.capacity() as u64,
                                         queued_total: counters.queued_total,
                                         dropped_total: counters.replaced_dropped_total,
                                         coalesced_total: counters.coalesced_total,
@@ -1128,11 +2247,21 @@ pub fn start_rtsp_probe(
                                 if !decision_delay.is_zero() {
                                     sleep_shutdown_aware(&shutdown, decision_delay);
                                 }
+                                // The analysis rate this pass runs at is the
+                                // one in force NOW, not the one that was in
+                                // force when this thread started: an owner
+                                // whose machine cannot keep up reaches for it
+                                // precisely because they cannot afford to
+                                // restart the thing watching their property.
                                 let output = detector.detect_segment(
                                     &segment.media,
                                     segment.clip_sha256.clone(),
-                                    config.detector_sample_frames,
-                                    config.detector_confidence_threshold,
+                                    crate::settings_application::detector_sample_frames_in_force(
+                                        config.detector_sample_frames,
+                                    ),
+                                    crate::settings_application::detector_confidence_threshold_in_force(
+                                        config.detector_confidence_threshold,
+                                    ),
                                 );
                                 let latency_ms = detector_started.elapsed().as_secs_f64() * 1000.0;
                                 stats.update(|stats| {
@@ -1174,17 +2303,21 @@ pub fn start_rtsp_probe(
                                         // A result that failed its join never becomes
                                         // events — receipted Rejected above, gated here.
                                         if finished.joined {
-                                            if let Err(error) = record_detected_events(
-                                                &store,
-                                                &config,
+                                            if let Err(error) = record_or_publish_detected_events(
+                                                store.as_ref(),
                                                 &segment,
                                                 &output,
-                                                &stats,
-                                                &health,
-                                                detection_publisher.as_deref(),
-                                                recognition_embedder.as_deref(),
                                                 &detection_work,
-                                                &receipts,
+                                                &DetectionRecordingContext {
+                                                    config: &config,
+                                                    stats: &stats,
+                                                    health: &health,
+                                                    detection_publisher: detection_publisher
+                                                        .as_deref(),
+                                                    recognition_embedder: recognition_embedder
+                                                        .as_deref(),
+                                                    receipts: &receipts,
+                                                },
                                             ) {
                                                 println!("record_detection_failed error={error}");
                                             }
@@ -1237,6 +2370,8 @@ pub fn start_rtsp_probe(
                             mark_health_condition(&mut stats.health, "ingest_failed");
                         });
                         panic_health.set(HealthStatus::IngestFailed, "detector thread panicked");
+                        panic_health
+                            .set_camera(&panic_camera, CameraCondition::IngestFailed);
                     }
                 })
             });
@@ -1250,11 +2385,16 @@ pub fn start_rtsp_probe(
             let mut last_stationary_detector_scan: Option<Instant> = None;
             let stationary_detector_interval =
                 Duration::from_secs(config.detector_stationary_interval_secs);
-            let retry_initial_ms = env_u64("VIGIL_RTSP_RETRY_INITIAL_MS").unwrap_or(2_000);
-            let retry_max_ms = env_u64("VIGIL_RTSP_RETRY_MAX_MS")
-                .unwrap_or(30_000)
-                .max(retry_initial_ms);
+            // Resolved from the store with the rest of this camera's settings:
+            // how long vigil waits before trying a dropped stream again is a
+            // thing an operator sets, not a thing the environment whispers.
+            let retry_initial_ms = config.rtsp_retry_initial_ms;
+            let retry_max_ms = config.rtsp_retry_max_ms.max(retry_initial_ms);
             let mut retry_delay_ms = retry_initial_ms;
+            // This pipeline, registered where a live decode change can reach
+            // it: which decode path a stream runs is decided when its session
+            // opens, so a change reaches it by having it open a new one.
+            crate::live_backends::register_live_stream(config.hardware_decoding);
             while !shutdown.load(Ordering::SeqCst) {
                 // Per-camera disable: gate on the enabled flag without exiting the
                 // thread so that a subsequent enable resumes ingest immediately.
@@ -1266,6 +2406,12 @@ pub fn start_rtsp_probe(
                 let receipt_stats = stats.clone();
                 let receipt_accel = accel.clone();
                 let receipt_backend = current_decode_backend.clone();
+                // The decode answer this session opens under, held so the end
+                // of the session can be told apart from a stream fault: a
+                // pipeline that stopped because the operator changed the
+                // backend reconnects at once, with no fault recorded against
+                // the camera and no retry delay to sit through.
+                let decode_epoch_at_open = crate::live_backends::decode_selection_epoch();
                 let capture_result = media_pipeline::capture_rtsp_segments(
                     &rtsp_source,
                     capture_frames,
@@ -1273,7 +2419,10 @@ pub fn start_rtsp_probe(
                     media_pipeline::CaptureDecodeOptions {
                         stream_id: crate::workgraph::StreamId::new(config.camera_name.clone()),
                         stream_epoch: stream_generation,
-                        hardware_decoding: config.hardware_decoding,
+                        decode_epoch: decode_epoch_at_open,
+                        hardware_decoding: crate::live_backends::hardware_decoding_in_force(
+                            config.hardware_decoding,
+                        ),
                     },
                     move |receipt| {
                         if receipt_accel.should_log(&receipt) {
@@ -1341,6 +2490,7 @@ pub fn start_rtsp_probe(
                         });
                         if detector_alive.load(Ordering::SeqCst) {
                             set_ready_unless_latched_fault(&health, "RTSP ingest active");
+                            health.set_camera(&config.camera_name, CameraCondition::Watching);
                             // The stats surface follows the live health state
                             // through recovery: a condition latched into the
                             // stats string during an outage must not outlive
@@ -1357,6 +2507,7 @@ pub fn start_rtsp_probe(
                                 HealthStatus::IngestFailed,
                                 "detector unavailable (capture active)",
                             );
+                            health.set_camera(&config.camera_name, CameraCondition::IngestFailed);
                         }
                         reconnect_pending = false;
                         retry_delay_ms = retry_initial_ms;
@@ -1379,9 +2530,15 @@ pub fn start_rtsp_probe(
                                 );
                         segment.decode_receipt_id = Some(decode_finished.receipt_id);
 
+                        // The stationary-scan interval in force now, for the
+                        // same reason the sample rate is read per segment.
                         let decision = detector_segment_decision(
                             motion_positive,
-                            stationary_detector_interval,
+                            Duration::from_secs(
+                                crate::settings_application::detector_stationary_interval_in_force(
+                                    stationary_detector_interval.as_secs(),
+                                ),
+                            ),
                             last_stationary_detector_scan.map(|last| last.elapsed()),
                         );
                         let motion_work = segment.envelope.derive(crate::workgraph::STAGE_MOTION);
@@ -1461,6 +2618,10 @@ pub fn start_rtsp_probe(
                                         HealthStatus::KeepPaceFailed,
                                         "detector queue fell behind",
                                     );
+                                    health.set_camera(
+                                        &config.camera_name,
+                                        CameraCondition::KeepPaceFailed,
+                                    );
                                     println!(
                                         "detector_queue_replaced_pending_segment=true dropped_sequence={}",
                                         dropped_segment.sequence
@@ -1532,12 +2693,29 @@ pub fn start_rtsp_probe(
                         Ok(())
                     },
                 );
-                match capture_result {
-                    Ok(()) => {}
-                    Err(error) => {
-                        if shutdown.load(Ordering::SeqCst) {
-                            break;
-                        }
+                let session_end = classify_capture_end(
+                    capture_result.is_err(),
+                    shutdown.load(Ordering::SeqCst),
+                    decode_epoch_at_open,
+                    crate::live_backends::decode_selection_epoch(),
+                );
+                match session_end {
+                    CaptureSessionEnd::ShuttingDown => break,
+                    CaptureSessionEnd::PlannedDecodeReselect => {
+                        // Not a fault: the session ended because the operator
+                        // named a different decode path, and the pipeline is
+                        // reopened immediately so the selection runs afresh
+                        // under it. A new stream epoch, because the units that
+                        // follow are decoded by a different backend than the
+                        // ones before them.
+                        println!("decode_backend_reconnect camera={}", config.camera_name);
+                        reconnect_pending = true;
+                        stream_generation =
+                            active_stream_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                    }
+                    CaptureSessionEnd::Quiescent => {}
+                    CaptureSessionEnd::Fault => {
+                        let error = capture_result.err().unwrap_or_default();
                         println!("rtsp probe failed url={rtsp_log_url} error={error}");
                         println!("decoded_frames={decoded_total}");
                         stats.update(|stats| {
@@ -1549,6 +2727,7 @@ pub fn start_rtsp_probe(
                         stream_generation =
                             active_stream_generation.fetch_add(1, Ordering::SeqCst) + 1;
                         health.set(HealthStatus::IngestFailed, "RTSP ingest failed");
+                        health.set_camera(&config.camera_name, CameraCondition::IngestFailed);
                         println!("rtsp_retry_after_ms={retry_delay_ms}");
                         sleep_shutdown_aware(&shutdown, Duration::from_millis(retry_delay_ms));
                         retry_delay_ms = retry_delay_ms.saturating_mul(2).min(retry_max_ms);
@@ -1567,6 +2746,7 @@ pub fn start_rtsp_probe(
                 mark_health_condition(&mut stats.health, "ingest_failed");
             });
             panic_health.set(HealthStatus::IngestFailed, "camera thread panicked");
+            panic_health.set_camera(&panic_camera, CameraCondition::IngestFailed);
         }
     })
 }
@@ -1597,12 +2777,21 @@ fn build_captured_segment(
     stream_generation: u64,
 ) -> Result<CapturedSegment, String> {
     let staging_dir = data_dir.join("staging");
+    // Describing a segment names where its clip WOULD be kept; it does not
+    // prepare the place. A run that is not allowed to record must leave no
+    // trace of a recording, and a clip directory standing empty under the data
+    // root is exactly that trace — so the directory is created where a clip is
+    // actually finalized, by the run that is allowed to write one.
     let clip_dir = data_dir.join("clips");
-    fs::create_dir_all(&clip_dir)
-        .map_err(|error| format!("create clip dir {}: {error}", clip_dir.display()))?;
-    let motion_positive_frames = media_pipeline::motion_gate(&media)
-        .motion_positive_frames
-        .min(media.frame_count());
+    // The sensitivity in force for THIS camera right now: an operator who turns
+    // one camera down is answered on that camera's next segment, not at the
+    // next restart, and every other camera keeps running what it inherits.
+    let motion_positive_frames = media_pipeline::motion_gate(
+        &media,
+        crate::settings_application::motion_sensitivity_in_force_for(camera_name),
+    )
+    .motion_positive_frames
+    .min(media.frame_count());
     let observed_at = media.observed_at.unwrap_or_else(crate::clock::now_utc);
     let stamp = startup_epoch();
     let sequence = CAPTURE_SEQUENCE.fetch_add(1, Ordering::SeqCst);
@@ -1695,12 +2884,16 @@ fn finalize_clip(
     stats: &RuntimeStatsState,
     health: &HealthState,
 ) -> Result<(), String> {
+    // The stream this segment came off is the camera whose clip could not be
+    // written, so a failure here reports against that camera and no other.
+    let camera = segment.envelope.stream_id.as_str();
     if let Err(error) =
         media_pipeline::write_browser_playable_mp4_clip(&segment.media, &segment.path)
     {
         return Err(clip_write_failure(
             stats,
             health,
+            camera,
             Some(&segment.path),
             format!("write staging clip {}: {error}", segment.path.display()),
         ));
@@ -1710,6 +2903,7 @@ fn finalize_clip(
             clip_write_failure(
                 stats,
                 health,
+                camera,
                 None,
                 format!("create clip dir {}: {error}", parent.display()),
             )
@@ -1719,6 +2913,7 @@ fn finalize_clip(
         return Err(clip_write_failure(
             stats,
             health,
+            camera,
             Some(&segment.final_path),
             format!(
                 "write durable clip {}: {error}",
@@ -1732,6 +2927,7 @@ fn finalize_clip(
             return Err(clip_write_failure(
                 stats,
                 health,
+                camera,
                 Some(&segment.final_path),
                 format!(
                     "open durable clip {}: {error}",
@@ -1744,6 +2940,7 @@ fn finalize_clip(
         return Err(clip_write_failure(
             stats,
             health,
+            camera,
             Some(&segment.final_path),
             format!(
                 "sync durable clip {}: {error}",
@@ -1758,6 +2955,7 @@ fn finalize_clip(
                 return Err(clip_write_failure(
                     stats,
                     health,
+                    camera,
                     Some(&segment.final_path),
                     format!("open clip directory {}: {error}", parent.display()),
                 ));
@@ -1767,6 +2965,7 @@ fn finalize_clip(
             return Err(clip_write_failure(
                 stats,
                 health,
+                camera,
                 Some(&segment.final_path),
                 format!("sync clip directory {}: {error}", parent.display()),
             ));
@@ -1778,6 +2977,7 @@ fn finalize_clip(
 fn clip_write_failure(
     stats: &RuntimeStatsState,
     health: &HealthState,
+    camera: &str,
     partial_final_path: Option<&Path>,
     message: impl Into<String>,
 ) -> String {
@@ -1786,6 +2986,7 @@ fn clip_write_failure(
         mark_health_condition(&mut stats.health, "disk-full");
     });
     health.set(HealthStatus::DiskFull, "clip write failed");
+    health.set_camera(camera, CameraCondition::ClipWriteFailed);
     if let Some(path) = partial_final_path {
         let _ = fs::remove_file(path);
     }
@@ -1825,6 +3026,16 @@ fn mark_health_condition(current: &mut String, condition: &str) {
     }
 }
 
+/// Record that the pipeline is doing its work, without overwriting a fault
+/// that is still standing and without promoting a run to a state it never
+/// earned.
+///
+/// What "working" means is the run's OWN baseline: an ordinary run is ready, a
+/// run with no store behind it is running unmanaged. Decoding a frame proves
+/// the cameras are working; it proves nothing about a store that failed to
+/// open, so it must not answer for one. A later independent fault still moves
+/// the status to whatever that fault is, and when the fault clears this brings
+/// the run back to its own baseline rather than to a readiness it never had.
 fn set_ready_unless_latched_fault(health: &HealthState, detail: &'static str) {
     let (status, _) = health.snapshot();
     if matches!(
@@ -1833,7 +3044,7 @@ fn set_ready_unless_latched_fault(health: &HealthState, detail: &'static str) {
     ) {
         return;
     }
-    health.set(HealthStatus::Ready, detail);
+    health.set(health.healthy_baseline(), detail);
 }
 
 fn decoded_frames_sha256(media: &media_pipeline::DecodedVideoSegment) -> String {
@@ -1861,6 +3072,19 @@ fn env_u64(key: &str) -> Option<u64> {
     std::env::var(key).ok()?.parse().ok()
 }
 
+/// The one documented environment lever over a behavior setting: the
+/// deterministic queue-pressure lever the owner smoke uses to make an overflow
+/// reproducible without waiting on live scene traffic. It overrides for that
+/// run only.
+pub(crate) const DETECTOR_QUEUE_CAPACITY_VARIABLE: &str = "VIGIL_DETECTOR_QUEUE_CAPACITY";
+
+/// The queue depth this process runs at when the lever supplied one. Read from
+/// one place so the depth the surface reports and the depth the queue is built
+/// at cannot diverge.
+fn detector_queue_capacity_lever() -> Option<usize> {
+    env_u64(DETECTOR_QUEUE_CAPACITY_VARIABLE).map(|capacity| capacity.max(1) as usize)
+}
+
 /// Map a raw `VIGIL_DETECTOR_DECISION_DELAY_MS` value to a per-detection-
 /// decision delay. This is a TEST-ONLY deterministic pressure lever, fenced
 /// exactly like `VIGIL_DETECTOR_QUEUE_CAPACITY`: env-only, no options-schema
@@ -1882,6 +3106,8 @@ fn maybe_crash_after_startup_node(node: &str) {
 /// visible counters) behind the runtime's historical name and API.
 struct LatestSegmentQueue<T> {
     inner: crate::workgraph::BoundedStageQueue<T>,
+    /// Whether this queue's depth follows the operator's setting as it changes.
+    follows_setting: bool,
 }
 
 enum LatestSegmentRecv<T> {
@@ -1894,10 +3120,38 @@ impl<T> LatestSegmentQueue<T> {
     fn new(capacity: usize) -> Self {
         Self {
             inner: crate::workgraph::BoundedStageQueue::new(capacity),
+            follows_setting: false,
+        }
+    }
+
+    /// A queue whose depth is the operator's setting, followed as it changes.
+    /// The deterministic pressure lever builds the fixed-depth shape instead:
+    /// it overrides the setting for one run, so a queue that kept re-reading
+    /// the setting would undo the lever on the first push.
+    fn following_the_setting(capacity: usize) -> Self {
+        Self {
+            inner: crate::workgraph::BoundedStageQueue::new(capacity),
+            follows_setting: true,
         }
     }
 
     fn push_latest(&self, segment: T) -> Result<Option<T>, T> {
+        if self.follows_setting {
+            // Accepting work is where a new depth is taken on, and taking it on
+            // is what makes it the depth this queue is running at. Until then
+            // the queue is holding work under the bound it was given, and the
+            // surface says so rather than reporting a typed number as running.
+            let requested = crate::settings_application::detector_queue_capacity_requested(
+                self.inner.capacity(),
+            );
+            if requested != self.inner.capacity() {
+                self.inner.set_capacity(requested);
+                crate::settings_application::bring_into_force(
+                    crate::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING,
+                    crate::settings_model::SettingValue::Int(requested as i64),
+                );
+            }
+        }
         self.inner.push_latest(segment)
     }
 
@@ -2010,19 +3264,109 @@ fn maintain_runtime_memory(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn record_detected_events(
-    store: &Store,
+/// Everything a detection needs recording or publishing THROUGH, as opposed to
+/// the detection itself: this camera's configuration, where counters and health
+/// go, the outbound channel, the recognizer, and the receipt log. Grouped
+/// because they travel together for the life of a camera thread and change per
+/// camera, never per detection — and because a ten-argument call is a place for
+/// two arguments to swap silently.
+pub(crate) struct DetectionRecordingContext<'a> {
+    pub(crate) config: &'a config::RuntimeConfig,
+    pub(crate) stats: &'a RuntimeStatsState,
+    pub(crate) health: &'a HealthState,
+    pub(crate) detection_publisher: Option<&'a dyn crate::site_channel::DetectionChannel>,
+    pub(crate) recognition_embedder: Option<&'a dyn context_graph::Embedder>,
+    pub(crate) receipts: &'a crate::workgraph::StageReceiptLog,
+}
+
+/// What happens to a detection, whichever kind of run made it.
+///
+/// With a store behind it, the detection becomes recorded memory with a clip
+/// beside it and a published fact naming that observation. With no store, the
+/// detection is still published — someone watching a property has to be told
+/// what is happening — and nothing is written: no clip is finalized, no
+/// observation exists, and the fact says as much rather than naming a record
+/// nobody could look up.
+pub(crate) fn record_or_publish_detected_events(
+    store: Option<&Store>,
+    segment: &CapturedSegment,
+    output: &yolox_detector::DetectorOutput,
+    detection_work: &crate::workgraph::WorkEnvelope,
+    context: &DetectionRecordingContext<'_>,
+) -> Result<(), String> {
+    match store {
+        Some(store) => record_detected_events(store, segment, output, detection_work, context),
+        None => {
+            publish_unmanaged_detected_events(
+                context.config,
+                segment,
+                output,
+                context.stats,
+                context.detection_publisher,
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Publish the detections of one segment on a run with no store behind it.
+///
+/// Recording is one of the four capabilities the degraded contract gives up,
+/// so the captured segment is dropped rather than finalized into a clip, and
+/// the published fact carries no observation identifier: there is no
+/// observation, and inventing one would hand Home Assistant a reference that
+/// resolves to nothing the moment anyone follows it.
+fn publish_unmanaged_detected_events(
     config: &config::RuntimeConfig,
     segment: &CapturedSegment,
     output: &yolox_detector::DetectorOutput,
     stats: &RuntimeStatsState,
-    health: &HealthState,
     detection_publisher: Option<&dyn crate::site_channel::DetectionChannel>,
-    recognition_embedder: Option<&dyn context_graph::Embedder>,
+) {
+    let _ = fs::remove_file(&segment.path);
+    if output.detections.is_empty() {
+        return;
+    }
+    stats.update(|stats| {
+        stats.detections_emitted = stats.detections_emitted.saturating_add(1);
+    });
+    let Some(channel) = detection_publisher else {
+        return;
+    };
+    for detection in output.detections.iter().take(1) {
+        channel.publish_detection(crate::site_channel::DetectionFact {
+            observation_id: String::new(),
+            camera_id: camera_slug(&config.camera_name),
+            camera_name: config.camera_name.clone(),
+            object_class: detection.class_name.clone(),
+            confidence: detection.confidence,
+            timestamp_ms: segment.observed_at.timestamp_millis(),
+            evidence_ref: segment.source_ref.clone(),
+            snapshot_ref: String::new(),
+            entity_name: None,
+            match_score: None,
+        });
+    }
+}
+
+pub(crate) fn record_detected_events(
+    store: &Store,
+    segment: &CapturedSegment,
+    output: &yolox_detector::DetectorOutput,
     detection_work: &crate::workgraph::WorkEnvelope,
-    receipts: &crate::workgraph::StageReceiptLog,
+    context: &DetectionRecordingContext<'_>,
 ) -> Result<(), String> {
+    // Destructured rather than threaded field by field: every one of these is a
+    // shared reference, so this is the same set of bindings the body used when
+    // they arrived as arguments.
+    let DetectionRecordingContext {
+        config,
+        stats,
+        health,
+        detection_publisher,
+        recognition_embedder,
+        receipts,
+    } = *context;
     if output.detections.is_empty() {
         let _ = fs::remove_file(&segment.path);
         return Ok(());
@@ -2722,11 +4066,62 @@ fn get_or_create_decision(
 #[cfg(feature = "fabric")]
 use crate::fabric::{FabricBundle, PendingOffloadSegment, fabric_bring_up, try_offload_segment};
 
+/// How one capture session ended, which is what decides whether the camera
+/// records a fault against itself.
+///
+/// A session ends four ways and only one of them is the camera's fault. The
+/// operator naming a different decode path ends the session on purpose: the
+/// pipeline reopens at once under the new path, and counting that against the
+/// camera would show an operator who asked for a change a stream that dropped,
+/// a health surface reporting failed ingest, and a retry delay they never asked
+/// to sit through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureSessionEnd {
+    /// The process is going down; nothing is reopened.
+    ShuttingDown,
+    /// The operator named a different decode path, so this session was ended to
+    /// let the next one select afresh under it.
+    PlannedDecodeReselect,
+    /// The session ended with nothing wrong and nothing to say.
+    Quiescent,
+    /// A genuine stream fault: the camera is not delivering.
+    Fault,
+}
+
+/// Which of the four a session end was.
+///
+/// The decode answer this node runs is the discriminator, and it is read
+/// against the answer the session opened under — never against how the capture
+/// happened to report itself. Tearing a live session down to reopen it under a
+/// different decoder surfaces as an ordinary stream error just as often as it
+/// surfaces as a quiet exit, so a classification that only recognises the quiet
+/// shape describes the rare case and books the ordinary one as a fault.
+fn classify_capture_end(
+    capture_failed: bool,
+    shutting_down: bool,
+    decode_epoch_at_open: u64,
+    decode_epoch_now: u64,
+) -> CaptureSessionEnd {
+    if capture_failed && shutting_down {
+        return CaptureSessionEnd::ShuttingDown;
+    }
+    // The decode answer is read FIRST, before how the capture reported itself,
+    // because that is the only fact that says whose doing this end was.
+    if !shutting_down && decode_epoch_now != decode_epoch_at_open {
+        return CaptureSessionEnd::PlannedDecodeReselect;
+    }
+    if capture_failed {
+        CaptureSessionEnd::Fault
+    } else {
+        CaptureSessionEnd::Quiescent
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DetectorSegmentDecision, LatestSegmentQueue, LatestSegmentRecv, decision_delay_from_env,
-        detector_segment_decision,
+        CaptureSessionEnd, DetectorSegmentDecision, LatestSegmentQueue, LatestSegmentRecv,
+        classify_capture_end, decision_delay_from_env, detector_segment_decision,
     };
     use crate::config;
     use crate::ha_camera_registration::generic_camera_url;
@@ -2977,6 +4372,61 @@ mod tests {
             DetectorSegmentDecision::Enqueue {
                 stationary_scan: true
             }
+        );
+    }
+
+    #[test]
+    fn a_planned_decode_reselect_is_not_counted_as_a_stream_fault() {
+        // An operator who names a different decode path asked for exactly one
+        // thing: the camera comes back on the new path. What they must not get
+        // is their camera booking faults against itself for doing what they
+        // asked — a stream drop, failed-ingest health, and an exponential retry
+        // sleep that is a real outage nobody requested.
+        //
+        // The discriminating case is the shape a live change actually
+        // produces. Tearing down a running RTSP session to reopen it under
+        // another decoder ends the session through one of the pipeline's error
+        // returns — the stream ending, the demux failing, the video-unit
+        // watchdog — far more often than through the quiet loop-condition exit.
+        // A classification that recognises the planned move only on the quiet
+        // shape is right about the rare case and wrong about the ordinary one.
+        assert_eq!(
+            classify_capture_end(true, false, 4, 5),
+            CaptureSessionEnd::PlannedDecodeReselect,
+            "a session that ended with an error BECAUSE the operator changed the decode path is \
+             the change they asked for, not a fault the camera should be marked down for"
+        );
+
+        // The quiet exit through the loop condition is the same event and is
+        // classified the same way.
+        assert_eq!(
+            classify_capture_end(false, false, 4, 5),
+            CaptureSessionEnd::PlannedDecodeReselect,
+            "the quiescent end of a session whose decode answer moved is the same planned move"
+        );
+
+        // The sibling that stops the fix being a blanket suppression: with the
+        // decode answer unchanged, an error is exactly what it has always been.
+        assert_eq!(
+            classify_capture_end(true, false, 5, 5),
+            CaptureSessionEnd::Fault,
+            "a genuine stream fault must keep every consequence it has today — the drop counted, \
+             ingest marked failed, the retry backed off"
+        );
+        assert_eq!(
+            classify_capture_end(false, false, 5, 5),
+            CaptureSessionEnd::Quiescent,
+            "and a session that simply ended with nothing wrong says nothing"
+        );
+
+        // A process going down is not a camera fault either way.
+        assert_eq!(
+            classify_capture_end(true, true, 5, 5),
+            CaptureSessionEnd::ShuttingDown
+        );
+        assert_eq!(
+            classify_capture_end(true, true, 4, 5),
+            CaptureSessionEnd::ShuttingDown
         );
     }
 }

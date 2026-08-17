@@ -183,9 +183,14 @@ fn spawn_cameraless_fabric_worker(
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("run")
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--fabric-hub")
+        .arg("true")
         .env("VIGIL_DATA_DIR", data_dir)
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_FABRIC_HUB", "true")
+        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
+        // env per the settings-authority census (still no flag/config seam).
+        //
         // Test-only deadline override (scaffold, fabric.rs): a REAL model load
         // needs headroom over the production wait in a debug build (~2-3s to
         // deserialize the fixture checkpoint), so the serving arm passes a
@@ -198,10 +203,14 @@ fn spawn_cameraless_fabric_worker(
         .env_remove("VIGIL_RTSP_URL");
     match model_path {
         Some(path) => {
-            command.env("VIGIL_DETECTOR_MODEL_PATH", path);
+            command.arg("--detector-model-path").arg(path);
         }
         None => {
-            command.env_remove("VIGIL_DETECTOR_MODEL_PATH");
+            // No CLI-flag equivalent of "explicitly absent" exists for
+            // --detector-model-path (an omitted flag already means absent),
+            // so the no-model arm needs no action here — env_remove is now
+            // a no-op left over from the prior env-driven invocation and is
+            // dropped rather than kept as dead code.
         }
     }
     command

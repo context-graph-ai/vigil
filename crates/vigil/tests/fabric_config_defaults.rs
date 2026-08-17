@@ -85,7 +85,7 @@ fn collect_rust_source_files_into(dir: &Path, sources: &mut Vec<SourceFile>) {
 /// (c) no source file outside `offload_policy.rs`'s defaults struct
 ///     hardcodes one of the new threshold literals in control flow.
 #[test]
-fn all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset() {
+fn all_offload_and_fabric_knobs_have_sane_defaults_and_work_unset() {
     // (a) Every new knob has a working Default; the fabric intent resolves
     // with nothing provided.
     let offload_defaults = OffloadPolicyConfig::default();
@@ -135,10 +135,19 @@ fn all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset() {
          OffloadPolicyConfig::default() value (5000ms)"
     );
 
-    // (b) The HAOS add-on options yaml must show the fabric knob defaults —
-    // both `options:` (the operator-visible default) and `schema:` (the
-    // type contract), mirroring the `addon_config_surface` pattern. This is
-    // the RED arm: the yaml is not edited by this test-authoring pass.
+    // (b) The HAOS add-on options yaml must show each knob's default on its
+    // real surface. `fabric_ticket` is an enrollment credential, not a
+    // behavior key (see `addon_config_surface.rs`'s `NON_BEHAVIOR_SCHEMA_KEYS`
+    // exemption list), so it still carries a manifest-visible default under
+    // `options:`, mirroring the `addon_config_surface` pattern. `fabric_hub`
+    // IS a behavior key: under the settings-authority direction a behavior
+    // key that still declared a default in `options:` would pin every fresh
+    // install and break reset-by-absence, so it carries no `options:` entry
+    // at all — its default-false-and-works-unset fact is the source-side
+    // check already made above in arm (a) via the public
+    // `fabric_intent_from_args` surface (`fabric_intent.fabric_hub` is
+    // `false` with nothing supplied); here we only require the manifest to
+    // declare it schema-optional with no options default.
     let addon_config_path = repo_root().join("addons/vigil/config.yaml");
     let addon_config = fs::read_to_string(&addon_config_path).unwrap_or_else(|error| {
         panic!(
@@ -146,16 +155,24 @@ fn all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset() {
             addon_config_path.display()
         )
     });
-    for key in ["fabric_ticket", "fabric_hub"] {
-        assert!(
-            section_scalar(&addon_config, "options", key).is_some(),
-            "{key} must be present under the HAOS add-on options: block with a visible default"
-        );
-        assert!(
-            section_scalar(&addon_config, "schema", key).is_some(),
-            "{key} must be present under the HAOS add-on schema: block"
-        );
-    }
+    assert!(
+        section_scalar(&addon_config, "options", "fabric_ticket").is_some(),
+        "fabric_ticket must be present under the HAOS add-on options: block with a visible default"
+    );
+    assert!(
+        section_scalar(&addon_config, "schema", "fabric_ticket").is_some(),
+        "fabric_ticket must be present under the HAOS add-on schema: block"
+    );
+    assert_eq!(
+        section_scalar(&addon_config, "options", "fabric_hub"),
+        None,
+        "fabric_hub must not declare a default in the options block — its default lives in Vigil's own loader, proven in arm (a) above"
+    );
+    assert_eq!(
+        section_scalar(&addon_config, "schema", "fabric_hub").as_deref(),
+        Some("bool?"),
+        "fabric_hub must be present under the HAOS add-on schema block as an optional boolean"
+    );
 
     // (c) Source-scan arm: no hardcoded threshold literal for the C10 knobs
     // outside the defaults struct in offload_policy.rs. Mirrors the
@@ -210,11 +227,33 @@ fn fabric_tuning_knobs_flow_through_the_config_surface_when_set() {
 
 /// (iii, fix cycle 9) Extends the `addon_config_surface` HAOS options/schema
 /// contract (mirroring the `["fabric_ticket", "fabric_hub"]` check above) to
-/// the two new tuning knobs. RED by construction, per the 705b1ac
-/// precedent's own line: editing the yaml is implementation, not
-/// test-authoring, so it is deliberately left untouched here.
+/// the two new tuning knobs.
+///
+/// Superseded contract note: this test used to require both knobs present
+/// under `options:` with a visible default. Under the settings-authority
+/// direction they are behavior keys: a declared options default would pin
+/// every fresh install and block reset-by-absence, so the manifest now
+/// declares them schema-optional with no options entry, and their default
+/// value is Vigil's own. That default is asserted through the PUBLIC
+/// resolved surface (`vigil::fabric_tuning_intent_from_args`), not by
+/// grepping fabric.rs's source text for a literal — `fabric_worker_lease_ms`
+/// is mid-move into the env-baseline work (block 4, in progress alongside
+/// this pass), so a source-text assertion here would break under a rename
+/// that leaves the resolved value unchanged. The exact values (300000ms /
+/// 5000ms) are already proven against that same public surface by
+/// `all_offload_and_fabric_knobs_have_sane_defaults_and_work_unset` above in
+/// this file — not re-asserted here to avoid pinning the same fact twice;
+/// this test's own job is the manifest's schema/options shape.
 #[test]
-fn addon_config_declares_the_new_fabric_tuning_knobs_in_options_and_schema() {
+fn addon_config_declares_the_new_fabric_tuning_knobs_as_schema_optional_with_vigil_owned_defaults()
+{
+    // The defaults exist and are reachable through the resolved public
+    // surface right now — a knob whose loader wiring silently regressed
+    // (e.g. block 4's move drops the fallback value) fails here even though
+    // this test does not re-check the exact numbers.
+    vigil::fabric_tuning_intent_from_args(Vec::new())
+        .expect("vigil must build with NONE of the fabric tuning knobs provided");
+
     let addon_config_path = repo_root().join("addons/vigil/config.yaml");
     let addon_config = fs::read_to_string(&addon_config_path).unwrap_or_else(|error| {
         panic!(
@@ -223,13 +262,15 @@ fn addon_config_declares_the_new_fabric_tuning_knobs_in_options_and_schema() {
         )
     });
     for key in ["fabric_worker_lease_ms", "fabric_fallback_horizon_ms"] {
-        assert!(
-            section_scalar(&addon_config, "options", key).is_some(),
-            "{key} must be present under the HAOS add-on options: block with a visible default"
+        assert_eq!(
+            section_scalar(&addon_config, "options", key),
+            None,
+            "{key} must not declare a default in the options block — its default lives in Vigil's own loader"
         );
-        assert!(
-            section_scalar(&addon_config, "schema", key).is_some(),
-            "{key} must be present under the HAOS add-on schema: block"
+        assert_eq!(
+            section_scalar(&addon_config, "schema", key).as_deref(),
+            Some("int?"),
+            "{key} must be present under the HAOS add-on schema block as an optional integer"
         );
     }
 }

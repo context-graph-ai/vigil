@@ -40,6 +40,25 @@ pub const CAMERA_NAME: &str = "lower gate";
 pub const DETECTOR_MODEL_ID: &str = "yolox-tiny-burn-cpu";
 pub const DETECTOR_THRESHOLD: f64 = 0.5;
 
+/// How long a spawned runtime is given to reach the startup output a test is
+/// waiting for — `boot_phase=pipeline-up`, or the startup fabric-join line the
+/// same boot prints.
+///
+/// Every test that waits on a node finishing its boot takes this one bound, so
+/// the estate cannot drift into a mix of numbers where some tests survive a
+/// loaded machine and others do not.
+///
+/// The number is measured, not guessed: on this box a store open ALONE reached
+/// 19.6s while the full default suite (567 tests) ran at full parallelism,
+/// against roughly 1.5s for the same boot solo. A 20s bound therefore failed
+/// tests that were working perfectly — the machine was busy, not the code. This
+/// bound covers a loaded box with room to spare.
+///
+/// It is a ceiling on waiting, never a timing assertion: what these tests
+/// assert is the STATE they waited for, so a fast machine finishes in a second
+/// and a loaded one takes longer, and neither outcome changes what is proven.
+pub const RUNTIME_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+
 // ── Store helpers ──────────────────────────────────────────────────────────
 
 pub fn open_store_at(path: &Path) -> Result<Store, String> {

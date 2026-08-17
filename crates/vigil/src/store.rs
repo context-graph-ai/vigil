@@ -11,6 +11,35 @@ pub(crate) struct OpenStore {
     pub(crate) trace: String,
 }
 
+/// Why a startup open did not produce a store.
+///
+/// The two are different facts about different things, and a caller that
+/// flattened them told an operator their store was unreadable when the store
+/// was never opened at all: the component the runtime loads BEFORE it opens
+/// anything is what failed.
+pub(crate) enum StartupOpenFailure {
+    /// The store itself could not be opened.
+    Store(String),
+    /// A component the runtime loads before the store failed to load. The
+    /// store was never reached.
+    Component {
+        component: &'static str,
+        detail: String,
+    },
+}
+
+impl StartupOpenFailure {
+    /// The failure as an operator reads it, cause named either way.
+    pub(crate) fn detail(&self) -> String {
+        match self {
+            Self::Store(detail) => detail.clone(),
+            Self::Component { component, detail } => {
+                format!("{component} failed to load: {detail}")
+            }
+        }
+    }
+}
+
 /// Open the store, registering the real vision embedder when recognition is
 /// configured. A configured weights dir that fails to load is a LOUD startup
 /// failure — recognition never degrades silently. Returns the embedder handle
@@ -18,14 +47,18 @@ pub(crate) struct OpenStore {
 pub(crate) fn open_with_recognition(
     path: &Path,
     recognition: &crate::recognition::RecognitionConfig,
-) -> Result<(OpenStore, Option<Arc<dyn Embedder>>), String> {
+) -> Result<(OpenStore, Option<Arc<dyn Embedder>>), StartupOpenFailure> {
     if !recognition.enabled {
-        return Ok((open(path)?, None));
+        return Ok((open(path).map_err(StartupOpenFailure::Store)?, None));
     }
-    let weights_dir = recognition
-        .weights_dir
-        .clone()
-        .ok_or_else(|| "recognition enabled without a weights dir".to_string())?;
+    let weights_dir =
+        recognition
+            .weights_dir
+            .clone()
+            .ok_or_else(|| StartupOpenFailure::Component {
+                component: crate::settings_degraded::RECOGNITION_EMBEDDER_COMPONENT,
+                detail: "recognition is on with no weights directory configured".to_string(),
+            })?;
     let embedder: Arc<dyn Embedder> = Arc::new(
         cg_vision_embedder::SiglipVisionEmbedder::load(cg_vision_embedder::SiglipEmbedderConfig {
             weights_dir,
@@ -33,17 +66,21 @@ pub(crate) fn open_with_recognition(
             model_name: "siglip".to_string(),
             model_version: "2-base".to_string(),
         })
-        .map_err(|error| format!("recognition embedder failed to load: {error}"))?,
+        .map_err(|error| StartupOpenFailure::Component {
+            component: crate::settings_degraded::RECOGNITION_EMBEDDER_COMPONENT,
+            detail: error.to_string(),
+        })?,
     );
     let created = !path.exists();
     let handle = crate::recognition::open_store_with_embedder(
         path,
         &recognition.embedding_space_id,
         embedder.clone(),
-    )?;
-    let trace = handle
-        .last_query_trace()
-        .map_err(|error| format!("could not read store trace: {error}"))?;
+    )
+    .map_err(StartupOpenFailure::Store)?;
+    let trace = handle.last_query_trace().map_err(|error| {
+        StartupOpenFailure::Store(format!("could not read store trace: {error}"))
+    })?;
     Ok((
         OpenStore {
             path: handle.db_path().to_path_buf(),

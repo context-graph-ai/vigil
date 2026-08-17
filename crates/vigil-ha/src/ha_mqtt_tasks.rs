@@ -219,7 +219,7 @@ fn re_announce_to_broker(
     condition_topic: &str,
     current_condition: &str,
     service_id: &str,
-    control: &dyn SiteControl,
+    control: Option<&dyn SiteControl>,
 ) {
     for payload in payloads {
         if let Ok(json) = serde_json::to_string(&payload.payload) {
@@ -239,7 +239,13 @@ fn re_announce_to_broker(
         true,
         current_condition.as_bytes().to_vec(),
     );
-    publish_enabled_states(client, service_id, control);
+    // The enable/disable reflection is a read of Vigil's own camera state, so
+    // it is published only where that state is reachable. A presence-only
+    // connection has no door onto it and publishes the rest regardless: the
+    // entities, their availability, and the condition this node is in.
+    if let Some(control) = control {
+        publish_enabled_states(client, service_id, control);
+    }
 }
 
 /// Published state topic for a camera's `enabled` switch/reflection.
@@ -347,6 +353,32 @@ pub fn spawn_production_subscriber(
     control: Arc<dyn SiteControl>,
     overflow_count: Arc<AtomicUsize>,
 ) -> SubscriberHandle {
+    spawn_broker_connection(cfg, Some(control), overflow_count)
+}
+
+/// Publish this site's presence and keep it published, WITHOUT accepting owner
+/// commands: the discovery payloads that make the entities exist, the retained
+/// availability that makes them usable, the running condition this node is in,
+/// and the last-will that turns them unavailable if this process dies unclean.
+///
+/// This is what a run with no store behind it brings up. Such a run cannot
+/// record a correction, so it must not listen for one — but everything it CAN
+/// still do (watching, detecting, alerting, and saying what condition it is in)
+/// reaches Home Assistant exactly as it does on a healthy node, which is the
+/// whole reason that run keeps going at all.
+pub fn spawn_site_presence(cfg: WiredSubscriberConfig) -> SubscriberHandle {
+    spawn_broker_connection(cfg, None, Arc::new(AtomicUsize::new(0)))
+}
+
+/// The one broker connection both surfaces are built from. With a door onto
+/// Vigil's own camera state it also subscribes and serves owner commands;
+/// without one it publishes and nothing more. One loop, so presence can never
+/// drift from what a full connection publishes.
+fn spawn_broker_connection(
+    cfg: WiredSubscriberConfig,
+    control: Option<Arc<dyn SiteControl>>,
+    overflow_count: Arc<AtomicUsize>,
+) -> SubscriberHandle {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
     let overflow_clone = Arc::clone(&overflow_count);
@@ -405,10 +437,16 @@ pub fn spawn_production_subscriber(
             match event {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
                     reconnect_delay_ms = 500; // reset backoff on successful connect
-                    // Re-subscribe every command topic on every (re)connect so
-                    // subscriptions survive a broker restart.
-                    let _ = client.subscribe(CORRECTION_COMMAND_TOPIC, QoS::AtLeastOnce);
-                    let _ = client.subscribe(CONTROL_COMMAND_TOPIC, QoS::AtLeastOnce);
+                    // Re-subscribe on every (re)connect so subscriptions
+                    // survive a broker restart. The command topics are
+                    // subscribed only where the commands they carry can be
+                    // served; Home Assistant's own restart announcement is
+                    // subscribed either way, because re-publishing the entities
+                    // after HA restarts is presence, not a command.
+                    if control.is_some() {
+                        let _ = client.subscribe(CORRECTION_COMMAND_TOPIC, QoS::AtLeastOnce);
+                        let _ = client.subscribe(CONTROL_COMMAND_TOPIC, QoS::AtLeastOnce);
+                    }
                     let _ = client.subscribe(HOME_ASSISTANT_STATUS_TOPIC, QoS::AtMostOnce);
                     // Re-publish retained discovery and availability so HA entities
                     // reappear after a broker restart without requiring a Vigil restart.
@@ -423,7 +461,7 @@ pub fn spawn_production_subscriber(
                         &cfg.condition_topic,
                         conn_condition,
                         &cfg.service_id,
-                        control.as_ref(),
+                        control.as_deref(),
                     );
                 }
                 Ok(Event::Incoming(Packet::Publish(p))) => {
@@ -444,13 +482,14 @@ pub fn spawn_production_subscriber(
                                     &cfg.condition_topic,
                                     ha_condition,
                                     &cfg.service_id,
-                                    control.as_ref(),
+                                    control.as_deref(),
                                 );
                             }
                         }
                         CORRECTION_COMMAND_TOPIC => {
-                            if let Ok(msg) =
-                                serde_json::from_slice::<CommandTopicMessage>(&p.payload)
+                            if let Some(control) = control.as_ref()
+                                && let Ok(msg) =
+                                    serde_json::from_slice::<CommandTopicMessage>(&p.payload)
                                 && let Ok(req) = parse_command_topic(&msg)
                             {
                                 match control.submit_correction(req) {
@@ -464,12 +503,14 @@ pub fn spawn_production_subscriber(
                             }
                         }
                         CONTROL_COMMAND_TOPIC => {
-                            handle_production_control(
-                                &p.payload,
-                                &cfg.service_id,
-                                control.as_ref(),
-                                &client,
-                            );
+                            if let Some(control) = control.as_ref() {
+                                handle_production_control(
+                                    &p.payload,
+                                    &cfg.service_id,
+                                    control.as_ref(),
+                                    &client,
+                                );
+                            }
                         }
                         _ => {}
                     }

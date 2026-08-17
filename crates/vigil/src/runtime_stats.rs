@@ -1,5 +1,7 @@
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +10,11 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct RuntimeStatsState {
     inner: Arc<Mutex<RuntimeStats>>,
     path: PathBuf,
+    /// Whether this state may touch the disk yet. A run that turns out to have
+    /// no store behind it never records anything, so counters stay in memory —
+    /// where every operator surface reads them from anyway — and an unmanaged
+    /// run cannot later be mistaken for a recorded one.
+    persisting: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +79,58 @@ pub(crate) struct RuntimeStats {
     /// Recent work-graph stage receipts (bounded, newest last).
     #[serde(default)]
     pub(crate) recent_work_receipts: Vec<String>,
+    /// Which process wrote this file. Absent on a file written before the
+    /// stamp existed, which is treated the same as a foreign writer: unknown
+    /// provenance is not this process.
+    #[serde(default)]
+    pub(crate) written_by: Option<WriterIdentity>,
+}
+
+/// The process that wrote a snapshot, identified strongly enough that a
+/// recycled process id cannot be mistaken for the original: the id together
+/// with the moment that particular process started.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct WriterIdentity {
+    pub(crate) pid: u32,
+    /// Kernel start time of that pid, in clock ticks since boot. Two processes
+    /// sharing an id across a recycle differ here.
+    pub(crate) started_at_ticks: u64,
+}
+
+impl WriterIdentity {
+    /// This process, right now.
+    fn current() -> Option<Self> {
+        let pid = std::process::id();
+        Some(Self {
+            pid,
+            started_at_ticks: start_ticks_of(pid)?,
+        })
+    }
+
+    /// Whether the process that wrote the snapshot is still the process
+    /// running now — the only condition under which its numbers are a reading
+    /// of a live deployment rather than a record of a finished one.
+    fn is_still_running(&self) -> bool {
+        start_ticks_of(self.pid) == Some(self.started_at_ticks)
+    }
+}
+
+/// Kernel start time of a pid, read from the process table. Returns `None`
+/// when the process does not exist or the process table is not readable, and
+/// an unreadable identity always resolves to a refusal upstream — a surface
+/// that cannot prove whose numbers it holds must not present them as current.
+fn start_ticks_of(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is parenthesised and may itself contain spaces and
+    // parentheses, so the fields are counted from the LAST closing paren.
+    let after_comm = stat.rsplit_once(')')?.1;
+    after_comm
+        .split_whitespace()
+        // state is field 3; start time is field 22, so it is the 20th token
+        // after the command name.
+        .nth(19)?
+        .parse()
+        .ok()
 }
 
 /// Bounded push for the recent-receipts window.
@@ -124,18 +183,65 @@ impl Default for RuntimeStats {
             fabric_status: String::new(),
             fabric_join_advice: FabricJoinAdvice::default(),
             recent_work_receipts: Vec::new(),
+            written_by: None,
+        }
+    }
+}
+
+impl RuntimeStats {
+    /// The part of a previous run's snapshot that is still true after that run
+    /// ended: the cumulative counters an operator reads as this deployment's
+    /// history. Everything describing what a process is DOING — the queue it
+    /// is feeding, the decoder and detector it built, its receipts — belongs
+    /// to the process that wrote it and is dropped, because a new process has
+    /// not done any of it yet.
+    fn counters_carried_forward(self) -> Self {
+        Self {
+            health: Self::default().health,
+            ingest_signal: Self::default().ingest_signal,
+            active_decoder: std::collections::BTreeMap::new(),
+            active_detector_backend: String::new(),
+            decode_acceleration: String::new(),
+            detection_acceleration: String::new(),
+            detection_receipt_block: String::new(),
+            decode_receipt_blocks: std::collections::BTreeMap::new(),
+            detector_queue: String::new(),
+            fabric_status: String::new(),
+            fabric_join_advice: FabricJoinAdvice::default(),
+            recent_work_receipts: Vec::new(),
+            written_by: None,
+            ..self
         }
     }
 }
 
 impl RuntimeStatsState {
+    /// A stats state that has not yet earned the right to write. Reading the
+    /// previous snapshot is fine — it is a read — but nothing lands on disk
+    /// until [`RuntimeStatsState::begin_persisting`] says this run is
+    /// store-backed.
     pub(crate) fn new(data_dir: &Path) -> Self {
         let path = snapshot_path(data_dir);
-        let stats = read_snapshot(data_dir).unwrap_or_default();
+        // Continuity, not inheritance: this run picks up the deployment's
+        // running totals, and none of the previous process's account of what
+        // it was doing.
+        let stats = read_snapshot_file(&path)
+            .map(RuntimeStats::counters_carried_forward)
+            .unwrap_or_default();
         Self {
             inner: Arc::new(Mutex::new(stats)),
             path,
+            persisting: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// This run has a store behind it, so its counters are worth recording.
+    /// Flushes what has accumulated so far, so the file carries the same
+    /// content it would have carried had every update written from the start.
+    pub(crate) fn begin_persisting(&self) {
+        self.persisting.store(true, Ordering::SeqCst);
+        let snapshot = self.snapshot();
+        let _ = write_snapshot_path(&self.path, &snapshot);
     }
 
     pub(crate) fn snapshot(&self) -> RuntimeStats {
@@ -160,7 +266,9 @@ impl RuntimeStatsState {
             update(&mut stats);
             stats.clone()
         };
-        let _ = write_snapshot_path(&self.path, &snapshot);
+        if self.persisting.load(Ordering::SeqCst) {
+            let _ = write_snapshot_path(&self.path, &snapshot);
+        }
     }
 }
 
@@ -233,12 +341,165 @@ impl HealthFabricStatus {
     }
 }
 
+/// What the file in a data directory can be said to be — three conditions an
+/// operator surface must tell apart, because each one has a different true
+/// answer.
+///
+/// `vigil stats` asks the runtime owner over the control socket first and
+/// falls back to this file when that fails. Collapsing these into one
+/// serve-or-refuse decision gets one of them wrong whichever way it is
+/// decided: serving everything answers a stopped process's queue depth as this
+/// deployment's current state (how a removed environment variable came back to
+/// life on the operator's surface), and refusing everything destroys the
+/// readback of every fault only visible after the run that produced it.
+pub(crate) enum SnapshotProvenance {
+    /// No file at all: nothing has ever run in this directory. Zero is the
+    /// true answer, and no runtime fact may be asserted alongside it.
+    NeverStarted,
+    /// A file carrying no ownership stamp, or one whose contents cannot be
+    /// read back at all. Nothing about it can be attributed to any process, so
+    /// none of it may be presented as this deployment's — and its mere
+    /// existence rules out the never-started answer.
+    Unattributable,
+    /// This deployment's own last run, since ended. Real figures, really
+    /// produced here, by a process that is no longer running.
+    StoppedRun(RuntimeStats),
+    /// The process that wrote it is still the process running now, so its
+    /// figures are a reading of a live deployment.
+    LiveRun(RuntimeStats),
+}
+
+/// Which of the three conditions the data directory is in.
+pub(crate) fn read_snapshot_provenance(data_dir: &Path) -> SnapshotProvenance {
+    let stats = match read_snapshot_file_outcome(&snapshot_path(data_dir)) {
+        Err(NoSnapshot::Absent) => return SnapshotProvenance::NeverStarted,
+        // A file is sitting there, so something ran here and the zeros would be
+        // a claim about a directory this is not — and nothing in a file that
+        // cannot be read back can be attributed to any process either. Both
+        // halves of the unattributable case, so it is refused, not served.
+        Err(NoSnapshot::Unreadable) => return SnapshotProvenance::Unattributable,
+        Ok(stats) => stats,
+    };
+    match stats.written_by {
+        Some(identity) if identity.is_still_running() => SnapshotProvenance::LiveRun(stats),
+        Some(_) => SnapshotProvenance::StoppedRun(stats),
+        None => SnapshotProvenance::Unattributable,
+    }
+}
+
+/// The snapshot a surface may present as this deployment's CURRENT state —
+/// only ever the live case.
 pub(crate) fn read_snapshot(data_dir: &Path) -> Option<RuntimeStats> {
-    let text = fs::read_to_string(snapshot_path(data_dir)).ok()?;
-    serde_json::from_str(&text).ok()
+    match read_snapshot_provenance(data_dir) {
+        SnapshotProvenance::LiveRun(stats) => Some(stats),
+        _ => None,
+    }
+}
+
+/// The health and ingest values a stopped or never-started node may be said to
+/// have. `ready` and `ok` are claims about a process doing something right
+/// now, so they are the two that cannot survive the process that made them;
+/// every other value — `disk-full`, `keep-pace-failed` — is a record of what
+/// happened, which stays true of the run that recorded it.
+const STOPPED_RUNTIME_FACT: &str = "stopped";
+const NOT_STARTED_RUNTIME_FACT: &str = "not-started";
+
+/// The answer for a directory nothing has ever run in: every counter zero,
+/// under a line saying so, and no runtime fact asserted about a process that
+/// does not exist.
+///
+/// The line names the directory it looked in, because the commonest way to
+/// land here is not a first run at all — it is a mistyped or unset
+/// `VIGIL_DATA_DIR` pointing the read somewhere the deployment never was. An
+/// all-zeros answer that does not say where it looked leaves that operator
+/// with no way to tell the two apart.
+pub(crate) fn format_not_started_stats(data_dir: &Path) -> String {
+    let stats = RuntimeStats {
+        health: NOT_STARTED_RUNTIME_FACT.to_string(),
+        ingest_signal: NOT_STARTED_RUNTIME_FACT.to_string(),
+        ..RuntimeStats::default()
+    };
+    format!(
+        "stats-provenance=not-started data-dir={} nothing has run in this data directory yet, so \
+         these are zeros and not a reading of a running node\n{}",
+        data_dir.display(),
+        format_stats(&stats)
+    )
+}
+
+/// The answer for this deployment's own last run: what that run recorded and
+/// is still true of it, under a line saying it is a record and not a reading.
+///
+/// The partition is the one a new run already seeds itself from
+/// ([`RuntimeStats::counters_carried_forward`]): the cumulative counters are
+/// this deployment's history and survive, and everything describing what a
+/// process was DOING — the queue it was feeding, the decoder and detector it
+/// built, its receipts — belongs to that process and goes with it. That is
+/// what stops a queue depth levered by an environment variable from being read
+/// back as current after the run that set it has ended. Health and ingest are
+/// carried across the drop deliberately: a run that ended in `disk-full` ended
+/// there, and that is the only surface through which a fault is visible after
+/// the run that hit it.
+pub(crate) fn format_stopped_run_stats(stats: &RuntimeStats) -> String {
+    let health = replace_live_claim(&stats.health, "ready");
+    let ingest_signal = replace_live_claim(&stats.ingest_signal, "ok");
+    let stats = RuntimeStats {
+        health,
+        ingest_signal,
+        ..stats.clone().counters_carried_forward()
+    };
+    format!(
+        "stats-provenance=stopped-run these are the last figures a process wrote here before it \
+         ended, not a reading of anything running now\n{}",
+        format_stats(&stats)
+    )
+}
+
+fn replace_live_claim(value: &str, live_claim: &str) -> String {
+    if value == live_claim {
+        STOPPED_RUNTIME_FACT.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Why a read of the snapshot file produced no figures. The two reasons have
+/// to stay apart, because only one of them is evidence that nothing has ever
+/// run in the directory: a file that is not there, and a file that is there and
+/// cannot be turned back into figures.
+enum NoSnapshot {
+    /// Nothing at that path. Nothing has ever written a snapshot here.
+    Absent,
+    /// A file is there and its contents could not be recovered — a permission
+    /// wall, bytes that are not text, a truncated or malformed body. Something
+    /// wrote here; none of it can be read back.
+    Unreadable,
+}
+
+/// The file as written, with no claim about whose it is, keeping absence and
+/// unreadability apart.
+fn read_snapshot_file_outcome(path: &Path) -> Result<RuntimeStats, NoSnapshot> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(NoSnapshot::Absent),
+        Err(_) => return Err(NoSnapshot::Unreadable),
+    };
+    serde_json::from_str(&text).map_err(|_| NoSnapshot::Unreadable)
+}
+
+/// The figures the file carries, or nothing. Only the run's own counter
+/// continuity uses this, and it starts from zero either way — a directory with
+/// no history and a file it cannot read are the same thing to a run that is
+/// about to write its own totals.
+fn read_snapshot_file(path: &Path) -> Option<RuntimeStats> {
+    read_snapshot_file_outcome(path).ok()
 }
 
 fn write_snapshot_path(path: &Path, stats: &RuntimeStats) -> Result<(), String> {
+    let stats = &RuntimeStats {
+        written_by: WriterIdentity::current(),
+        ..stats.clone()
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("create stats directory {}: {error}", parent.display()))?;

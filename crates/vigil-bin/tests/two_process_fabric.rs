@@ -98,19 +98,24 @@ fn spawn_node(
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("run")
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--review-port")
+        .arg(review_port.to_string())
+        .arg("--detector-model-path")
+        .arg(fixture_model_path())
         .env("VIGIL_DATA_DIR", data_dir)
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", review_port.to_string())
-        .env("VIGIL_DETECTOR_MODEL_PATH", fixture_model_path())
+        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
+        // env per the settings-authority census (still no flag/config seam).
+        //
         // Generous worker-slot deadline: a real checkpoint load in a debug
         // build needs headroom over the production wait before the cameraless
         // worker loop is declared started.
         .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", "20000")
         .env_remove("VIGIL_RTSP_URL")
-        .env_remove("VIGIL_FABRIC_HUB")
         .env_remove("VIGIL_FABRIC_TICKET");
     if hub {
-        command.env("VIGIL_FABRIC_HUB", "true");
+        command.arg("--fabric-hub").arg("true");
     }
     if let Some(ticket) = ticket {
         command.env("VIGIL_FABRIC_TICKET", ticket);

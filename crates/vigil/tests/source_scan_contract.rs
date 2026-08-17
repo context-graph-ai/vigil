@@ -397,7 +397,31 @@ fn rtsp_success_recovers_health_after_transient_ingest_failure() {
 }
 
 #[test]
-fn addon_config_exposes_recognition_options_and_schema() {
+fn recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry() {
+    // Superseded contract note: this test used to require
+    // detector_stationary_interval_secs / recognition_space_id /
+    // recognition_threshold / recognition_covered_classes visible under
+    // `options:` (including a hardcoded person+dog-only, no-traffic-classes
+    // default for recognition_covered_classes) "so a Home Assistant add-on
+    // user can see the active recognition setting". Under the
+    // settings-authority direction the operator sees the ACTIVE setting
+    // through `vigil settings`, not through a manifest default — a declared
+    // options default is a pin on the whole-form save and blocks
+    // reset-by-absence. That every behavior key (recognition_weights_dir
+    // included) carries no options default and IS declared schema-optional
+    // is already asserted generically, over every schema-derived behavior
+    // key, by `addon_config_surface.rs`'s
+    // `no_behavior_key_carries_a_declared_default_in_the_options_block` and
+    // `every_behavior_key_is_declared_schema_optional` — not repeated here.
+    //
+    // What this test keeps checking: each recognition key's specific schema
+    // TYPE (not just optionality), and that the value an operator gets when
+    // they set nothing is Vigil's own, read from the real seam rather than
+    // hand-copied — `crate::settings_backends::automatic_default` for the
+    // two settings the registry governs, and
+    // `crate::recognition::RecognitionConfig::default()` for the two it
+    // does not (recognition_space_id/recognition_threshold resolve straight
+    // from that struct in `config.rs`, never through the registry).
     let root = workspace_root();
     let addon_config_path = root.join("addons/vigil/config.yaml");
     let addon_config = fs::read_to_string(&addon_config_path)
@@ -407,63 +431,8 @@ fn addon_config_exposes_recognition_options_and_schema() {
     let options = top_level_yaml_section(&addon_config, "options");
     let schema = top_level_yaml_section(&addon_config, "schema");
 
-    if yaml_section_contains_key(&options, "recognition_weights_dir") {
-        failures.push(format!(
-            "{} must not set options.recognition_weights_dir to null/empty by default; Home Assistant Supervisor treats optional strings as omitted, not nullable, and rejects the add-on before the owner can configure it",
-            addon_config_path.display()
-        ));
-    }
-
-    for key in [
-        "detector_stationary_interval_secs",
-        "recognition_space_id",
-        "recognition_threshold",
-        "recognition_covered_classes",
-    ] {
-        if !yaml_section_contains_key(&options, key) {
-            failures.push(format!(
-                "{} must expose top-level options.{key} so a Home Assistant add-on user can see the active recognition setting",
-                addon_config_path.display()
-            ));
-        }
-    }
-    if !yaml_section_contains_entry(&options, "recognition_threshold", "0.9") {
-        failures.push(format!(
-            "{} must keep options.recognition_threshold at the owner-approved visible default 0.9",
-            addon_config_path.display()
-        ));
-    }
-    for future_key in ["zones", "masks"] {
-        if yaml_section_contains_key(&options, future_key)
-            || yaml_section_contains_key(&schema, future_key)
-        {
-            failures.push(format!(
-                "{} must not expose future {future_key} configuration before runtime support exists",
-                addon_config_path.display()
-            ));
-        }
-    }
-    for class_name in ["person", "dog"] {
-        let expected = format!("- {class_name}");
-        if !options.iter().any(|line| line.trim() == expected) {
-            failures.push(format!(
-                "{} must default options.recognition_covered_classes to include {class_name} for the person-and-dog recognition owner smoke",
-                addon_config_path.display()
-            ));
-        }
-    }
-    for class_name in ["car", "truck", "bus", "motorcycle", "bicycle"] {
-        let forbidden = format!("- {class_name}");
-        if options.iter().any(|line| line.trim() == forbidden) {
-            failures.push(format!(
-                "{} must not default options.recognition_covered_classes to include traffic class {class_name}; traffic classes auto-matched the only enrolled person before the class guard existed",
-                addon_config_path.display()
-            ));
-        }
-    }
-
     for (key, expected_schema) in [
-        ("detector_stationary_interval_secs", "int"),
+        ("detector_stationary_interval_secs", "int?"),
         ("recognition_weights_dir", "str?"),
         ("recognition_space_id", "str?"),
         ("recognition_threshold", "float?"),
@@ -475,15 +444,76 @@ fn addon_config_exposes_recognition_options_and_schema() {
             ));
         }
     }
-    if !yaml_section_contains_key(&schema, "recognition_covered_classes")
-        || !schema.iter().any(|line| {
-            line.trim()
-                == "- \"list(person|dog|cat|bird|horse|sheep|cow|car|truck|bus|motorcycle|bicycle)\""
-        })
-    {
+
+    for future_key in ["zones", "masks"] {
+        if yaml_section_contains_key(&options, future_key)
+            || yaml_section_contains_key(&schema, future_key)
+        {
+            failures.push(format!(
+                "{} must not expose future {future_key} configuration before runtime support exists",
+                addon_config_path.display()
+            ));
+        }
+    }
+
+    let recognition_defaults = vigil::recognition::RecognitionConfig::default();
+    if recognition_defaults.embedding_space_id != "vigil_site_vision_v1" {
         failures.push(format!(
-            "{} must declare schema.recognition_covered_classes as a Home Assistant list enum of supported COCO classes so the detector/recognizer allowlist is configurable outside Rust",
-            addon_config_path.display()
+            "recognition_space_id's owning default, RecognitionConfig::default().embedding_space_id, must stay \"vigil_site_vision_v1\", got {:?}",
+            recognition_defaults.embedding_space_id
+        ));
+    }
+    if recognition_defaults.match_threshold != 0.9 {
+        failures.push(format!(
+            "recognition_threshold's owning default, RecognitionConfig::default().match_threshold, must stay the owner-approved 0.9, got {}",
+            recognition_defaults.match_threshold
+        ));
+    }
+
+    let stationary_interval_default = vigil::settings_backends::automatic_default(
+        vigil::settings_model::DETECTOR_STATIONARY_INTERVAL_SETTING,
+    )
+    .map(|(value, _reason)| value);
+    if stationary_interval_default != Some(vigil::settings_model::SettingValue::Int(30)) {
+        failures.push(format!(
+            "detector_stationary_interval_secs's owning default, settings_backends::automatic_default, must stay 30 seconds, got {stationary_interval_default:?}"
+        ));
+    }
+
+    // The recognition_covered_classes automatic floor is Vigil's OWN
+    // independent default (cold-review-r4 finding 22): resolving it from
+    // `RecognitionConfig::default().covered_classes` (the full COCO set)
+    // coupled it to `detector_classes` — the moment an operator widened
+    // detection to include `car`, recognition silently covered it too,
+    // reviving the "traffic classes auto-matched the only enrolled person"
+    // regression this setting's own removed pre-arc default existed to
+    // prevent. `default_recognition_covered_classes()` restores that
+    // person+dog-only floor as its own single-sourced function, independent
+    // of both `detector_classes` and of `RecognitionConfig::default()`.
+    let covered_classes_default = vigil::settings_backends::automatic_default(
+        vigil::settings_model::RECOGNITION_COVERED_CLASSES_SETTING,
+    )
+    .map(|(value, _reason)| value);
+    let expected_covered_classes = vigil::settings_model::SettingValue::list(
+        vigil::settings_backends::default_recognition_covered_classes()
+            .iter()
+            .copied(),
+    );
+    if covered_classes_default != Some(expected_covered_classes) {
+        failures.push(format!(
+            "recognition_covered_classes's automatic floor must stay settings_backends::default_recognition_covered_classes() (person+dog), independent of detector_classes and of RecognitionConfig::default(), got {covered_classes_default:?}"
+        ));
+    }
+    if vigil::settings_backends::default_recognition_covered_classes() != ["person", "dog"] {
+        failures.push(format!(
+            "settings_backends::default_recognition_covered_classes() must stay [\"person\", \"dog\"], got {:?}",
+            vigil::settings_backends::default_recognition_covered_classes()
+        ));
+    }
+    if vigil::settings_backends::default_detection_classes() != ["person"] {
+        failures.push(format!(
+            "the detector's own default class list, settings_backends::default_detection_classes(), must stay person-only — this is what now keeps a passing vehicle from ever reaching recognition by default, got {:?}",
+            vigil::settings_backends::default_detection_classes()
         ));
     }
 
@@ -724,4 +754,295 @@ fn yaml_section_contains_entry(lines: &[&str], key: &str, expected_value: &str) 
 struct SourceFile {
     path: PathBuf,
     text: String,
+}
+
+// ---------------------------------------------------------------------
+// Settings-arc source contracts: the detector's own documentation must
+// stop claiming a behavior it no longer has, and no shipped path may
+// author a settings record at the pushed rank.
+// ---------------------------------------------------------------------
+
+#[path = "source_scan_lexer.rs"]
+mod source_scan_lexer;
+use source_scan_lexer::{
+    PRODUCTION_CRATES, collect_cfg_test_ranges, crates_root, in_any_range, lex, rust_sources,
+};
+
+/// The whole file as one lowercase line: every run of whitespace and every
+/// comment marker collapsed to a single space, so a claim written across
+/// three wrapped `///` lines reads as the one sentence it is. A robust
+/// phrasing check rather than a frozen byte string — the claim must be
+/// gone, however it happened to be line-wrapped.
+fn flattened_prose(text: &str) -> String {
+    let mut flattened = String::with_capacity(text.len());
+    let mut previous_was_space = false;
+    for character in text.chars() {
+        let normalized = if character.is_whitespace() {
+            ' '
+        } else {
+            character
+        };
+        if normalized == ' ' {
+            if !previous_was_space {
+                flattened.push(' ');
+            }
+            previous_was_space = true;
+        } else {
+            flattened.push(normalized.to_ascii_lowercase());
+            previous_was_space = false;
+        }
+    }
+    flattened.replace("/// ", "").replace("// ", "")
+}
+
+/// The phrases that together make the stale claim: the detector emits person
+/// only until recognition widens it. Recognition no longer decides the
+/// detector's class breadth, so documentation that still says it does sends
+/// a reader to the wrong place for the wrong reason.
+const STALE_CLASS_BREADTH_CLAIMS: &[&str] = &["recognition widens", "defaults to person only"];
+
+#[test]
+fn detector_doc_comment_no_longer_claims_recognition_widens_classes() {
+    // Unfakeable: the check runs against the real detector source, flattened
+    // so a re-wrap cannot hide the sentence, and it carries its own canary —
+    // the same detector against a synthetic string that DOES make the claim
+    // must flag it. A normalizer that quietly stopped matching anything
+    // therefore fails here rather than passing as a clean result.
+    let detector_path = workspace_root().join("crates/vigil/src/yolox_detector.rs");
+    let detector = fs::read_to_string(&detector_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", detector_path.display()));
+    assert!(
+        detector.len() > 1_000,
+        "{} is implausibly small; a documentation guard that reads the wrong file must fail \
+         loudly rather than pass on an empty read",
+        detector_path.display()
+    );
+
+    let canary = "/// COCO class indices this detector emits. Defaults to person only (the\n\
+                  /// baseline NVR behavior first-light depends on); recognition widens it to\n\
+                  /// the covered classes so a dog sighting reaches the match path.";
+    let flattened_canary = flattened_prose(canary);
+    for claim in STALE_CLASS_BREADTH_CLAIMS {
+        assert!(
+            flattened_canary.contains(claim),
+            "canary: the flattening must still recognize the stale claim {claim:?} when it is \
+             present, or this guard proves nothing about the real file"
+        );
+    }
+
+    let flattened = flattened_prose(&detector);
+    let mut failures = Vec::new();
+    for claim in STALE_CLASS_BREADTH_CLAIMS {
+        if flattened.contains(claim) {
+            failures.push(format!(
+                "{} still documents the detector's class breadth as person-only-until-recognition \
+                 ({claim:?}); recognition no longer widens the detector's classes, so the comment \
+                 tells a reader the opposite of what the code does",
+                detector_path.display()
+            ));
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("{}", failures.join("\n"));
+    }
+}
+
+/// The two files that legitimately name the pushed rank: the record model
+/// declares the author and the single constructor that builds a pushed
+/// record, and the settings store holds the hub-role write door. Every
+/// other production file — the command line, the Home Assistant surface,
+/// every operator-facing module — must never reach either.
+///
+/// `vigil/settings_domains.rs` is deliberately NOT listed here
+/// (cold-review-arc2-r5 finding 1): it used to carry a whole-file exemption
+/// because the scan's `#[cfg(test)]`-only masking could not see that
+/// `apply_take_over` — the one function in that file that opens the
+/// hub-role handle and authors at the pushed rank — is gated behind
+/// `#[cfg(feature = "test-support")]`, the same door
+/// `artifact_never_enables_test_support.rs` proves no shipped artifact
+/// opens. `collect_cfg_test_ranges` (`source_scan_lexer.rs`) now masks that
+/// gate too, so the scan sees `apply_take_over` is compiled out of every
+/// shipped build on its own — the file no longer needs a blanket exemption,
+/// and everything else in it (`gate_write`, `governed_value_refusal`,
+/// `domain_roster`, ...) is scanned exactly like every other production
+/// file, which is the whole point: the guard should read STRICTLY MORE of
+/// the tree after a correction wave, never less.
+const PUSHED_RANK_DEFINITION_FILES: &[&str] =
+    &["vigil/settings_model.rs", "vigil/settings_store.rs"];
+
+/// The spellings that author, or reach, a record at the pushed rank.
+const PUSHED_RANK_TOKENS: &[&str] = &[
+    "Author::Pushed",
+    "Surface::ManagementServer",
+    "write_pushed_record",
+    "SettingRecord::pushed",
+    "open_hub_role",
+    "apply_hub_authored",
+    // `apply_take_over` itself REACHES the pushed rank (it is the harness's
+    // stand-in for a management server, and its own body calls
+    // `open_hub_role`/`apply_hub_authored`/`SettingRecord::pushed`) — this
+    // doc comment's own words are "author, or reach, a record at the pushed
+    // rank," and a bare call to `settings_domains::apply_take_over(...)`
+    // from an operator-facing module is exactly a reach-the-pushed-rank
+    // site the prior wave's canary could not notice because it planted the
+    // other three tokens but never this one (cold-review-arc2-r5 finding
+    // 1). Its own definition in `settings_domains.rs` is masked out by the
+    // `#[cfg(feature = "test-support")]` range around it, so listing it
+    // here does not make that file's own legitimate definition a false
+    // positive.
+    "apply_take_over",
+];
+
+/// `masked` with every whitespace character dropped, alongside the original
+/// index each surviving character came from — so a match found in the
+/// compacted text (which tolerates `Author :: Pushed` and any line wrapping)
+/// can still be tested against the `#[cfg(test)]` ranges computed over the
+/// original positions.
+fn compacted_with_positions(masked: &[char]) -> (Vec<char>, Vec<usize>) {
+    let mut compacted = Vec::with_capacity(masked.len());
+    let mut positions = Vec::with_capacity(masked.len());
+    for (index, character) in masked.iter().enumerate() {
+        if !character.is_whitespace() {
+            compacted.push(*character);
+            positions.push(index);
+        }
+    }
+    (compacted, positions)
+}
+
+/// Every live-code occurrence of a pushed-rank spelling in one source file,
+/// reported as `file: token`. Comments and string literals are masked out by
+/// the shared lexer, and `#[cfg(test)]` bodies are excluded, so a unit test
+/// exercising the hub-role door is not mistaken for a shipped path.
+///
+/// A token immediately followed by `=>` is the left-hand PATTERN of a match
+/// arm — code scrutinizing an author a record already carries (`Author::Pushed
+/// => ...`), not code authoring one. That shape is a read, so it is excluded
+/// here; every other shape (a field initializer, an assignment, or a match
+/// arm's own RIGHT-hand value) still matches and is still reported. This is
+/// narrower than the bare token, not weaker: a construction site cannot be
+/// spelled `Author::Pushed =>` and still count as a construction, so nothing
+/// the scan exists to forbid can hide behind this exclusion.
+fn pushed_rank_sites(label: &str, source: &str) -> Vec<String> {
+    let lexed = lex(source);
+    let cfg_test_ranges = collect_cfg_test_ranges(source, &lexed.masked);
+    let (compacted, positions) = compacted_with_positions(&lexed.masked);
+    let mut sites = Vec::new();
+    for token in PUSHED_RANK_TOKENS {
+        let needle: Vec<char> = token.chars().collect();
+        if needle.len() > compacted.len() {
+            continue;
+        }
+        for start in 0..=compacted.len() - needle.len() {
+            if compacted[start..start + needle.len()] != needle[..] {
+                continue;
+            }
+            if in_any_range(&cfg_test_ranges, positions[start]) {
+                continue;
+            }
+            let end = start + needle.len();
+            let is_match_arm_pattern =
+                compacted.get(end) == Some(&'=') && compacted.get(end + 1) == Some(&'>');
+            if is_match_arm_pattern {
+                continue;
+            }
+            sites.push(format!("{label}: {token}"));
+        }
+    }
+    sites
+}
+
+#[test]
+fn no_command_line_or_operator_path_writes_at_the_pushed_rank() {
+    // Unfakeable in both directions. The negative leg scans every production
+    // crate's real sources for the pushed-rank spellings; the positive legs
+    // stop it being vacuous — a planted synthetic source MUST be flagged, and
+    // the one legitimate construction site MUST be found where it belongs. A
+    // scan that silently matched nothing therefore fails rather than passing
+    // as a clean result.
+    let planted = r#"
+        fn __planted_operator_surface_write(path: &Path) {
+            let record = SettingRecord {
+                author: Author :: Pushed,
+                surface: Surface::ManagementServer,
+            };
+            let pushed = SettingRecord::pushed(name, scope, value, reason);
+            let store = SettingsStore::open_hub_role(path).expect("planted");
+            store.write_pushed_record(record).expect("planted");
+            store.apply_hub_authored(vec![pushed]).expect("planted");
+            settings_domains::apply_take_over(path, &instruction).expect("planted");
+        }
+    "#;
+    let planted_sites = pushed_rank_sites("planted.rs", planted);
+    assert!(
+        planted_sites.len() >= PUSHED_RANK_TOKENS.len(),
+        "canary: a planted pushed-rank write must be flagged by this scan — including the spaced \
+         `Author :: Pushed` spelling — or the scan proves nothing about the real tree; flagged: \
+         {planted_sites:?}"
+    );
+
+    let commented_out = r#"
+        // let record = SettingRecord { author: Author::Pushed };
+        /// A doc comment mentioning Surface::ManagementServer.
+        fn __clean() { let message = "write_pushed_record"; let _ = message; }
+    "#;
+    assert!(
+        pushed_rank_sites("commented-out.rs", commented_out).is_empty(),
+        "a mention inside a comment or a string literal is not a shipped write path"
+    );
+
+    let crate_roots = crates_root();
+    let mut failures = Vec::new();
+    let mut definition_site_tokens = Vec::new();
+
+    for crate_name in PRODUCTION_CRATES {
+        let src_root = crate_roots.join(crate_name).join("src");
+        assert!(
+            src_root.is_dir(),
+            "expected production source tree {}",
+            src_root.display()
+        );
+        let sources = rust_sources(&src_root);
+        assert!(
+            !sources.is_empty(),
+            "expected Rust sources under {}",
+            src_root.display()
+        );
+        for path in sources {
+            let relative = path
+                .strip_prefix(&src_root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let label = format!("{crate_name}/{relative}");
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            let sites = pushed_rank_sites(&label, &text);
+            if PUSHED_RANK_DEFINITION_FILES.contains(&label.as_str()) {
+                definition_site_tokens.extend(sites);
+            } else {
+                failures.extend(sites);
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "no operator-facing or command-line path may author a settings record at the pushed rank; \
+         the only writer is the harness through the hub-role handle, and a local operation that \
+         could write at the pushed rank would be exactly the second control path the settings \
+         model forbids. Found: {failures:?}"
+    );
+
+    assert!(
+        definition_site_tokens
+            .iter()
+            .any(|site| site.starts_with("vigil/settings_model.rs")
+                && site.ends_with("Author::Pushed")),
+        "the pushed author must be constructed somewhere — in the record model's own pushed-record \
+         constructor — or this guard is vacuous: it would pass just as well on a tree where the \
+         pushed rank does not exist at all. Found definition-site tokens: \
+         {definition_site_tokens:?}"
+    );
 }

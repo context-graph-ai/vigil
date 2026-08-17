@@ -2,9 +2,9 @@
 //! avoid two hazards: unsafe process cleanup (a wildcard or shell-spawned
 //! `kill`, rather than the one centralized, target-checked helper) and a
 //! nested artifact build spawned from inside a test process (a real
-//! build/test invocation, as opposed to a read-only metadata query). This
-//! scan enforces both, over every file under `tests/` and every production
-//! crate's own `tests/` directory.
+//! build/test invocation, as opposed to a read-only `cargo metadata` or
+//! `cargo tree` query). This scan enforces both, over every file under
+//! `tests/` and every production crate's own `tests/` directory.
 //!
 //! Lives under `crates/vigil/tests/` — beside `environment_read_surface.rs`,
 //! `cli_secret_flag_surface.rs`, and `transport_purity.rs`, which share the
@@ -122,6 +122,11 @@ const BENIGN_COMMAND_NEW_EXPRESSIONS: &[(&str, &str)] = &[
     (
         "&mosquitto_bin",
         "the resolved mosquitto broker fixture binary path",
+    ),
+    (
+        "&lock_holder_binary",
+        "this test binary's own resolved path, re-executed as the settings-store lock holder so the \
+         holder pid the classification reports can only come from real cross-process lock ownership",
     ),
 ];
 
@@ -360,6 +365,134 @@ fn is_env_cargo_argument(
         return false;
     };
     next == end
+}
+
+/// A small chained-token match starting EXACTLY at `pos` — not a search
+/// like [`find_live_token_sequence`], a fixed sequence anchored at the
+/// position the caller already landed on. Each token in `tokens` must
+/// match in order, tolerating insignificant whitespace between them.
+/// `None` if any token fails to match; otherwise the position immediately
+/// after the last token.
+fn match_token_chain(
+    masked: &[char],
+    string_starts: &BTreeSet<usize>,
+    mut pos: usize,
+    tokens: &[&str],
+) -> Option<usize> {
+    for (index, token) in tokens.iter().enumerate() {
+        if index > 0 {
+            pos = skip_insignificant(masked, string_starts, pos);
+        }
+        pos = matches_token_at(masked, pos, token)?;
+    }
+    Some(pos)
+}
+
+/// Whether the expression starting at `pos` (right after a `let <name> =`)
+/// is `std::env::var("CARGO")` or `env::var("CARGO")` followed by
+/// `.unwrap_or_else(<closure>)` whose closure's own body carries EXACTLY
+/// one string literal, and it reads `"cargo"` — nothing else, so a
+/// fallback that named some other program could never pass this. Proves
+/// BOTH arms of the binding resolve to cargo: the `Ok` arm reads the
+/// `CARGO` env var cargo's own test harness sets to the cargo binary's
+/// path for every test process it runs; the `Err` arm's fallback is the
+/// literal `"cargo"`, walked by `$PATH`.
+fn binding_is_cargo_env_lookup(
+    masked: &[char],
+    strings: &[(usize, usize, String)],
+    string_starts: &BTreeSet<usize>,
+    pos: usize,
+) -> bool {
+    let mut cursor = skip_insignificant(masked, string_starts, pos);
+    let mut matched_prefix = false;
+    for prefix in [
+        ["std", "::", "env", "::", "var", "("].as_slice(),
+        ["env", "::", "var", "("].as_slice(),
+    ] {
+        if let Some(next) = match_token_chain(masked, string_starts, cursor, prefix) {
+            cursor = next;
+            matched_prefix = true;
+            break;
+        }
+    }
+    if !matched_prefix {
+        return false;
+    }
+    cursor = skip_insignificant(masked, string_starts, cursor);
+    let Some((_, string_end, content)) = strings.iter().find(|(s, _, _)| *s == cursor) else {
+        return false;
+    };
+    if content != "CARGO" {
+        return false;
+    }
+    cursor = skip_insignificant(masked, string_starts, *string_end);
+    let Some(next) = matches_token_at(masked, cursor, ")") else {
+        return false;
+    };
+    cursor = skip_insignificant(masked, string_starts, next);
+    let Some(next) =
+        match_token_chain(masked, string_starts, cursor, &[".", "unwrap_or_else", "("])
+    else {
+        return false;
+    };
+    let open_paren = next - 1;
+    let Some(close_paren) = match_paren(masked, open_paren) else {
+        return false;
+    };
+    let inner: Vec<&(usize, usize, String)> = strings
+        .iter()
+        .filter(|(s, e, _)| *s >= open_paren && *e <= close_paren)
+        .collect();
+    inner.len() == 1 && inner[0].2 == "cargo"
+}
+
+/// Whether the argument span `[start, end)` is a reference (`&<name>`) to
+/// a local bound, earlier in the same file, to the RUNTIME analogue of
+/// `env!("CARGO")`: `let <name> =
+/// std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());` (see
+/// [`binding_is_cargo_env_lookup`] for the exact shape required). Chosen
+/// at runtime instead of compile time so a missing `CARGO` var degrades to
+/// a `$PATH` lookup rather than a compile-time panic — the same tradeoff
+/// `vigil_binary_path`'s own resolution makes, just for a different
+/// binary. Every path through a binding matching that shape resolves to
+/// cargo, so a `Command::new(&name)` reached through it is recognized as
+/// cargo here — not filed as a benign non-cargo expression — and still
+/// goes through the identical subcommand check every other cargo
+/// invocation gets.
+fn is_runtime_cargo_env_argument(
+    masked: &[char],
+    strings: &[(usize, usize, String)],
+    string_starts: &BTreeSet<usize>,
+    start: usize,
+    end: usize,
+) -> bool {
+    let Some(after_amp) = matches_token_at(masked, start, "&") else {
+        return false;
+    };
+    let pos = skip_insignificant(masked, string_starts, after_amp);
+    let Some((ident, ident_end)) = read_ident_forward(masked, pos) else {
+        return false;
+    };
+    if ident_end != end {
+        return false;
+    }
+
+    for (_, after_eq) in find_live_token_sequence(masked, &["let", ident.as_str(), "="]) {
+        if binding_is_cargo_env_lookup(masked, strings, string_starts, after_eq) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Subcommands of `cargo` this scan treats as read-only queries rather
+/// than a nested build/test invocation — `metadata` (parses the
+/// manifest/lock graph) and `tree` (walks the already-resolved
+/// dependency/feature graph via the same resolver `cargo build` itself
+/// uses, and prints it — no compilation, no crate fetch beyond what the
+/// existing `Cargo.lock` already pins). Anything else is refused.
+fn is_readonly_cargo_subcommand(subcommand: Option<&str>) -> bool {
+    matches!(subcommand, Some("metadata") | Some("tree"))
 }
 
 /// The literal subcommand `open_delim` (a `(` or `[`) opens onto: skip
@@ -872,7 +1005,7 @@ fn command_new_violations(path_display: &str, source: &str) -> Vec<String> {
                         call_start,
                         call_end,
                     );
-                    if subcommand.as_deref() != Some("metadata") {
+                    if !is_readonly_cargo_subcommand(subcommand.as_deref()) {
                         violations.push(describe_violation("cargo", subcommand));
                     }
                 }
@@ -901,7 +1034,22 @@ fn command_new_violations(path_display: &str, source: &str) -> Vec<String> {
                 call_start,
                 call_end,
             );
-            if subcommand.as_deref() != Some("metadata") {
+            if !is_readonly_cargo_subcommand(subcommand.as_deref()) {
+                violations.push(describe_violation("cargo", subcommand));
+            }
+            continue;
+        }
+
+        if is_runtime_cargo_env_argument(masked, &lexed.strings, &string_starts, arg_start, arg_end)
+        {
+            let subcommand = resolve_command_new_subcommand(
+                masked,
+                &lexed.strings,
+                &string_starts,
+                call_start,
+                call_end,
+            );
+            if !is_readonly_cargo_subcommand(subcommand.as_deref()) {
                 violations.push(describe_violation("cargo", subcommand));
             }
             continue;
@@ -983,7 +1131,7 @@ fn same_call_argument_violations(source: &str) -> Vec<String> {
                         &string_starts,
                         *string_end,
                     );
-                    if subcommand.as_deref() != Some("metadata") {
+                    if !is_readonly_cargo_subcommand(subcommand.as_deref()) {
                         violations.push(describe_violation("cargo", subcommand));
                     }
                 }

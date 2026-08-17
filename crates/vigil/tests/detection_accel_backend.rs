@@ -569,23 +569,6 @@ impl DetectionForwardProbe for CountingProbe {
 }
 
 #[cfg(feature = "detect-burn-wgpu")]
-struct SlowProbe {
-    invocations: Arc<AtomicUsize>,
-    delay: Duration,
-}
-
-#[cfg(feature = "detect-burn-wgpu")]
-impl DetectionForwardProbe for SlowProbe {
-    fn run_forward_probe(&mut self) -> DetectionForwardProbeOutcome {
-        self.invocations.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(self.delay);
-        DetectionForwardProbeOutcome::Failed {
-            reason: "probe exceeded deadline".to_string(),
-        }
-    }
-}
-
-#[cfg(feature = "detect-burn-wgpu")]
 struct PanickingProbe {
     invocations: Arc<AtomicUsize>,
 }
@@ -976,33 +959,17 @@ fn doctor_detection_action_line_names_cpu_detection_as_supported() {
 
 #[cfg(feature = "detect-burn-wgpu")]
 #[test]
-fn detection_probe_timeout_and_panic_classify_probe_failed_without_hang() {
-    // Unfakeable because slow and panicking probes are injected deterministically
-    // and must return as classified fallback, not hang or escape.
+fn a_probe_that_panics_is_caught_and_classified_rather_than_escaping() {
+    // A preparation ends two ways: it completes, or it reports an error. A
+    // panic is the ugliest shape the second one takes, and it must still be
+    // caught, classified and reported rather than escaping into the caller or
+    // leaving the surface silent.
     //
-    // This test pins its own 1 s deadline via VIGIL_DETECTION_PROBE_DEADLINE_SECS
-    // instead of inheriting the shipped default: the shipped default is set high
-    // enough to let a real GPU's cold shader compile reach ACTIVE, so the
-    // bounded-classification contract must own a short deadline to stay a
-    // deterministic test of the timeout path (an injected 3 s probe against a 1 s
-    // deadline must return bounded and classify ProbeFailed). The env is restored
-    // before any assertion can unwind.
-    const DEADLINE_ENV: &str = "VIGIL_DETECTION_PROBE_DEADLINE_SECS";
-    let previous_deadline = std::env::var_os(DEADLINE_ENV);
-    unsafe {
-        std::env::set_var(DEADLINE_ENV, "1");
-    }
-
-    let slow_invocations = Arc::new(AtomicUsize::new(0));
-    let slow_probe = SlowProbe {
-        invocations: Arc::clone(&slow_invocations),
-        delay: Duration::from_secs(3),
-    };
-    let started = std::time::Instant::now();
-    let slow_selection =
-        select_detection_acceleration_with_probe(true, MODEL_ID, INPUT_SHAPE, slow_probe);
-    let slow_elapsed = started.elapsed();
-
+    // What this test no longer holds: it used to inject a SLOW probe against a
+    // short deadline and require the selection to give up on it. Nothing gives
+    // up on a working preparation now — a slow cold build on hardware that can
+    // do the work is not a failure — so both the deadline it pinned and the
+    // elapsed-time assertion that read it are gone.
     let panic_invocations = Arc::new(AtomicUsize::new(0));
     let panic_probe = PanickingProbe {
         invocations: Arc::clone(&panic_invocations),
@@ -1010,29 +977,6 @@ fn detection_probe_timeout_and_panic_classify_probe_failed_without_hang() {
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         select_detection_acceleration_with_probe(true, MODEL_ID, INPUT_SHAPE, panic_probe)
     }));
-
-    // Restore the environment before any assertion can unwind out of the test.
-    unsafe {
-        match previous_deadline {
-            Some(value) => std::env::set_var(DEADLINE_ENV, value),
-            None => std::env::remove_var(DEADLINE_ENV),
-        }
-    }
-
-    assert!(
-        slow_elapsed < Duration::from_secs(2),
-        "slow injected probe must be deadline-bounded"
-    );
-    assert_eq!(slow_selection.receipt.probe_status, ProbeStatus::Fallback);
-    assert_eq!(
-        slow_selection.receipt.failure_code,
-        FailureCode::ProbeFailed
-    );
-    assert_eq!(
-        slow_invocations.load(Ordering::SeqCst),
-        1,
-        "the slow probe path must actually invoke the injected probe"
-    );
 
     assert!(
         caught.is_ok(),

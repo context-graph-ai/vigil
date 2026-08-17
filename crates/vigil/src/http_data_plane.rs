@@ -188,6 +188,57 @@ pub fn spawn_review_data_plane_with_clock(
     })
 }
 
+/// The review data plane a run with no store behind it serves: it answers, and
+/// what it answers is why it cannot serve what was asked for.
+///
+/// Answering matters as much as refusing. A port that simply refuses
+/// connections leaves an operator with a transport error and no idea that the
+/// store is the problem, so every route here comes back with the one degraded
+/// refusal — recording, review history and corrections all need the store, and
+/// each says so.
+pub fn spawn_degraded_review_plane(port: u16) -> Result<ReviewDataPlaneHandle, String> {
+    let (server, local_addr) = bind_review_server(port)?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let worker_shutdown = Arc::clone(&shutdown);
+    let handle = thread::spawn(move || {
+        while !worker_shutdown.load(Ordering::SeqCst) {
+            match server.recv_timeout(Duration::from_millis(100)) {
+                Ok(Some(request)) => {
+                    let capability = degraded_route_capability(request.url());
+                    let body = crate::settings_degraded::refusal_line(capability);
+                    let response = Response::from_string(body)
+                        .with_status_code(StatusCode(503))
+                        .with_header(
+                            Header::from_bytes(&b"content-type"[..], &b"text/plain"[..])
+                                .expect("static header"),
+                        );
+                    let _ = request.respond(response);
+                }
+                Ok(None) => {}
+                Err(_) => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    });
+    Ok(ReviewDataPlaneHandle {
+        local_addr,
+        shutdown,
+        handle: Some(handle),
+    })
+}
+
+/// Which unavailable capability a review-plane route is asking for, so the
+/// refusal names what the caller actually wanted rather than one blanket word.
+fn degraded_route_capability(url: &str) -> crate::settings_degraded::UnavailableCapability {
+    let path = url.split('?').next().unwrap_or(url);
+    if path.starts_with(MEDIA_ROUTE_PREFIX) {
+        crate::settings_degraded::UnavailableCapability::Recording
+    } else if path.starts_with(CORRECTION_ROUTE) {
+        crate::settings_degraded::UnavailableCapability::Corrections
+    } else {
+        crate::settings_degraded::UnavailableCapability::ReviewHistory
+    }
+}
+
 fn bind_review_server(port: u16) -> Result<(Server, SocketAddr), String> {
     let server = Server::http(("0.0.0.0", port))
         .map_err(|error| format!("review port {port} bind failed: {error}"))?;

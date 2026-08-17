@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -24,6 +25,14 @@ pub enum HealthStatus {
     /// watching nothing can never present as an ordinary, camera-serving,
     /// unqualified "ready" box (still a 2xx liveness answer).
     NoCamerasConfigured,
+    /// Alive and watching, with no store behind it: live view, detection and
+    /// broker alerting are running while recording, review history,
+    /// corrections and settings changes are unavailable. Kept distinct from
+    /// `StoreOpenFailed` because it is the opposite outcome — the store failed
+    /// to open and the property is still being watched — and it answers 2xx,
+    /// since restarting a node that is doing its job would take the cameras
+    /// down for nothing.
+    RunningUnmanaged,
 }
 
 impl HealthStatus {
@@ -39,6 +48,7 @@ impl HealthStatus {
             Self::DiskFull => 4,
             Self::KeepPaceFailed => 5,
             Self::NoCamerasConfigured => 6,
+            Self::RunningUnmanaged => 7,
         }
     }
 
@@ -50,6 +60,7 @@ impl HealthStatus {
             4 => Self::DiskFull,
             5 => Self::KeepPaceFailed,
             6 => Self::NoCamerasConfigured,
+            7 => Self::RunningUnmanaged,
             _ => Self::Starting,
         }
     }
@@ -65,7 +76,10 @@ impl HealthStatus {
     /// contract). The precise degraded state stays named in the `/health` body.
     pub fn liveness_status_code(self) -> u16 {
         match self {
-            Self::Ready | Self::KeepPaceFailed | Self::NoCamerasConfigured => 200,
+            Self::Ready
+            | Self::KeepPaceFailed
+            | Self::NoCamerasConfigured
+            | Self::RunningUnmanaged => 200,
             Self::Starting | Self::StoreOpenFailed | Self::IngestFailed | Self::DiskFull => 503,
         }
     }
@@ -79,6 +93,40 @@ impl HealthStatus {
             Self::DiskFull => "disk-full",
             Self::KeepPaceFailed => "keep-pace-failed",
             Self::NoCamerasConfigured => "no_cameras_configured",
+            Self::RunningUnmanaged => "running_unmanaged",
+        }
+    }
+}
+
+/// What ONE camera reports about itself. A camera's condition is a camera fact:
+/// whether this node's store is readable, or whether it has any cameras at all,
+/// describes the node, and a camera field carrying one of those words would
+/// tell an operator every camera is in the same trouble whatever each camera is
+/// actually doing. Each variant renders as a single whitespace-free token, and
+/// this enum is where that vocabulary lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraCondition {
+    /// The camera's thread is coming up and has not reported anything yet.
+    Starting,
+    /// Frames are arriving and the pipeline behind them is working.
+    Watching,
+    /// The stream could not be reached, or the detector behind it is gone.
+    IngestFailed,
+    /// Frames are arriving faster than detection can keep up with them.
+    KeepPaceFailed,
+    /// This camera's clip could not be written.
+    ClipWriteFailed,
+}
+
+impl CameraCondition {
+    /// The token this condition renders as on the `/health` body.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Watching => "watching",
+            Self::IngestFailed => "ingest_failed",
+            Self::KeepPaceFailed => "keep_pace_failed",
+            Self::ClipWriteFailed => "clip_write_failed",
         }
     }
 }
@@ -87,6 +135,15 @@ impl HealthStatus {
 pub struct HealthState {
     status: Arc<AtomicU16>,
     detail: Arc<Mutex<String>>,
+    /// What each camera reports about ITSELF, by camera name. Kept apart from
+    /// the node's own condition above: one shared state cannot say that one
+    /// camera lost its stream while another is watching normally.
+    cameras: Arc<Mutex<BTreeMap<String, CameraCondition>>>,
+    /// The continuous unmanaged statement, present for as long as a run with
+    /// no store behind it lasts. It is carried on the state rather than fixed
+    /// at bind time because the store-open outcome is not known until after
+    /// the liveness surface is already answering.
+    unmanaged: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for HealthState {
@@ -100,6 +157,57 @@ impl HealthState {
         Self {
             status: Arc::new(AtomicU16::new(HealthStatus::Starting.as_u16())),
             detail: Arc::new(Mutex::new(String::new())),
+            cameras: Arc::new(Mutex::new(BTreeMap::new())),
+            unmanaged: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Record what one camera is reporting about itself.
+    pub fn set_camera(&self, camera: &str, condition: CameraCondition) {
+        if let Ok(mut guard) = self.cameras.lock() {
+            guard.insert(camera.to_string(), condition);
+        }
+    }
+
+    /// What every camera that has reported is reporting, read once so one
+    /// answer renders one consistent moment.
+    pub fn camera_conditions(&self) -> BTreeMap<String, CameraCondition> {
+        self.cameras
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    /// Declare that this run has no store behind it. The statement is then
+    /// carried on every `/health` answer for as long as the run lasts — the
+    /// unmanaged state is a standing condition, not a startup warning that
+    /// scrolls away.
+    pub fn declare_unmanaged(&self, statement: impl Into<String>) {
+        if let Ok(mut guard) = self.unmanaged.lock() {
+            *guard = Some(statement.into());
+        }
+    }
+
+    /// The unmanaged statement this run carries, if it is running unmanaged.
+    pub fn unmanaged_statement(&self) -> Option<String> {
+        self.unmanaged.lock().ok().and_then(|guard| guard.clone())
+    }
+
+    /// The status this run presents when nothing is wrong with it — the state
+    /// it starts from and the state it comes back to once a fault clears.
+    ///
+    /// On an ordinary run that is `Ready`. On a run with no store behind it it
+    /// is `RunningUnmanaged`, for the whole life of the run: a decoded frame
+    /// says the cameras are working, which was never in question, and it can
+    /// never make a box that cannot record, review, or accept a correction
+    /// into an ordinary ready box. Deriving it from the standing unmanaged
+    /// declaration rather than tracking a second flag keeps the status word
+    /// and the statement in the same answer from disagreeing.
+    pub fn healthy_baseline(&self) -> HealthStatus {
+        if self.unmanaged_statement().is_some() {
+            HealthStatus::RunningUnmanaged
+        } else {
+            HealthStatus::Ready
         }
     }
 
@@ -107,6 +215,16 @@ impl HealthState {
         if let Ok(mut guard) = self.detail.lock() {
             *guard = detail.into();
         }
+        // The condition the runtime observed is what is stored, on an unmanaged
+        // run as much as on any other. A camera that stopped ingesting, or a
+        // detector that failed to load, is a different fact from "the store is
+        // unreadable", and an operator looking for what is wrong needs the one
+        // that is actually wrong — laundering every later condition into the
+        // unmanaged state hides a real fault behind a state nobody can act on.
+        //
+        // What the watchdog reads is protected instead, where the answer is
+        // built: see `liveness_code`. That is the narrow place the protection
+        // belongs, because it is the only place it is about a restart.
         self.status.store(status.as_u16(), Ordering::SeqCst);
     }
 
@@ -157,12 +275,14 @@ fn group_cameras_by_kind(
 }
 
 /// Render the `cameras_by_kind` object as a leading-comma JSON fragment
-/// (composes with `acceleration_field` the same way), reporting every
-/// camera at the given request's current status label — the runtime
-/// tracks one shared liveness state today, so a per-camera entry must
-/// never invent a diverging value from the same snapshot's top-level
-/// `status`.
-fn render_cameras_by_kind(groups: &[(&'static str, Vec<String>)], status_label: &str) -> String {
+/// (composes with `acceleration_field` the same way), reporting every camera at
+/// what THAT camera is reporting about itself. A camera that has not reported
+/// anything yet is starting, which is the honest answer for a thread that is
+/// still coming up.
+fn render_cameras_by_kind(
+    groups: &[(&'static str, Vec<String>)],
+    conditions: &BTreeMap<String, CameraCondition>,
+) -> String {
     let mut out = String::from(r#","cameras_by_kind":{"#);
     for (kind_index, (kind, names)) in groups.iter().enumerate() {
         if kind_index > 0 {
@@ -177,10 +297,14 @@ fn render_cameras_by_kind(groups: &[(&'static str, Vec<String>)], status_label: 
             if camera_index > 0 {
                 out.push(',');
             }
+            let condition = conditions
+                .get(name)
+                .copied()
+                .unwrap_or(CameraCondition::Starting);
             out.push_str(&format!(
                 r#"{{"name":"{}","status":"{}"}}"#,
                 json_escape(name),
-                status_label
+                condition.label()
             ));
         }
         out.push_str("]}");
@@ -191,6 +315,7 @@ fn render_cameras_by_kind(groups: &[(&'static str, Vec<String>)], status_label: 
 
 pub(crate) struct HealthServer {
     handle: Option<JoinHandle<()>>,
+    bound_port: u16,
 }
 
 impl HealthServer {
@@ -260,7 +385,15 @@ impl HealthServer {
         });
         Ok(Self {
             handle: Some(handle),
+            bound_port,
         })
+    }
+
+    /// The port this surface is actually answering on — what the operator
+    /// surface reports as running, which is a fact about this process rather
+    /// than about what was asked for.
+    pub(crate) fn port(&self) -> u16 {
+        self.bound_port
     }
 
     pub(crate) fn join(mut self) {
@@ -302,6 +435,9 @@ fn handle_client(
         return;
     }
     let (status, detail) = state.snapshot();
+    // Read once, so the code this answer carries and the statement its body
+    // carries are the same run's condition rather than two reads apart.
+    let unmanaged = state.unmanaged_statement();
     // Degraded acceleration (configured-true but software/CPU active) is
     // reported additively; it is degraded acceleration, never a fault.
     let acceleration_field = acceleration
@@ -332,7 +468,7 @@ fn handle_client(
             )
         })
         .unwrap_or_default();
-    let cameras_by_kind_field = render_cameras_by_kind(cameras_by_kind, status.label());
+    let cameras_by_kind_field = render_cameras_by_kind(cameras_by_kind, &state.camera_conditions());
     let mut body = format!(
         r#"{{"status":"{}","version":"{}","detail":"{}"{}{}}}"#,
         status.label(),
@@ -362,7 +498,32 @@ fn handle_client(
             body.push_str(&fabric_status);
         }
     }
-    write_response(&mut stream, status.liveness_status_code(), &body);
+    // While the run is unmanaged, every operator surface says so on every
+    // answer, in the one line the settings projection renders — the same
+    // statement, from the same source, so the two surfaces cannot drift.
+    if let Some(statement) = &unmanaged {
+        body.push('\n');
+        body.push_str(crate::settings_projection::UNMANAGED_LINE_PREFIX);
+        body.push(' ');
+        body.push_str(statement);
+    }
+    write_response(&mut stream, liveness_code(status), &body);
+}
+
+/// The code one answer carries: the recorded status's own liveness code,
+/// always. A successful storeless start records `RunningUnmanaged`, which
+/// already answers 200 while live view and detection are functional —
+/// restarting a node whose settings database is unreadable cannot make it
+/// readable, so the Supervisor watchdog leaves it running. A LATER,
+/// independent failure (the camera's own ingest giving out, a full disk)
+/// changes the recorded status, and that status's own normal code answers
+/// instead, because a restart can plausibly clear a wedged ingest path or a
+/// disk that has since been freed — the watchdog needs to see that failure to
+/// act on it. The standing unmanaged statement stays on the body regardless of
+/// which code answers: it is a fact about the store, not about whichever
+/// condition is being reported right now.
+fn liveness_code(status: HealthStatus) -> u16 {
+    status.liveness_status_code()
 }
 
 fn write_response(stream: &mut TcpStream, code: u16, body: &str) {

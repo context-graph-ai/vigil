@@ -5,14 +5,22 @@ id = "acceleration-selection-fallback-promotion-and-honesty"
 lineage = "Accepted acceleration selection, fallback, promotion, artifact, and receipt criteria."
 sources = [
   "crates/vigil-bin/tests/detection_accel_backend.rs",
+  "crates/vigil/src/detector.rs",
+  "crates/vigil/src/live_backends.rs",
   "crates/vigil/tests/acceleration_receipts.rs",
   "crates/vigil/tests/config_acceleration_intent.rs",
   "crates/vigil/tests/decode_backend_contract.rs",
+  "crates/vigil/tests/decode_probe_effective_intent.rs",
   "crates/vigil/tests/detection_accel_backend.rs",
   "crates/vigil/tests/detection_fallback_action_truth.rs",
-  "crates/vigil/tests/detection_probe_completes_after_deadline.rs",
-  "crates/vigil/tests/detection_probe_promotes_after_deadline.rs",
+  "crates/vigil/tests/detection_preparation_outcomes_reach_every_surface.rs",
+  "crates/vigil/tests/detection_preparation_promotes_when_it_completes.rs",
+  "crates/vigil/tests/detection_transition_contract.rs",
+  "crates/vigil/tests/distributed_work_detector_registration.rs",
   "crates/vigil/tests/doctor_acceleration.rs",
+  "crates/vigil/tests/managed_detection_truth.rs",
+  "crates/vigil/tests/probe_deadline_knob_surface.rs",
+  "crates/vigil/tests/probe_timer_removal.rs",
   "crates/vigil/tests/shader_cache_persistence.rs",
 ]
 evidence_kind = "integration"
@@ -21,13 +29,14 @@ tests = [
   "vigil-bin::detection_accel_backend::runtime_detection_receipt_action_line_is_honest", # crates/vigil-bin/tests/detection_accel_backend.rs
   "vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback", # crates/vigil/tests/acceleration_receipts.rs
+  "vigil::acceleration_receipts::every_decode_selection_epoch_emits_its_own_proof_line", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::acceleration_receipts::health_reports_degraded_decode_and_detection_when_configured_but_fallback", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::acceleration_receipts::logs_are_bounded_per_stream_selection_plus_fallback", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::acceleration_receipts::receipt_carries_fixed_field_vocabulary", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::acceleration_receipts::stats_show_active_decoder_per_stream_and_detector_backend", # crates/vigil/tests/acceleration_receipts.rs
   "vigil::config_acceleration_intent::acceleration_booleans_default_true_everywhere", # crates/vigil/tests/config_acceleration_intent.rs
   "vigil::config_acceleration_intent::cli_flags_override_config_file", # crates/vigil/tests/config_acceleration_intent.rs
-  "vigil::config_acceleration_intent::env_vars_are_understood", # crates/vigil/tests/config_acceleration_intent.rs
+  "vigil::config_acceleration_intent::environment_variables_no_longer_steer_acceleration", # crates/vigil/tests/config_acceleration_intent.rs
   "vigil::config_acceleration_intent::invalid_boolean_fails_loud", # crates/vigil/tests/config_acceleration_intent.rs
   "vigil::config_acceleration_intent::toml_config_can_disable_each_boolean_independently", # crates/vigil/tests/config_acceleration_intent.rs
   "vigil::decode_backend_contract::cross_epoch_units_are_rejected_by_backend", # crates/vigil/tests/decode_backend_contract.rs
@@ -36,21 +45,41 @@ tests = [
   "vigil::decode_backend_contract::probe_reports_decoded_frames_and_classification", # crates/vigil/tests/decode_backend_contract.rs
   "vigil::decode_backend_contract::software_backend_preserves_first_light_decode_behavior", # crates/vigil/tests/decode_backend_contract.rs
   "vigil::decode_backend_contract::unclassified_selected_decoder_never_claims_hardware", # crates/vigil/tests/decode_backend_contract.rs
+  "vigil::decode_probe_effective_intent::the_live_pipeline_gate_is_derived_from_effective_intent_not_from_the_domain_switch", # crates/vigil/tests/decode_probe_effective_intent.rs
+  "vigil::decode_probe_effective_intent::the_operator_pin_alone_is_enough_to_require_real_probe_units", # crates/vigil/tests/decode_probe_effective_intent.rs
+  "vigil::detection_accel_backend::a_probe_that_panics_is_caught_and_classified_rather_than_escaping", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::detection_accel_compiled_in_receipt_agrees_with_recorded_probe", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::detection_accel_compiled_out_is_backend_not_compiled_from_observed_state", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::detection_accel_disabled_skips_probe_and_reports_disabled", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::detection_accel_hardware_flag_requires_recorded_passing_probe", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::detection_kill_path_action_names_cpu_detection_as_supported", # crates/vigil/tests/detection_accel_backend.rs
-  "vigil::detection_accel_backend::detection_probe_timeout_and_panic_classify_probe_failed_without_hang", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_accel_backend::doctor_detection_action_line_names_cpu_detection_as_supported", # crates/vigil/tests/detection_accel_backend.rs
   "vigil::detection_fallback_action_truth::fallback_action_says_backend_absent_when_accelerated_detection_is_not_compiled", # crates/vigil/tests/detection_fallback_action_truth.rs
   "vigil::detection_fallback_action_truth::probe_failure_action_names_real_next_steps_when_accelerated_backend_is_compiled", # crates/vigil/tests/detection_fallback_action_truth.rs
-  "vigil::detection_probe_completes_after_deadline::deadline_returns_fallback_now_but_probe_runs_to_completion_and_promotes_on_late_pass", # crates/vigil/tests/detection_probe_completes_after_deadline.rs
-  "vigil::detection_probe_promotes_after_deadline::in_time_pass_flows_through_the_single_receipt_path", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
-  "vigil::detection_probe_promotes_after_deadline::late_fail_leaves_cpu_standing_and_never_promotes", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
-  "vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
-  "vigil::detection_probe_promotes_after_deadline::overrunning_probe_yields_a_terminal_receipt_within_the_late_window_never_silence", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
-  "vigil::detection_probe_promotes_after_deadline::promote_error_records_cpu_standing_fallback_on_every_surface_never_active", # crates/vigil/tests/detection_probe_promotes_after_deadline.rs
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_completed_preparation_promotes_and_the_same_account_reaches_every_surface", # crates/vigil/tests/detection_preparation_outcomes_reach_every_surface.rs
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_preparation_still_working_is_never_ended_for_it", # crates/vigil/tests/detection_preparation_outcomes_reach_every_surface.rs
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_preparation_that_reports_an_error_leaves_the_processor_standing_and_never_promotes", # crates/vigil/tests/detection_preparation_outcomes_reach_every_surface.rs
+  "vigil::detection_preparation_outcomes_reach_every_surface::a_promotion_that_fails_leaves_the_processor_standing_on_every_surface", # crates/vigil/tests/detection_preparation_outcomes_reach_every_surface.rs
+  "vigil::detection_preparation_outcomes_reach_every_surface::every_outcome_flows_through_the_single_receipt_path", # crates/vigil/tests/detection_preparation_outcomes_reach_every_surface.rs
+  "vigil::detection_preparation_promotes_when_it_completes::a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes", # crates/vigil/tests/detection_preparation_promotes_when_it_completes.rs
+  "vigil::detection_transition_contract::a_backend_command_answers_with_requested_running_and_a_transition_under_way", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::a_preparation_that_has_neither_completed_nor_errored_stays_pending", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::a_preparation_under_way_says_when_it_started_and_what_it_last_reported", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::an_older_requests_completion_can_never_replace_the_backend_now_asked_for", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::completing_changes_every_fact_together", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::distributed_work_reuses_a_camera_detector_and_only_a_camera_less_node_owns_its_own", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::each_detector_identity_is_prepared_once_however_many_times_it_is_asked_for", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::moving_back_installs_the_retained_instance_without_preparing_again", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::moving_the_clock_changes_nothing_a_surface_reports", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::repeating_the_same_backend_after_a_real_error_is_a_fresh_attempt", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::the_coordinator_never_authors_the_operators_stored_choice", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::the_instance_that_was_forward_tested_is_the_instance_that_runs", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detection_transition_contract::the_node_claims_the_new_backend_only_after_every_handle_has_moved", # crates/vigil/tests/detection_transition_contract.rs
+  "vigil::detector::ownership_contract::a_swap_does_not_wait_for_the_detector_a_worker_is_already_using", # crates/vigil/src/detector.rs
+  "vigil::detector::ownership_contract::a_swap_hands_back_the_detector_it_replaced", # crates/vigil/src/detector.rs
+  "vigil::detector::ownership_contract::every_snapshot_of_an_unchanged_handle_is_the_same_instance", # crates/vigil/src/detector.rs
+  "vigil::distributed_work_detector_registration::a_node_with_no_camera_registers_the_detector_its_distributed_work_runs_on", # crates/vigil/tests/distributed_work_detector_registration.rs
+  "vigil::distributed_work_detector_registration::the_camera_path_registers_camera_handles_and_nothing_else", # crates/vigil/tests/distributed_work_detector_registration.rs
   "vigil::doctor_acceleration::blocked_device_classifies_permission_denied_with_ready_fix", # crates/vigil/tests/doctor_acceleration.rs
   "vigil::doctor_acceleration::disabled_intent_skips_probes_and_reports_disabled", # crates/vigil/tests/doctor_acceleration.rs
   "vigil::doctor_acceleration::doctor_cli_requires_the_acceleration_subcommand", # crates/vigil/tests/doctor_acceleration.rs
@@ -59,8 +88,37 @@ tests = [
   "vigil::doctor_acceleration::no_sudo_reports_current_process_truth_only", # crates/vigil/tests/doctor_acceleration.rs
   "vigil::doctor_acceleration::service_user_resolution_order_is_flag_env_systemd", # crates/vigil/tests/doctor_acceleration.rs
   "vigil::doctor_acceleration::sudo_without_service_user_source_is_manual_action_required", # crates/vigil/tests/doctor_acceleration.rs
+  "vigil::live_backends::tests::a_command_issued_during_the_startup_probe_is_carried_when_the_probe_answers", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_live_preparation_reports_its_progress", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_move_asked_for_before_any_handle_exists_claims_nothing_and_is_not_lost", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_startup_preparation_that_finishes_late_installs_nothing_after_a_newer_command", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_superseded_pass_leaves_the_running_claim_on_the_backend_still_in_use", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_superseded_preparation_installs_nothing_through_the_production_path", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::automatic_startup_moves_the_registered_handle_through_the_one_preparation_path", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::command_during_the_startup_probe_is_carried_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::late_startup_promotion_installs_nothing_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::live_preparation_reports_progress_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::move_before_handle_slot_is_not_lost_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::running_claim_waits_for_every_camera_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::startup_installs_the_instance_it_forward_tested_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::startup_uses_the_shared_transition_path_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::superseded_pass_leaves_running_claim_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::superseded_preparation_installs_nothing_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::the_node_claims_no_backend_while_a_camera_still_runs_the_old_one", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::the_startup_preparation_installs_the_instance_it_forward_tested", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::two_requests_are_one_build_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::two_requests_for_the_same_backend_are_one_build", # crates/vigil/src/live_backends.rs
+  "vigil::managed_detection_truth::the_automatic_choice_names_the_backend_the_detector_is_running", # crates/vigil/tests/managed_detection_truth.rs
+  "vigil::managed_detection_truth::the_domain_view_agrees_with_the_running_detector", # crates/vigil/tests/managed_detection_truth.rs
+  "vigil::managed_detection_truth::the_reason_moves_onto_the_promoted_backend_with_the_choice", # crates/vigil/tests/managed_detection_truth.rs
+  "vigil::probe_deadline_knob_surface::addon_config_declares_the_decode_probe_sample_wait_as_an_optional_integer", # crates/vigil/tests/probe_deadline_knob_surface.rs
+  "vigil::probe_timer_removal::a_deployment_declares_neither_detection_timer_as_a_setting", # crates/vigil/tests/probe_timer_removal.rs
+  "vigil::probe_timer_removal::neither_detection_timer_is_offered_as_an_add_on_option", # crates/vigil/tests/probe_timer_removal.rs
+  "vigil::probe_timer_removal::no_add_on_help_describes_a_detection_timer", # crates/vigil/tests/probe_timer_removal.rs
+  "vigil::probe_timer_removal::nothing_vigil_prints_offers_to_lengthen_a_detection_wait", # crates/vigil/tests/probe_timer_removal.rs
   "vigil::shader_cache_persistence::persistent_gpu_caches_live_under_data_root_and_export_their_env", # crates/vigil/tests/shader_cache_persistence.rs
 ]
+
 [[contract]]
 id = "acceptance-harness-process-port-and-network-safety"
 lineage = "Accepted first-light harness-safety criteria and the explicit acceptance-harness lineage review; the process-cleanup/nested-build source scan that used to live in this contract moved to its own contract (`test-source-process-cleanup-and-nested-build-safety`) alongside the sibling scans in `crates/vigil/tests/`, leaving this contract's own artifact-resolver assertion in place under a name that describes only what it now checks."
@@ -184,8 +242,8 @@ tests = [
   "vigil::detector_workclass_schema::detector_job_serde_round_trips_bit_exact", # crates/vigil/tests/detector_workclass_schema.rs
   "vigil::detector_workclass_schema::detector_result_serde_round_trips_bit_exact", # crates/vigil/tests/detector_workclass_schema.rs
   "vigil::detector_workclass_schema::length_framed_encoded_units_round_trip", # crates/vigil/tests/detector_workclass_schema.rs
-  "vigil::fabric_config_defaults::addon_config_declares_the_new_fabric_tuning_knobs_in_options_and_schema", # crates/vigil/tests/fabric_config_defaults.rs
-  "vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_visible_defaults_and_work_unset", # crates/vigil/tests/fabric_config_defaults.rs
+  "vigil::fabric_config_defaults::addon_config_declares_the_new_fabric_tuning_knobs_as_schema_optional_with_vigil_owned_defaults", # crates/vigil/tests/fabric_config_defaults.rs
+  "vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_sane_defaults_and_work_unset", # crates/vigil/tests/fabric_config_defaults.rs
   "vigil::fabric_config_defaults::fabric_rs_never_hardcodes_the_tuning_defaults_outside_their_config_owned_home", # crates/vigil/tests/fabric_config_defaults.rs
   "vigil::fabric_config_defaults::fabric_tuning_knobs_flow_through_the_config_surface_when_set", # crates/vigil/tests/fabric_config_defaults.rs
   "vigil::offload_policy::happy_path_never_touches_a_threshold_knob", # crates/vigil/tests/offload_policy.rs
@@ -373,8 +431,8 @@ tests = [
   "vigil-acceptance::acceptance::installable_substrate::vigil_container_persistent_volume_reopens_same_store", # tests/acceptance/installable_substrate.rs
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_first_start_opens_local_context_graph_store", # tests/acceptance/installable_substrate.rs
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_health_200_requires_store_open_and_runtime_loop", # tests/acceptance/installable_substrate.rs
-  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_health_503_when_store_cannot_open", # tests/acceptance/installable_substrate.rs
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_idle_rss_stays_below_100mb_without_growth", # tests/acceptance/installable_substrate.rs
+  "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_keeps_watching_unmanaged_when_store_cannot_open", # tests/acceptance/installable_substrate.rs
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_kill9_survivor_store_reopens_cleanly", # tests/acceptance/installable_substrate.rs
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_restart_reopens_existing_store", # tests/acceptance/installable_substrate.rs
   "vigil-acceptance::acceptance::installable_substrate::vigil_standalone_sigterm_exits_zero_and_releases_store", # tests/acceptance/installable_substrate.rs
@@ -421,6 +479,9 @@ tests = [
   "vigil-ha::ha_mqtt_broker::mqtt_gated_off_when_no_broker_configured", # crates/vigil-ha/tests/ha_mqtt_broker.rs
   "vigil-ha::ha_mqtt_broker::outbound_detection_publish_is_nonblocking_and_overflow_is_loud", # crates/vigil-ha/tests/ha_mqtt_broker.rs
   "vigil-ha::ha_mqtt_broker::running_condition_tracks_live_health_retained", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::storeless_presence_carries_a_last_will_that_marks_it_offline_on_unclean_disconnect", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::storeless_presence_never_reflects_a_control_command_it_has_no_door_to_serve", # crates/vigil-ha/tests/ha_mqtt_broker.rs
+  "vigil-ha::ha_mqtt_broker::storeless_presence_publishes_discovery_availability_and_running_condition", # crates/vigil-ha/tests/ha_mqtt_broker.rs
   "vigil-ha::ha_mqtt_broker::tcp_reservation_holds_port_until_release", # crates/vigil-ha/tests/ha_mqtt_broker.rs
 ]
 [[contract]]
@@ -493,6 +554,7 @@ sources = [
 evidence_kind = "behavioral-unit"
 gate = "pull-request"
 tests = [
+  "vigil::runtime::tests::a_planned_decode_reselect_is_not_counted_as_a_stream_fault", # crates/vigil/src/runtime.rs
   "vigil::runtime::tests::detector_decision_delay_is_zero_without_env_and_honors_short_values", # crates/vigil/src/runtime.rs
   "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan", # crates/vigil/src/runtime.rs
   "vigil::runtime::tests::detector_gate_still_enqueues_motion_positive_segments", # crates/vigil/src/runtime.rs
@@ -508,9 +570,12 @@ id = "structural-packaging-and-source-contracts"
 lineage = "Vigil inventory structural-evidence section; replacement remains required before deleting source scans."
 sources = [
   "crates/vigil/tests/addon_config_surface.rs",
+  "crates/vigil/tests/artifact_never_enables_test_support.rs",
   "crates/vigil/tests/artifact_profile_honesty.rs",
   "crates/vigil/tests/dependency_direction_contract.rs",
   "crates/vigil/tests/home_assistant_vocabulary_scan.rs",
+  "crates/vigil/tests/no_broker_surface.rs",
+  "crates/vigil/tests/no_site_channel_contract.rs",
   "crates/vigil/tests/oss_cleanliness_scan.rs",
   "crates/vigil/tests/probe_deadline_knob_surface.rs",
   "crates/vigil/tests/runtime_packages_manifest.rs",
@@ -521,10 +586,23 @@ evidence_kind = "structural"
 gate = "pull-request"
 tests = [
   "vigil::addon_config_surface::addon_config_camera_schema_exposes_usb_csi_and_mjpeg_source_fields", # crates/vigil/tests/addon_config_surface.rs
-  "vigil::addon_config_surface::addon_config_exposes_both_booleans_in_options_and_schema_defaulting_true", # crates/vigil/tests/addon_config_surface.rs
-  "vigil::addon_config_surface::addon_config_exposes_keyframe_and_bitrate_options_and_schema_with_ratified_defaults", # crates/vigil/tests/addon_config_surface.rs
   "vigil::addon_config_surface::addon_config_maps_video_device_and_forbids_full_access", # crates/vigil/tests/addon_config_surface.rs
   "vigil::addon_config_surface::addon_config_states_accelerated_detection_gpu_with_cpu_fallback_in_help", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::every_behavior_key_is_declared_schema_optional", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::every_manifest_declared_deployment_wide_setting_is_deliverable_by_the_config_loader", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::every_manifest_schema_key_carries_a_translation", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::hardware_decoding_and_accelerated_detection_default_true_in_vigils_own_loader", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::no_behavior_key_carries_a_declared_default_in_the_options_block", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::ratified_keyframe_and_bitrate_defaults_stay_vigils_own_and_schema_declares_them_optional", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::the_detection_class_list_is_a_loose_list_of_strings_not_an_enumeration", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::the_detector_queue_capacity_frame_sampling_and_confidence_threshold_have_schema_keys", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::the_manifest_declares_a_key_for_every_setting_the_operator_surface_answers_for", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::the_manifest_declares_supervisor_api_access_with_the_role_the_self_write_requires", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::the_reflection_roster_and_the_manifest_declare_the_same_keys_types_and_optionality", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::addon_config_surface::the_two_backend_settings_are_declared_as_loose_strings", # crates/vigil/tests/addon_config_surface.rs
+  "vigil::artifact_never_enables_test_support::no_artifact_build_invocation_names_the_test_support_feature", # crates/vigil/tests/artifact_never_enables_test_support.rs
+  "vigil::artifact_never_enables_test_support::no_artifact_feature_resolution_ever_activates_test_support", # crates/vigil/tests/artifact_never_enables_test_support.rs
+  "vigil::artifact_never_enables_test_support::the_vigil_crate_declares_test_support_but_never_defaults_it_on", # crates/vigil/tests/artifact_never_enables_test_support.rs
   "vigil::artifact_profile_honesty::hardware_addon_image_carries_manifest_hardware_profile", # crates/vigil/tests/artifact_profile_honesty.rs
   "vigil::artifact_profile_honesty::release_notes_name_the_hardware_generic_docker_artifact", # crates/vigil/tests/artifact_profile_honesty.rs
   "vigil::dependency_direction_contract::adapter_crate_declares_no_dependency_of_either_kind_on_a_substrate_core_already_embeds", # crates/vigil/tests/dependency_direction_contract.rs
@@ -552,31 +630,37 @@ tests = [
   "vigil::dependency_direction_contract::product_binary_crate_never_ships_a_direct_dependency_on_a_substrate_or_mqtt_transport_crate", # crates/vigil/tests/dependency_direction_contract.rs
   "vigil::home_assistant_vocabulary_scan::core_sources_carry_no_home_assistant_vocabulary", # crates/vigil/tests/home_assistant_vocabulary_scan.rs
   "vigil::home_assistant_vocabulary_scan::scan_detects_a_planted_leak_in_a_real_core_file", # crates/vigil/tests/home_assistant_vocabulary_scan.rs
+  "vigil::no_broker_surface::vigil_has_no_broker_surface", # crates/vigil/tests/no_broker_surface.rs
+  "vigil::no_site_channel_contract::no_site_channel_announce_returns_none", # crates/vigil/tests/no_site_channel_contract.rs
+  "vigil::no_site_channel_contract::no_site_channel_connect_and_listen_also_return_none", # crates/vigil/tests/no_site_channel_contract.rs
   "vigil::oss_cleanliness_scan::backend_nouns_stay_out_of_product_domain_outputs", # crates/vigil/tests/oss_cleanliness_scan.rs
   "vigil::oss_cleanliness_scan::no_private_environment_nouns_in_repo_sources", # crates/vigil/tests/oss_cleanliness_scan.rs
   "vigil::oss_cleanliness_scan::packaging_and_docs_surfaces_are_covered_by_the_cleanliness_scan", # crates/vigil/tests/oss_cleanliness_scan.rs
-  "vigil::probe_deadline_knob_surface::addon_config_declares_both_probe_deadline_knobs_as_optional_integers", # crates/vigil/tests/probe_deadline_knob_surface.rs
   "vigil::probe_deadline_knob_surface::addon_help_documents_decode_probe_deadline_option", # crates/vigil/tests/probe_deadline_knob_surface.rs
-  "vigil::probe_deadline_knob_surface::addon_help_documents_detection_probe_deadline_option", # crates/vigil/tests/probe_deadline_knob_surface.rs
+  "vigil::probe_deadline_knob_surface::the_decode_probe_sample_wait_defaults_to_the_documented_number_of_seconds", # crates/vigil/tests/probe_deadline_knob_surface.rs
   "vigil::runtime_packages_manifest::addon_dockerfile_installs_only_manifest_declared_packages", # crates/vigil/tests/runtime_packages_manifest.rs
   "vigil::runtime_packages_manifest::runtime_packages_manifest_bakes_packages_with_no_runtime_download", # crates/vigil/tests/runtime_packages_manifest.rs
   "vigil::runtime_packages_manifest::runtime_packages_manifest_exists_and_parses", # crates/vigil/tests/runtime_packages_manifest.rs
   "vigil::runtime_packages_manifest::runtime_packages_manifest_has_amd64_and_aarch64_profiles_with_backends_and_packages", # crates/vigil/tests/runtime_packages_manifest.rs
-  "vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::detector_doc_comment_no_longer_claims_recognition_widens_classes", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::generic_camera_registration_confirms_home_assistant_preview_step", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::generic_camera_registration_logs_validation_errors_and_deletes_failed_flows", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::generic_camera_registration_uses_live_rtsp_url_not_detection_rtsp_url", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::ha_os_vm_shell_signals_stay_behind_child_pid_validator", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::live_read_and_owner_control_source_contracts_are_fast", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::no_command_line_or_operator_path_writes_at_the_pushed_rank", # crates/vigil/tests/source_scan_contract.rs
+  "vigil::source_scan_contract::recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::review_data_plane_bounds_request_fanout_and_survives_accept_panics", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::rtsp_success_recovers_health_after_transient_ingest_failure", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::vigil_addon_does_not_auto_install_legacy_lovelace_gallery", # crates/vigil/tests/source_scan_contract.rs
   "vigil::source_scan_contract::yolox_oracle_owns_decode_path_without_dead_code_link_shims", # crates/vigil/tests/source_scan_contract.rs
-  "vigil::transport_purity::guard_catches_every_shape_of_the_transport_name", # crates/vigil/tests/transport_purity.rs
-  "vigil::transport_purity::no_declared_dependency_names_the_transport_crate_in_any_production_manifest", # crates/vigil/tests/transport_purity.rs
-  "vigil::transport_purity::no_iroh_symbol_anywhere_in_production_crate_sources", # crates/vigil/tests/transport_purity.rs
-  "vigil::transport_purity::scan_catches_a_transport_dependency_declared_directly_or_renamed_via_the_package_field_in_a_real_manifest", # crates/vigil/tests/transport_purity.rs
-  "vigil::transport_purity::scan_detects_a_planted_leak_in_vigil_ha_and_vigil_bin", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::a_ddl_keyword_split_across_a_format_call_is_still_caught", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::an_unparseable_table_name_is_flagged_not_exempted", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::create_table_if_not_exists_fails_closed_as_a_documented_nuisance_not_a_hole", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::the_false_positive_clause_fragment_is_no_longer_flagged_but_teeth_are_preserved", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::vigil_namespace_exemption_only_covers_vigil_tables", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::vigil_production_fabric_uses_authenticated_iroh", # crates/vigil/tests/transport_purity.rs
+  "vigil::transport_purity::vigil_settings_tables_declare_sync_conflict_policy_exactly_where_they_travel", # crates/vigil/tests/transport_purity.rs
 ]
 [[contract]]
 id = "supervisor-service-and-generic-camera-payloads"
@@ -771,15 +855,24 @@ lineage = "Accepted operator-settings pin/unpin, secret-disclosure, and environm
 sources = [
   "crates/vigil/src/secret.rs",
   "crates/vigil/src/settings.rs",
+  "crates/vigil/tests/addon_least_supervisor_role.rs",
+  "crates/vigil/tests/addon_optional_class_lists.rs",
   "crates/vigil/tests/automation_handle_capability_scan.rs",
   "crates/vigil/tests/cli_secret_flag_surface.rs",
   "crates/vigil/tests/environment_read_surface.rs",
+  "crates/vigil/tests/retry_and_probe_setting_authoring.rs",
   "crates/vigil/tests/settings_registry_declare_boundary.rs",
   "crates/vigil/tests/settings_surface_coverage.rs",
+  "crates/vigil/tests/supervisor_reflection_record_fidelity.rs",
 ]
 evidence_kind = "behavioral-unit"
 gate = "pull-request"
 tests = [
+  "vigil::addon_least_supervisor_role::the_manifest_asks_for_the_ordinary_role_a_self_options_write_needs", # crates/vigil/tests/addon_least_supervisor_role.rs
+  "vigil::addon_least_supervisor_role::the_packaged_documentation_does_not_claim_the_ordinary_role_cannot_self_write", # crates/vigil/tests/addon_least_supervisor_role.rs
+  "vigil::addon_optional_class_lists::an_installation_that_authored_neither_list_carries_no_required_key", # crates/vigil/tests/addon_optional_class_lists.rs
+  "vigil::addon_optional_class_lists::both_class_lists_declare_the_optional_list_element_grammar", # crates/vigil/tests/addon_optional_class_lists.rs
+  "vigil::addon_optional_class_lists::neither_class_list_ships_a_packaged_value", # crates/vigil/tests/addon_optional_class_lists.rs
   "vigil::automation_handle_capability_scan::automation_handle_never_gains_a_manual_pin_or_unpin_method", # crates/vigil/tests/automation_handle_capability_scan.rs
   "vigil::automation_handle_capability_scan::detector_catches_a_direct_alias_declared_inside_a_nested_module_and_referenced_by_its_module_path", # crates/vigil/tests/automation_handle_capability_scan.rs
   "vigil::automation_handle_capability_scan::detector_catches_a_direct_alias_whose_right_hand_side_is_path_qualified", # crates/vigil/tests/automation_handle_capability_scan.rs
@@ -795,6 +888,7 @@ tests = [
   "vigil::environment_read_surface::detector_numbers_repeated_reads_of_the_same_variable_as_distinct_sites", # crates/vigil/tests/environment_read_surface.rs
   "vigil::environment_read_surface::detector_resolves_plain_unaliased_use_imports", # crates/vigil/tests/environment_read_surface.rs
   "vigil::environment_read_surface::no_new_environment_read_sites_and_baseline_only_shrinks", # crates/vigil/tests/environment_read_surface.rs
+  "vigil::retry_and_probe_setting_authoring::all_three_set_together_author_three_distinct_settings", # crates/vigil/tests/retry_and_probe_setting_authoring.rs
   "vigil::secret::tests::debug_output_never_contains_the_secret_and_always_shows_the_redaction", # crates/vigil/src/secret.rs
   "vigil::secret::tests::deserializes_from_a_plain_json_string", # crates/vigil/src/secret.rs
   "vigil::secret::tests::equality_and_clone_compare_and_preserve_the_underlying_value", # crates/vigil/src/secret.rs
@@ -818,7 +912,18 @@ tests = [
   "vigil::settings_surface_coverage::observation_path_notices_a_config_key_the_real_dispatch_does_not_recognize", # crates/vigil/tests/settings_surface_coverage.rs
   "vigil::settings_surface_coverage::observation_path_notices_the_pilot_setting_missing_from_the_addon_options_surface", # crates/vigil/tests/settings_surface_coverage.rs
   "vigil::settings_surface_coverage::observation_path_notices_the_pilot_setting_missing_from_the_documentation_surface", # crates/vigil/tests/settings_surface_coverage.rs
+  "vigil::supervisor_reflection_record_fidelity::a_digit_leading_prefix_is_no_scheme_and_is_read_as_the_credential_it_is", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::a_dot_leading_prefix_is_no_scheme_and_is_read_as_the_credential_it_is", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::a_letter_leading_credential_prefix_survives_because_it_is_written_exactly_like_a_scheme", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::a_posted_camera_entry_is_an_object_never_text", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::a_refusal_still_says_what_was_refused", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::a_secret_written_into_the_path_survives_because_the_path_names_the_camera", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::a_surfaced_address_keeps_its_scheme_host_and_path_and_nothing_else", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::an_encoded_delimiter_is_outside_a_rule_written_about_literal_ones", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::reflecting_one_setting_returns_the_camera_list_in_the_shape_it_arrived_in", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
+  "vigil::supervisor_reflection_record_fidelity::several_addresses_in_one_message_are_each_reduced", # crates/vigil/tests/supervisor_reflection_record_fidelity.rs
 ]
+
 [[contract]]
 id = "site-control-camera-enable-boundary-and-disabled-marker-safety"
 lineage = "Accepted SiteControl camera-enable/disable boundary contract: the disabled-marker path never escapes its directory and an unrecognized camera id is a no-op."
@@ -1079,4 +1184,320 @@ tests = [
   "vigil::camera_identity_construction::from_usb_refuses_an_empty_node_id", # crates/vigil/tests/camera_identity_construction.rs
   "vigil::camera_identity_construction::from_usb_trims_incidental_surrounding_whitespace", # crates/vigil/tests/camera_identity_construction.rs
   "vigil::camera_identity_construction::the_same_raw_text_across_different_source_kinds_never_collides", # crates/vigil/tests/camera_identity_construction.rs
+]
+[[contract]]
+id = "settings-authority-scope-and-operator-surface"
+lineage = "Accepted vigil-settings authority-and-scope model, exercised in-process against a real settings store: a local pin outranks an automatic adjustment and a pushed record, and is outranked only by a more specific scope from the same author; a pushed record is shadowed rather than deleted, and resetting the local pin restores it; an automatic-management domain refuses a direct write to a value it governs, names how to turn itself off, and a hub take-over applies only when it names the domain, all-or-nothing; a pin that predates a domain widening stays effective, goes dormant instead of being deleted, and only an explicit reset hands it over; the four local write surfaces -- add-on options, startup flags, vigil-settings pins, and the config file -- each keep their own record and settle by most-recent-author with a fixed first-start tie order, and absence clears only where the surface genuinely says so; the store schema declares local records up-only, pushed records down-only behind the write scope constraint, keeps automatic and achieved records out of sync entirely, and keys every settings table by scope; a write commits whole or not at all; an echo of a value vigil itself wrote through the supervisor authors nothing so the reflect-then-observe loop terminates; supervisor reflection carries the complete options record, pre-validates against the add-on schema, honours restart-on-reflect, and never discards, alters, or un-applies a pushed value when the supervisor rejects the write or cannot be reached; the service identity is derived once at first start, persisted, refused an ordinary edit, and never rewritten by a storeless run; detection classes, rate controls, secrets, and detection backends resolve from the store with actionable refusals rather than silent clamps; and the control-state rendering and the Auto-adjusted source scan keep the operator's reading of who set a value honest."
+sources = [
+  "crates/vigil-bin/tests/range_doors_binding.rs",
+  "crates/vigil/src/live_backends.rs",
+  "crates/vigil/tests/auto_adjusted_control_state_scan.rs",
+  "crates/vigil/tests/backend_setting_validation.rs",
+  "crates/vigil/tests/detector_class_authoring_independence.rs",
+  "crates/vigil/tests/detector_class_emptiness_and_rate_range_gaps.rs",
+  "crates/vigil/tests/detector_class_selection.rs",
+  "crates/vigil/tests/detector_queue_capacity_environment_attribution.rs",
+  "crates/vigil/tests/environment_behavior_var_reported_ignored.rs",
+  "crates/vigil/tests/health_condition_truth.rs",
+  "crates/vigil/tests/node_key_scope_isolation.rs",
+  "crates/vigil/tests/pending_cause_truthfulness.rs",
+  "crates/vigil/tests/per_camera_motion_sensitivity_runtime.rs",
+  "crates/vigil/tests/rate_control_settings.rs",
+  "crates/vigil/tests/retry_and_probe_setting_authoring.rs",
+  "crates/vigil/tests/secret_source_precedence.rs",
+  "crates/vigil/tests/service_identity_cross_node_isolation.rs",
+  "crates/vigil/tests/service_identity_persistence.rs",
+  "crates/vigil/tests/service_identity_record_semantics.rs",
+  "crates/vigil/tests/settings_absent_value_rendering.rs",
+  "crates/vigil/tests/settings_addon_authoring_rules.rs",
+  "crates/vigil/tests/settings_application_timing_roster.rs",
+  "crates/vigil/tests/settings_authority_ranking.rs",
+  "crates/vigil/tests/settings_automatic_floor_pending.rs",
+  "crates/vigil/tests/settings_automatic_management_gate.rs",
+  "crates/vigil/tests/settings_control_states.rs",
+  "crates/vigil/tests/settings_domain_membership_surface.rs",
+  "crates/vigil/tests/settings_dormancy_and_grandfathering.rs",
+  "crates/vigil/tests/settings_echo_ledger.rs",
+  "crates/vigil/tests/settings_echo_ledger_home.rs",
+  "crates/vigil/tests/settings_echo_read_back_on_surface_ingest.rs",
+  "crates/vigil/tests/settings_pushed_table_boundary.rs",
+  "crates/vigil/tests/settings_record_coexistence.rs",
+  "crates/vigil/tests/settings_refusals.rs",
+  "crates/vigil/tests/settings_reset_semantics.rs",
+  "crates/vigil/tests/settings_shadowing.rs",
+  "crates/vigil/tests/settings_startup_value_store_authority.rs",
+  "crates/vigil/tests/settings_store_resolution.rs",
+  "crates/vigil/tests/settings_store_schema.rs",
+  "crates/vigil/tests/settings_write_durability.rs",
+  "crates/vigil/tests/stationary_scan_interval_accepts_off.rs",
+  "crates/vigil/tests/store_open_failure_classes.rs",
+  "crates/vigil/tests/supervisor_options_reflection.rs",
+  "crates/vigil/tests/supervisor_reflection_transport.rs",
+]
+evidence_kind = "behavioral-unit"
+gate = "pull-request"
+tests = [
+  "vigil-bin::range_doors_binding::detector_confidence_threshold_loader_ceiling_matches_the_declared_boundary", # crates/vigil-bin/tests/range_doors_binding.rs
+  "vigil-bin::range_doors_binding::detector_sample_frames_loader_ceiling_matches_the_declared_boundary", # crates/vigil-bin/tests/range_doors_binding.rs
+  "vigil-bin::range_doors_binding::recognition_threshold_loader_ceiling_matches_the_declared_boundary", # crates/vigil-bin/tests/range_doors_binding.rs
+  "vigil::auto_adjusted_control_state_scan::no_production_caller_mints_the_automation_handle_that_reaches_the_registry_auto_adjusted_writer", # crates/vigil/tests/auto_adjusted_control_state_scan.rs
+  "vigil::auto_adjusted_control_state_scan::no_production_code_outside_the_settings_model_writes_auto_adjusted", # crates/vigil/tests/auto_adjusted_control_state_scan.rs
+  "vigil::backend_setting_validation::a_compiled_in_backend_is_accepted_and_is_pending_until_a_runtime_runs_it", # crates/vigil/tests/backend_setting_validation.rs
+  "vigil::backend_setting_validation::an_unavailable_detection_backend_is_refused_naming_what_this_artifact_carries", # crates/vigil/tests/backend_setting_validation.rs
+  "vigil::detector_class_authoring_independence::naming_the_classes_recognition_covers_authors_only_recognition_coverage", # crates/vigil/tests/detector_class_authoring_independence.rs
+  "vigil::detector_class_authoring_independence::naming_the_classes_to_detect_authors_the_detector_setting_and_leaves_recognition_alone", # crates/vigil/tests/detector_class_authoring_independence.rs
+  "vigil::detector_class_emptiness_and_rate_range_gaps::an_in_range_float_or_whole_number_is_accepted_for_a_float_setting", # crates/vigil/tests/detector_class_emptiness_and_rate_range_gaps.rs
+  "vigil::detector_class_emptiness_and_rate_range_gaps::an_out_of_range_float_setting_is_refused_at_the_settings_door_and_nothing_is_stored", # crates/vigil/tests/detector_class_emptiness_and_rate_range_gaps.rs
+  "vigil::detector_class_emptiness_and_rate_range_gaps::detector_sample_frames_is_refused_above_the_loaders_own_ceiling", # crates/vigil/tests/detector_class_emptiness_and_rate_range_gaps.rs
+  "vigil::detector_class_emptiness_and_rate_range_gaps::explicit_empty_detector_classes_is_an_actionable_error_naming_field_and_remedy", # crates/vigil/tests/detector_class_emptiness_and_rate_range_gaps.rs
+  "vigil::detector_class_emptiness_and_rate_range_gaps::float_threshold_range_matches_the_loaders_own_ceiling_at_the_exact_boundary", # crates/vigil/tests/detector_class_emptiness_and_rate_range_gaps.rs
+  "vigil::detector_class_selection::every_declared_detection_class_is_selectable_across_the_whole_inventory", # crates/vigil/tests/detector_class_selection.rs
+  "vigil::detector_class_selection::explicit_class_list_reaches_the_detector_allowlist_exactly", # crates/vigil/tests/detector_class_selection.rs
+  "vigil::detector_class_selection::omitted_classes_keep_person_only_and_stay_automatic", # crates/vigil/tests/detector_class_selection.rs
+  "vigil::detector_class_selection::recognition_never_widens_or_narrows_an_explicit_class_list", # crates/vigil/tests/detector_class_selection.rs
+  "vigil::detector_class_selection::runtime_never_derives_detector_construction_classes_from_recognition_config", # crates/vigil/tests/detector_class_selection.rs
+  "vigil::detector_class_selection::unknown_class_name_is_refused_naming_the_field_and_the_value", # crates/vigil/tests/detector_class_selection.rs
+  "vigil::detector_queue_capacity_environment_attribution::the_environment_lever_names_itself_beside_the_pin_it_stands_in_front_of", # crates/vigil/tests/detector_queue_capacity_environment_attribution.rs
+  "vigil::environment_behavior_var_reported_ignored::an_environment_variable_naming_a_behavior_setting_is_reported_as_ignored_with_the_reason_and_where_to_set_it", # crates/vigil/tests/environment_behavior_var_reported_ignored.rs
+  "vigil::environment_behavior_var_reported_ignored::the_report_names_the_store_surface_not_another_environment_variable", # crates/vigil/tests/environment_behavior_var_reported_ignored.rs
+  "vigil::health_condition_truth::a_later_independent_failure_on_an_unmanaged_run_answers_its_own_liveness_code", # crates/vigil/tests/health_condition_truth.rs
+  "vigil::health_condition_truth::an_ordinary_store_backed_run_recovers_to_ready_not_unmanaged", # crates/vigil/tests/health_condition_truth.rs
+  "vigil::health_condition_truth::an_unmanaged_run_answers_200_with_the_unmanaged_statement_carried", # crates/vigil/tests/health_condition_truth.rs
+  "vigil::health_condition_truth::recovery_on_an_unmanaged_run_returns_to_running_unmanaged_not_ready", # crates/vigil/tests/health_condition_truth.rs
+  "vigil::live_backends::tests::a_decode_backend_change_is_never_answered_with_restart", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_decode_selection_for_an_older_epoch_publishes_nothing", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_decode_transition_names_the_request_it_belongs_to", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_landing_move_is_never_read_as_restart_pending", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_node_preparing_the_accelerator_is_never_told_to_restart_onto_the_backend_it_runs", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_return_onto_a_retained_detector_is_never_answered_with_restart", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_superseded_decode_completion_installs_nothing_and_clears_nothing", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::all_fail_restores_and_stays_unapplied_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::all_fail_restores_running_prints_no_taken_on_statement_and_stays_unapplied", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::an_automatic_landing_move_is_never_read_as_restart_pending", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::automatic_landing_move_is_never_read_as_restart_pending_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::decode_change_is_never_answered_with_restart_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::decode_selection_for_an_older_epoch_publishes_nothing_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::decode_transition_names_the_request_it_belongs_to_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::full_success_updates_and_applies_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::full_success_updates_running_fires_every_receipt_and_applies", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::landing_move_is_never_read_as_restart_pending_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::partial_success_and_repeat_retries_failed_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::partial_success_reports_partial_and_retries_only_the_failed_cameras_on_repeat", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::preparing_node_is_never_told_to_restart_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::receipts_fire_only_for_rebuilt_camera_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::receipts_fire_only_for_the_rebuilt_camera", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::return_onto_retained_detector_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::settings_answer_names_live_transition_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::superseded_decode_completion_installs_nothing_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::the_settings_answer_names_the_live_transition_its_own_command_started", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::zero_registered_detectors_settles_without_attempting_a_rebuild", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::zero_registered_settles_without_rebuild_child", # crates/vigil/src/live_backends.rs
+  "vigil::node_key_scope_isolation::a_read_of_a_never_started_deployment_creates_no_node_key_file", # crates/vigil/tests/node_key_scope_isolation.rs
+  "vigil::node_key_scope_isolation::the_operator_facing_identity_is_never_the_node_key_on_either_surface", # crates/vigil/tests/node_key_scope_isolation.rs
+  "vigil::node_key_scope_isolation::two_deployments_sharing_a_data_dir_basename_resolve_at_different_scope_targets", # crates/vigil/tests/node_key_scope_isolation.rs
+  "vigil::pending_cause_truthfulness::a_stream_or_model_change_names_the_restart_that_actually_closes_it", # crates/vigil/tests/pending_cause_truthfulness.rs
+  "vigil::pending_cause_truthfulness::no_setting_that_waits_for_a_restart_names_anything_else_as_what_closes_it", # crates/vigil/tests/pending_cause_truthfulness.rs
+  "vigil::per_camera_motion_sensitivity_runtime::each_cameras_gate_runs_at_that_cameras_own_motion_sensitivity", # crates/vigil/tests/per_camera_motion_sensitivity_runtime.rs
+  "vigil::rate_control_settings::each_rate_control_is_stored_and_resolved_at_its_declared_value", # crates/vigil/tests/rate_control_settings.rs
+  "vigil::rate_control_settings::no_domain_governs_the_rate_controls_so_setting_one_takes_no_disabling_step", # crates/vigil/tests/rate_control_settings.rs
+  "vigil::rate_control_settings::per_camera_motion_sensitivity_overrides_the_site_value_and_others_inherit", # crates/vigil/tests/rate_control_settings.rs
+  "vigil::rate_control_settings::zero_queue_capacity_is_an_actionable_range_error_not_a_silent_clamp", # crates/vigil/tests/rate_control_settings.rs
+  "vigil::retry_and_probe_setting_authoring::the_first_stream_retry_wait_typed_into_a_file_authors_its_setting", # crates/vigil/tests/retry_and_probe_setting_authoring.rs
+  "vigil::retry_and_probe_setting_authoring::the_hardware_probe_deadline_typed_into_a_file_authors_its_setting", # crates/vigil/tests/retry_and_probe_setting_authoring.rs
+  "vigil::retry_and_probe_setting_authoring::the_widest_stream_retry_wait_typed_into_a_file_authors_its_setting", # crates/vigil/tests/retry_and_probe_setting_authoring.rs
+  "vigil::secret_source_precedence::an_environment_secret_is_used_over_a_stored_one", # crates/vigil/tests/secret_source_precedence.rs
+  "vigil::secret_source_precedence::removing_the_environment_variable_restores_the_stored_secret_with_nothing_to_undo", # crates/vigil/tests/secret_source_precedence.rs
+  "vigil::secret_source_precedence::the_environment_secret_leg_authors_no_record_and_syncs_nowhere", # crates/vigil/tests/secret_source_precedence.rs
+  "vigil::secret_source_precedence::the_operator_surface_names_the_secret_source_and_never_prints_the_value", # crates/vigil/tests/secret_source_precedence.rs
+  "vigil::service_identity_cross_node_isolation::a_service_identity_record_at_another_nodes_scope_target_never_resolves_here_but_this_nodes_own_does", # crates/vigil/tests/service_identity_cross_node_isolation.rs
+  "vigil::service_identity_persistence::a_site_rename_leaves_the_persisted_identity_unchanged_across_restart", # crates/vigil/tests/service_identity_persistence.rs
+  "vigil::service_identity_persistence::a_storeless_first_start_persists_nothing_and_the_identity_is_persisted_at_the_first_successful_store_open", # crates/vigil/tests/service_identity_persistence.rs
+  "vigil::service_identity_persistence::an_ordinary_edit_of_the_identity_is_refused_naming_the_orphaned_history_consequence", # crates/vigil/tests/service_identity_persistence.rs
+  "vigil::service_identity_persistence::identity_is_derived_once_at_first_start_and_persisted", # crates/vigil/tests/service_identity_persistence.rs
+  "vigil::service_identity_persistence::the_degraded_storeless_run_never_rewrites_the_persisted_identity", # crates/vigil/tests/service_identity_persistence.rs
+  "vigil::service_identity_persistence::the_deliberate_change_operation_states_the_consequence_before_it_takes_effect", # crates/vigil/tests/service_identity_persistence.rs
+  "vigil::service_identity_record_semantics::a_deliberate_change_outranks_the_first_start_record_on_a_later_start", # crates/vigil/tests/service_identity_record_semantics.rs
+  "vigil::service_identity_record_semantics::the_identity_derivation_survives_a_rewording_of_the_reason_prose", # crates/vigil/tests/service_identity_record_semantics.rs
+  "vigil::settings_absent_value_rendering::a_declared_path_setting_with_no_value_renders_as_absent", # crates/vigil/tests/settings_absent_value_rendering.rs
+  "vigil::settings_absent_value_rendering::an_absent_value_and_an_explicitly_empty_value_never_render_the_same", # crates/vigil/tests/settings_absent_value_rendering.rs
+  "vigil::settings_absent_value_rendering::an_absent_value_reads_automatic_and_names_nobody_as_its_author", # crates/vigil/tests/settings_absent_value_rendering.rs
+  "vigil::settings_addon_authoring_rules::a_posted_key_whose_value_is_null_or_empty_authors_nothing", # crates/vigil/tests/settings_addon_authoring_rules.rs
+  "vigil::settings_addon_authoring_rules::a_value_diverging_from_the_declared_default_authors_a_local_explicit_record", # crates/vigil/tests/settings_addon_authoring_rules.rs
+  "vigil::settings_addon_authoring_rules::an_add_on_value_equal_to_the_declared_default_authors_nothing", # crates/vigil/tests/settings_addon_authoring_rules.rs
+  "vigil::settings_addon_authoring_rules::an_unset_schema_optional_key_is_absent_from_the_options_file_and_resolves_automatic", # crates/vigil/tests/settings_addon_authoring_rules.rs
+  "vigil::settings_application_timing_roster::a_domain_switch_and_the_backend_it_governs_take_effect_at_the_same_moment", # crates/vigil/tests/settings_application_timing_roster.rs
+  "vigil::settings_application_timing_roster::a_value_a_start_can_only_take_on_at_startup_is_declared_restart_pending", # crates/vigil/tests/settings_application_timing_roster.rs
+  "vigil::settings_application_timing_roster::every_setting_the_surface_answers_for_declares_when_it_takes_effect", # crates/vigil/tests/settings_application_timing_roster.rs
+  "vigil::settings_application_timing_roster::the_cause_a_pending_value_names_is_the_one_that_actually_closes_its_gap", # crates/vigil/tests/settings_application_timing_roster.rs
+  "vigil::settings_application_timing_roster::the_values_the_take_back_promise_covers_are_declared_live", # crates/vigil/tests/settings_application_timing_roster.rs
+  "vigil::settings_authority_ranking::an_older_local_pin_outranks_a_newer_pushed_record", # crates/vigil/tests/settings_authority_ranking.rs
+  "vigil::settings_authority_ranking::an_older_pushed_record_outranks_a_newer_automatic_adjustment", # crates/vigil/tests/settings_authority_ranking.rs
+  "vigil::settings_authority_ranking::an_older_site_wide_pin_shadows_a_newer_per_camera_push_visibly", # crates/vigil/tests/settings_authority_ranking.rs
+  "vigil::settings_authority_ranking::the_most_specific_scope_wins_within_one_author_before_authors_are_compared", # crates/vigil/tests/settings_authority_ranking.rs
+  "vigil::settings_automatic_floor_pending::a_floor_listing_reports_the_gap_it_can_see_and_claims_none_where_there_is_none", # crates/vigil/tests/settings_automatic_floor_pending.rs
+  "vigil::settings_automatic_management_gate::a_hub_take_over_that_does_not_name_the_domain_is_refused", # crates/vigil/tests/settings_automatic_management_gate.rs
+  "vigil::settings_automatic_management_gate::a_hub_take_over_that_names_the_domain_applies_disable_then_set_all_or_nothing", # crates/vigil/tests/settings_automatic_management_gate.rs
+  "vigil::settings_automatic_management_gate::a_write_to_a_governed_value_is_refused_naming_the_domain_and_how_to_turn_it_off", # crates/vigil/tests/settings_automatic_management_gate.rs
+  "vigil::settings_automatic_management_gate::turning_a_domain_off_then_pinning_a_governed_value_succeeds_and_the_pin_is_effective", # crates/vigil/tests/settings_automatic_management_gate.rs
+  "vigil::settings_control_states::a_governed_value_reads_managed_by_its_domain_never_top_level_auto_adjusted", # crates/vigil/tests/settings_control_states.rs
+  "vigil::settings_control_states::automatic_and_set_by_you_render_from_the_records_that_produce_them", # crates/vigil/tests/settings_control_states.rs
+  "vigil::settings_control_states::set_by_your_management_server_renders_with_what_the_server_said_and_when", # crates/vigil/tests/settings_control_states.rs
+  "vigil::settings_control_states::the_late_accelerated_promotion_renders_as_managed_by_accelerated_detection_with_revision_reason_and_effect", # crates/vigil/tests/settings_control_states.rs
+  "vigil::settings_domain_membership_surface::each_domain_names_the_settings_it_governs_and_what_vigil_currently_chooses", # crates/vigil/tests/settings_domain_membership_surface.rs
+  "vigil::settings_dormancy_and_grandfathering::a_pin_that_predates_a_domain_widening_stays_effective_and_is_labelled_as_predating", # crates/vigil/tests/settings_dormancy_and_grandfathering.rs
+  "vigil::settings_dormancy_and_grandfathering::only_an_explicit_reset_hands_a_grandfathered_pin_to_its_new_domain", # crates/vigil/tests/settings_dormancy_and_grandfathering.rs
+  "vigil::settings_dormancy_and_grandfathering::turning_the_domain_back_on_holds_the_pin_dormant_and_never_deletes_it", # crates/vigil/tests/settings_dormancy_and_grandfathering.rs
+  "vigil::settings_dormancy_and_grandfathering::turning_the_domain_off_again_wakes_the_dormant_pin_unchanged", # crates/vigil/tests/settings_dormancy_and_grandfathering.rs
+  "vigil::settings_echo_ledger::a_float_value_genuinely_differing_from_the_int_write_out_still_authors_a_human_record", # crates/vigil/tests/settings_echo_ledger.rs
+  "vigil::settings_echo_ledger::a_value_differing_from_the_recorded_write_out_authors_a_local_explicit_record", # crates/vigil/tests/settings_echo_ledger.rs
+  "vigil::settings_echo_ledger::a_write_out_recorded_before_a_restart_is_still_recognized_as_an_echo_after_it", # crates/vigil/tests/settings_echo_ledger.rs
+  "vigil::settings_echo_ledger::an_echo_never_triggers_another_write_so_the_cycle_terminates", # crates/vigil/tests/settings_echo_ledger.rs
+  "vigil::settings_echo_ledger::an_integer_reflected_into_a_float_key_and_coerced_on_read_back_is_still_recognized_as_an_echo", # crates/vigil/tests/settings_echo_ledger.rs
+  "vigil::settings_echo_ledger::content_matching_the_recorded_write_out_is_recognized_as_an_echo_and_authors_nothing", # crates/vigil/tests/settings_echo_ledger.rs
+  "vigil::settings_echo_ledger::the_ledger_records_the_complete_posted_record_as_the_write_out", # crates/vigil/tests/settings_echo_ledger.rs
+  "vigil::settings_echo_ledger_home::the_deployment_holds_its_echo_record_in_its_store_and_writes_no_file_beside_it", # crates/vigil/tests/settings_echo_ledger_home.rs
+  "vigil::settings_echo_read_back_on_surface_ingest::a_value_a_person_typed_over_the_mirrored_one_is_ingested_as_their_own_record", # crates/vigil/tests/settings_echo_read_back_on_surface_ingest.rs
+  "vigil::settings_echo_read_back_on_surface_ingest::ingesting_vigils_own_mirrored_write_records_the_read_back_and_authors_nothing", # crates/vigil/tests/settings_echo_read_back_on_surface_ingest.rs
+  "vigil::settings_pushed_table_boundary::the_hub_role_handle_writes_the_pushed_table_successfully", # crates/vigil/tests/settings_pushed_table_boundary.rs
+  "vigil::settings_pushed_table_boundary::the_ordinary_node_side_handle_is_refused_a_write_to_the_pushed_table", # crates/vigil/tests/settings_pushed_table_boundary.rs
+  "vigil::settings_record_coexistence::a_config_file_value_never_reverts_a_vigil_settings_change_at_restart", # crates/vigil/tests/settings_record_coexistence.rs
+  "vigil::settings_record_coexistence::a_first_start_tie_resolves_startup_options_then_vigil_settings_then_the_file_surface", # crates/vigil/tests/settings_record_coexistence.rs
+  "vigil::settings_record_coexistence::a_held_statement_never_claims_a_stored_value_is_running", # crates/vigil/tests/settings_record_coexistence.rs
+  "vigil::settings_record_coexistence::an_unchanged_surface_authors_nothing_and_re_wins_nothing_at_restart", # crates/vigil/tests/settings_record_coexistence.rs
+  "vigil::settings_record_coexistence::between_local_surfaces_the_most_recent_author_wins", # crates/vigil/tests/settings_record_coexistence.rs
+  "vigil::settings_record_coexistence::one_local_surface_being_outranked_by_another_is_stated_on_the_operator_surface", # crates/vigil/tests/settings_record_coexistence.rs
+  "vigil::settings_record_coexistence::the_four_local_surfaces_keep_their_own_records", # crates/vigil/tests/settings_record_coexistence.rs
+  "vigil::settings_refusals::a_narrowed_range_never_refuses_a_value_already_stored_and_working", # crates/vigil/tests/settings_refusals.rs
+  "vigil::settings_refusals::an_invalid_value_is_refused_at_write_time_and_nothing_is_stored", # crates/vigil/tests/settings_refusals.rs
+  "vigil::settings_reset_semantics::a_missing_or_unparsable_file_surface_clears_nothing", # crates/vigil/tests/settings_reset_semantics.rs
+  "vigil::settings_reset_semantics::a_missing_or_unparsable_file_surface_clears_nothing_at_a_cameras_scope_either", # crates/vigil/tests/settings_reset_semantics.rs
+  "vigil::settings_reset_semantics::an_empty_but_present_file_surface_clears_records_at_node_and_camera_scope_alike", # crates/vigil/tests/settings_reset_semantics.rs
+  "vigil::settings_reset_semantics::an_explicit_reset_drops_to_the_record_beneath_and_names_it", # crates/vigil/tests/settings_reset_semantics.rs
+  "vigil::settings_reset_semantics::removing_a_key_from_a_present_parsing_file_surface_clears_only_that_surfaces_record", # crates/vigil/tests/settings_reset_semantics.rs
+  "vigil::settings_reset_semantics::startup_options_never_clear_a_cameras_own_record_by_absence_either", # crates/vigil/tests/settings_reset_semantics.rs
+  "vigil::settings_reset_semantics::startup_options_never_clear_by_absence", # crates/vigil/tests/settings_reset_semantics.rs
+  "vigil::settings_shadowing::a_local_pin_over_a_pushed_record_is_effective_with_the_pushed_record_still_stored", # crates/vigil/tests/settings_shadowing.rs
+  "vigil::settings_shadowing::no_local_operation_deletes_a_pushed_record", # crates/vigil/tests/settings_shadowing.rs
+  "vigil::settings_shadowing::resetting_the_local_pin_restores_the_pushed_value", # crates/vigil/tests/settings_shadowing.rs
+  "vigil::settings_shadowing::the_shadowed_pushed_record_is_reported_on_the_face_of_the_listing_not_in_history", # crates/vigil/tests/settings_shadowing.rs
+  "vigil::settings_startup_value_store_authority::a_stored_early_resolved_value_outranks_vigils_own_choice_and_reads_set_by_you", # crates/vigil/tests/settings_startup_value_store_authority.rs
+  "vigil::settings_startup_value_store_authority::each_value_this_node_resolves_early_is_still_settable_through_vigil_settings", # crates/vigil/tests/settings_startup_value_store_authority.rs
+  "vigil::settings_startup_value_store_authority::every_early_resolved_value_answers_on_the_operator_listing_with_the_stored_value", # crates/vigil/tests/settings_startup_value_store_authority.rs
+  "vigil::settings_store_resolution::detector_class_list_resolves_from_the_store_not_the_merged_config", # crates/vigil/tests/settings_store_resolution.rs
+  "vigil::settings_store_schema::automatic_auto_adjusted_and_achieved_records_never_sync", # crates/vigil/tests/settings_store_schema.rs
+  "vigil::settings_store_schema::local_records_are_declared_up_only", # crates/vigil/tests/settings_store_schema.rs
+  "vigil::settings_store_schema::no_settings_table_is_keyed_without_scope", # crates/vigil/tests/settings_store_schema.rs
+  "vigil::settings_store_schema::pushed_records_are_declared_down_only_with_the_write_scope_constraint", # crates/vigil/tests/settings_store_schema.rs
+  "vigil::settings_write_durability::a_second_write_at_the_same_identity_replaces_it_rather_than_accumulating", # crates/vigil/tests/settings_write_durability.rs
+  "vigil::settings_write_durability::a_write_of_one_authors_record_never_commits_a_state_where_that_record_is_absent", # crates/vigil/tests/settings_write_durability.rs
+  "vigil::settings_write_durability::an_explicit_reset_never_commits_a_state_where_the_setting_is_missing", # crates/vigil/tests/settings_write_durability.rs
+  "vigil::stationary_scan_interval_accepts_off::the_settings_store_accepts_zero_as_periodic_rescanning_turned_off", # crates/vigil/tests/stationary_scan_interval_accepts_off.rs
+  "vigil::store_open_failure_classes::a_locked_store_still_refuses_a_second_runtime_naming_the_holder", # crates/vigil/tests/store_open_failure_classes.rs
+  "vigil::store_open_failure_classes::a_separate_process_holds_the_store_lock_while_the_parent_classifies", # crates/vigil/tests/store_open_failure_classes.rs
+  "vigil::store_open_failure_classes::an_absent_store_is_created_rather_than_treated_as_a_failure", # crates/vigil/tests/store_open_failure_classes.rs
+  "vigil::supervisor_options_reflection::a_local_vigil_settings_change_reflects_immediately", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_missing_supervisor_permission_is_reported_as_a_reflection_failure_naming_the_manifest_declaration", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_pushed_value_is_reflected_without_requesting_a_restart", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_reflection_write_carries_the_complete_options_record", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_rejected_or_unreachable_supervisor_never_discards_alters_or_un_applies_the_pushed_value", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_setting_only_a_restart_brings_into_force_is_mirrored_and_then_restarted", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_setting_this_process_takes_on_live_is_mirrored_without_replacing_the_container", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_setting_with_no_add_on_schema_target_is_stated_per_setting_not_discovered_at_write_time", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_value_the_add_on_schema_would_coerce_is_not_mirrored_and_is_reported_as_not_achieved_naming_what_runs", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_write_omitting_a_schema_required_key_is_rejected_outright", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::a_write_omitting_a_user_set_optional_key_would_erase_it_so_the_merge_preserves_it", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::automatic_and_auto_adjusted_values_never_reflect", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::no_supervisor_reports_the_value_as_mirrored_nowhere_with_the_reason", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::schema_type_pre_validation_runs_before_the_write_not_after_the_response", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::the_reflection_client_uses_the_containers_own_supervisor_token", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::with_restart_on_reflect_at_its_default_vigil_requests_the_restart_that_makes_the_container_file_agree", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_options_reflection::with_restart_on_reflect_off_the_value_applies_where_it_can_and_the_rest_is_reported_pending_with_the_divergence", # crates/vigil/tests/supervisor_options_reflection.rs
+  "vigil::supervisor_reflection_transport::a_local_settings_change_mirrors_onto_the_add_on_options", # crates/vigil/tests/supervisor_reflection_transport.rs
+  "vigil::supervisor_reflection_transport::a_reflection_write_posts_the_complete_record_not_only_the_key_that_changed", # crates/vigil/tests/supervisor_reflection_transport.rs
+  "vigil::supervisor_reflection_transport::a_supervisor_that_refuses_the_write_never_un_applies_the_stored_value", # crates/vigil/tests/supervisor_reflection_transport.rs
+  "vigil::supervisor_reflection_transport::the_client_a_deployment_builds_is_the_client_these_proofs_drive", # crates/vigil/tests/supervisor_reflection_transport.rs
+  "vigil::supervisor_reflection_transport::the_production_client_reads_the_add_on_record_from_the_supervisor", # crates/vigil/tests/supervisor_reflection_transport.rs
+  "vigil::supervisor_reflection_transport::the_stored_restart_policy_decides_whether_a_mirror_is_followed_by_a_restart", # crates/vigil/tests/supervisor_reflection_transport.rs
+  "vigil::supervisor_reflection_transport::what_was_written_out_survives_as_the_deployments_own_echo_record", # crates/vigil/tests/supervisor_reflection_transport.rs
+]
+[[contract]]
+id = "settings-operator-listing-live-process-and-degraded-store"
+lineage = "Accepted vigil-settings live-operator-listing and degraded-store criteria, driven over real vigil run operating-system processes rather than an in-process runtime: the listing answers from the live runtime while it owns the store and by direct store read when no runtime owns it or after the run stops, an unstarted deployment leaves no store on disk, the listing reports value, control state, author, surface, scope, and reason for every touched setting side by side with what is actually running, and shows the service identifier read-only with how it was arrived at; a pin and its attribution survive a full process restart; and with the settings store made genuinely unreadable the runtime still starts cameras, detection, and broker alerting on a best-effort basis it never overstates, recording, review, corrections, and settings changes each refuse while naming what is unavailable, the unmanaged state is restated on every operator surface for as long as it lasts, and the degraded run persists nothing at all, including the service identity."
+sources = [
+  "crates/vigil-bin/tests/configured_stationary_scan_reaches_the_runtime.rs",
+  "crates/vigil-bin/tests/detector_queue_capacity_does_not_survive_its_variable.rs",
+  "crates/vigil-bin/tests/identity_refusal_through_settings_cli.rs",
+  "crates/vigil-bin/tests/recognition_component_failure_degraded_mode.rs",
+  "crates/vigil-bin/tests/service_identity_runtime_persistence.rs",
+  "crates/vigil-bin/tests/settings_declared_keys_land_or_refuse.rs",
+  "crates/vigil-bin/tests/settings_decode_backend_running_authority.rs",
+  "crates/vigil-bin/tests/settings_early_resolved_values_govern_the_next_start.rs",
+  "crates/vigil-bin/tests/settings_empty_surface_resets_everything_end_to_end.rs",
+  "crates/vigil-bin/tests/settings_live_application_while_running.rs",
+  "crates/vigil-bin/tests/settings_live_operator_visibility.rs",
+  "crates/vigil-bin/tests/settings_operator_surface_fields.rs",
+  "crates/vigil-bin/tests/settings_per_camera_motion_scope_and_clearing.rs",
+  "crates/vigil-bin/tests/settings_persistence_across_restart.rs",
+  "crates/vigil-bin/tests/settings_queue_capacity_environment_attribution_live.rs",
+  "crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs",
+  "crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil-bin::configured_stationary_scan_reaches_the_runtime::the_stationary_scan_interval_written_to_the_configuration_file_is_what_the_runtime_runs", # crates/vigil-bin/tests/configured_stationary_scan_reaches_the_runtime.rs
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_queue_depth_levered_by_an_environment_variable_does_not_outlive_it", # crates/vigil-bin/tests/detector_queue_capacity_does_not_survive_its_variable.rs
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_of_a_truncated_snapshot_refuses_instead_of_claiming_nothing_ran", # crates/vigil-bin/tests/detector_queue_capacity_does_not_survive_its_variable.rs
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_of_an_unreadable_snapshot_refuses_instead_of_claiming_nothing_ran", # crates/vigil-bin/tests/detector_queue_capacity_does_not_survive_its_variable.rs
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_of_this_deployments_own_stopped_run_serves_its_last_figures", # crates/vigil-bin/tests/detector_queue_capacity_does_not_survive_its_variable.rs
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_on_a_never_started_directory_answers_zeros_under_a_not_started_line", # crates/vigil-bin/tests/detector_queue_capacity_does_not_survive_its_variable.rs
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_with_no_owner_says_no_runtime_owns_the_data_directory", # crates/vigil-bin/tests/detector_queue_capacity_does_not_survive_its_variable.rs
+  "vigil-bin::identity_refusal_through_settings_cli::resetting_the_identity_through_the_cli_is_refused_with_the_consequence_and_changes_nothing", # crates/vigil-bin/tests/identity_refusal_through_settings_cli.rs
+  "vigil-bin::identity_refusal_through_settings_cli::setting_the_identity_through_the_cli_is_refused_with_the_consequence_and_changes_nothing", # crates/vigil-bin/tests/identity_refusal_through_settings_cli.rs
+  "vigil-bin::recognition_component_failure_degraded_mode::recognition_component_failure_names_itself_and_still_lands_settings_changes", # crates/vigil-bin/tests/recognition_component_failure_degraded_mode.rs
+  "vigil-bin::service_identity_runtime_persistence::a_site_rename_between_runs_does_not_change_the_identity_the_runtime_announces", # crates/vigil-bin/tests/service_identity_runtime_persistence.rs
+  "vigil-bin::settings_declared_keys_land_or_refuse::the_five_previously_silent_add_on_keys_land_from_a_config_file_edit", # crates/vigil-bin/tests/settings_declared_keys_land_or_refuse.rs
+  "vigil-bin::settings_decode_backend_running_authority::turning_hardware_decoding_off_makes_the_pinned_decode_backend_what_runs", # crates/vigil-bin/tests/settings_decode_backend_running_authority.rs
+  "vigil-bin::settings_early_resolved_values_govern_the_next_start::a_cached_early_resolved_value_never_outranks_a_newer_stored_one", # crates/vigil-bin/tests/settings_early_resolved_values_govern_the_next_start.rs
+  "vigil-bin::settings_early_resolved_values_govern_the_next_start::a_stored_liveness_port_is_what_the_next_start_binds", # crates/vigil-bin/tests/settings_early_resolved_values_govern_the_next_start.rs
+  "vigil-bin::settings_early_resolved_values_govern_the_next_start::a_value_stored_while_running_is_reported_pending_with_the_value_still_running", # crates/vigil-bin/tests/settings_early_resolved_values_govern_the_next_start.rs
+  "vigil-bin::settings_early_resolved_values_govern_the_next_start::stored_fabric_values_are_what_the_next_start_records_as_running", # crates/vigil-bin/tests/settings_early_resolved_values_govern_the_next_start.rs
+  "vigil-bin::settings_empty_surface_resets_everything_end_to_end::an_emptied_config_file_resets_every_record_it_authored_at_node_and_camera_scope_alike", # crates/vigil-bin/tests/settings_empty_surface_resets_everything_end_to_end.rs
+  "vigil-bin::settings_live_application_while_running::a_dormant_pin_runs_again_when_its_domain_is_turned_off", # crates/vigil-bin/tests/settings_live_application_while_running.rs
+  "vigil-bin::settings_live_application_while_running::a_pinned_processor_backend_outranks_the_accelerated_one_this_artifact_carries", # crates/vigil-bin/tests/settings_live_application_while_running.rs
+  "vigil-bin::settings_live_application_while_running::a_rate_change_made_while_running_takes_effect_without_a_restart", # crates/vigil-bin/tests/settings_live_application_while_running.rs
+  "vigil-bin::settings_live_application_while_running::turning_the_automation_off_makes_the_pinned_detection_backend_what_runs", # crates/vigil-bin/tests/settings_live_application_while_running.rs
+  "vigil-bin::settings_live_operator_visibility::listing_after_the_run_stops_serves_what_was_persisted", # crates/vigil-bin/tests/settings_live_operator_visibility.rs
+  "vigil-bin::settings_live_operator_visibility::listing_an_unstarted_deployment_leaves_no_store_on_disk", # crates/vigil-bin/tests/settings_live_operator_visibility.rs
+  "vigil-bin::settings_live_operator_visibility::listing_answers_by_direct_read_when_no_runtime_owns_the_store", # crates/vigil-bin/tests/settings_live_operator_visibility.rs
+  "vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store", # crates/vigil-bin/tests/settings_live_operator_visibility.rs
+  "vigil-bin::settings_operator_surface_fields::listing_answers_requested_from_the_store_while_the_runtime_is_stopped", # crates/vigil-bin/tests/settings_operator_surface_fields.rs
+  "vigil-bin::settings_operator_surface_fields::listing_reports_requested_running_and_pending_side_by_side", # crates/vigil-bin/tests/settings_operator_surface_fields.rs
+  "vigil-bin::settings_operator_surface_fields::listing_reports_value_state_author_surface_scope_and_reason_for_every_touched_setting", # crates/vigil-bin/tests/settings_operator_surface_fields.rs
+  "vigil-bin::settings_operator_surface_fields::listing_shows_the_service_identifier_read_only_with_how_it_was_arrived_at", # crates/vigil-bin/tests/settings_operator_surface_fields.rs
+  "vigil-bin::settings_per_camera_motion_scope_and_clearing::a_cameras_own_motion_sensitivity_authors_at_that_cameras_scope_and_an_unlisted_camera_inherits", # crates/vigil-bin/tests/settings_per_camera_motion_scope_and_clearing.rs
+  "vigil-bin::settings_per_camera_motion_scope_and_clearing::removing_a_cameras_key_clears_that_camera_alone_and_removing_its_row_clears_what_the_row_authored", # crates/vigil-bin/tests/settings_per_camera_motion_scope_and_clearing.rs
+  "vigil-bin::settings_persistence_across_restart::a_pin_and_its_attribution_survive_a_full_process_restart", # crates/vigil-bin/tests/settings_persistence_across_restart.rs
+  "vigil-bin::settings_queue_capacity_environment_attribution_live::a_cameraless_node_still_names_the_lever_that_supplied_its_queue_depth", # crates/vigil-bin/tests/settings_queue_capacity_environment_attribution_live.rs
+  "vigil-bin::settings_queue_capacity_environment_attribution_live::an_unpinned_node_shadows_the_depth_vigil_chose_for_itself_not_an_operator_pin", # crates/vigil-bin/tests/settings_queue_capacity_environment_attribution_live.rs
+  "vigil-bin::settings_queue_capacity_environment_attribution_live::the_queue_depth_a_camera_node_reports_names_its_lever_from_the_first_moment_it_can_be_asked", # crates/vigil-bin/tests/settings_queue_capacity_environment_attribution_live.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::a_stored_camera_name_governs_the_running_process_over_the_configuration_file", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::a_stored_camera_stream_is_the_one_the_running_process_brings_up", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::a_stored_detector_model_path_governs_the_running_process_over_the_configuration_file", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::a_stored_live_view_endpoint_is_what_the_running_process_serves", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::a_stored_motion_sensitivity_reaches_the_running_process", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::a_stored_recognition_class_list_governs_the_running_process_over_the_configuration_file", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::a_stored_site_name_governs_the_running_process_over_the_configuration_file", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::settings_store_authority_over_the_running_process::every_setting_the_loader_reaches_is_also_answerable_from_the_store_alone", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_configured_service_id_on_a_storeless_run_reports_configured_not_yet_persisted", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_degraded_run_writes_nothing_even_when_a_stream_connects", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_degraded_run_writes_nothing_including_the_persisted_service_identity", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_storeless_run_reports_the_same_identity_on_the_startup_line_and_the_degraded_listing", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::an_unreadable_store_still_starts_cameras_detection_and_broker_alerting", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::degraded_delivery_is_reported_best_effort_never_assured", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::each_camera_reports_its_own_condition_rather_than_the_nodes_unmanaged_state", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::recording_review_corrections_and_settings_changes_each_refuse_with_a_statement_of_what_is_unavailable", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::the_liveness_answer_stays_protected_while_the_body_names_the_real_condition", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::the_unmanaged_state_is_restated_on_every_operator_surface_for_as_long_as_it_lasts", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
 ]

@@ -201,7 +201,7 @@ fn declare_boundary_violations(file_label: &str, source: &str) -> Vec<String> {
         None
     };
     let test_exempt_ranges = if file_label == DECLARE_TEST_EXEMPT_FILE {
-        collect_cfg_test_ranges(&masked)
+        collect_cfg_test_ranges(source, &masked)
     } else {
         Vec::new()
     };

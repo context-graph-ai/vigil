@@ -71,10 +71,17 @@ fn vigil_standalone_version_reports_nonempty_build_identity() {
             if !output.status.success() {
                 failures.push(format!("--help exited with {}", output.status));
             }
+            // Superseded expectation: this pinned the command roster to
+            // [run, fabric]. `vigil settings` is the ratified operator surface —
+            // it is how a person reads what every setting is, who chose it, and
+            // what is pending, and how they set or reset one on a running node —
+            // so a binary that does not offer it is missing the surface the
+            // whole settings model is answered through. The roster stays exact,
+            // so an unannounced command still fails here.
             let commands = help_section_tokens(&stdout, "Commands:");
-            if commands != ["run", "fabric"] {
+            if commands != ["run", "settings", "fabric"] {
                 failures.push(format!(
-                    "--help commands were not exactly [run, fabric]: {commands:?}"
+                    "--help commands were not exactly [run, settings, fabric]: {commands:?}"
                 ));
             }
             let options = help_section_tokens(&stdout, "Options:");
@@ -387,7 +394,22 @@ fn collect_store_artifacts(path: &Path, artifacts: &mut Vec<PathBuf>) {
 }
 
 #[test]
-fn vigil_standalone_health_503_when_store_cannot_open() {
+fn vigil_standalone_keeps_watching_unmanaged_when_store_cannot_open() {
+    // Superseded contract note: this required health 503 when the store could
+    // not be opened, and the name said so. A camera system going blind because
+    // a settings database is unreadable is the worse outcome, so the ratified
+    // contract is the opposite: Vigil starts anyway, resolves from its own
+    // surfaces, keeps live view, detection and alerting running, and says
+    // loudly and continuously that it is unmanaged — with recording, review
+    // history, corrections and settings changes unavailable and delivery
+    // reported best-effort rather than assured. A 503 would take the cameras
+    // down for a restart that fixes nothing, so liveness stays 2xx.
+    //
+    // Unfakeable because the liveness answer alone proves nothing: a run that
+    // came up normally would also answer 2xx. Every leg is asserted together —
+    // the unmanaged statement naming what still runs and what is lost, the
+    // store-open cause, and the absence of the ready marker — so a build that
+    // quietly opened a store, or one that came up silently degraded, fails.
     let binary = VigilBinary::new();
     let data = TempDir::new().expect("tempdir");
     let blocked_parent = data.path().join("not-a-directory");
@@ -402,13 +424,46 @@ fn vigil_standalone_health_503_when_store_cannot_open() {
         Ok(mut process) => {
             if !process
                 .health()
-                .wait_for_status(503, Duration::from_secs(2))
+                .wait_for_status(200, Duration::from_secs(10))
             {
-                failures.push("unopenable store did not produce health 503".to_string());
+                failures.push(
+                    "an unreadable store must not take the watching down: liveness stays 2xx"
+                        .to_string(),
+                );
             }
             let logs = process.logs().to_ascii_lowercase();
             if !(logs.contains("store") && (logs.contains("permission") || logs.contains("open"))) {
                 failures.push("logs did not name an actionable store-open error".to_string());
+            }
+            if !logs.contains("store_unreadable=true") {
+                failures.push("the run did not state that the store is unreadable".to_string());
+            }
+            if !logs.contains("unmanaged") {
+                failures.push("the run did not state that it is running unmanaged".to_string());
+            }
+            for still_running in ["live-view", "detection", "broker-alerting"] {
+                if !logs.contains(still_running) {
+                    failures.push(format!(
+                        "the unmanaged statement did not name `{still_running}` as still running"
+                    ));
+                }
+            }
+            for unavailable in [
+                "recording",
+                "review-history",
+                "corrections",
+                "settings-changes",
+            ] {
+                if !logs.contains(unavailable) {
+                    failures.push(format!(
+                        "the unmanaged statement did not name `{unavailable}` as unavailable"
+                    ));
+                }
+            }
+            if !logs.contains("best-effort") {
+                failures.push(
+                    "the unmanaged statement did not qualify delivery as best-effort".to_string(),
+                );
             }
             if logs.contains("runtime loop ready") {
                 failures.push("ready marker appeared despite store-open failure".to_string());
@@ -542,8 +597,10 @@ fn vigil_container_persistent_volume_reopens_same_store() {
     let store_path = volume.path().join("store.contextgraph");
     let first = DockerProbe::run_volume_probe(&image, volume.path());
     let before = StoreProbe::new(&store_path).identity();
+    let before_content = StoreProbe::new(&store_path).service_identity_marker();
     let second = DockerProbe::run_volume_probe(&image, volume.path());
     let after = StoreProbe::new(&store_path).identity();
+    let after_content = StoreProbe::new(&store_path).service_identity_marker();
     let probe = StoreProbe::new(&store_path).open_existing();
     let mut failures = Vec::new();
 
@@ -562,6 +619,12 @@ fn vigil_container_persistent_volume_reopens_same_store() {
     if before.is_none() || before != after {
         failures.push(format!(
             "container store identity was not preserved; before={before:?}, after={after:?}"
+        ));
+    }
+    if before_content.is_none() || before_content != after_content {
+        failures.push(format!(
+            "container store content was not preserved across reopen; \
+             before={before_content:?}, after={after_content:?}"
         ));
     }
     if !probe.opened {

@@ -92,10 +92,14 @@ fn worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("run")
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--fabric-hub")
+        .arg("false")
         .env("VIGIL_DATA_DIR", data_dir.path())
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_FABRIC_HUB", "false")
         .env("VIGIL_FABRIC_TICKET", "not-a-real-ticket")
+        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
+        // env per the settings-authority census (still no flag/config seam).
         .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", "1500")
         .env_remove("VIGIL_RTSP_URL")
         .stdin(Stdio::null())

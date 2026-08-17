@@ -25,9 +25,10 @@ the periodic pass.
 <!-- enforced by: `vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan` -->
 <!-- enforced by: `vigil::runtime::tests::detector_gate_suppresses_motion_free_segments_when_stationary_scan_is_disabled` -->
 
-Per-camera motion sensitivity and automatic calibration are not implemented. The release adds a
-simple visible per-camera sensitivity setting; automatic calibration remains later work.
-<!-- vigil-unenforced: classification=future-surface; reason=`Per-camera sensitivity and automatic calibration are not implemented in the current runtime.` -->
+Per-camera motion sensitivity is implemented as `motion_sensitivity` on the deployment (default `5`
+on the declared `1`–`10` scale) with an optional per-camera override on each `[[cameras]]` entry; see
+[Configuration](configuration.md#motion-sensitivity). Automatic calibration remains later work.
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent runtime contract binds this page's motion-sensitivity summary to the configuration reference.` -->
 
 ## Object detection
 
@@ -45,25 +46,20 @@ detection. The value must be finite and between `0.0` and `1.0`.
 <!-- enforced by: `vigil-bin::first_light_loop::detector_confidence_threshold_filters_detector_output` -->
 
 `detector_sample_frames` defaults to five frames per segment and accepts values from 1 through 64.
-It is available in TOML, the environment, and the standalone command line, but it is not yet an
-add-on option. Adding the operator-facing setting and the automatic-analysis-rate status is pre-OSS
-work.
+It is settable via TOML, the standalone command line, the Home Assistant add-on options, and
+`vigil settings set` — not the environment. The automatic-analysis-rate status is still pre-OSS work.
 
-<!-- vigil-unenforced: classification=documentation-gap; reason=`No unified test binds sample-frame default, range, and TOML/env/CLI availability.` -->
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No unified test binds sample-frame default, range, and TOML/CLI/add-on/vigil-settings availability.` -->
 
 ## Detection classes
 
-With recognition off, the current detector path is person-focused. Enabling recognition widens
-detector outputs to the configured recognition-covered COCO classes, always including person.
+The release contract is implemented: `detector_classes` gives detector classes their own control,
+independent of recognition, and the full COCO set is user-selectable, defaulting to `person` when
+the setting is left unset. Enabling recognition does not widen detector output — recognition
+configuration is not a substitute for detector-class configuration — see
+[Configuration](configuration.md#detection-fields).
 
-<!-- vigil-unenforced: classification=documentation-gap; reason=`No direct contract binds recognition-dependent detector-class widening and person inclusion.` -->
-
-The release contract is different and not yet implemented: detector classes will have their own
-control, independent of recognition, and the full COCO set will be user-selectable with a sensible
-default subset. Recognition configuration must not be used as a substitute for detector-class
-configuration.
-
-<!-- vigil-unenforced: classification=product-decision; reason=`Independent detector-class control and its default subset are approved release behavior.` -->
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent runtime contract binds this page's detector_classes summary to the configuration reference.` -->
 
 ## More than one subject
 
@@ -104,14 +100,29 @@ failed probe, or disabled setting keeps Burn/CPU active and records a distinct r
 <!-- enforced by: `vigil::acceleration_receipts::cpu_only_artifact_with_accel_true_reports_backend_not_compiled_fallback` -->
 <!-- enforced by: `vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct` -->
 
-A slow first shader compilation can outlive the startup deadline. Vigil falls back immediately so
-camera startup is not blocked and lets the probe finish. The tested promotion seam can swap a
-detector and propagate the late receipt without a restart, using an injected probe and receipt sink.
-Actual running-worker promotion remains live-smoke evidence rather than deterministic runtime
-acceptance evidence.
+A first shader compilation can take minutes on a cold machine. Preparing the accelerated detector
+happens in the background, so camera startup is never held up by it: detection runs on the processor
+straight away and the surfaces say a preparation is under way, since when, and the last thing the
+preparation reported about itself. Nothing cuts it short — the preparation ends when it completes or
+when it reports an error about itself, and there is no waiting period anyone can lengthen. On
+completion the running detector is swapped live and every surface names the accelerated backend
+together; the repository contract drives that with an injected preparation and receipt sink. Actual
+running-worker promotion remains live-smoke evidence rather than deterministic runtime acceptance
+evidence.
 
-<!-- vigil-claim: `vigil.docs-detection.a-slow-first-shader-compilation-can-outlive` -->
-<!-- enforced by: `vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface` -->
+<!-- vigil-claim: `vigil.docs-detection.a-first-shader-compilation-can-take-minutes` -->
+<!-- enforced by: `vigil::detection_preparation_outcomes_reach_every_surface::a_preparation_still_working_is_never_ended_for_it` -->
+<!-- enforced by: `vigil::detection_preparation_promotes_when_it_completes::a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes` -->
+
+A preparation that reports an error leaves the processor running detection and says why, with a next
+step that can change the result: check that the graphics device is usable by this container, then ask
+for the accelerated backend again. The backend a node is actually running — and an operator's own pin
+— is `detection_backend`; see
+[Configuration: Acceleration probe deadlines](configuration.md#acceleration-probe-deadlines) for the
+decode-side deadlines and the pin behavior.
+
+<!-- vigil-claim: `vigil.docs-detection.a-preparation-that-reports-an-error-leaves` -->
+<!-- enforced by: `vigil::detection_fallback_action_truth::probe_failure_action_names_real_next_steps_when_accelerated_backend_is_compiled` -->
 
 Use this implemented diagnostic for the detailed acceleration report:
 
@@ -135,7 +146,7 @@ The add-on configuration accepts no `zones` or `masks` block, and current Home A
 HTTP event rows carry no `zone` field.
 
 <!-- vigil-claim: `vigil.docs-detection.zones-and-masks-are-not-yet-available` -->
-<!-- enforced by: `vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema` -->
+<!-- enforced by: `vigil::source_scan_contract::recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry` -->
 <!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 <!-- enforced by: `vigil::http_data_plane::event_list_serves_full_review_row_fieldset` -->
 

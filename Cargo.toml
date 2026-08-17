@@ -99,6 +99,12 @@ acceptance = []
 
 [dev-dependencies]
 tempfile.workspace = true
+# The reopen-identity acceptance probe reads the persisted settings store
+# through vigil's own settings-store reader (`SettingsStore::records`)
+# instead of re-deriving its table/column shape here — the abstraction the
+# rest of this workspace already owns. Default features only: the modules
+# this probe touches (`settings_model`, `settings_store`) are unconditional.
+vigil = { path = "crates/vigil" }
 
 [workspace.metadata.release]
 shared-version = true

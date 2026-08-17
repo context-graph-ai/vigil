@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use vigil::acceleration::{
     AccelStage, AccelerationReceipt, AccelerationState, ActionKind, EvidenceKind, FailureCode,
-    ProbeStatus, render_receipt_block,
+    ProbeStatus, SELECTION_EPOCH_FIELD, render_receipt_block,
 };
 use vigil::workgraph::StreamId;
 
@@ -246,5 +246,75 @@ fn logs_are_bounded_per_stream_selection_plus_fallback() {
     assert!(
         !state.should_log(&fallback),
         "the same fallback reason must not repeat unbounded"
+    );
+}
+
+#[test]
+fn every_decode_selection_epoch_emits_its_own_proof_line() {
+    // An operator who changes the decode path is entitled to read, in the
+    // pipeline's own words, which path the camera came back on. The only
+    // per-selection evidence this build emits is the selection line, and a
+    // reverse lands on an outcome an earlier session already reported — same
+    // stream, codec, status and backend — so an outcome-only bound swallows
+    // it and the reverse cannot be told from nothing happening at all.
+    //
+    // The session a receipt belongs to is what distinguishes them: a camera
+    // that reconnects under a newly named decode path opens a new session
+    // under a new stream epoch. So the discriminating case here is a RETURN to
+    // a previously seen outcome under a NEW epoch, which is exactly the case
+    // the bound above never reaches.
+    let state = AccelerationState::new();
+
+    let software_first_session = {
+        let mut receipt = decode_receipt("front-yard", ProbeStatus::Fallback);
+        receipt
+            .evidence_fields
+            .insert(SELECTION_EPOCH_FIELD.to_string(), "1".to_string());
+        receipt
+    };
+    assert!(
+        state.should_log(&software_first_session),
+        "the first session's selection is a first outcome and logs"
+    );
+    state.record(software_first_session.clone());
+
+    // Within that one session the same outcome repeats per segment, and the
+    // bound the budget exists for still holds.
+    assert!(
+        !state.should_log(&software_first_session),
+        "an unchanged outcome inside one session must not log per segment"
+    );
+
+    // The operator pins hardware: a new session, a different outcome.
+    let hardware_session = {
+        let mut receipt = decode_receipt("front-yard", ProbeStatus::Active);
+        receipt
+            .evidence_fields
+            .insert(SELECTION_EPOCH_FIELD.to_string(), "2".to_string());
+        receipt
+    };
+    assert!(state.should_log(&hardware_session), "a new path logs");
+    state.record(hardware_session);
+
+    // And the reverse: a genuinely new, working session that happens to land
+    // on the outcome the first one reported. It is its own event and says so.
+    let software_after_reverse = {
+        let mut receipt = decode_receipt("front-yard", ProbeStatus::Fallback);
+        receipt
+            .evidence_fields
+            .insert(SELECTION_EPOCH_FIELD.to_string(), "3".to_string());
+        receipt
+    };
+    assert!(
+        state.should_log(&software_after_reverse),
+        "a fresh session that returns to a previously seen decode outcome must still emit its \
+         own selection proof: without it an operator reading the log cannot tell the reverse \
+         happened from nothing happening, and the only remaining evidence is a stored value"
+    );
+    state.record(software_after_reverse.clone());
+    assert!(
+        !state.should_log(&software_after_reverse),
+        "and that fresh session is still bounded to one line: the per-frame spam the budget \
+         exists to prevent must not come back with it"
     );
 }

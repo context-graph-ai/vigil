@@ -25,14 +25,14 @@
 use std::fs;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde_json::Value;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, get, json_body, vigil_binary_path, wait_until,
+    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, get, json_body, vigil_binary_path,
+    wait_until,
 };
 
 struct Node {
@@ -66,9 +66,11 @@ fn spawn_cameraless_node(
         .arg("run")
         .arg("--config")
         .arg(&config_path)
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--review-port")
+        .arg(review_port.to_string())
         .env("VIGIL_DATA_DIR", data_dir)
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", review_port.to_string())
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_TICKET")
         .env_remove("VIGIL_FABRIC_HUB")
@@ -95,7 +97,7 @@ fn a_cameraless_node_states_no_cameras_configured_on_health_and_never_bare_ready
 
     let boot_reached_pipeline_up = wait_until(
         "the cameraless node to report boot_phase=pipeline-up",
-        Duration::from_secs(20),
+        RUNTIME_STARTUP_TIMEOUT,
         || {
             if node.stdout().contains("boot_phase=pipeline-up") {
                 Ok(Some(()))

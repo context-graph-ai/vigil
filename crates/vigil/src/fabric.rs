@@ -953,19 +953,14 @@ impl FabricRuntime {
 
 /// Resolve the exact lease duration passed to ContextDB's standing worker.
 ///
-/// Production normally supplies `configured` from the already-resolved Vigil
-/// configuration. The environment fallback supports direct `FabricRuntime`
-/// construction, and the final fallback preserves the historical five-minute
-/// lease. Kept as one production-used seam so config tests do not need a live
-/// Iroh hub merely to observe a value before it enters `WorkerConfig`.
+/// Production supplies `configured` from the already-resolved Vigil
+/// configuration; the fallback is Vigil's own five-minute lease, for a direct
+/// `FabricRuntime` construction that supplies nothing. Kept as one
+/// production-used seam so config tests do not need a live Iroh hub merely to
+/// observe a value before it enters `WorkerConfig`.
 #[doc(hidden)]
 pub fn resolved_worker_lease_duration_ms(configured: Option<u64>) -> i64 {
-    configured.unwrap_or_else(|| {
-        std::env::var("VIGIL_FABRIC_WORKER_LEASE_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(300_000)
-    }) as i64
+    configured.unwrap_or(crate::settings_backends::automatic::FABRIC_WORKER_LEASE_MS as u64) as i64
 }
 
 /// The same clip-hash algorithm the submitter uses
@@ -1238,7 +1233,9 @@ pub(crate) struct PendingOffloadSegment {
     pub(crate) detection_work: crate::workgraph::WorkEnvelope,
     pub(crate) detection_started_at: chrono::DateTime<chrono::Utc>,
     pub(crate) config: config::RuntimeConfig,
-    pub(crate) store: Store,
+    /// `None` when the run has no store behind it: the offloaded result is
+    /// published best-effort and recorded nowhere.
+    pub(crate) store: Option<Store>,
     pub(crate) stats: RuntimeStatsState,
     pub(crate) health: HealthState,
     pub(crate) detection_publisher: Option<Arc<dyn crate::site_channel::DetectionChannel>>,
@@ -2257,17 +2254,19 @@ fn apply_fabric_result(
             stats.update(|stats| crate::runtime_stats::push_recent_receipt(stats, receipt_line));
 
             let output = detector_output_from_wire(wire);
-            if let Err(error) = crate::runtime::record_detected_events(
-                &entry.store,
-                &entry.config,
+            if let Err(error) = crate::runtime::record_or_publish_detected_events(
+                entry.store.as_ref(),
                 &entry.segment,
                 &output,
-                &entry.stats,
-                &entry.health,
-                entry.detection_publisher.as_deref(),
-                entry.recognition_embedder.as_deref(),
                 &entry.detection_work,
-                &entry.receipts,
+                &crate::runtime::DetectionRecordingContext {
+                    config: &entry.config,
+                    stats: &entry.stats,
+                    health: &entry.health,
+                    detection_publisher: entry.detection_publisher.as_deref(),
+                    recognition_embedder: entry.recognition_embedder.as_deref(),
+                    receipts: &entry.receipts,
+                },
             ) {
                 println!("fabric_record_detection_failed=true job_id={job_id} error={error}");
             }

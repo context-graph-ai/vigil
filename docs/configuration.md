@@ -19,17 +19,32 @@ For a standalone run, pass the TOML path explicitly:
 vigil run --config /etc/vigil/vigil.toml
 ```
 
-Without `--config`, a non-add-on process does not search a default TOML location; it uses defaults,
-environment variables, and command-line overrides. In the Home Assistant add-on, Vigil reads
-`/data/options.json` automatically.
+Without `--config`, a non-add-on process does not search a default TOML location; it runs on what is
+already in its settings store, its own built-in defaults beneath that, and any command-line
+overrides. In the Home Assistant add-on, Vigil reads `/data/options.json` automatically.
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`No parser test binds the absence of default TOML search outside the add-on.` -->
 
-Most settings resolve in this order: built-in default, configuration file or add-on options,
-command line, then environment. The fabric enrollment ticket and hub switch are exceptions: their
-order is add-on/config or `DATA_DIR/fabric.toml`, environment, then command line.
+Settings do not resolve by merging surfaces. The settings store is the source of truth: the
+configuration file or add-on options, the startup options, and `vigil settings` are authors that
+write records into it, and the runtime resolves from the store. A value you set at this deployment
+outranks one your management server pushed, which outranks Vigil's own automatic choice, and the
+most specific scope wins within a given author; between two of your own surfaces, the one that
+authored most recently wins. The environment holds no rank at all, because it is not an author.
 
-<!-- vigil-unenforced: classification=documentation-gap; reason=`No precedence matrix test binds ordinary settings and the two fabric exceptions.` -->
+<!-- vigil-claim: `vigil.docs-configuration.settings-do-not-resolve-by-merging-surfaces` -->
+<!-- enforced by: `vigil::settings_authority_ranking::an_older_local_pin_outranks_a_newer_pushed_record` -->
+<!-- enforced by: `vigil::settings_authority_ranking::an_older_pushed_record_outranks_a_newer_automatic_adjustment` -->
+<!-- enforced by: `vigil::settings_authority_ranking::the_most_specific_scope_wins_within_one_author_before_authors_are_compared` -->
+<!-- enforced by: `vigil::settings_record_coexistence::between_local_surfaces_the_most_recent_author_wins` -->
+<!-- enforced by: `vigil::environment_behavior_var_reported_ignored::an_environment_variable_naming_a_behavior_setting_is_reported_as_ignored_with_the_reason_and_where_to_set_it` -->
+
+The fabric enrollment ticket is the exception, and it is an exception about secrets rather than
+about fabric: it is settable through the ordinary surfaces and through `VIGIL_FABRIC_TICKET`, and a
+secret found in the environment wins, because that is the per-process injection a rotation just
+handed this run. The hub switch is an ordinary setting resolved from the store like any other.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`Secret precedence is proven for the camera password by vigil::secret_source_precedence, and the fabric ticket is on the same product roster, but no test names the ticket or the hub switch as the instances this paragraph states.` -->
 
 ## Minimal standalone configuration
 
@@ -106,11 +121,18 @@ Human-readable site context. The current fallback is `site-1`.
 
 ### `service_id`
 
-Stable MQTT topic and Home Assistant device namespace. When absent, Vigil derives a lowercase,
-underscore-separated value from `site_name`. The current parser accepts `service_id` from TOML or
-add-on JSON and `VIGIL_SERVICE_ID` from the environment; there is no command-line flag.
+Stable MQTT topic and Home Assistant device namespace. It is derived ONCE — at the first start that
+has a store to persist it into, as a lowercase underscore-separated value from `site_name` — and read
+back from that persisted record on every later start. Renaming the site afterwards changes a display
+name and nothing else: re-deriving the identifier would hand Home Assistant an entirely new device
+and orphan the entity history attached to the old one. Moving it is its own deliberate operation,
+`vigil settings identity change <identifier> --confirm`, which states that consequence before it
+takes effect; an ordinary `vigil settings set service_identity` is refused with the same explanation.
+The current parser accepts `service_id` from TOML or add-on JSON and `VIGIL_SERVICE_ID` from the
+environment, and a value supplied that way seeds the first start only; there is no command-line flag.
+A run with no readable store uses an identifier derived for that run alone and persists nothing.
 
-<!-- vigil-unenforced: classification=documentation-gap; reason=`No complete test binds service_id derivation and TOML/add-on/environment availability.` -->
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No complete test binds service_id availability across TOML, add-on JSON and the environment together.` -->
 
 First-run site naming and collision-proof durable camera identity are pre-OSS work. The current
 camera record is matched by display name, which is not safe when two nodes use the same label.
@@ -152,6 +174,15 @@ options, and `/data/options.json`.
 
 <!-- vigil-unenforced: classification=implementation-blocker; reason=`The still-parsed password argv flag violates the release secret boundary.` -->
 
+### Stream reconnection
+
+`rtsp_retry_initial_ms` (default `2000`) and `rtsp_retry_max_ms` (default `30000`) govern how a
+dropped camera stream reconnects; both are whole milliseconds between `1` and `86400000` (one day).
+See [Cameras: Reconnect behavior](cameras.md#reconnect-behavior) for the doubling-backoff mechanism
+the two values bound.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`retry_and_probe_setting_authoring.rs proves both values reach the loader from a real file; no adjacent config contract binds their declared range in one place.` -->
+
 ## Detection fields
 
 | Field | Default | Validation and behavior |
@@ -160,7 +191,7 @@ options, and `/data/options.json`.
 | `detector_model_path` | none | Optional local checkpoint loaded by detector execution. |
 | `detector_confidence_threshold` | `0.5` | Must be finite and between `0.0` and `1.0`. |
 | `detector_sample_frames` | `5` | Must be between 1 and 64. |
-| `detector_stationary_interval_secs` | `30` | Periodic detector pass over motion-free segments in every deployment. |
+| `detector_stationary_interval_secs` | `30` | Periodic detector pass over motion-free segments in every deployment. Set it to `0` to stop re-scanning a motion-free scene at all, so nothing but movement reaches the detector. |
 | `hardware_decoding` | `true` | Probe hardware video decoding; fall back visibly when unavailable. |
 | `accelerated_detection` | `true` | Probe Burn/wgpu detection where compiled; otherwise run Burn/CPU. |
 
@@ -176,12 +207,35 @@ options, and `/data/options.json`.
 <!-- enforced by: `vigil-bin::first_light_loop::detector_config_recorded_as_decision` -->
 <!-- enforced by: `vigil-bin::first_light_loop::detector_loads_and_runs_over_real_frames` -->
 
-The Home Assistant schema currently exposes `detector_model_path` and
-`detector_stationary_interval_secs`, but not confidence threshold or sampled-frame count. Adding
-those supported options, per-camera motion sensitivity, and detector-class selection is pre-OSS
-work.
+The Home Assistant schema exposes `detector_model_path`, `detector_stationary_interval_secs`,
+`detector_confidence_threshold`, and `detector_sample_frames` as add-on options, using the same
+defaults and behavior described in the table above. It also exposes `detector_queue_capacity`
+(default `1`), the depth the detector's work queue holds before newer work replaces older; together
+the three form the set an operator reaches for when the machine cannot keep up.
 
-<!-- vigil-unenforced: classification=future-surface; reason=`Confidence, frame-count, sensitivity, and class controls remain absent add-on options.` -->
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No table-driven contract binds the add-on schema exposure of these detector controls in one place.` -->
+
+Detector-class selection ships as `detector_classes`: a loose list of class names, never a fixed
+enumeration in the manifest. Today validation runs against the bundled detector's compiled class
+inventory (`yolox_detector::COCO_CLASSES`), not against a loaded model instance, so a write refuses
+correctly before any detector exists; the inventory changes only when the compiled-in detector
+changes, which currently means a packaging release. Vigil names any entry the inventory does not
+carry. `detector_classes` and
+`recognition_covered_classes` are two separate operator choices — widening what the detector looks
+for does not change what recognition puts a name to, and widening recognition does not silently
+widen detection.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent config contract binds detector_classes validation against the model's class inventory in one place.` -->
+
+### Motion sensitivity
+
+`motion_sensitivity` is a deployment-wide value on the declared `1`–`10` scale; Vigil's own default
+is `5` when nothing is set. Each `[[cameras]]` entry accepts its own `motion_sensitivity` override:
+a camera whose own value is set runs at that value, and every other camera keeps running the
+deployment-wide value, so turning one camera's sensitivity down does not touch the rest of the site.
+Automatic per-camera calibration is not implemented; the setting is a manual per-camera knob.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent config contract binds the deployment-wide default, the 1-10 range, and the per-camera override precedence in one place.` -->
 
 Vigil does not download a detector checkpoint at startup. The file must already exist at the
 configured local path. How released images receive that checkpoint is still part of the public
@@ -250,9 +304,13 @@ current fields are:
 <!-- vigil-claim: `vigil.docs-configuration.field-default-recognitionweightsdir-none-recognition-off-recognitionspaceid` -->
 <!-- enforced by: `vigil::config::tests::addon_options_json_recognition_fields_enable_runtime_config_and_startup_line` -->
 
-The intended operator defaults use no weights directory, `vigil_site_vision_v1` as the space, and a
-person-plus-generic-animal/vehicle class subset. The mapped options-loader test does not bind those
-space and class-list defaults as one contract.
+The intended operator defaults use no weights directory and `vigil_site_vision_v1` as the space.
+Recognition coverage defaults to `person` and `dog` (`default_recognition_covered_classes`) — the
+deployment default this add-on shipped before recognition coverage had its own settings entry —
+narrowed from the wider twelve-class engine baseline (`RecognitionConfig::default()`) that was live
+earlier; an operator who relied on the wider set must now set `recognition_covered_classes`
+explicitly. The mapped options-loader test does not bind the space and class-list defaults as one
+contract.
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`The options-loader witness proves supplied values and the threshold default, but not the complete default space and covered-class inventory.` -->
 
@@ -279,16 +337,49 @@ not start.
 
 ## Acceleration probe deadlines
 
-The add-on schema accepts optional `decode_probe_deadline_secs` and
-`detection_probe_deadline_secs`. They bound the startup probe, not normal frame processing. A slow
-accelerated-detection probe may complete later. The promotion seam can swap a detector and propagate
-the late receipt without a restart; its repository test uses an injected probe and receipt sink.
-Actual running-worker promotion remains live-smoke evidence rather than deterministic runtime
-acceptance evidence.
+The add-on schema accepts optional `decode_probe_deadline_secs` (default `5`). It is how long a
+stream session gathers real video before it chooses a decode path, not a bound on normal frame
+processing. Detection has no equivalent: preparing the accelerated detector runs in the background
+and ends only on its own outcome, so there is no waiting period to set and none is offered. While it
+runs, the surfaces report a preparation under way, since when, and the last thing it reported; on
+completion the detector is swapped live and every surface moves together.
 
-<!-- vigil-claim: `vigil.docs-configuration.the-addon-schema-accepts-optional-decodeprobedeadlinesecs-and` -->
-<!-- enforced by: `vigil::probe_deadline_knob_surface::addon_config_declares_both_probe_deadline_knobs_as_optional_integers` -->
-<!-- enforced by: `vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface` -->
+<!-- vigil-claim: `vigil.docs-configuration.the-addon-schema-accepts-optional-decodeprobedeadlinesecs` -->
+<!-- enforced by: `vigil::probe_deadline_knob_surface::addon_config_declares_the_decode_probe_sample_wait_as_an_optional_integer` -->
+<!-- enforced by: `vigil::probe_deadline_knob_surface::addon_help_documents_decode_probe_deadline_option` -->
+<!-- enforced by: `vigil::probe_deadline_knob_surface::the_decode_probe_sample_wait_defaults_to_the_documented_number_of_seconds` -->
+<!-- enforced by: `vigil::probe_timer_removal::neither_detection_timer_is_offered_as_an_add_on_option` -->
+<!-- enforced by: `vigil::detection_preparation_outcomes_reach_every_surface::a_preparation_still_working_is_never_ended_for_it` -->
+<!-- enforced by: `vigil::detection_preparation_promotes_when_it_completes::a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes` -->
+<!-- enforced by: `vigil::detection_preparation_outcomes_reach_every_surface::a_completed_preparation_promotes_and_the_same_account_reaches_every_surface` -->
+
+The schema also accepts optional `hardware_probe_deadline_secs` (default `10`), a whole number of
+seconds bounding a further point in the same acceleration path: how long the hardware-decode probe
+waits to collect its buffer of real stream units before deciding on whatever it has collected, so a
+low-fps camera that cannot fill the buffer quickly still gets a backend decision instead of hanging —
+distinct from `decode_probe_deadline_secs` above, which bounds the GStreamer pipeline probe itself.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`retry_and_probe_setting_authoring.rs proves the decode-side settings reach the loader from a real file; no table-driven contract binds this prose to them in one place.` -->
+
+`detection_backend` reports which detection backend is actually running — `burn-cpu` in every
+artifact, `burn-wgpu` only where the accelerated feature is compiled in — and an operator may also
+pin it directly through this setting. A pin naming a backend the running artifact does not carry is
+refused, naming the backends it does carry instead. Pinning `burn-wgpu` does not bypass the probe:
+hardware is still entered only after a real forward pass succeeds on this machine, never off a stored
+name alone.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`addon_config_surface::the_two_backend_settings_are_declared_as_loose_strings proves the schema shape; no adjacent contract binds detection_backend's pin-vs-report and probe-gated-pin behavior described here.` -->
+
+`decode_backend` reports which decode backend is actually running — `software` in every artifact,
+`hardware` only where the GStreamer decode feature is compiled in — and an operator may also pin it
+directly through this setting. A pin naming a backend the running artifact does not carry is refused,
+naming the backends it does carry instead. A name held in the store is only a request: pinning
+`hardware` still goes through the probe, and hardware decode is entered only after a probe on this
+machine succeeds, never off the stored name alone. The decode selection reports the outcome of that
+probe back onto this same setting each time a stream settles, so the value read back is the answer,
+not the request.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`settings_decode_backend_running_authority::turning_hardware_decoding_off_makes_the_pinned_decode_backend_what_runs proves the pin takes effect live; no adjacent contract binds decode_backend's full pin-vs-report and probe-gated-pin behavior described here.` -->
 
 ## Distributed compute fields
 
@@ -300,14 +391,27 @@ surfaces but are not both production-wired. This is an implementation blocker, n
 
 <!-- vigil-unenforced: classification=implementation-blocker; reason=`Fabric can return empty detections and its tuning fields are not fully production-wired.` -->
 
+## Reflecting effective values
+
+Vigil mirrors an effective value it computes or applies back onto the add-on's own options page, so
+the page an operator trusts does not go on showing a stale number. Posting the mirrored value is
+immediate and free. `restart_on_reflect` (default `true`) governs only whether Vigil also triggers
+the restart that makes the running container's own copy of the options file agree, and it is
+consulted only where a restart is what brings the value into force: a setting this process takes on
+while running is mirrored and never restarted for, and a setting only a restart brings into force is
+mirrored and then restarted. Turned off, a startup-only value is still mirrored onto the options
+page, but the container's own file keeps the old value until the next restart — Vigil reports that as
+a pending divergence rather than claiming the mirror is fully applied.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`supervisor_options_reflection.rs proves each half separately — a_setting_this_process_takes_on_live_is_mirrored_without_replacing_the_container for the live-applied path, a_setting_only_a_restart_brings_into_force_is_mirrored_and_then_restarted for the startup-only path, and with_restart_on_reflect_off_the_value_applies_where_it_can_and_the_rest_is_reported_pending_with_the_divergence for the off path; no adjacent config contract binds this restart_on_reflect summary in one place.` -->
+
 ## Fields not yet available
 
 The current parser has no zones, masks, recording mode, retention, rule/action, listen-interface,
-analysis-rate, detector-class selection, per-camera motion sensitivity, snapshot-overlay, or
-scheduled-check blocks. Those are pre-OSS work. Examples using them would be fictional and do not
-belong in an operator guide yet.
+analysis-rate, snapshot-overlay, or scheduled-check blocks. Those are pre-OSS work. Examples using
+them would be fictional and do not belong in an operator guide yet.
 
-<!-- vigil-unenforced: classification=future-surface; reason=`Zones, retention, rules, binds, classes, and other listed parser blocks are absent.` -->
+<!-- vigil-unenforced: classification=future-surface; reason=`Zones, retention, rules, binds, and other listed parser blocks are absent.` -->
 
 There is also no `vigil config check` or `vigil config validate` command. Configuration is validated
 when `vigil run` loads it.
@@ -316,16 +420,42 @@ when `vigil run` loads it.
 
 ## Environment variables
 
-The current parser reads `VIGIL_HARDWARE_DECODING` and `VIGIL_ACCELERATED_DETECTION`, and
-environment values override ordinary file and command-line values for those two settings.
+Environment variables no longer steer hardware decoding or accelerated detection. Exporting
+`VIGIL_HARDWARE_DECODING` or `VIGIL_ACCELERATED_DETECTION` changes nothing about what runs: both
+switches are set through the settings surfaces — the configuration file, the add-on options, startup
+options, or `vigil settings` — and a variable found in the environment is reported as ignored, with
+the place to set it instead.
 
-<!-- vigil-claim: `vigil.docs-configuration.the-current-parser-reads-vigilhardwaredecoding-and-vigilaccelerateddetection` -->
-<!-- enforced by: `vigil::config_acceleration_intent::env_vars_are_understood` -->
+<!-- vigil-claim: `vigil.docs-configuration.environment-variables-no-longer-steer-hardware-decoding` -->
+<!-- enforced by: `vigil::config_acceleration_intent::environment_variables_no_longer_steer_acceleration` -->
 
-The source parser also accepts environment values for data/store paths, ports, site and legacy
-single-camera identity, RTSP values, detector values, some recognition values, and fabric values.
-There is no `VIGIL_RECOGNITION_COVERED_CLASSES`, and no table-driven documentation test currently
-binds this broader inventory. Password environment variables avoid command-line exposure but are not
-secret storage.
+That holds for every behavior setting but one. Paths, ports, the site and legacy single-camera
+identity, detector values, recognition values and fabric values are settings that live in the store
+and are written through those same surfaces; an environment variable naming one of them is reported
+as ignored rather than honored.
 
-<!-- vigil-unenforced: classification=documentation-gap; reason=`The broader environment-variable inventory explicitly lacks a table-driven contract.` -->
+The one documented exception is `VIGIL_DETECTOR_QUEUE_CAPACITY`: it deliberately overrides the stored
+detector queue depth for the run, so the owner smoke can reproduce an overflow without waiting on
+live scene traffic. When it is set, the running surface attributes the in-force capacity to that
+variable rather than reporting it as ignored or as the stored value, and it does so from the first
+moment the surface can be asked, on any node — including one with no cameras configured. The
+attribution appears on the setting's line as two tokens beside `running=`:
+`running-source=environment:<VAR>` names the environment variable that supplied the running value
+(for example `running-source=environment:VIGIL_DETECTOR_QUEUE_CAPACITY`), and
+`shadowed-setting=<value>` carries the depth this node would be running at if the lever were not
+there — the operator's own stored pin where they set one, and the depth Vigil chooses for itself
+where they did not — so the lever's number is never mistaken for the node's own setting.
+
+<!-- vigil-claim: `vigil.docs-configuration.the-one-documented-exception-is-vigil-detector-queue-capacity` -->
+<!-- enforced by: `vigil-bin::settings_queue_capacity_environment_attribution_live::a_cameraless_node_still_names_the_lever_that_supplied_its_queue_depth` -->
+<!-- enforced by: `vigil-bin::settings_queue_capacity_environment_attribution_live::an_unpinned_node_shadows_the_depth_vigil_chose_for_itself_not_an_operator_pin` -->
+<!-- enforced by: `vigil-bin::settings_queue_capacity_environment_attribution_live::the_queue_depth_a_camera_node_reports_names_its_lever_from_the_first_moment_it_can_be_asked` -->
+
+What
+the environment still carries otherwise is everything that is not a behavior setting: camera and
+fabric secrets, the bootstrap locations that must be readable before the store opens, declared
+internal diagnostics, the deployment's own process identity, and the values the platform injects for
+service discovery. Password environment variables avoid command-line exposure but are not secret
+storage.
+
+<!-- vigil-unenforced: classification=documentation-gap; reason=`The per-variable disposition of the broader environment inventory has no table-driven contract; the ignored-behavior reporting itself is covered by vigil::environment_behavior_var_reported_ignored.` -->

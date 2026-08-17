@@ -74,9 +74,11 @@ pub(crate) struct YoloxDetector<B: Backend> {
     pub(crate) model_sha256: String,
     pub(crate) session_id: String,
     observer: Option<DetectorForwardProbe>,
-    /// COCO class indices this detector emits. Defaults to person only (the
-    /// baseline NVR behavior first-light depends on); recognition widens it to
-    /// the covered classes so a dog/vehicle sighting reaches the match path.
+    /// The class indices this detector emits, resolved from the detection class
+    /// setting and from nothing else. Which classes Vigil looks for is one
+    /// setting an operator owns; recognition neither widens nor narrows it, and
+    /// the construction path never derives it from the recognition
+    /// configuration.
     allowed_class_indices: Vec<usize>,
     /// The backend identity this instance was actually constructed with —
     /// carried into the forward-event record so it can never drift from the
@@ -125,7 +127,8 @@ impl DetectorOutput {
 
 pub(crate) fn run_detector_probe(args: Vec<OsString>) -> Result<(), String> {
     let probe = parse_detector_probe_args(args)?;
-    let detector: YoloxDetector<DetectorBackend> = load_detector(Some(&probe.model), BACKEND_ID)?;
+    let detector: YoloxDetector<DetectorBackend> =
+        load_detector(Some(&probe.model), BACKEND_ID, &[PERSON_CLASS_INDEX])?;
     let output = detect_frame(
         &detector,
         &probe.clip,
@@ -156,13 +159,12 @@ pub(crate) fn run_detector_probe(args: Vec<OsString>) -> Result<(), String> {
     Ok(())
 }
 
-/// Always the plain CPU backend, regardless of the accel feature — the
-/// fallback path `runtime::start_rtsp_probe` constructs whenever the
-/// detection-acceleration selection did not report `Active`.
-pub(crate) fn load_cpu_detector(model: Option<&Path>) -> Result<YoloxDetector<CpuBackend>, String> {
-    load_detector(model, CPU_BACKEND_ID)
-}
-
+/// Always the plain CPU backend, regardless of the accel feature — the fallback
+/// path `runtime::start_rtsp_probe` constructs whenever the
+/// detection-acceleration selection did not report `Active`. Every detector the
+/// runtime builds is built WITH its class list, so there is no class-free
+/// variant of this to call: which classes a detector emits is resolved from the
+/// store before any detector exists.
 pub(crate) fn load_cpu_detector_with_classes(
     model: Option<&Path>,
     allowed_class_indices: &[usize],
@@ -170,16 +172,10 @@ pub(crate) fn load_cpu_detector_with_classes(
     load_detector_with_classes(model, allowed_class_indices, CPU_BACKEND_ID)
 }
 
-/// Constructed only when the detection-acceleration selection reported
-/// `Active` on the accel backend — the receipt and the live detector are
-/// derived from the SAME selection, never independently.
-#[cfg(feature = "detect-burn-wgpu")]
-pub(crate) fn load_accelerated_detector(
-    model: Option<&Path>,
-) -> Result<YoloxDetector<AccelBackend>, String> {
-    load_detector(model, ACCEL_BACKEND_ID)
-}
-
+/// Constructed only when the detection-acceleration selection reported `Active`
+/// on the accel backend — the receipt and the live detector are derived from the
+/// SAME selection, never independently, and from the same class list every other
+/// detector on this node is built with.
 #[cfg(feature = "detect-burn-wgpu")]
 pub(crate) fn load_accelerated_detector_with_classes(
     model: Option<&Path>,
@@ -188,11 +184,15 @@ pub(crate) fn load_accelerated_detector_with_classes(
     load_detector_with_classes(model, allowed_class_indices, ACCEL_BACKEND_ID)
 }
 
+/// The detector this node runs: the operator's model, on the named backend,
+/// looking for the classes this node was told to look for. An empty list is
+/// the person-only baseline every fresh install starts on.
 pub(crate) fn load_detector<B: Backend>(
     model: Option<&Path>,
     backend_id: &'static str,
+    allowed_class_indices: &[usize],
 ) -> Result<YoloxDetector<B>, String> {
-    load_detector_with_classes(model, &[PERSON_CLASS_INDEX], backend_id)
+    load_detector_with_classes(model, allowed_class_indices, backend_id)
 }
 
 pub(crate) fn load_detector_with_classes<B: Backend>(

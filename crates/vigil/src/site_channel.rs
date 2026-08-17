@@ -151,6 +151,20 @@ pub trait CommandListener: Send {
     fn shutdown_and_join(self: Box<Self>);
 }
 
+/// Keeps this site's presence published on an integration — that the node
+/// exists, that it is reachable, and what condition it is in — without
+/// accepting owner commands. Owns whatever background connection it needs.
+///
+/// A run that cannot record a correction must not listen for one, but it must
+/// still be visible and still say what it is: the person watching the property
+/// is the reason the run keeps going at all, and an integration that never
+/// heard of this node shows them nothing.
+pub trait SitePresence: Send {
+    /// Signal the presence connection to stop and block until its background
+    /// work has joined.
+    fn shutdown_and_join(self: Box<Self>);
+}
+
 /// Builds an integration's outbound channel and command listener from
 /// Vigil's own resolved facts. Implemented once by an adapter; supplied by
 /// the composition root that assembles the running binary.
@@ -178,6 +192,20 @@ pub trait SiteChannelFactory: Send + Sync {
         health: HealthState,
         control: Arc<dyn SiteControl>,
     ) -> Option<Box<dyn CommandListener>>;
+
+    /// Announce the resolved site and keep its presence published, without
+    /// listening for owner commands. Called INSTEAD of [`Self::listen`] by a
+    /// run that has no store behind it: there is no door onto Vigil's camera
+    /// state or evidence to hand over, and the commands a listener carries are
+    /// corrections, which are exactly what such a run cannot record. Everything
+    /// an integration needs to show the node and its condition is announced
+    /// here, on the same terms a healthy run announces it.
+    fn announce(
+        &self,
+        endpoint: &ConnectionEndpoint,
+        site: SiteAnnouncement,
+        health: HealthState,
+    ) -> Option<Box<dyn SitePresence>>;
 }
 
 /// The absence of any integration: never connects, never listens. An
@@ -204,6 +232,15 @@ impl SiteChannelFactory for NoSiteChannel {
         _health: HealthState,
         _control: Arc<dyn SiteControl>,
     ) -> Option<Box<dyn CommandListener>> {
+        None
+    }
+
+    fn announce(
+        &self,
+        _endpoint: &ConnectionEndpoint,
+        _site: SiteAnnouncement,
+        _health: HealthState,
+    ) -> Option<Box<dyn SitePresence>> {
         None
     }
 }

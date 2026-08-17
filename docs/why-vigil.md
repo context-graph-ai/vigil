@@ -77,11 +77,12 @@ the two states are not collapsed.
 <!-- enforced by: `vigil::acceleration_receipts::accel_false_is_disabled_not_fallback_and_they_are_distinct` -->
 <!-- enforced by: `vigil::acceleration_receipts::stats_show_active_decoder_per_stream_and_detector_backend` -->
 
-The tested late-promotion seam can swap a detector after the startup deadline and propagate its
-receipt without a restart. The repository test drives an injected probe and receipt sink; promotion
-of the actual running worker and its health/stats wiring remains dev-box smoke evidence.
-<!-- vigil-claim: `vigil.docs-why-vigil.the-tested-latepromotion-seam-can-swap-a` -->
-<!-- enforced by: `vigil::detection_probe_promotes_after_deadline::late_pass_promotes_and_the_promoted_receipt_reaches_every_surface` -->
+The tested promotion seam can swap a detector when its background preparation completes and
+propagate the receipt without a restart. The repository test drives an injected preparation and
+receipt sink; promotion of the actual running worker and its health/stats wiring remains dev-box
+smoke evidence.
+<!-- vigil-claim: `vigil.docs-why-vigil.the-tested-promotion-seam-can-swap-a` -->
+<!-- enforced by: `vigil::detection_preparation_outcomes_reach_every_surface::a_completed_preparation_promotes_and_the_same_account_reaches_every_surface` -->
 
 ## Frigate is the baseline, not a dependency
 

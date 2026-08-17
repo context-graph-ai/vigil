@@ -7,12 +7,20 @@ path = "crates/vigil/tests/addon_config_surface.rs"
 reason = "Legacy add-on YAML/help surface scanner; replace with the typed packaging contract checker."
 
 [[file]]
+path = "crates/vigil/tests/auto_adjusted_control_state_scan.rs"
+reason = "Reviewed structural scan proving the settings-model Auto-adjusted control state is constructed only where the model declares it, scoped to that enum specifically so the legacy settings-registry enum of the same variant name is not conflated with it; a second test proves the registry's own automatic writer is unreachable in production by scanning every production crate for a caller that mints the automation capability and finding none. Carries planted-write, scoping-bites-both-ways, and test-only-mint canaries so a scan matching nothing cannot pass, and fails any allowance whose file no longer contains a site."
+
+[[file]]
 path = "crates/vigil/tests/automation_handle_capability_scan.rs"
 reason = "Reviewed structural scan; proves no impl block for AutomationHandle regains set_manual/return_to_automatic, which the compile_fail doctests beside the type prove only unreachability for, not method absence."
 
 [[file]]
 path = "crates/vigil/tests/camera_hub_capability_scan.rs"
 reason = "Reviewed structural scan mirroring automation_handle_capability_scan.rs's core impl-block-scanning mechanism (not its full alias-detection sophistication, which closed a bypass class with no equivalent history here yet): proves CameraTrackHubProducer never regains Clone and no non-new method on CameraTrackHub ever names CameraTrackHubProducer in its signature, which the compile_fail doctests beside CameraTrackHubProducer prove only unreachability for today, not regression-proofing against a future edit."
+
+[[file]]
+path = "crates/vigil/tests/artifact_never_enables_test_support.rs"
+reason = "Reviewed structural scan proving the crate's `test-support` feature (the hub-role door: open_hub_role/apply_hub_authored/the pushed-rank take-over instruction) is declared but never defaulted on in crates/vigil/Cargo.toml, and that no shipped-artifact build invocation -- both Dockerfiles, the release/install-binary xtask argv builders, and every workflow file -- ever names it on a --features list. Complements the source-gate proof beside it, no_command_line_or_operator_path_writes_at_the_pushed_rank in source_scan_contract.rs, which proves the door is gated in source; this proves nothing that builds a shipped artifact ever flips the gate open."
 
 [[file]]
 path = "crates/vigil/tests/artifact_profile_honesty.rs"
@@ -65,3 +73,23 @@ reason = "Reviewed source-structure regression collection pending behavioral or 
 [[file]]
 path = "crates/vigil/tests/transport_purity.rs"
 reason = "Accepted transport-neutrality architecture guard pending syntax-aware central replacement."
+
+[[file]]
+path = "crates/vigil/tests/addon_least_supervisor_role.rs"
+reason = "Reads the shipped add-on manifest and its packaged help to prove Vigil asks for the ordinary Supervisor role a self options-write needs and that the packaged text no longer claims that role cannot do it; the manifest and the words beside it are the operator-facing artifact, so there is nothing behind them to assert instead."
+
+[[file]]
+path = "crates/vigil/tests/addon_optional_class_lists.rs"
+reason = "Reads the shipped add-on manifest to prove both class lists are declared optional and ship no packaged value, which is what lets a never-before-used installation start untouched; the file an installation validates against is the only place that promise exists."
+
+[[file]]
+path = "crates/vigil/tests/decode_probe_effective_intent.rs"
+reason = "Reads the live stream session to prove its probe-collection gate is derived from the effective hardware intent rather than the automatic switch alone; the gate is inline in an async session loop with no seam to drive, and the predicate half of the same contract is asserted behaviorally beside it."
+
+[[file]]
+path = "crates/vigil/tests/distributed_work_detector_registration.rs"
+reason = "Reads the worker-detector bootstrap and the camera registration to prove a camera-less node registers the detector its distributed work runs on while a camera node registers no second handle; both registrations are crate-private inside a private module, so there is no reachable seam to observe them through until one is exposed."
+
+[[file]]
+path = "crates/vigil/tests/probe_timer_removal.rs"
+reason = "Reads the shipped source for the two withdrawn detection timers, because the surface that matters most is the remedy Vigil prints when a preparation fails: an operator told to lengthen a wait that decides nothing spends their time on a value with no effect. The declared-roster half of the same contract is asserted behaviorally beside it."

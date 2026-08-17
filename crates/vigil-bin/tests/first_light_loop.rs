@@ -313,6 +313,35 @@ impl FirstLightWorld {
             .map_err(|error| format!("write config {}: {error}", self.config_path.display()))
     }
 
+    /// Say, on this deployment's configuration file, how often a motion-free
+    /// scene is re-scanned. Zero turns periodic re-scanning off, which is how a
+    /// test that is proving the motion gate keeps the independent
+    /// stationary-scan path out of the way. The configuration file is the
+    /// surface a behavior value is expressed through; an environment variable
+    /// holds no rank in the authority model and is not read.
+    fn set_stationary_scan_interval(&self, secs: i64) -> Result<(), String> {
+        let config = fs::read_to_string(&self.config_path)
+            .map_err(|error| format!("read config {}: {error}", self.config_path.display()))?;
+        let key = "detector_stationary_interval_secs";
+        let mut replaced = false;
+        let mut lines: Vec<String> = config
+            .lines()
+            .map(|line| {
+                if line.starts_with(&format!("{key} = ")) {
+                    replaced = true;
+                    format!("{key} = {secs}")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        if !replaced {
+            lines.push(format!("{key} = {secs}"));
+        }
+        fs::write(&self.config_path, lines.join("\n") + "\n")
+            .map_err(|error| format!("write config {}: {error}", self.config_path.display()))
+    }
+
     fn set_camera_name(&self, camera_name: &str) -> Result<(), String> {
         let config = fs::read_to_string(&self.config_path)
             .map_err(|error| format!("read config {}: {error}", self.config_path.display()))?;
@@ -853,11 +882,17 @@ fn undecodable_rtsp_world_or_fail() -> FirstLightWorld {
 
 fn apply_world_runtime_env(command: &mut Command, world: &FirstLightWorld) {
     command
-        .env("VIGIL_HEALTH_PORT", world.health_port.to_string())
+        .arg("--health-port")
+        .arg(world.health_port.to_string())
+        .arg("--rtsp-url")
+        .arg(&world.rtsp_url)
+        .arg("--detector-model-path")
+        .arg(&world.detector_artifact)
         .env("VIGIL_DATA_DIR", &world.data_dir)
         .env("VIGIL_STORE_PATH", &world.store_path)
-        .env("VIGIL_RTSP_URL", &world.rtsp_url)
-        .env("VIGIL_DETECTOR_MODEL_PATH", &world.detector_artifact)
+        // No --rtsp-retry-initial-ms / --rtsp-retry-max-ms CLI flags exist
+        // yet; left as env per the settings-authority census (still no
+        // flag/config seam for either).
         .env("VIGIL_RTSP_RETRY_INITIAL_MS", "200")
         .env("VIGIL_RTSP_RETRY_MAX_MS", "1000");
     if let Some(username) = world.rtsp_username.as_ref() {
@@ -5094,10 +5129,10 @@ fn detector_loads_and_runs_over_real_frames() {
     // performs periodic stationary-scene scans by default, so disable that
     // independent path instead of treating its detector invocation as a gate
     // failure.
-    let (background_runtime, background_store) = run_runtime_and_open_store_with_env(
-        &background_world,
-        &[("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS", "0")],
-    );
+    if let Err(error) = background_world.set_stationary_scan_interval(0) {
+        failures.push(format!("could not turn periodic re-scanning off: {error}"));
+    }
+    let (background_runtime, background_store) = run_runtime_and_open_store(&background_world);
     let background_detections = list_observations(background_store.as_ref()).len() as u64;
 
     assert_detector_oracle_is_repo_owned_and_independent(&mut failures);
@@ -5513,7 +5548,10 @@ fn assert_no_event_for_stream_case(
     let runtime = if expect_decoded_frames {
         // This branch proves the motion gate. Periodic stationary-scene
         // detection is a separate production path and is covered independently.
-        world.run_runtime_once_with_env(&[("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS", "0")])
+        if let Err(error) = world.set_stationary_scan_interval(0) {
+            failures.push(format!("could not turn periodic re-scanning off: {error}"));
+        }
+        world.run_runtime_once()
     } else {
         world.run_runtime_once()
     };
@@ -5750,8 +5788,10 @@ fn motion_gate_suppresses_non_motion_frames() {
     drop(person_world);
 
     let mut empty_world = empty_rtsp_world_or_fail();
-    let empty_runtime =
-        empty_world.run_runtime_once_with_env(&[("VIGIL_DETECTOR_STATIONARY_INTERVAL_SECS", "0")]);
+    if let Err(error) = empty_world.set_stationary_scan_interval(0) {
+        failures.push(format!("could not turn periodic re-scanning off: {error}"));
+    }
+    let empty_runtime = empty_world.run_runtime_once();
     let motion_positive_person_free_clip = generate_motion_positive_person_free_clip(&empty_world);
     if let Ok(clip) = motion_positive_person_free_clip.as_ref()
         && let Err(error) = empty_world.switch_rtsp_clip(clip)

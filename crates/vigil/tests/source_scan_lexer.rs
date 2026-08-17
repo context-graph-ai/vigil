@@ -274,20 +274,70 @@ pub fn match_bracket(masked: &[char], open_pos: usize) -> Option<usize> {
     match_delim(masked, open_pos, '[', ']')
 }
 
-/// Every `#[cfg(test)]`-attributed item's body range (the attributed item's
-/// own `{`..`}`, whatever kind of item it is — `mod`, `fn`, `impl`, ...).
-/// Shared by scans that need to exclude test-only scaffolding from a
-/// production-surface inventory. Only the exact `#[cfg(test)]` spelling is
-/// recognized — the whole crate's test modules use it consistently — so
-/// something conditioned more elaborately (`cfg(any(test, feature =
-/// "x"))`, ...) is deliberately out of scope for this narrow exclusion.
-pub fn collect_cfg_test_ranges(masked: &[char]) -> Vec<(usize, usize)> {
-    let marker: Vec<char> = "#[cfg(test)]".chars().collect();
-    let n = masked.len();
+/// Every `#[cfg(test)]`- or `#[cfg(feature = "test-support")]`-attributed
+/// item's full range — from the marker attribute itself through the
+/// attributed item's own closing `}`, whatever kind of item it is — `mod`,
+/// `fn`, `impl`, ... — so the item's own signature (and any name a scan
+/// might be looking for) is excluded along with its body. Shared by scans
+/// that need to exclude test-only scaffolding from a production-surface
+/// inventory. Both markers are compiled out of every shipped artifact —
+/// `test-support` is a non-default feature no release build enables (see
+/// `artifact_never_enables_test_support.rs`) — so a scan that only masked
+/// `#[cfg(test)]` would read a `test-support`-gated item as live code. Only
+/// these two exact spellings are recognized — the whole crate uses them
+/// consistently — so something conditioned more elaborately (`cfg(any(test,
+/// feature = "x"))`, ...) is deliberately out of scope for this narrow
+/// exclusion.
+///
+/// Takes `source` (the ORIGINAL, un-masked text) alongside `masked`
+/// specifically because the second marker contains a string literal
+/// (`"test-support"`) — [`lex`]'s own masking replaces every string
+/// literal's content, quotes included, with spaces, so
+/// `#[cfg(feature = "test-support")]` does not survive INTO `masked` at
+/// all (it reads as `#[cfg(feature =              )]`), and matching
+/// against `masked` alone can never find it. The marker is therefore
+/// located in `source`, where it is unambiguous, and each candidate match
+/// is then confirmed LIVE — not inside a comment or another string — by
+/// checking that `masked` agrees with `source` at the marker's own `#`
+/// position (a `#` starting a real attribute is never itself inside a
+/// comment or string, so masking never touches it; one that IS inside a
+/// comment or string reads as a space in `masked`, so the two disagree and
+/// the candidate is rejected). `source` and `masked` share the same
+/// char-index space by construction ([`lex`] builds `masked` as a clone of
+/// `source`'s own char vector), so this comparison is always positionally
+/// valid.
+pub fn collect_cfg_test_ranges(source: &str, masked: &[char]) -> Vec<(usize, usize)> {
+    let original: Vec<char> = source.chars().collect();
+    let mut ranges = collect_cfg_marker_ranges(&original, masked, "#[cfg(test)]");
+    ranges.extend(collect_cfg_marker_ranges(
+        &original,
+        masked,
+        "#[cfg(feature = \"test-support\")]",
+    ));
+    ranges.sort_by_key(|(start, _)| *start);
+    ranges
+}
+
+/// The full ranges (attribute through closing `}`) of every item attributed
+/// with the exact attribute text `marker_str` (e.g. `#[cfg(test)]`),
+/// located in `original` and confirmed live against `masked` (see
+/// [`collect_cfg_test_ranges`]'s own doc comment for why both are needed).
+/// Shared implementation behind
+/// [`collect_cfg_test_ranges`] — one marker, one pass, so a second gating
+/// spelling is a second call rather than a second hand-written loop that
+/// could silently diverge from the first.
+fn collect_cfg_marker_ranges(
+    original: &[char],
+    masked: &[char],
+    marker_str: &str,
+) -> Vec<(usize, usize)> {
+    let marker: Vec<char> = marker_str.chars().collect();
+    let n = original.len();
     let mut ranges = Vec::new();
     let mut i = 0usize;
     while i + marker.len() <= n {
-        if masked[i..i + marker.len()] == marker[..] {
+        if original[i..i + marker.len()] == marker[..] && masked[i] == original[i] {
+            let marker_start = i;
             let mut k = i + marker.len();
             loop {
                 k = skip_ws_forward(masked, k);
@@ -328,7 +378,13 @@ pub fn collect_cfg_test_ranges(masked: &[char]) -> Vec<(usize, usize)> {
                     }
                     z += 1;
                 }
-                ranges.push((open, z));
+                // The masked range covers the WHOLE item — from the marker
+                // attribute itself through the closing `}` — not just the
+                // body. A gated function's own name lives in its signature,
+                // between the attribute and the opening `{`; masking only
+                // the body would leave that name (e.g. a gated fn whose name
+                // is itself a scanned token) readable as live code.
+                ranges.push((marker_start, z));
                 i = z;
                 continue;
             }

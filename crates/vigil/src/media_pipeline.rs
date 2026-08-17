@@ -271,6 +271,13 @@ impl DecodedVideoSegment {
 pub(crate) struct CaptureDecodeOptions {
     pub(crate) stream_id: crate::workgraph::StreamId,
     pub(crate) stream_epoch: u64,
+    /// The decode answer this session is opening under, read by the caller
+    /// BEFORE the session opens. The session carries it rather than re-reading
+    /// it once its RTSP handshake is done: a command that landed during that
+    /// handshake would otherwise be invisible to the session it should have
+    /// ended, and the reconnect the operator is owed would be taken on by
+    /// nobody.
+    pub(crate) decode_epoch: u64,
     pub(crate) hardware_decoding: bool,
 }
 
@@ -279,18 +286,12 @@ const HARDWARE_PROBE_UNIT_COUNT: usize = 12;
 /// A low-fps camera cannot deliver the full probe buffer quickly; after
 /// this deadline the probe runs on whatever real units were collected so
 /// slow streams still select a backend instead of timing out forever.
-/// Advanced override: VIGIL_HARDWARE_PROBE_DEADLINE_SECS.
-const HARDWARE_PROBE_DEADLINE: Duration = Duration::from_secs(10);
-
-// VIGIL_HARDWARE_PROBE_DEADLINE_SECS is an enumerated, reviewed override
-// (`environment_read_surface.baseline.txt`), not an ad-hoc read.
-#[allow(clippy::disallowed_methods)]
+/// Set through the ordinary settings surfaces as `hardware_probe_deadline_secs`.
 fn hardware_probe_deadline() -> Duration {
-    std::env::var("VIGIL_HARDWARE_PROBE_DEADLINE_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|secs| Duration::from_secs(secs.max(1)))
-        .unwrap_or(HARDWARE_PROBE_DEADLINE)
+    Duration::from_secs(crate::settings_backends::resolved_secs(
+        crate::settings_model::HARDWARE_PROBE_DEADLINE_SECS_SETTING,
+        crate::settings_backends::automatic::HARDWARE_PROBE_DEADLINE_SECS,
+    ))
 }
 
 pub(crate) fn capture_rtsp_segments<OnSessionStarted, OnSegment, OnDecodeReceipt>(
@@ -372,25 +373,31 @@ where
         codec,
         decode_options.stream_epoch,
     );
-    // With no hardware probe to run (intent off, a software-only artifact,
-    // or a device the process cannot even open), the backend is selected
-    // immediately: a blocked device reports its classified receipt without
-    // waiting for stream units, and behavior matches the pre-seam software
-    // path exactly. Only a genuinely possible hardware probe waits for
-    // REAL stream units.
-    // hardware_decoding=false means NO hardware probing of any kind —
-    // including the device-access preflight, which opens /dev/dri nodes.
-    // Short-circuit on intent before any device is touched.
-    let hardware_probe_possible = decode_options.hardware_decoding && {
-        #[cfg(feature = "decode-gstreamer")]
-        {
-            crate::doctor::live_device_access_finding().is_none()
-        }
-        #[cfg(not(feature = "decode-gstreamer"))]
-        {
-            false
-        }
-    };
+    // With no hardware probe to run (neither the automatic domain nor an
+    // explicit pin asking for one, a software-only artifact, or a device the
+    // process cannot even open), the backend is selected immediately: a
+    // blocked device reports its classified receipt without waiting for
+    // stream units, and behavior matches the pre-seam software path exactly.
+    // Only a genuinely possible hardware probe waits for REAL stream units.
+    // The gate reads the effective intent (`real_probe_units_required`), not
+    // the bare automatic-domain switch: an operator who turns automatic
+    // hardware decoding off and pins the hardware path themselves is still
+    // asking for a real probe, and reading the domain switch alone left that
+    // pin with nothing to collect and then a hardware verdict asked of an
+    // empty sample. With neither the domain nor a pin asking for hardware, no
+    // device is touched — the device-access preflight, which opens /dev/dri
+    // nodes, stays short-circuited on intent.
+    let hardware_probe_possible =
+        crate::decode::real_probe_units_required(decode_options.hardware_decoding) && {
+            #[cfg(feature = "decode-gstreamer")]
+            {
+                crate::doctor::live_device_access_finding().is_none()
+            }
+            #[cfg(not(feature = "decode-gstreamer"))]
+            {
+                false
+            }
+        };
     let needs_stream_probe = hardware_probe_possible;
     let mut backend: Option<Box<dyn crate::decode::DecodeBackend>> = None;
     let mut probe_buffer: Vec<crate::decode::EncodedAccessUnit> = Vec::new();
@@ -399,6 +406,7 @@ where
             &decode_options.stream_id,
             codec,
             decode_options.stream_epoch,
+            decode_options.decode_epoch,
             decode_options.hardware_decoding,
             &[],
         )?;
@@ -426,7 +434,21 @@ where
     let mut last_video_at = started;
     let mut segment_started_at = None;
     let mut any_frames_decoded = false;
-    while !shutdown.load(Ordering::SeqCst) {
+    // The decode answer this session opened under. A session decodes on the
+    // backend it selected, so a change of that answer is taken on by ending the
+    // session cleanly and letting the caller open a new one — which is what
+    // makes a decode backend an operator names while the node runs become the
+    // one the camera is actually decoded by.
+    //
+    // Taken from what the caller read before the session opened, never re-read
+    // here: the RTSP handshake above takes real time, and a command landing
+    // inside it would be baked in as this session's own answer — leaving the
+    // loop below comparing the new epoch against itself, ending nothing, and
+    // the operator's change silently unapplied on this camera.
+    let opened_under = decode_options.decode_epoch;
+    while !shutdown.load(Ordering::SeqCst)
+        && crate::live_backends::decode_selection_epoch() == opened_under
+    {
         // The decodable-frames watchdog runs on EVERY iteration: a stream
         // that keeps sending undecodable units (no complete codec config)
         // never pauses long enough for the poll-timeout branch to see it.
@@ -457,6 +479,7 @@ where
                             &decode_options.stream_id,
                             codec,
                             decode_options.stream_epoch,
+                            decode_options.decode_epoch,
                             decode_options.hardware_decoding,
                             &probe_buffer,
                         )?;
@@ -1044,13 +1067,20 @@ fn draw_bbox(image: &mut RgbImage, bbox: (i32, i32, i32, i32)) {
     }
 }
 
-pub(crate) fn motion_gate(segment: &DecodedVideoSegment) -> MotionGateResult {
+/// Whether each frame of `segment` moved, at the sensitivity in force.
+///
+/// `sensitivity` is the operator's declared 1..=10 scale: turning it up makes a
+/// smaller change count as movement, which is what an owner watching a distant
+/// gate reaches for; turning it down is what an owner whose camera sees a busy
+/// road reaches for.
+pub(crate) fn motion_gate(segment: &DecodedVideoSegment, sensitivity: i64) -> MotionGateResult {
+    let difference_threshold = motion_difference_threshold(sensitivity);
     let mut previous = None;
     let mut motion_positive_frames = 0_u64;
     for frame in &segment.frames {
         let gray = motion_thumbnail(frame);
         if let Some(previous_gray) = previous.as_ref()
-            && motion_positive(previous_gray, &gray)
+            && motion_positive(previous_gray, &gray, difference_threshold)
         {
             motion_positive_frames = motion_positive_frames.saturating_add(1);
         }
@@ -1359,17 +1389,35 @@ fn motion_thumbnail(frame: &DecodedRgbFrame) -> GrayImage {
     })
 }
 
-fn motion_positive(previous: &GrayImage, current: &GrayImage) -> bool {
+/// The per-pixel difference a frame has to clear to count as movement, at one
+/// point on the operator's scale.
+///
+/// Anchored on Vigil's own mid-scale value, which is the threshold this gate
+/// has always run at: an install nobody has touched keeps detecting exactly
+/// what it detected before this became a knob.
+fn motion_difference_threshold(sensitivity: i64) -> u8 {
+    let sensitivity = sensitivity.clamp(1, 10);
+    let scaled = i64::from(MOTION_DIFFERENCE_THRESHOLD_AT_MID_SCALE) * (11 - sensitivity)
+        / (11 - crate::settings_application::AUTOMATIC_MOTION_SENSITIVITY);
+    scaled.clamp(1, i64::from(u8::MAX)) as u8
+}
+
+/// The per-pixel difference vigil's own mid-scale sensitivity counts as
+/// movement.
+const MOTION_DIFFERENCE_THRESHOLD_AT_MID_SCALE: u8 = 3;
+
+fn motion_positive(previous: &GrayImage, current: &GrayImage, difference_threshold: u8) -> bool {
     let mut diff_sum = 0_u64;
     let diff = ImageBuffer::from_fn(MOTION_WIDTH, MOTION_HEIGHT, |x, y| {
         let value = current.get_pixel(x, y)[0].abs_diff(previous.get_pixel(x, y)[0]);
         diff_sum = diff_sum.saturating_add(value as u64);
         Luma([value])
     });
-    let mask = threshold(&diff, 3, ThresholdType::Binary);
+    let mask = threshold(&diff, difference_threshold, ThresholdType::Binary);
     let labels = connected_components(&mask, Connectivity::Eight, Luma([0_u8]));
     let has_component = labels.pixels().any(|pixel| pixel[0] != 0);
-    diff_sum > u64::from(MOTION_WIDTH * MOTION_HEIGHT) * 3 && has_component
+    diff_sum > u64::from(MOTION_WIDTH * MOTION_HEIGHT) * u64::from(difference_threshold)
+        && has_component
 }
 
 fn split_avcc_nals(data: &[u8]) -> Option<Vec<&[u8]>> {

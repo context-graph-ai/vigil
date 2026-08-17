@@ -35,7 +35,7 @@ use std::time::Duration;
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, get, vigil_binary_path, wait_until,
+    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, get, vigil_binary_path, wait_until,
 };
 
 /// Redact every occurrence of the fabric enrollment ticket from a raw
@@ -382,10 +382,13 @@ fn fabric_enrollment_ticket_appears_on_no_surface_except_the_two_sanctioned_retr
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("run")
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--review-port")
+        .arg(review_port.to_string())
+        .arg("--fabric-hub")
+        .arg("true")
         .env("VIGIL_DATA_DIR", data_dir.path())
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", review_port.to_string())
-        .env("VIGIL_FABRIC_HUB", "true")
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_TICKET")
         .stdin(Stdio::null())
@@ -400,7 +403,7 @@ fn fabric_enrollment_ticket_appears_on_no_surface_except_the_two_sanctioned_retr
 
     let boot = wait_until(
         "the hub node to report boot_phase=pipeline-up",
-        Duration::from_secs(20),
+        RUNTIME_STARTUP_TIMEOUT,
         || {
             Ok(stdout
                 .lock()
@@ -419,7 +422,7 @@ fn fabric_enrollment_ticket_appears_on_no_surface_except_the_two_sanctioned_retr
     // fabric-join line, proving the ticket really is live this run.
     let join_line_result = wait_until(
         "the hub node to print its startup fabric-join ticket line",
-        Duration::from_secs(20),
+        RUNTIME_STARTUP_TIMEOUT,
         || {
             let logs = stdout.lock().expect("stdout lock").clone();
             Ok(logs

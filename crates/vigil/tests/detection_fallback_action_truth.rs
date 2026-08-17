@@ -1,11 +1,14 @@
 //! The accelerated-detection fallback receipt must tell the operator the
 //! truth about THIS build.
 //!
-//! When the accelerated backend is compiled in, a failed forward probe is a
-//! probe failure the operator can act on — it must NOT claim the build lacks
-//! the accelerated detector, and it must name the real next steps (raise the
-//! probe deadline, verify the GPU is usable). When the accelerated backend is
-//! NOT compiled in, the action correctly says the build does not include it.
+//! When the accelerated backend is compiled in, a preparation that reports an
+//! error is something the operator can act on — the action must NOT claim the
+//! build lacks the accelerated detector, and it must name a step that can
+//! actually change the outcome: check that the graphics device is usable by
+//! this container, then ask for the backend again. Offering to lengthen a wait
+//! is not such a step, because no wait decided this. When the accelerated
+//! backend is NOT compiled in, the action correctly says the build does not
+//! include it.
 
 #[cfg(feature = "detect-burn-wgpu")]
 use vigil::acceleration::ActionKind;
@@ -68,13 +71,30 @@ fn probe_failure_action_names_real_next_steps_when_accelerated_backend_is_compil
         );
     }
     assert!(
-        lower.contains("vigil_detection_probe_deadline_secs")
-            || lower.contains("verify the gpu")
+        lower.contains("verify the gpu")
             || lower.contains("usable gpu")
             || lower.contains("check the gpu")
             || lower.contains("gpu is usable"),
-        "the fallback action must name the real next steps (raise VIGIL_DETECTION_PROBE_DEADLINE_SECS or verify the GPU is usable): {action}"
+        "the fallback action must name the real next step — check that the graphics device is \
+         usable by this container: {action}"
     );
+    // The remedy an operator is offered has to be one that can actually work.
+    // Telling someone to give the attempt longer is not: the attempt was ended
+    // by an error the preparation itself reported, so more waiting changes
+    // nothing, and there is no waiting period to lengthen. Asking for it again
+    // is the cheap action that does work.
+    for absent_remedy in [
+        "deadline",
+        "late window",
+        "wait longer",
+        "give it more time",
+    ] {
+        assert!(
+            !lower.contains(absent_remedy),
+            "the action must not send the operator to lengthen a wait that does not decide \
+             anything (`{absent_remedy}`): {action}"
+        );
+    }
 }
 
 /// Without the accelerated backend compiled in, the fallback must plainly say

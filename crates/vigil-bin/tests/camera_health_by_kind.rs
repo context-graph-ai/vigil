@@ -20,14 +20,13 @@
 use std::fs;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use serde_json::Value;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, get, vigil_binary_path, wait_until,
+    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, get, vigil_binary_path, wait_until,
 };
 
 const FIRST_CAMERA_NAME: &str = "loading dock";
@@ -82,9 +81,11 @@ fn spawn_two_camera_node(
         .arg("run")
         .arg("--config")
         .arg(&config_path)
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--review-port")
+        .arg(review_port.to_string())
         .env("VIGIL_DATA_DIR", data_dir)
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", review_port.to_string())
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_TICKET")
         .env_remove("VIGIL_FABRIC_HUB")
@@ -126,7 +127,7 @@ fn configured_rtsp_cameras_are_counted_and_listed_by_kind_on_health() {
 
     let boot_reached_pipeline_up = wait_until(
         "the two-camera node to report boot_phase=pipeline-up",
-        Duration::from_secs(20),
+        RUNTIME_STARTUP_TIMEOUT,
         || {
             if node.stdout().contains("boot_phase=pipeline-up") {
                 Ok(Some(()))
@@ -202,20 +203,31 @@ fn configured_rtsp_cameras_are_counted_and_listed_by_kind_on_health() {
          set; got body: {whole_body}"
     );
 
-    let top_level_status = body
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    // A per-camera status is a fact about that camera. The node's own
+    // vocabulary — whether its store opened, whether it has any cameras at all,
+    // whether it is running unmanaged — describes the node, and putting one of
+    // those words in a camera's field tells an operator every camera is in the
+    // same trouble whatever each camera is actually doing.
+    const NODE_SCOPE_STATUS_LABELS: [&str; 3] = [
+        "running_unmanaged",
+        "store_open_failed",
+        "no_cameras_configured",
+    ];
     for camera_entry in rtsp_cameras {
         let camera_status = camera_entry
             .get("status")
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("each cameras_by_kind.rtsp.cameras entry must carry a \"status\"; got body: {whole_body}"));
         assert_eq!(
-            camera_status, top_level_status,
-            "a per-camera \"status\" must agree with the same snapshot's top-level \"status\" \
-             field (the runtime tracks one shared liveness state today; a per-camera entry must \
-             never invent a diverging value) — got body: {whole_body}"
+            camera_status.split_whitespace().count(),
+            1,
+            "a per-camera \"status\" is one whitespace-free token a reader can act on; got body: \
+             {whole_body}"
+        );
+        assert!(
+            !NODE_SCOPE_STATUS_LABELS.contains(&camera_status),
+            "a per-camera \"status\" must report that camera's own condition, never the node's — \
+             {camera_status:?} describes the node; got body: {whole_body}"
         );
     }
 

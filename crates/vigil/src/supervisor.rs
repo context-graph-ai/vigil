@@ -69,6 +69,50 @@ pub(crate) fn supervisor_post_body(url: &str, token: &str, body: &str) -> Result
     }
 }
 
+/// One Supervisor request, answered with the status code beside the body.
+///
+/// The two helpers above hide the status behind success or failure, which is
+/// enough for a call whose only question is "did it work". A write of this
+/// add-on's own options needs more: a Supervisor that REFUSES the write because
+/// the manifest never declared the permission is a thing an operator can fix,
+/// and telling them so means telling the refusal apart from the Supervisor
+/// being unreachable.
+pub(crate) fn supervisor_request(
+    method: &str,
+    url: &str,
+    token: &str,
+    body: Option<&str>,
+) -> Result<(u16, String), String> {
+    let auth = format!("Authorization: Bearer {token}");
+    let mut arguments = vec![
+        "-s".to_string(),
+        "-w".to_string(),
+        "\n%{http_code}".to_string(),
+        "-X".to_string(),
+        method.to_string(),
+        url.to_string(),
+        "-H".to_string(),
+        "Content-Type: application/json".to_string(),
+        "-H".to_string(),
+        auth,
+    ];
+    if let Some(body) = body {
+        arguments.push("-d".to_string());
+        arguments.push(body.to_string());
+    }
+    let output = std::process::Command::new("curl")
+        .args(&arguments)
+        .output()
+        .map_err(|error| format!("curl spawn: {error}"))?;
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let (answer, code) = raw.rsplit_once('\n').unwrap_or(("", raw.as_ref()));
+    let code: u16 = code
+        .trim()
+        .parse()
+        .map_err(|_| format!("supervisor {method} {url} returned no status"))?;
+    Ok((code, answer.to_string()))
+}
+
 fn supervisor_delete(url: &str, token: &str) -> Result<(), String> {
     let auth = format!("Authorization: Bearer {token}");
     let output = std::process::Command::new("curl")

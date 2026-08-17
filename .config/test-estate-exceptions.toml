@@ -65,6 +65,14 @@ elapsed_calls = 0
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
 [[file]]
+path = "crates/vigil/src/live_backends.rs"
+sleeps = 3
+raw_clocks = 0
+free_port_helpers = 0
+elapsed_calls = 0
+reason = "This contract holds the operator surface across the moment an automatic backend move publishes. The interleaving it is about is the width of one publication — microseconds against reads that take milliseconds — so the test gathers readers on the publication seam and puts the landing behind them. Nothing a test can read says that a thread is now waiting on a given lock, so these three waits have no fact to wait on, and a bounded spin in their place starves the very readers being gathered (measured: 3.5s of sleeps against 261s of spinning, same verdict). Slack here only ever costs a missed interleaving, never a false one."
+
+[[file]]
 path = "crates/vigil/tests/capability_lifecycle.rs"
 sleeps = 1
 raw_clocks = 0
@@ -74,24 +82,8 @@ reason = "Exact current timing and port surface is frozen migration debt; change
 
 [[file]]
 path = "crates/vigil/tests/detection_accel_backend.rs"
-sleeps = 2
-raw_clocks = 1
-free_port_helpers = 0
-elapsed_calls = 1
-reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
-
-[[file]]
-path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
-sleeps = 2
-raw_clocks = 2
-free_port_helpers = 0
-elapsed_calls = 0
-reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
-
-[[file]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-sleeps = 3
-raw_clocks = 2
+sleeps = 1
+raw_clocks = 0
 free_port_helpers = 0
 elapsed_calls = 0
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
@@ -119,6 +111,14 @@ raw_clocks = 3
 free_port_helpers = 0
 elapsed_calls = 0
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
+
+[[file]]
+path = "crates/vigil/tests/store_open_failure_classes.rs"
+sleeps = 1
+raw_clocks = 0
+free_port_helpers = 0
+elapsed_calls = 0
+reason = "The re-executed lock-holder child process parks on an open store handle so its parent can classify a genuinely locked store; the parent kills and reaps the child through the standard-library handle, and no assertion in the parent waits on this duration."
 
 [[file]]
 path = "tests/acceptance/common.rs"
@@ -151,6 +151,22 @@ raw_clocks = 2
 free_port_helpers = 0
 elapsed_calls = 2
 reason = "The verifier measures command wall time, per-step time, and process-tree memory; these clocks and the 100 ms sampler interval produce receipts and never decide whether product behavior passes."
+
+[[file]]
+path = "crates/vigil/tests/supervisor_reflection_record_fidelity.rs"
+sleeps = 0
+raw_clocks = 0
+free_port_helpers = 1
+elapsed_calls = 0
+reason = "The production Supervisor reflection client is driven over a real loopback listener standing in for the Supervisor API; the ephemeral bind is process-isolation debt, not a product-behavior clock or port choice."
+
+[[file]]
+path = "crates/vigil/tests/supervisor_reflection_transport.rs"
+sleeps = 0
+raw_clocks = 0
+free_port_helpers = 1
+elapsed_calls = 0
+reason = "The production Supervisor reflection client is driven over a real loopback listener standing in for the Supervisor API; the ephemeral bind is process-isolation debt, not a product-behavior clock or port choice."
 
 [[site]]
 path = "crates/vigil-bin/tests/boot_readiness.rs"
@@ -1201,102 +1217,6 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 # syntax: std :: thread :: sleep (Duration :: from_millis (100))
 
 [[site]]
-path = "crates/vigil/tests/detection_accel_backend.rs"
-scope = "detection_probe_timeout_and_panic_classify_probe_failed_without_hang"
-kind = "elapsed_call"
-fingerprint = "sha256:cb8e42fe10bd81370c7943756d972320dc97f96b158694b0cea2ac176bc36815"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: started . elapsed ()
-
-[[site]]
-path = "crates/vigil/tests/detection_accel_backend.rs"
-scope = "detection_probe_timeout_and_panic_classify_probe_failed_without_hang"
-kind = "raw_clock"
-fingerprint = "sha256:8a492051b8f9b539ecb23445e01d6d9d44fda32fac45f4e38e85d242b0500a8d"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: time :: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_accel_backend.rs"
-scope = "impl SlowProbe::run_forward_probe"
-kind = "sleep"
-fingerprint = "sha256:34992e54f1c5836237fe523bc197a0e9ba148f922349021ccc7e65fcb31ec192"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: thread :: sleep (self . delay)
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
-scope = "impl SlowThenPassProbe::run_forward_probe"
-kind = "sleep"
-fingerprint = "sha256:34992e54f1c5836237fe523bc197a0e9ba148f922349021ccc7e65fcb31ec192"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: thread :: sleep (self . delay)
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
-scope = "wait_for_detection_receipt"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
-scope = "wait_for_detection_receipt"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_completes_after_deadline.rs"
-scope = "wait_for_detection_receipt"
-kind = "sleep"
-fingerprint = "sha256:a1efee31029e0eb0ca11f2489e605d0bdc9cc9c0b707447ab4e2fb4d14b04f91"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-scope = "impl SlowThenFailProbe::run_forward_probe"
-kind = "sleep"
-fingerprint = "sha256:34992e54f1c5836237fe523bc197a0e9ba148f922349021ccc7e65fcb31ec192"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: thread :: sleep (self . delay)
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-scope = "impl SlowThenPassProbe::run_forward_probe"
-kind = "sleep"
-fingerprint = "sha256:34992e54f1c5836237fe523bc197a0e9ba148f922349021ccc7e65fcb31ec192"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: thread :: sleep (self . delay)
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-scope = "poll"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-scope = "poll"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil/tests/detection_probe_promotes_after_deadline.rs"
-scope = "poll"
-kind = "sleep"
-fingerprint = "sha256:a1efee31029e0eb0ca11f2489e605d0bdc9cc9c0b707447ab4e2fb4d14b04f91"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: std :: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
 path = "crates/vigil/tests/deterministic_test_support.rs"
 scope = "impl TcpPortReservation::reserve_loopback"
 kind = "bind_port_zero"
@@ -1399,6 +1319,14 @@ kind = "raw_clock"
 fingerprint = "sha256:7c84cdc16fd1bed9f319c5edde5a265b038c521284bdfd801b4959192a971d30"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Utc :: now ()
+
+[[site]]
+path = "crates/vigil/tests/store_open_failure_classes.rs"
+scope = "a_separate_process_holds_the_store_lock_while_the_parent_classifies"
+kind = "sleep"
+fingerprint = "sha256:0dc1867f6bada5cea96da01b66b6f7e1e8c2fdad40754662ebcb6c1ae73359e4"
+reason = "The re-executed lock-holder child process parks on an open store handle so its parent can classify a genuinely locked store; the parent kills and reaps the child through the standard-library handle, and no assertion in the parent waits on this duration."
+# syntax: std :: thread :: sleep (Duration :: from_secs (120))
 
 [[site]]
 path = "tests/acceptance/common.rs"
@@ -1618,3 +1546,43 @@ kind = "raw_clock"
 fingerprint = "sha256:8a492051b8f9b539ecb23445e01d6d9d44fda32fac45f4e38e85d242b0500a8d"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: std :: time :: Instant :: now ()
+
+[[site]]
+path = "crates/vigil/tests/supervisor_reflection_record_fidelity.rs"
+scope = "impl SupervisorDouble::start_with"
+kind = "bind_port_zero"
+fingerprint = "sha256:54a45d0ed4b778f3b682cf947d7955cb173011c7303b9c625eed45d649429b58"
+reason = "The double binds an ephemeral loopback listener to stand in for the Supervisor API; the production reflection client under test dials whatever address the double reports, so the port itself carries no product behavior."
+# syntax: TcpListener :: bind (("127.0.0.1" , 0))
+
+[[site]]
+path = "crates/vigil/tests/supervisor_reflection_transport.rs"
+scope = "impl SupervisorDouble::start_with_write_status"
+kind = "bind_port_zero"
+fingerprint = "sha256:54a45d0ed4b778f3b682cf947d7955cb173011c7303b9c625eed45d649429b58"
+reason = "The double binds an ephemeral loopback listener to stand in for the Supervisor API; the production reflection client under test dials whatever address the double reports, so the port itself carries no product behavior."
+# syntax: TcpListener :: bind (("127.0.0.1" , 0))
+
+[[site]]
+path = "crates/vigil/src/live_backends.rs"
+scope = "tests::automatic_landing_move_is_never_read_as_restart_pending_child"
+kind = "sleep"
+fingerprint = "sha256:de0e230b4008af06f561033c743b0f1dad099b096d141365799fe656ff521aea"
+reason = "One of the three gathering waits this contract's interleaving needs; the file entry for crates/vigil/src/live_backends.rs carries the reasoning."
+# syntax: std :: thread :: sleep (GATHER)
+
+[[site]]
+path = "crates/vigil/src/live_backends.rs"
+scope = "tests::automatic_landing_move_is_never_read_as_restart_pending_child"
+kind = "sleep"
+fingerprint = "sha256:de0e230b4008af06f561033c743b0f1dad099b096d141365799fe656ff521aea"
+reason = "One of the three gathering waits this contract's interleaving needs; the file entry for crates/vigil/src/live_backends.rs carries the reasoning."
+# syntax: std :: thread :: sleep (GATHER)
+
+[[site]]
+path = "crates/vigil/src/live_backends.rs"
+scope = "tests::automatic_landing_move_is_never_read_as_restart_pending_child"
+kind = "sleep"
+fingerprint = "sha256:a757046c3b693f04fc0745f189511a7f3a706d6513f73e0141ce0bdf7680b77f"
+reason = "One of the three gathering waits this contract's interleaving needs; the file entry for crates/vigil/src/live_backends.rs carries the reasoning."
+# syntax: std :: thread :: sleep (COME_ROUND)

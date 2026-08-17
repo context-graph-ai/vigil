@@ -23,43 +23,55 @@ ports_description:
 # accepted as a fallback for non-Supervisor deployments.
 services:
   - mqtt:want
+# Behavior settings deliberately declare NO defaults here.
+#
+# The Supervisor cannot show anyone the difference between an option nobody
+# touched and one typed to the same value as the declared default, and the web
+# interface posts the whole rendered form on save. A declared default therefore
+# turns every fresh install into a screenful of values that look like a person
+# set them — which would switch off automatic tuning and refuse a management
+# server's value for each of them. Removing such a key from the user's record
+# does not produce absence either; the Supervisor refills the declared default,
+# so there would be no way to say "nothing is set here" at all.
+#
+# What stays: the store location, because a store cannot say where the store
+# is; the enrollment credential; and the camera list, which is not a setting.
+# Every behavior default is Vigil's own, and the operator surface names Vigil as
+# the author of each until somebody sets one.
 options:
   store_path: /data/store.contextgraph
-  health_port: 8099
-  review_port: 8098
-  detector_stationary_interval_secs: 30
-  recognition_space_id: vigil_site_vision_v1
-  recognition_threshold: 0.9
-  recognition_covered_classes:
-    - person
-    - dog
-  cameras: []
-  hardware_decoding: true
-  accelerated_detection: true
   fabric_ticket: ""
-  fabric_hub: false
-  fabric_allow_frame_offload: true
-  fabric_worker_lease_ms: 300000
-  fabric_fallback_horizon_ms: 5000
-  keyframe_interval_fps_multiplier: 2
-  keyframe_interval_min_frames: 15
-  keyframe_interval_max_frames: 300
-  bitrate_bps_up_to_640x480: 1000000
-  bitrate_bps_up_to_1280x720: 2000000
-  bitrate_bps_up_to_1920x1080: 4000000
-  bitrate_bps_up_to_2560x1440: 6000000
-  bitrate_bps_above_2560x1440: 10000000
+  cameras: []
+# Every behavior key is declared optional, so an unset key is genuinely absent
+# from the file Vigil reads and clearing one means "this surface no longer says
+# anything about this setting" rather than "put the packaged default back".
 schema:
   store_path: str
-  health_port: int
-  review_port: int
+  site_name: str?
+  health_port: int?
+  review_port: int?
+  detector_model_id: str?
   detector_model_path: str?
-  detector_stationary_interval_secs: int
+  detector_stationary_interval_secs: int?
   recognition_weights_dir: str?
   recognition_space_id: str?
   recognition_threshold: float?
+  # What Vigil looks for, and what recognition puts a name to, are two
+  # separate choices an operator makes. One key serving both would mean a
+  # person who widens recognition silently widens what the machine detects,
+  # and a person who wants vehicles detected without recognizing anything
+  # would have no field to say it in.
+  #
+  # Both are a loose list of strings, never an enumeration of the model's
+  # classes. Vigil validates detector_classes entries at write time against
+  # the bundled detector's compiled class inventory, not a loaded model
+  # instance, naming any entry it does not carry; that inventory changes only
+  # when the compiled-in detector changes, which today means a packaging
+  # release.
+  detector_classes:
+    - str?
   recognition_covered_classes:
-    - "list(person|dog|cat|bird|horse|sheep|cow|car|truck|bus|motorcycle|bicycle)"
+    - str?
   cameras:
     - name: str
       rtsp_url: str?
@@ -69,23 +81,48 @@ schema:
       usb_device: str?
       csi_module: str?
       mjpeg_url: str?
-  hardware_decoding: bool
-  accelerated_detection: bool
+      # A camera whose own value is set runs it; every other camera keeps
+      # running the value the whole deployment inherits, so turning the
+      # driveway down for a tree in the wind does not turn the site down.
+      motion_sensitivity: int?
+  # The deployment-wide value every camera without one of its own runs at.
+  motion_sensitivity: int?
+  hardware_decoding: bool?
+  accelerated_detection: bool?
   decode_probe_deadline_secs: int?
-  detection_probe_deadline_secs: int?
+  hardware_probe_deadline_secs: int?
+  rtsp_retry_initial_ms: int?
+  rtsp_retry_max_ms: int?
+  # Whether Vigil, having mirrored a value onto this page, also takes the
+  # restart that makes the container's own copy of this file agree. Mirroring
+  # itself is free and unconditional; only the restart is governed here.
+  restart_on_reflect: bool?
+  # The controls an operator reaches for when the machine cannot keep up.
+  # Widening the class set with nothing to adjust would be a dead end, so these
+  # three get a Home Assistant surface rather than living only in the runtime.
+  detector_queue_capacity: int?
+  detector_sample_frames: int?
+  detector_confidence_threshold: float?
+  # The two values automatic management chooses, so turning that automation off
+  # leaves something to set. Loose strings, never a list of backend names: which
+  # backends exist is a property of the build — the accelerated one is compiled
+  # in or it is not — and Vigil refuses a backend this artifact does not carry,
+  # naming what it does.
+  detection_backend: str?
+  decode_backend: str?
   fabric_ticket: str?
   fabric_hub: bool?
   fabric_allow_frame_offload: bool?
   fabric_worker_lease_ms: int?
   fabric_fallback_horizon_ms: int?
-  keyframe_interval_fps_multiplier: int
-  keyframe_interval_min_frames: int
-  keyframe_interval_max_frames: int
-  bitrate_bps_up_to_640x480: int
-  bitrate_bps_up_to_1280x720: int
-  bitrate_bps_up_to_1920x1080: int
-  bitrate_bps_up_to_2560x1440: int
-  bitrate_bps_above_2560x1440: int
+  keyframe_interval_fps_multiplier: int?
+  keyframe_interval_min_frames: int?
+  keyframe_interval_max_frames: int?
+  bitrate_bps_up_to_640x480: int?
+  bitrate_bps_up_to_1280x720: int?
+  bitrate_bps_up_to_1920x1080: int?
+  bitrate_bps_up_to_2560x1440: int?
+  bitrate_bps_above_2560x1440: int?
 apparmor: true
 # Host networking is REQUIRED for the fabric (distributed compute): the iroh
 # sync/blob endpoint is QUIC over UDP on a dynamically bound port, and the
@@ -103,3 +140,12 @@ devices:
 # Required for Supervisor REST API access to MQTT credentials and Generic Camera
 # config-flow registration, and for SUPERVISOR_TOKEN injection.
 homeassistant_api: true
+# Supervisor API access, so Vigil can write its OWN add-on options with its own
+# container's token. Without it the options page keeps showing the old value
+# after a management server changes one, and the surface a user trusts most is
+# the one telling them something untrue. The ordinary role already permits an
+# add-on to write its own options — measured empirically against a live
+# Supervisor with this container's own token, where a complete self-options
+# write succeeded at this role.
+hassio_api: true
+hassio_role: default

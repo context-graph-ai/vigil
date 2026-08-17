@@ -69,7 +69,7 @@ The add-on configuration, Home Assistant event payload, and review HTTP event ro
 `zones`, `masks`, or placeholder `zone` field.
 
 <!-- vigil-claim: `vigil.docs-concepts.zone-is-unavailable-and-not-exposed` -->
-<!-- enforced by: `vigil::source_scan_contract::addon_config_exposes_recognition_options_and_schema` -->
+<!-- enforced by: `vigil::source_scan_contract::recognition_settings_are_schema_optional_with_defaults_owned_by_vigils_settings_registry` -->
 <!-- enforced by: `vigil-ha::ha_discovery::tests::detection_event_payload_carries_current_contract_without_future_zone_field` -->
 <!-- enforced by: `vigil::http_data_plane::event_list_serves_full_review_row_fieldset` -->
 

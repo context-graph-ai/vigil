@@ -73,12 +73,15 @@ fn spawn_vigil_with_mqtt(
     let mut command = Command::new(vigil_binary_path());
     command
         .arg("run")
+        .arg("--site-name")
+        .arg(deterministic_fixture_support::SITE_NAME)
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--review-port")
+        .arg(review_port.to_string())
         .env("VIGIL_DATA_DIR", data_dir)
         .env("VIGIL_STORE_PATH", store_path)
-        .env("VIGIL_SITE_NAME", deterministic_fixture_support::SITE_NAME)
         .env("VIGIL_SERVICE_ID", service_id)
-        .env("VIGIL_HEALTH_PORT", health_port.to_string())
-        .env("VIGIL_REVIEW_PORT", review_port.to_string())
         .env("MQTT_HOST", &broker.host)
         .env("MQTT_PORT", broker.port.to_string())
         .env_remove("VIGIL_RTSP_URL")

@@ -23,14 +23,14 @@ pub use ha_mqtt_tasks::{
     HOME_ASSISTANT_STATUS_TOPIC, MqttConfig, SubscriberHandle, WiredSubscriberConfig,
     enabled_state_topic, mqtt_connect_intent, publish_availability_online, publish_detection_event,
     publish_discovery_to_broker, snapshot_topic, spawn_detection_publisher,
-    spawn_production_subscriber,
+    spawn_production_subscriber, spawn_site_presence,
 };
 
 use std::sync::{Arc, Mutex};
 
 use vigil::{
     CommandListener, ConnectionEndpoint, DetectionChannel, DetectionFact, HealthState,
-    SiteAnnouncement, SiteChannelFactory, SiteControl,
+    SiteAnnouncement, SiteChannelFactory, SiteControl, SitePresence,
 };
 
 /// The production Home Assistant MQTT adapter. Implements Vigil's
@@ -111,6 +111,12 @@ impl CommandListener for SubscriberHandle {
     }
 }
 
+impl SitePresence for SubscriberHandle {
+    fn shutdown_and_join(self: Box<Self>) {
+        SubscriberHandle::shutdown_and_join(*self);
+    }
+}
+
 impl SiteChannelFactory for HomeAssistantMqtt {
     fn connect(
         &self,
@@ -135,45 +141,73 @@ impl SiteChannelFactory for HomeAssistantMqtt {
         health: HealthState,
         control: Arc<dyn SiteControl>,
     ) -> Option<Box<dyn CommandListener>> {
-        let mqtt_cfg = mqtt_config_from_endpoint(endpoint);
-        let svc = ServiceConfig {
-            service_name: site.service_name,
-            service_id: site.service_id.clone(),
-            cameras: site
-                .cameras
-                .into_iter()
-                .map(|camera| CameraConfig {
-                    camera_id: camera.id,
-                    camera_label: camera.label,
-                })
-                .collect(),
-        };
-        let payloads = generate_discovery_payloads(&svc);
-        match publish_discovery_to_broker(&mqtt_cfg, &payloads) {
-            Ok(()) => println!("mqtt_discovery_published=true"),
-            Err(e) => println!("mqtt_discovery_error={e}"),
-        }
-        let avail_topic = service_availability_topic(&site.service_id);
-        match publish_availability_online(&mqtt_cfg, &avail_topic) {
-            Ok(()) => println!("mqtt_availability_online=true"),
-            Err(e) => println!("mqtt_availability_error={e}"),
-        }
-        let condition_topic = running_condition_topic(&site.service_id);
+        let sub_cfg = announce_site(endpoint, site, health);
         let overflow = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        // Derive a stable client id from the service_id so the broker can
-        // correlate last-will across restarts.
-        let client_id = format!("vigil-{}-sub", slug_for_id(&site.service_id));
-        let sub_cfg = WiredSubscriberConfig {
-            mqtt: mqtt_cfg,
-            service_id: site.service_id,
-            client_id,
-            availability_topic: avail_topic,
-            condition_topic,
-            discovery_payloads: payloads,
-            health,
-        };
         let subscriber = spawn_production_subscriber(sub_cfg, control, overflow);
         println!("mqtt_subscriber_started=true");
         Some(Box::new(subscriber))
+    }
+
+    fn announce(
+        &self,
+        endpoint: &ConnectionEndpoint,
+        site: SiteAnnouncement,
+        health: HealthState,
+    ) -> Option<Box<dyn SitePresence>> {
+        let sub_cfg = announce_site(endpoint, site, health);
+        let presence = spawn_site_presence(sub_cfg);
+        println!("mqtt_presence_started=true");
+        Some(Box::new(presence))
+    }
+}
+
+/// Register this site's entities with Home Assistant, mark it available, and
+/// build the long-lived connection's configuration.
+///
+/// The whole publish side lives here rather than inside the listening half, so
+/// a run that must not listen still registers its entities, still marks itself
+/// available, still reports the condition it is in, and still leaves a last
+/// will behind. Home Assistant learns about a Vigil node from exactly one
+/// place, whichever half of the adapter a run brings up.
+fn announce_site(
+    endpoint: &ConnectionEndpoint,
+    site: SiteAnnouncement,
+    health: HealthState,
+) -> WiredSubscriberConfig {
+    let mqtt_cfg = mqtt_config_from_endpoint(endpoint);
+    let svc = ServiceConfig {
+        service_name: site.service_name,
+        service_id: site.service_id.clone(),
+        cameras: site
+            .cameras
+            .into_iter()
+            .map(|camera| CameraConfig {
+                camera_id: camera.id,
+                camera_label: camera.label,
+            })
+            .collect(),
+    };
+    let payloads = generate_discovery_payloads(&svc);
+    match publish_discovery_to_broker(&mqtt_cfg, &payloads) {
+        Ok(()) => println!("mqtt_discovery_published=true"),
+        Err(e) => println!("mqtt_discovery_error={e}"),
+    }
+    let avail_topic = service_availability_topic(&site.service_id);
+    match publish_availability_online(&mqtt_cfg, &avail_topic) {
+        Ok(()) => println!("mqtt_availability_online=true"),
+        Err(e) => println!("mqtt_availability_error={e}"),
+    }
+    let condition_topic = running_condition_topic(&site.service_id);
+    // Derive a stable client id from the service_id so the broker can
+    // correlate last-will across restarts.
+    let client_id = format!("vigil-{}-sub", slug_for_id(&site.service_id));
+    WiredSubscriberConfig {
+        mqtt: mqtt_cfg,
+        service_id: site.service_id,
+        client_id,
+        availability_topic: avail_topic,
+        condition_topic,
+        discovery_payloads: payloads,
+        health,
     }
 }

@@ -69,6 +69,13 @@ detect-burn-wgpu = ["dep:burn-wgpu", "dep:wgpu", "dep:pollster"]
 # Slow deterministic camera/detector first-light acceptance. Keep this out of
 # the default workspace gate; run with `cargo test-first-light`.
 first-light-acceptance = []
+# The hub-role door: opening this deployment's store as a management server
+# and authoring at the pushed rank. It exists so the harness can act as the
+# hub a node would otherwise only meet over sync. No artifact enables it, so
+# in every shipped build those entry points are not merely private — they are
+# not compiled at all, and nothing on this node can author a fleet
+# instruction nobody in the fleet issued.
+test-support = []
 # Distributed compute fabric (vigil-distributed-compute): embeds
 # contextdb-server's shared work ledger + iroh transport so this vigil node
 # can submit/claim/execute `vigil.detector` jobs with other enrolled nodes.
@@ -79,6 +86,12 @@ fabric = ["dep:contextdb-server", "dep:contextdb-engine"]
 [dev-dependencies]
 contextdb-server = { workspace = true, features = ["test-seams"] }
 tempfile.workspace = true
+# The harness's own door onto the hub-role handle. A test stands a management
+# server up against a deployment directory; a shipped artifact never can,
+# because no artifact builds this feature and the door does not exist in one.
+# Depending on this crate from its own tests is what turns the feature on for
+# the test build and leaves every artifact build without it.
+vigil = { path = ".", features = ["test-support"] }
 unicode-ident.workspace = true
 uuid.workspace = true
 # The settings-surface-coverage guard test binds its documentation check to

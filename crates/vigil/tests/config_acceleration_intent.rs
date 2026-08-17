@@ -3,10 +3,12 @@
 //! entry point, and absence means true. The booleans are INTENT — true means
 //! "probe and use only if a real probe succeeds", never "report active".
 //!
-//! Every test here mutates process environment variables (VIGIL_HARDWARE_DECODING
-//! / VIGIL_ACCELERATED_DETECTION), which `cargo test`'s default parallelism runs
-//! as threads sharing one process, and `acceleration_intent_from_args` reads
-//! those variables via `config::load`. Serialized by `ENV_LOCK` (the same
+//! The two variables that once set these booleans (VIGIL_HARDWARE_DECODING /
+//! VIGIL_ACCELERATED_DETECTION) no longer steer anything — the environment is
+//! not a settings surface — and one test here sets them to prove exactly that.
+//! Every test still clears them, because `cargo test`'s default parallelism
+//! runs these as threads sharing one process and a variable left set by one
+//! test would make the next one prove nothing. Serialized by `ENV_LOCK` (the same
 //! pattern `tests/fabric_worker_lease_knob.rs` already uses) so this binary's
 //! own tests cannot race each other under plain `cargo test`; the repo gate
 //! also runs under nextest, one process per test, where this race cannot fire
@@ -114,40 +116,42 @@ fn cli_flags_override_config_file() {
     );
 }
 
+/// The environment is not a settings surface: an operator who exports one of
+/// these variables has said nothing about what this node does, and the two
+/// acceleration switches keep the value their real surfaces gave them. The
+/// variables are still recognized by NAME — that is how a run tells the
+/// operator their export did nothing and where to set it instead — which is a
+/// different contract, proven by its own test rather than duplicated here.
 #[test]
-fn env_vars_are_understood() {
+fn environment_variables_no_longer_steer_acceleration() {
     let _env_lock = ENV_LOCK.lock().expect("acceleration environment lock");
     clear_acceleration_env();
     let tmp = tempfile::tempdir().expect("tempdir");
-    // A MIXED pair: one false, one explicitly true. This can only pass when
-    // the env vars are genuinely parsed — a hardwired default in either
-    // direction fails one half.
-    unsafe {
-        std::env::set_var("VIGIL_HARDWARE_DECODING", "false");
-        std::env::set_var("VIGIL_ACCELERATED_DETECTION", "true");
-    }
-    let intent = acceleration_intent_from_args(args(&["--data-dir", tmp.path().to_str().unwrap()]))
-        .expect("env overrides load");
-    clear_acceleration_env();
-    assert!(!intent.hardware_decoding, "VIGIL_HARDWARE_DECODING=false");
-    assert!(
-        intent.accelerated_detection,
-        "VIGIL_ACCELERATED_DETECTION=true is honored, not defaulted"
-    );
 
-    // And the swapped pair, so neither field can be hardwired.
-    unsafe {
-        std::env::set_var("VIGIL_HARDWARE_DECODING", "true");
-        std::env::set_var("VIGIL_ACCELERATED_DETECTION", "false");
+    // A MIXED pair, both ways round, so neither field can pass by being
+    // hardwired to the answer this test wants: if either variable still
+    // reached the loader, one half of one pair would come back false.
+    for (hardware, detection) in [("false", "true"), ("true", "false")] {
+        unsafe {
+            std::env::set_var("VIGIL_HARDWARE_DECODING", hardware);
+            std::env::set_var("VIGIL_ACCELERATED_DETECTION", detection);
+        }
+        let intent =
+            acceleration_intent_from_args(args(&["--data-dir", tmp.path().to_str().unwrap()]))
+                .expect("the configuration loads with the variables set");
+        clear_acceleration_env();
+        assert!(
+            intent.hardware_decoding,
+            "VIGIL_HARDWARE_DECODING={hardware} must change nothing: hardware decoding stays at \
+             the value its own surfaces gave it, which with none of them speaking is true"
+        );
+        assert!(
+            intent.accelerated_detection,
+            "VIGIL_ACCELERATED_DETECTION={detection} must change nothing either — a variable that \
+             still steered one of the two would be a behavior surface nobody can see on the \
+             operator surface"
+        );
     }
-    let intent = acceleration_intent_from_args(args(&["--data-dir", tmp.path().to_str().unwrap()]))
-        .expect("env overrides load");
-    clear_acceleration_env();
-    assert!(intent.hardware_decoding, "VIGIL_HARDWARE_DECODING=true");
-    assert!(
-        !intent.accelerated_detection,
-        "VIGIL_ACCELERATED_DETECTION=false"
-    );
 }
 
 #[test]

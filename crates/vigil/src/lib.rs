@@ -14,6 +14,7 @@ pub mod decode;
 #[cfg(feature = "decode-gstreamer")]
 pub mod decode_gstreamer;
 pub mod detection_accel;
+pub mod detection_transition;
 mod detector;
 pub mod detector_workclass;
 pub mod doctor;
@@ -23,15 +24,29 @@ pub mod fabric;
 mod ha_camera_registration;
 mod health;
 mod http_data_plane;
+pub mod live_backends;
 mod live_read;
 mod media_pipeline;
+pub mod node_key;
 pub mod offload_policy;
 mod privilege;
 pub mod recognition;
 mod runtime;
 mod runtime_stats;
 pub mod secret;
+pub mod service_identity;
 pub mod settings;
+pub mod settings_application;
+pub mod settings_backends;
+mod settings_cache;
+pub mod settings_command;
+pub mod settings_degraded;
+pub mod settings_domains;
+pub mod settings_environment;
+pub mod settings_model;
+pub mod settings_projection;
+pub mod settings_reflection;
+pub mod settings_store;
 mod shutdown;
 pub mod site_channel;
 mod store;
@@ -40,6 +55,10 @@ pub mod workgraph;
 mod yolox_detector;
 
 pub use clock::PersistedClock;
+/// Where the running runtime publishes its control socket for a deployment —
+/// the one place that fixes the filename, re-exported so a caller never has to
+/// assume it.
+pub use control_socket::control_socket_path;
 pub use correction::{
     CorrectionError, CorrectionReceipt, CorrectionRequest, CorrectionType, EventRow, EventsView,
     RecordedCorrection, ReviewError, WhyView, correction_execution_fingerprint, record_correction,
@@ -50,12 +69,17 @@ pub use http_data_plane::{
     CORRECTION_ROUTE, EVENTS_ROUTE, MEDIA_ROUTE_PREFIX, ReviewDataPlaneHandle, WHY_ROUTE_PREFIX,
     spawn_review_data_plane, spawn_review_data_plane_with_clock,
 };
+/// The marker every answer served by the running runtime carries, re-exported
+/// so a caller distinguishes an owner-served answer from a direct read without
+/// re-spelling it.
+pub use live_read::OWNER_SERVED_PREFIX;
 pub use media_pipeline::{DecodedRgbFrame, VideoCodec};
 pub use privilege::{PrivilegeStep, privilege_drop_plan};
 pub use secret::Secret;
 pub use site_channel::{
     CameraAnnouncement, CommandListener, ConnectionEndpoint, DetectionChannel, DetectionFact,
-    NoSiteChannel, SiteAnnouncement, SiteChannelFactory, SiteControl, SubmitCorrectionError,
+    NoSiteChannel, SiteAnnouncement, SiteChannelFactory, SiteControl, SitePresence,
+    SubmitCorrectionError,
 };
 
 /// The operator-facing acceleration intent, resolved from every config
@@ -265,6 +289,49 @@ pub fn camera_source_summaries_from_args(
         .collect())
 }
 
+/// What one input surface asserts into the settings store, exactly as
+/// `config::load` built it. A projection of the loader's own per-surface
+/// assertions rather than a second reading of the file, mirroring the
+/// [`CameraSourceSummary`] precedent above: it lets a caller observe which
+/// setting a surface authored without exposing the whole `RuntimeConfig`.
+///
+/// `Debug` is derived, and safely: the loader deliberately keeps the camera
+/// stream out of these entries because its userinfo carries the camera's
+/// password, so nothing a surface asserts here is a secret.
+#[derive(Debug, Clone)]
+pub struct SurfaceAuthoring {
+    pub surface: settings_model::Surface,
+    pub entries: Vec<(String, settings_model::SettingValue)>,
+    /// What this surface says about each camera it lists, camera by camera —
+    /// the per-camera twin of `entries` above, exactly as `config::load`
+    /// built it. Exposed so a caller can observe whether a `cameras[].<key>`
+    /// value the surface named actually reached a camera's own record,
+    /// without exposing the whole `RuntimeConfig`.
+    pub camera_entries: Vec<(String, Vec<(String, settings_model::SettingValue)>)>,
+}
+
+/// Every input surface's assertions, exactly as `vigil run` would resolve them
+/// from the same arguments.
+pub fn surface_authoring_from_args(args: Vec<OsString>) -> Result<Vec<SurfaceAuthoring>, String> {
+    config::load(args).map(|loaded| {
+        [loaded.file_surface, loaded.startup_surface]
+            .into_iter()
+            .flatten()
+            .map(|assertions| SurfaceAuthoring {
+                surface: assertions.surface,
+                entries: assertions.entries,
+                camera_entries: assertions.camera_entries,
+            })
+            .collect()
+    })
+}
+
+/// The classes recognition covers, exactly as `vigil run` would resolve them
+/// from the same arguments.
+pub fn recognition_covered_classes_from_args(args: Vec<OsString>) -> Result<Vec<String>, String> {
+    config::load(args).map(|loaded| loaded.recognition.covered_classes)
+}
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
@@ -306,10 +373,6 @@ where
     let mut args = args.into_iter();
     let _program = args.next();
 
-    // Add-on start path: write the probe-deadline options into the environment
-    // the decode/detection startup probes read, before any command dispatches.
-    config::apply_addon_probe_deadline_env();
-
     match args.next().and_then(|arg| arg.into_string().ok()) {
         Some(flag) if flag == "--version" => {
             println!("vigil {}", env!("CARGO_PKG_VERSION"));
@@ -328,6 +391,13 @@ where
             print_control_or_direct("why", &request)
         }
         Some(command) if command == "stats" => print_control_or_direct("stats", ""),
+        Some(command) if command == "settings" => {
+            let request = args
+                .filter_map(|arg| arg.into_string().ok())
+                .collect::<Vec<String>>()
+                .join(" ");
+            print_settings(&request)
+        }
         Some(command) if command == "enroll" => {
             let detection_id = args.next().and_then(|a| a.into_string().ok());
             let name = args.next().and_then(|a| a.into_string().ok());
@@ -399,8 +469,40 @@ pub fn decode_sampled_detector_rgb_frames(
     media_pipeline::sampled_detector_rgb(&segment.frames, sample_frames, width, height)
 }
 
+/// The settings surface answers through the runtime that owns the store when
+/// one is up, and directly from the store when none is. Both render the same
+/// projection; a refusal is a real answer that names its cause and its remedy,
+/// and it exits non-zero because it did not do what was asked.
+fn print_settings(request: &str) -> ExitCode {
+    let data_dir = data_dir_from_env();
+    let answer = match ask_runtime_owner("settings", request) {
+        Ok(response) => response,
+        Err(_socket_error) => settings_command::answer(&data_dir, request),
+    };
+    if settings_command::answer_failed(&answer) {
+        eprint!("{answer}");
+        return ExitCode::from(2);
+    }
+    print!("{answer}");
+    ExitCode::SUCCESS
+}
+
+/// How a stats answer opens when the snapshot in the data directory cannot be
+/// attributed to any process. It is a refusal like any other — it names its
+/// cause and its remedy and it did not serve what was asked — so the caller
+/// prints it plainly and exits non-zero, with no transport note appended.
+const NO_RUNTIME_OWNER_REFUSAL: &str = "no runtime owns ";
+
 fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
     match ask_runtime_owner(command, request) {
+        // A refusal is a real answer — it names its cause and its remedy — but
+        // it is never a served request: an operator who asked for review
+        // history and got an explanation of why there is none did not get
+        // review history, and the exit status has to say so.
+        Ok(response) if settings_degraded::is_refusal(&response) => {
+            eprint!("{response}");
+            ExitCode::from(2)
+        }
         Ok(response) => {
             print!("{response}");
             ExitCode::SUCCESS
@@ -409,6 +511,18 @@ fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
             Ok(response) => {
                 print!("{response}");
                 ExitCode::SUCCESS
+            }
+            Err(error)
+                if settings_degraded::is_refusal(&error)
+                    || error.starts_with(NO_RUNTIME_OWNER_REFUSAL) =>
+            {
+                // The refusal already names its cause and its remedy; a
+                // socket-unavailable note appended to it would only tell the
+                // operator about a transport they never asked about — and it
+                // would put the word `error` into a stats answer that has no
+                // failure in it to report.
+                eprintln!("{error}");
+                ExitCode::from(2)
             }
             Err(error) => {
                 if error.to_ascii_lowercase().contains("not found") {
@@ -420,6 +534,20 @@ fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
             }
         },
     }
+}
+
+/// The refusal a command aimed at an unreadable store gets, whichever surface
+/// it arrived through. A store that exists and cannot be opened is the
+/// degraded condition, so the answer names the capability, says it is
+/// unavailable, and names the store — never a bare open error the operator has
+/// to interpret.
+fn degraded_refusal_for(command: &str, error: &str) -> Option<String> {
+    if is_database_locked_error(error) {
+        // Another runtime owns this store. That is a different failure with a
+        // different answer, and it must not be dressed up as degraded.
+        return None;
+    }
+    settings_degraded::capability_for_command(command).map(settings_degraded::refusal_line)
 }
 
 #[cfg(unix)]
@@ -435,12 +563,47 @@ fn ask_runtime_owner(_command: &str, _request: &str) -> Result<String, String> {
 
 fn direct_read_local(command: &str, request: &str) -> Result<String, String> {
     if command == "stats" {
-        let stats = runtime_stats::read_snapshot(&data_dir_from_env()).unwrap_or_default();
-        return Ok(runtime_stats::format_stats(&stats));
+        let data_dir = data_dir_from_env();
+        // Three different questions arrive here as one, and each has its own
+        // true answer. A directory nothing has run in has a real answer —
+        // nothing has happened — which is served, minus any runtime fact about
+        // the process that is not there. A snapshot nobody can be shown to
+        // have written cannot be attributed to this deployment at all, so none
+        // of it is presented. This deployment's own last run really did
+        // produce its figures here, and they are the only surface through
+        // which a fault that ended a run stays visible, so they are served
+        // under a line saying whose they are and that they are not current.
+        return match runtime_stats::read_snapshot_provenance(&data_dir) {
+            runtime_stats::SnapshotProvenance::NeverStarted => {
+                Ok(runtime_stats::format_not_started_stats(&data_dir))
+            }
+            // The condition is the snapshot's own: no writer identity can be
+            // established for it — either it carries no stamp, or its bytes
+            // cannot be read back at all. Neither says the writer has stopped;
+            // a file behind a permission wall may be being written right now.
+            // Naming a stopped process here points an operator debugging a
+            // hand-copied, permission-walled or corrupt snapshot at a cause
+            // that was never established.
+            runtime_stats::SnapshotProvenance::Unattributable => Err(format!(
+                "{NO_RUNTIME_OWNER_REFUSAL}{}: the stats snapshot there carries no establishable \
+                 writer identity, so nothing in it can be read as this deployment's figures; \
+                 start the runtime to read what it is doing",
+                data_dir.display()
+            )),
+            runtime_stats::SnapshotProvenance::StoppedRun(stats) => {
+                Ok(runtime_stats::format_stopped_run_stats(&stats))
+            }
+            runtime_stats::SnapshotProvenance::LiveRun(stats) => {
+                Ok(runtime_stats::format_stats(&stats))
+            }
+        };
     }
 
     let store_path = store_path_from_env();
     let open = store::open(&store_path).map_err(|error| {
+        if let Some(refusal) = degraded_refusal_for(command, &error) {
+            return refusal.trim_end().to_string();
+        }
         let error_kind = if is_database_locked_error(&error) {
             "database_locked"
         } else {
@@ -494,7 +657,7 @@ fn direct_read_local(command: &str, request: &str) -> Result<String, String> {
     }
 }
 
-fn is_database_locked_error(error: &str) -> bool {
+pub(crate) fn is_database_locked_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("database is locked") || (lower.contains("locked") && lower.contains("process"))
 }
@@ -530,6 +693,9 @@ fn print_help() {
     println!();
     println!("Commands:");
     println!("  run");
+    println!(
+        "  settings [set <SETTING> <VALUE> | reset <SETTING> | domain <DOMAIN> | identity change <IDENTIFIER> --confirm]"
+    );
     println!("  fabric ticket");
     println!();
     println!("Options:");

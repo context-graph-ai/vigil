@@ -57,7 +57,7 @@ Common options:
 
 <!-- vigil-unenforced: classification=implementation-blocker; reason=`Fabric jobs can return empty detection content and tuning remains incompletely wired.` -->
 
-The confidence threshold must be between `0.0` and `1.0`; sampled frames must be between 1 and 64; booleans accept `true` or `false`. Multi-camera lists, MQTT, recognition class coverage, and service identity are configured through TOML, add-on options, or environment variables rather than repeated CLI flags.
+The confidence threshold must be between `0.0` and `1.0`; sampled frames must be between 1 and 64; booleans accept `true` or `false`. Multi-camera lists and MQTT are configured through TOML or add-on options rather than repeated CLI flags. Recognition class coverage (`recognition_covered_classes`) is configured through TOML or add-on options; it is not an environment variable. Service identity is not a TOML or add-on field at all — an ordinary `vigil settings set service_identity` is refused, and moving it is its own deliberate operation, `vigil settings identity change <identifier> --confirm` (see [Configuration](configuration.md#site-and-service-identity-fields)).
 
 <!-- vigil-claim: `vigil.docs-cli.the-confidence-threshold-must-be-between-00` -->
 <!-- enforced by: `vigil::config::tests::review_port_cli_override_is_documented_and_loaded` -->

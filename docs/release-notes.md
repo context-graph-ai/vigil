@@ -22,16 +22,13 @@ detection honestly — the receipt names why on `/health`, `vigil stats`, and
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent artifact contract binds shipped GStreamer/Vulkan packages and achieved fallback reporting.` -->
 
-Measured on the Home Assistant OS test VM, the add-on's detection fell back to
-CPU at default settings — but that is a cold-start timing effect, not a
-capability limit. The VM's virtualized Intel iGPU (ADL-N Intel Graphics) is
-Vulkan-capable: given a longer probe window it completed a verified GPU
-detection on `burn-wgpu` in about two and a half minutes. Its cold first shader
-compile simply exceeds the default 60-second startup probe window, so at default
-settings detection falls back to CPU with a receipt naming the measured time,
-while hardware video decode stays active. Raising the `detection_probe_deadline_secs`
-add-on option past that compile time activates accelerated detection on the same
-VM.
+Measured on the Home Assistant OS test VM, the add-on's detection starts on the
+CPU and moves to the GPU when the preparation finishes. The VM's virtualized
+Intel iGPU (ADL-N Intel Graphics) is Vulkan-capable: its cold first shader
+compile takes about two and a half minutes, and it then completed a verified GPU
+detection on `burn-wgpu`. Detection runs on the processor throughout that
+preparation, with the surfaces naming it as under way, and hardware video decode
+stays active; no setting bounds the preparation and none needs raising.
 
 <!-- vigil-unenforced: classification=external-procedure; reason=`HAOS VM GPU timing and cold-shader behavior come from a measured physical run.` -->
 

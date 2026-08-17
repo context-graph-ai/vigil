@@ -7,21 +7,19 @@
 //! field is derived from an observed probe or the compiled-backend set,
 //! never echoed from the `accelerated_detection` intent boolean.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
-#[cfg(feature = "detect-burn-wgpu")]
-use std::sync::{Arc, Mutex, mpsc};
-#[cfg(feature = "detect-burn-wgpu")]
-use std::thread;
-#[cfg(feature = "detect-burn-wgpu")]
-use std::time::Duration;
-
 #[cfg(feature = "detect-burn-wgpu")]
 use crate::acceleration::AccelerationState;
 use crate::acceleration::{
     AccelStage, AccelerationReceipt, ActionKind, EvidenceKind, FailureCode, ProbeStatus,
 };
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "detect-burn-wgpu")]
+use std::sync::OnceLock;
+#[cfg(feature = "detect-burn-wgpu")]
+use std::sync::{Arc, Mutex, mpsc};
+#[cfg(feature = "detect-burn-wgpu")]
+use std::thread;
 
 pub const CPU_DETECTION_BACKEND: &str = "burn-cpu";
 pub const ACCELERATED_DETECTION_BACKEND: &str = "burn-wgpu";
@@ -60,37 +58,6 @@ pub fn configure_persistent_shader_cache(data_dir: &Path) -> std::io::Result<Pat
     Ok(shader_cache_dir)
 }
 
-/// The startup probe is a one-time, once-per-process attempt; a wall-clock
-/// deadline bounds it so a wedged forward pass never blocks camera startup
-/// forever. The default is sized to admit a real GPU's cold first-shader
-/// compile: on the reference AMD 680M (RADV) an in-container cold Vulkan/SPIR-V
-/// compile plus a tiny-model forward pass measured ~44.5 s, so a shorter
-/// deadline would misclassify a capable-but-cold GPU as a failed probe and
-/// never reach the accelerated backend. 60 s gives that cold start margin. A
-/// GPU-less box never pays this wait — it classifies `no_device_visible`
-/// before any compile begins (see `YoloxForwardProbe::run_forward_probe`, which
-/// returns early on `find_hardware_adapter() == None`); only a box that HAS a
-/// device but whose compute hangs waits out the full deadline, which is
-/// bounded and acceptable for a once-per-process probe.
-#[cfg(feature = "detect-burn-wgpu")]
-const PROBE_DEADLINE: Duration = Duration::from_secs(60);
-
-/// The effective forward-probe deadline. The default admits a real GPU's cold
-/// start (first-time shader compile, model load); a box that needs even longer,
-/// or a test that wants a short deterministic timeout, sets
-/// `VIGIL_DETECTION_PROBE_DEADLINE_SECS` to override it. An unparseable value
-/// falls back to the default; the timeout evidence records the effective
-/// deadline either way.
-#[cfg(feature = "detect-burn-wgpu")]
-fn detection_probe_deadline() -> Duration {
-    std::env::var("VIGIL_DETECTION_PROBE_DEADLINE_SECS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<f64>().ok())
-        .filter(|secs| secs.is_finite() && *secs > 0.0)
-        .map(Duration::from_secs_f64)
-        .unwrap_or(PROBE_DEADLINE)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetectionForwardProbeOutcome {
     Passed {
@@ -105,6 +72,41 @@ pub enum DetectionForwardProbeOutcome {
 
 pub trait DetectionForwardProbe: Send + 'static {
     fn run_forward_probe(&mut self) -> DetectionForwardProbeOutcome;
+
+    /// The exact detector instance this probe's forward pass ran on, handed
+    /// over so the preparation installs THAT object rather than cold-loading a
+    /// second one behind it.
+    ///
+    /// The instance travels as an opaque box because the detector seam is
+    /// crate-private while this trait is the public startup door;
+    /// [`forward_tested_detector`] is the one place it is recovered. A probe
+    /// that proves a device without building the node's own detector carries
+    /// nothing, and the preparation then builds through the seam each handle
+    /// registered, exactly as it always has.
+    fn take_forward_tested(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        None
+    }
+}
+
+/// Carry a forward-tested detector out of a probe.
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) fn forward_tested_payload(
+    detector: Box<dyn crate::detector::Detector>,
+) -> Box<dyn std::any::Any + Send> {
+    Box::new(detector)
+}
+
+/// Recover a forward-tested detector a probe carried out. Anything else a
+/// caller put in the box is not a detector this process can install, so it is
+/// dropped rather than guessed at.
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) fn forward_tested_detector(
+    payload: Box<dyn std::any::Any + Send>,
+) -> Option<Box<dyn crate::detector::Detector>> {
+    payload
+        .downcast::<Box<dyn crate::detector::Detector>>()
+        .ok()
+        .map(|boxed| *boxed)
 }
 
 pub struct NoopDetectionForwardProbe;
@@ -127,18 +129,52 @@ pub struct DetectionAccelerationSelection {
 /// path parameter — it mirrors `select_decode_backend`'s host-facts-free
 /// shape — so it reads the same checkpoint the live per-camera detector
 /// loads through this slot instead.
-static DETECTOR_MODEL_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static DETECTOR_MODEL_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-/// Registers the operator-configured detector model path once per process.
-/// A later call is a no-op: the first registration (at startup, before any
-/// camera thread) wins.
+/// Registers the model path every detector this process builds loads from.
+///
+/// Called twice on a store-backed start, and the SECOND call is the one that
+/// matters: the first carries what the loader merged before the store could be
+/// read, and the second carries what the store resolved. Both run before any
+/// camera thread exists, so nothing is loading a model while this changes, and
+/// the store is the authority for which model this node runs.
 pub(crate) fn register_detector_model_path(path: Option<PathBuf>) {
-    let _ = DETECTOR_MODEL_PATH.set(path);
+    if let Ok(mut registered) = DETECTOR_MODEL_PATH.lock() {
+        *registered = path;
+    }
 }
 
 #[cfg(feature = "detect-burn-wgpu")]
 fn registered_detector_model_path() -> Option<PathBuf> {
-    DETECTOR_MODEL_PATH.get().cloned().flatten()
+    DETECTOR_MODEL_PATH
+        .lock()
+        .ok()
+        .and_then(|path| path.clone())
+}
+
+/// The classes every detector this process builds looks for, registered beside
+/// the model path and for the same reason: the probe's detector is the one the
+/// cameras run, so it has to be built from the same class list. A probe that
+/// proved a person-only detector and handed it to a node whose operator
+/// widened the classes would leave those cameras detecting less than they were
+/// told they would.
+static DETECTOR_CLASS_INDICES: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// Registers the class list every detector this process builds looks for.
+/// Called wherever the model path is, on the same schedule and for the same
+/// reason.
+pub(crate) fn register_detector_class_indices(class_indices: &[usize]) {
+    if let Ok(mut registered) = DETECTOR_CLASS_INDICES.lock() {
+        *registered = class_indices.to_vec();
+    }
+}
+
+#[cfg(feature = "detect-burn-wgpu")]
+fn registered_detector_class_indices() -> Vec<usize> {
+    DETECTOR_CLASS_INDICES
+        .lock()
+        .map(|classes| classes.clone())
+        .unwrap_or_default()
 }
 
 /// The honest fallback action when the accelerated detector is NOT compiled
@@ -154,15 +190,19 @@ fn cpu_detection_fallback_action() -> String {
 }
 
 /// The honest fallback action when the accelerated detector IS compiled in but
-/// the startup forward probe failed (wedged, panicked, or ran past the
-/// deadline). The build carries the backend, so the action names the real
-/// next steps the operator can take — never claims the backend is missing.
+/// the preparation reported an error.
+///
+/// The build carries the backend, so the action never claims it is missing —
+/// and the step it names has to be one that can change the result. Nothing was
+/// decided by a wait here: the preparation ended on an error it observed, so
+/// offering to lengthen a wait would send an operator to do something that
+/// cannot help. What can help is checking that the graphics device is usable
+/// by this container, and then asking for the backend again.
 #[cfg(feature = "detect-burn-wgpu")]
 fn probe_failed_fallback_action() -> String {
-    "accelerated detection is compiled in but the GPU forward probe failed; \
-     raise VIGIL_DETECTION_PROBE_DEADLINE_SECS and restart to allow a slow GPU cold \
-     start (first shader compile, model load), and verify the GPU is usable by this \
-     container; CPU detection is the supported fallback until the probe passes."
+    "accelerated detection is compiled in but the preparation reported an error; verify the GPU \
+     is usable by this container (for example /dev/dri mapped with render-group access), then \
+     ask for the accelerated backend again; CPU detection keeps running meanwhile."
         .to_string()
 }
 
@@ -236,13 +276,217 @@ pub fn select_detection_acceleration(
     )
 }
 
+/// The detection backend this node runs when no probe is involved at all — the
+/// automation is off and nobody has pinned the accelerated path — or nothing
+/// while the answer still depends on a probe.
+///
+/// With the automation off the operator holds the wheel, so their pin decides
+/// which path is attempted. A pin naming the accelerated backend still goes
+/// through the probe: hardware is entered off a probe that passes on the
+/// machine in front of you, never off a stored name.
+pub fn settled_detection_backend(accelerated_detection: bool) -> Option<&'static str> {
+    let pinned_accelerated = crate::settings_application::pinned_backend(
+        crate::settings_backends::DETECTION_BACKEND_SETTING,
+    )
+    .is_some_and(|pin| pin == ACCELERATED_DETECTION_BACKEND);
+    (!accelerated_detection && !pinned_accelerated).then_some(CPU_DETECTION_BACKEND)
+}
+
 pub fn select_detection_acceleration_with_probe<P: DetectionForwardProbe>(
     accelerated_detection: bool,
     model_id: &str,
     input_shape: &str,
     probe: P,
 ) -> DetectionAccelerationSelection {
-    if !accelerated_detection {
+    let selection = select_detection_backend(accelerated_detection, model_id, input_shape, probe);
+    // This is where the detection backend is decided, so this is where the node
+    // reports which one it is running. A name in the store is a request; what
+    // came out of the selection is the answer.
+    crate::settings_application::bring_into_force(
+        crate::settings_backends::DETECTION_BACKEND_SETTING,
+        crate::settings_model::SettingValue::text(selection.backend.clone()),
+    );
+    selection
+}
+
+/// Building one detector under a named backend, which is the physical work a
+/// preparation does.
+pub(crate) type DetectorBuild<'a> =
+    &'a dyn Fn(&str) -> Result<Box<dyn crate::detector::Detector>, String>;
+
+/// What a preparation running off every control path produced: the backend
+/// this node can actually enter, its receipt, and — when the accelerated
+/// backend was entered — the exact detector instance that was forward-tested.
+pub(crate) struct PreparedDetectionBackend {
+    pub(crate) selection: DetectionAccelerationSelection,
+    /// The instance the forward test ran on. It is installed as it is; nothing
+    /// loads the model a second time to put something else in its place.
+    pub(crate) forward_tested: Option<Box<dyn crate::detector::Detector>>,
+}
+
+/// Prepare the detection backend this node can enter, building the detector
+/// ONCE.
+///
+/// No deadline anywhere: nothing is waiting on this, so nothing may cut it
+/// short. A slow first shader compile on hardware that can genuinely do the
+/// work finishes and is entered, instead of being read as a failure because it
+/// took a while. Only a real outcome decides anything here.
+///
+/// The accelerated path is entered on evidence from THIS machine, and the
+/// evidence is a forward pass through the very detector that will run the
+/// cameras — not a second one built to be thrown away. When that detector
+/// cannot be built, or cannot complete a forward pass, the processor detector
+/// is prepared instead and the receipt says why; that is the one case where a
+/// second load happens, and it is the case where the first instance is unusable.
+#[cfg(feature = "detect-burn-wgpu")]
+pub(crate) fn prepare_detection_backend(
+    accelerated_detection: bool,
+    model_id: &str,
+    input_shape: &str,
+    build: DetectorBuild<'_>,
+    already_prepared: &dyn Fn(&str) -> bool,
+) -> PreparedDetectionBackend {
+    // A preparation publishes nothing. What a selection decided is not what this
+    // node is running: the detectors are still on the backend they booted with
+    // until a handle genuinely takes the new one on, and the node's running
+    // claim moves with that act — never one call ahead of it.
+    match settled_detection_backend(accelerated_detection) {
+        Some(_) => {
+            let mut receipt = base_detection_receipt(model_id, input_shape, false);
+            receipt.probe_status = ProbeStatus::Disabled;
+            PreparedDetectionBackend {
+                selection: DetectionAccelerationSelection {
+                    backend: CPU_DETECTION_BACKEND.to_string(),
+                    receipt,
+                },
+                forward_tested: None,
+            }
+        }
+        None => enter_accelerated_or_say_why(model_id, input_shape, build, already_prepared),
+    }
+}
+
+/// Without an accelerated detector in this artifact there is no device to
+/// enter and nothing to forward-test: the processor is the answer, and the
+/// ordinary selection is what says so.
+#[cfg(not(feature = "detect-burn-wgpu"))]
+pub(crate) fn prepare_detection_backend(
+    accelerated_detection: bool,
+    model_id: &str,
+    input_shape: &str,
+    build: DetectorBuild<'_>,
+    already_prepared: &dyn Fn(&str) -> bool,
+) -> PreparedDetectionBackend {
+    let _ = (build, already_prepared);
+    PreparedDetectionBackend {
+        // The selection without its publish: a preparation says what backend
+        // this node CAN enter, and the node names it as running only once a
+        // handle has genuinely taken it on.
+        selection: select_detection_backend(
+            accelerated_detection,
+            model_id,
+            input_shape,
+            NoopDetectionForwardProbe,
+        ),
+        forward_tested: None,
+    }
+}
+
+/// Build the accelerated detector and prove it on this machine, or say what
+/// stopped it.
+#[cfg(feature = "detect-burn-wgpu")]
+fn enter_accelerated_or_say_why(
+    model_id: &str,
+    input_shape: &str,
+    build: DetectorBuild<'_>,
+    already_prepared: &dyn Fn(&str) -> bool,
+) -> PreparedDetectionBackend {
+    let outcome = match crate::yolox_detector::find_hardware_adapter() {
+        None => Err(DetectionForwardProbeOutcome::NoDeviceVisible),
+        // This node has entered this backend before and the detector it proved
+        // is still loaded, so coming back to it is a pointer swap: there is
+        // nothing to build and nothing left to find out.
+        Some(adapter) if already_prepared(ACCELERATED_DETECTION_BACKEND) => {
+            let mut evidence_fields = BTreeMap::new();
+            evidence_fields.insert("prepared_instance".to_string(), "retained".to_string());
+            return PreparedDetectionBackend {
+                selection: classify_forward_probe_selection(
+                    Ok(DetectionForwardProbeOutcome::Passed {
+                        selected_device: adapter.name,
+                        evidence_fields,
+                    }),
+                    model_id,
+                    input_shape,
+                ),
+                forward_tested: None,
+            };
+        }
+        Some(adapter) => match build(ACCELERATED_DETECTION_BACKEND) {
+            Err(error) => Err(DetectionForwardProbeOutcome::Failed { reason: error }),
+            Ok(detector) => match forward_test(detector.as_ref()) {
+                Err(error) => Err(DetectionForwardProbeOutcome::Failed { reason: error }),
+                Ok(output) => {
+                    let mut evidence_fields = BTreeMap::new();
+                    evidence_fields.insert(
+                        "model_forward_sha256".to_string(),
+                        output.model_forward_sha256.clone(),
+                    );
+                    evidence_fields.insert(
+                        "detector_session_id".to_string(),
+                        output.detector_session_id.clone(),
+                    );
+                    Ok((
+                        detector,
+                        DetectionForwardProbeOutcome::Passed {
+                            selected_device: adapter.name,
+                            evidence_fields,
+                        },
+                    ))
+                }
+            },
+        },
+    };
+    match outcome {
+        Ok((detector, passed)) => {
+            let selection = classify_forward_probe_selection(Ok(passed), model_id, input_shape);
+            // A software rasterizer reported as a device is not acceleration,
+            // so the classification downgrades it — and the instance built for
+            // it is not what this node runs.
+            let entered = selection.backend == ACCELERATED_DETECTION_BACKEND;
+            PreparedDetectionBackend {
+                selection,
+                forward_tested: entered.then_some(detector),
+            }
+        }
+        Err(refused) => PreparedDetectionBackend {
+            selection: classify_forward_probe_selection(Ok(refused), model_id, input_shape),
+            forward_tested: None,
+        },
+    }
+}
+
+/// Run one forward pass through a built detector, which is what turns "this
+/// machine has a device" into "this detector runs on it".
+#[cfg(feature = "detect-burn-wgpu")]
+fn forward_test(
+    detector: &dyn crate::detector::Detector,
+) -> Result<crate::yolox_detector::DetectorOutput, String> {
+    let clip = crate::yolox_detector::synthetic_probe_clip()?;
+    let clip_sha256 = crate::media_pipeline::sha256_path(clip.path())?;
+    let segment = crate::media_pipeline::decode_video_file(clip.path())?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        detector.detect_segment(&segment, clip_sha256, 1, 0.25)
+    }))
+    .unwrap_or_else(|_| Err("the forward pass stopped unexpectedly".to_string()))
+}
+
+fn select_detection_backend<P: DetectionForwardProbe>(
+    accelerated_detection: bool,
+    model_id: &str,
+    input_shape: &str,
+    probe: P,
+) -> DetectionAccelerationSelection {
+    if settled_detection_backend(accelerated_detection).is_some() {
         // Intent says CPU-only: return before the probe is even constructed
         // on the calling side would touch anything — no forward probe is
         // scheduled, not even in the background.
@@ -256,7 +500,7 @@ pub fn select_detection_acceleration_with_probe<P: DetectionForwardProbe>(
 
     #[cfg(feature = "detect-burn-wgpu")]
     {
-        run_probe_with_deadline(probe, model_id, input_shape)
+        run_probe_off_the_caller(probe, model_id, input_shape)
     }
 
     #[cfg(not(feature = "detect-burn-wgpu"))]
@@ -281,12 +525,13 @@ pub fn select_detection_acceleration_with_probe<P: DetectionForwardProbe>(
     }
 }
 
-/// Runs the forward probe on a spawned helper thread bounded by a
-/// result-channel `recv_timeout` — never inline on the caller's thread. A
-/// wedged or panicking probe is abandoned/caught and classified
-/// `probe_failed`, never left to hang or to kill the caller.
+/// Runs the forward probe on a spawned helper thread — never inline on the
+/// caller's thread — and reports what the probe itself says. The probe ends one
+/// of two ways: it reports an outcome, or it panics and is caught and
+/// classified `probe_failed`. Nothing else ends it, so a slow cold start on
+/// capable hardware is never written off as hardware that cannot do the job.
 #[cfg(feature = "detect-burn-wgpu")]
-fn run_probe_with_deadline<P: DetectionForwardProbe>(
+fn run_probe_off_the_caller<P: DetectionForwardProbe>(
     mut probe: P,
     model_id: &str,
     input_shape: &str,
@@ -295,14 +540,13 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
     thread::spawn(move || {
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe.run_forward_probe()));
-        // If the receiver already gave up on the deadline, the send just
-        // finds nobody listening; the abandoned thread's result is dropped.
+        // A caller that has already gone away leaves nobody listening; the
+        // send then finds no receiver and the result is dropped.
         let _ = tx.send(outcome);
     });
 
     let mut receipt = base_detection_receipt(model_id, input_shape, true);
-    let probe_deadline = detection_probe_deadline();
-    let classified = match rx.recv_timeout(probe_deadline) {
+    let classified = match rx.recv() {
         Ok(Ok(DetectionForwardProbeOutcome::Passed {
             selected_device,
             evidence_fields,
@@ -374,21 +618,15 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
             receipt.action_payload = Some(probe_failed_fallback_action());
             CPU_DETECTION_BACKEND
         }
-        Err(_deadline_or_disconnect) => {
-            // Deadline exceeded (or the helper thread vanished without
-            // sending): abandon the wedged thread — detached, harmless for a
-            // once-per-process probe that never reruns. A timeout is its own
-            // named evidence class: "no answer inside the probe window" must
-            // never masquerade as "this hardware cannot accelerate", and the
-            // operator lever for a slow cold start is named right here.
+        Err(_disconnected) => {
+            // The helper thread went away without reporting anything, so
+            // there is no outcome to report and none is invented. This is
+            // the probe ending on its own account, not a wait ending it.
             receipt.failure_code = FailureCode::ProbeFailed;
             receipt.evidence_kind = Some(EvidenceKind::UpstreamError);
             receipt.evidence_fields.insert(
                 "probe_error".to_string(),
-                format!(
-                    "timed out after {:.1}s; a slow GPU cold start (first shader compile, model load) can exceed the probe window - raise VIGIL_DETECTION_PROBE_DEADLINE_SECS and restart to retry",
-                    probe_deadline.as_secs_f64()
-                ),
+                "the forward probe ended without reporting an outcome".to_string(),
             );
             receipt.action_kind = ActionKind::ManualActionRequired;
             receipt.action_payload = Some(probe_failed_fallback_action());
@@ -401,21 +639,21 @@ fn run_probe_with_deadline<P: DetectionForwardProbe>(
     }
 }
 
-/// Runs the forward probe under a deadline, but NEVER abandons a slow probe,
-/// and promotes the running detector live when the probe passes after the
-/// startup deadline. When the deadline expires it returns the honest
-/// fallback-now selection immediately (so camera startup is never blocked on a
-/// cold shader compile); the probe thread runs on to its REAL outcome, and on a
-/// valid late PASS the late recorder calls `promote` (the runtime's live
-/// detector swap) and, only if that swap succeeds, produces an Active receipt
-/// naming the accelerated backend the workers now run. A promotion that fails,
-/// or a late FAIL/timeout, leaves CPU standing with its honest classification —
-/// `promote` is never called on a non-PASS, and no Active receipt is ever
-/// produced without the swap having succeeded. The FINAL late receipt is
+/// Runs the forward probe away from startup and promotes the running detector
+/// live when the probe passes. Startup gets its answer at once — the processor
+/// is running detection and a preparation is under way — so camera startup is
+/// never held up by a cold shader compile; the probe thread runs on to its REAL
+/// outcome, and on a valid PASS the recorder calls `promote` (the runtime's
+/// live detector swap) and, only if that swap succeeds, produces an Active
+/// receipt naming the accelerated backend the workers now run. A promotion that
+/// fails, or a probe that reports an error, leaves CPU standing with its honest
+/// classification — `promote` is never called on a non-PASS, and no Active
+/// receipt is ever produced without the swap having succeeded. Every receipt is
 /// written to EVERY receipt surface: `accel` (/health, doctor) via `record`,
 /// and `on_late_receipt` (the runtime's RuntimeStats sink — `vigil stats` and
-/// the worker provenance read) — so no surface can disagree after a late
-/// outcome. Doctor stays on the bounded variant.
+/// the worker provenance read) — so no surface can disagree once the
+/// preparation ends. Doctor asks for the outcome on its own thread and reports
+/// what comes back.
 #[cfg(feature = "detect-burn-wgpu")]
 pub fn spawn_detection_probe_with_promotion<P, F, R>(
     accelerated_detection: bool,
@@ -440,12 +678,55 @@ where
         };
     }
 
+    // The processor detector runs the cameras for as long as this preparation
+    // does, so this node reports it as the backend it is running — recorded
+    // HERE, before the probe can answer, because the surface has no other
+    // source for it. Without it a node that has taken no backend on reads its
+    // automatic choice against nothing and answers restart: for the whole
+    // accelerated cold compile, and for ever on a machine whose probe never
+    // passes, an operator is told to power-cycle a node to reach the very
+    // backend already feeding its frames. A probe that passes publishes the
+    // accelerated value through the one preparation path, exactly as a
+    // command's move does. This is the same act the path without an
+    // accelerated backend performs in `select_detection_acceleration_with_probe`.
+    //
+    // Only where nothing has been recorded yet, because this says what a node
+    // with no answer runs and nothing more: a node with several cameras spawns
+    // a probe per camera, and one that has already been promoted onto the
+    // accelerated backend is running it — writing the processor over that
+    // would report a backend no frame goes through.
+    if crate::settings_application::in_force(crate::settings_backends::DETECTION_BACKEND_SETTING)
+        .is_none()
+    {
+        crate::settings_application::bring_into_force(
+            crate::settings_backends::DETECTION_BACKEND_SETTING,
+            crate::settings_model::SettingValue::text(CPU_DETECTION_BACKEND),
+        );
+    }
+    // The request this startup preparation belongs to, taken HERE, where the
+    // preparation starts. A command issued while the probe runs is a newer
+    // request and owns the node; this preparation then installs nothing. Read
+    // on completion instead, it would ask whether anyone is standing there
+    // rather than whether this is still the move being waited for.
+    let startup_version = crate::live_backends::detection_transitions().request_version();
+    // From here the node has a move in flight: the probe is the preparation,
+    // and it is outstanding until it answers and what it proved has been taken
+    // on. Said through the same machinery a command's preparation uses, so a
+    // command issued during startup attaches to this work instead of starting a
+    // second physical build beside it.
+    crate::live_backends::begin_probed_move();
     let (tx, rx) = mpsc::channel();
     let mut probe = probe;
     thread::spawn(move || {
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe.run_forward_probe()));
-        let _ = tx.send(outcome);
+        // The instance the probe proved travels with its outcome, so what the
+        // cameras end up running is the object the forward pass went through
+        // rather than a second one loaded behind it.
+        let forward_tested =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| probe.take_forward_tested()))
+                .unwrap_or(None);
+        let _ = tx.send((outcome, forward_tested));
     });
 
     // ONE receipt authority for every probe timing: this recorder is the single
@@ -468,105 +749,104 @@ where
         })
     };
 
-    let probe_deadline = detection_probe_deadline();
-    match rx.recv_timeout(probe_deadline) {
-        // In time: a valid PASS is Active NOW; the runtime loads the accelerated
-        // detector directly from this selection, so no live promotion is needed
-        // and `promote` is dropped unused. The receipt still flows through the
-        // single recorder so every surface sees the same truth.
-        Ok(outcome) => {
-            let selection = classify_forward_probe_selection(outcome, model_id, input_shape);
-            recorder(selection.receipt.clone(), "in_time");
-            selection
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            // The probe is still running its cold compile. Return the honest
-            // fallback-now so startup proceeds, and hand the live channel to a
-            // late recorder that awaits the probe's true outcome within a
-            // bounded (generous) late window, promotes on a valid PASS, and
-            // ALWAYS delivers a terminal receipt — pass, fail, window expiry,
-            // probe death, or its own panic. Silence is never an outcome.
-            let recorder_for_late = Arc::clone(&recorder);
-            let model_id_owned = model_id.to_string();
-            let input_shape_owned = input_shape.to_string();
-            thread::spawn(move || {
-                let window = detection_late_window();
-                match rx.recv_timeout(window) {
-                    Ok(outcome) => {
-                        let classified =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                classify_late_outcome_and_promote(
-                                    outcome,
-                                    &model_id_owned,
-                                    &input_shape_owned,
-                                    promote,
-                                )
-                            }));
-                        match classified {
-                            Ok(receipt) => {
-                                let path = if receipt.probe_status == ProbeStatus::Active {
-                                    "late_pass"
-                                } else {
-                                    "late_terminal"
-                                };
-                                recorder_for_late(receipt, path);
-                            }
-                            Err(_) => recorder_for_late(
-                                late_terminal_receipt(
-                                    &model_id_owned,
-                                    &input_shape_owned,
-                                    "the GPU probe's late classification stopped unexpectedly; \
-                                     CPU detection keeps running - restart to retry the probe",
-                                ),
-                                "late_panic",
-                            ),
-                        }
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => recorder_for_late(
-                        late_terminal_receipt(
-                            &model_id_owned,
-                            &input_shape_owned,
-                            &format!(
-                                "the GPU probe did not complete within the {}s late window; CPU \
-                                 detection keeps running - verify the GPU is usable by this \
-                                 container and restart to retry",
-                                window.as_secs()
-                            ),
-                        ),
-                        "late_window_expired",
-                    ),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => recorder_for_late(
-                        late_terminal_receipt(
-                            &model_id_owned,
-                            &input_shape_owned,
-                            "the GPU probe stopped without reporting a result; CPU detection \
-                             keeps running - restart to retry the probe",
-                        ),
-                        "late_disconnected",
-                    ),
+    // The preparation is under way; nothing waits for it. Startup gets its
+    // answer now — the processor is running detection — and the preparation
+    // ends the only two ways it may: it completes, or it reports an error
+    // about itself. A waiter carries it to whichever of those happens and
+    // records it on every surface, so an outcome is never silent, and no
+    // amount of time passing produces one.
+    let recorder_for_outcome = Arc::clone(&recorder);
+    let model_id_owned = model_id.to_string();
+    let input_shape_owned = input_shape.to_string();
+    thread::spawn(move || match rx.recv() {
+        Ok((outcome, forward_tested)) => {
+            // The probe has answered, so this pass is the one carrying the move
+            // that was owed when it was spawned.
+            crate::live_backends::carry_probed_move(startup_version);
+            let classified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                classify_late_outcome_and_promote(
+                    outcome,
+                    &model_id_owned,
+                    &input_shape_owned,
+                    startup_version,
+                    forward_tested,
+                    promote,
+                )
+            }));
+            crate::live_backends::finish_probed_move(startup_version);
+            match classified {
+                Ok(receipt) => {
+                    let path = if receipt.probe_status == ProbeStatus::Active {
+                        "completed"
+                    } else {
+                        "reported_error"
+                    };
+                    recorder_for_outcome(receipt, path);
                 }
-            });
-            let selection = timeout_fallback_selection(model_id, input_shape, probe_deadline);
-            recorder(selection.receipt.clone(), "boot_fallback");
-            selection
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            // The probe thread vanished without sending (should not happen —
-            // the panic is caught and still sent). No late outcome is coming;
-            // `promote` is dropped without being called, and the terminal truth
-            // is recorded rather than left silent.
-            let selection = timeout_fallback_selection(model_id, input_shape, probe_deadline);
-            recorder(
-                late_terminal_receipt(
-                    model_id,
-                    input_shape,
-                    "the GPU probe stopped without reporting a result; CPU detection keeps \
-                     running - restart to retry the probe",
+                Err(_) => recorder_for_outcome(
+                    preparation_error_receipt(
+                        &model_id_owned,
+                        &input_shape_owned,
+                        "classifying the preparation's result stopped unexpectedly; CPU \
+                         detection keeps running",
+                    ),
+                    "classification_stopped",
                 ),
-                "probe_thread_died",
-            );
-            selection
+            }
         }
+        Err(mpsc::RecvError) => {
+            // The move this probe was carrying is over too — it stopped without
+            // an answer, which is one of the two ways a preparation ends and is
+            // no reason to leave the node saying work is in flight for ever.
+            crate::live_backends::carry_probed_move(startup_version);
+            crate::live_backends::finish_probed_move(startup_version);
+            recorder_for_outcome(
+                preparation_error_receipt(
+                    &model_id_owned,
+                    &input_shape_owned,
+                    "the preparation stopped without reporting a result; CPU detection keeps \
+                     running",
+                ),
+                "stopped_without_result",
+            );
+        }
+    });
+
+    let selection = preparing_selection(model_id, input_shape, &accel);
+    recorder(selection.receipt.clone(), "preparing");
+    selection
+}
+
+/// The answer while a preparation is under way: the processor is running
+/// detection, the accelerator is being prepared, and nothing has failed. The
+/// clock is read exactly here, once, so a surface can say when this began —
+/// it decides nothing, and it never moves again.
+#[cfg(feature = "detect-burn-wgpu")]
+fn preparing_selection(
+    model_id: &str,
+    input_shape: &str,
+    accel: &AccelerationState,
+) -> DetectionAccelerationSelection {
+    let _ = accel;
+    let mut receipt = base_detection_receipt(model_id, input_shape, true);
+    receipt.probe_status = ProbeStatus::Preparing;
+    receipt.failure_code = FailureCode::None;
+    receipt.evidence_kind = Some(EvidenceKind::BackendProbe);
+    receipt.evidence_fields.insert(
+        crate::acceleration::PREPARING_SINCE_FIELD.to_string(),
+        crate::clock::PersistedClock::contextdb()
+            .unix_millis()
+            .to_string(),
+    );
+    receipt.action_kind = ActionKind::NoAction;
+    receipt.action_payload = Some(
+        "the accelerated detector is being prepared in the background; the processor is running \
+         detection meanwhile. No action required."
+            .to_string(),
+    );
+    DetectionAccelerationSelection {
+        backend: CPU_DETECTION_BACKEND.to_string(),
+        receipt,
     }
 }
 
@@ -575,28 +855,15 @@ where
 #[cfg(feature = "detect-burn-wgpu")]
 type DetectionReceiptRecorder = Arc<dyn Fn(AccelerationReceipt, &str) + Send + Sync>;
 
-/// The bounded wait for a probe that outlived the startup deadline. Generous by
-/// default (far above the slowest measured cold compile) so a real first
-/// shader build always finishes inside it; overridable for boxes that need
-/// even longer via `VIGIL_DETECTION_LATE_WINDOW_SECS`.
+/// The CPU-standing receipt for a preparation that ended without reporting an
+/// outcome of its own — it stopped, or classifying its result did. Honest
+/// fallback with a concrete operator action, never an accelerated claim.
 #[cfg(feature = "detect-burn-wgpu")]
-const LATE_WINDOW: Duration = Duration::from_secs(900);
-
-#[cfg(feature = "detect-burn-wgpu")]
-fn detection_late_window() -> Duration {
-    std::env::var("VIGIL_DETECTION_LATE_WINDOW_SECS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<f64>().ok())
-        .filter(|secs| secs.is_finite() && *secs > 0.0)
-        .map(Duration::from_secs_f64)
-        .unwrap_or(LATE_WINDOW)
-}
-
-/// A terminal CPU-standing receipt for a late path that ended without a probe
-/// verdict (window expiry, probe-thread death, or a classification panic):
-/// honest fallback, a concrete operator action, never an accelerated claim.
-#[cfg(feature = "detect-burn-wgpu")]
-fn late_terminal_receipt(model_id: &str, input_shape: &str, action: &str) -> AccelerationReceipt {
+fn preparation_error_receipt(
+    model_id: &str,
+    input_shape: &str,
+    action: &str,
+) -> AccelerationReceipt {
     let mut receipt = base_detection_receipt(model_id, input_shape, true);
     receipt.probe_status = ProbeStatus::Fallback;
     receipt.attempted_backend = ACCELERATED_DETECTION_BACKEND.to_string();
@@ -618,6 +885,8 @@ fn classify_late_outcome_and_promote<F>(
     outcome: std::thread::Result<DetectionForwardProbeOutcome>,
     model_id: &str,
     input_shape: &str,
+    startup_version: u64,
+    forward_tested: Option<Box<dyn std::any::Any + Send>>,
     promote: F,
 ) -> AccelerationReceipt
 where
@@ -626,7 +895,18 @@ where
     let mut receipt = classify_forward_probe_selection(outcome, model_id, input_shape).receipt;
     // Only a valid-HW PASS (Active + hardware-accelerated) is promotable.
     if receipt.probe_status == ProbeStatus::Active && receipt.hardware_accelerated {
-        match promote() {
+        // The move itself goes through the one preparation machinery every
+        // command goes through: each registered handle builds through the seam
+        // it registered, and the instance that build produced is the instance
+        // installed. `promote` is the caller's own account of the move, run
+        // once that move has genuinely landed.
+        match crate::live_backends::install_probed_detection_backend(
+            ACCELERATED_DETECTION_BACKEND,
+            startup_version,
+            forward_tested.and_then(forward_tested_detector),
+        )
+        .and_then(|()| promote())
+        {
             Ok(()) => {
                 // The live swap succeeded: the workers now run the accelerated
                 // detector, so the Active receipt is honest — stamp the
@@ -635,7 +915,7 @@ where
                 receipt.action_payload = Some(promoted_pass_action());
                 receipt
                     .evidence_fields
-                    .insert("promotion".to_string(), "late".to_string());
+                    .insert("promotion".to_string(), "live".to_string());
                 receipt
             }
             Err(error) => {
@@ -650,41 +930,13 @@ where
     }
 }
 
-/// The immediate "fallback for now" selection returned when the deadline
-/// expires while the probe keeps running: an honest probe timeout that
-/// classifies fallback while the live probe continues toward a possible
-/// promotion.
-#[cfg(feature = "detect-burn-wgpu")]
-fn timeout_fallback_selection(
-    model_id: &str,
-    input_shape: &str,
-    probe_deadline: Duration,
-) -> DetectionAccelerationSelection {
-    let mut receipt = base_detection_receipt(model_id, input_shape, true);
-    receipt.failure_code = FailureCode::ProbeFailed;
-    receipt.evidence_kind = Some(EvidenceKind::UpstreamError);
-    receipt.evidence_fields.insert(
-        "probe_error".to_string(),
-        format!(
-            "timed out after {:.1}s; a slow GPU cold start (first shader compile, model load) can exceed the probe window - the probe keeps running and detection is promoted live if it passes",
-            probe_deadline.as_secs_f64()
-        ),
-    );
-    receipt.action_kind = ActionKind::ManualActionRequired;
-    receipt.action_payload = Some(probe_failed_fallback_action());
-    DetectionAccelerationSelection {
-        backend: CPU_DETECTION_BACKEND.to_string(),
-        receipt,
-    }
-}
-
-/// The action for a probe that PASSED after the startup deadline and was
-/// PROMOTED live: detection was promoted after the deadline and is now active
-/// with no restart and no knob to raise. Never the pre-promotion wording.
+/// The action for a preparation that COMPLETED and was PROMOTED live:
+/// detection moved onto the accelerated backend and is now active, with no
+/// restart and nothing to turn. Never the pre-promotion wording.
 #[cfg(feature = "detect-burn-wgpu")]
 fn promoted_pass_action() -> String {
-    "detection was promoted to the accelerated backend after the startup deadline; accelerated \
-     detection is now active. No action required."
+    "detection was promoted to the accelerated backend when its preparation completed; \
+     accelerated detection is now active. No action required."
         .to_string()
 }
 
@@ -907,6 +1159,9 @@ fn classify_forward_failure(reason: String) -> DetectionForwardProbeOutcome {
 pub(crate) struct YoloxForwardProbe {
     model_id: String,
     input_shape: String,
+    /// The instance the forward pass ran through, kept so the preparation
+    /// installs THAT detector instead of loading the model a second time.
+    forward_tested: Arc<Mutex<Option<Box<dyn crate::detector::Detector>>>>,
 }
 
 #[cfg(feature = "detect-burn-wgpu")]
@@ -915,6 +1170,7 @@ impl YoloxForwardProbe {
         Self {
             model_id: model_id.to_string(),
             input_shape: input_shape.to_string(),
+            forward_tested: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -925,6 +1181,11 @@ impl DetectionForwardProbe for YoloxForwardProbe {
         let key = (self.model_id.clone(), self.input_shape.clone());
         let model_id = self.model_id.clone();
         let input_shape = self.input_shape.clone();
+        // A repeat probe for the same identity answers from the cached
+        // outcome, so it proves nothing new and carries no instance; the
+        // preparation then builds through each handle's own seam, as it does
+        // for every other backend.
+        let proved = Arc::clone(&self.forward_tested);
         probe_outcome_once(key, move || {
             if input_shape != crate::yolox_detector::MODEL_INPUT_SHAPE {
                 return classify_forward_failure(format!(
@@ -935,12 +1196,17 @@ impl DetectionForwardProbe for YoloxForwardProbe {
                 None => classify_no_usable_device(),
                 Some(adapter) => {
                     let model_path = registered_detector_model_path();
+                    // The same model and the same class list every camera on
+                    // this node builds its detector from, because this
+                    // instance IS the one they end up running.
+                    let class_indices = registered_detector_class_indices();
                     let loaded: Result<
                         crate::yolox_detector::YoloxDetector<crate::yolox_detector::AccelBackend>,
                         String,
                     > = crate::yolox_detector::load_detector(
                         model_path.as_deref(),
                         "burn-yolox-tiny-wgpu",
+                        &class_indices,
                     );
                     match loaded {
                         Err(error) => classify_forward_failure(error),
@@ -963,6 +1229,11 @@ impl DetectionForwardProbe for YoloxForwardProbe {
                                         "detector_session_id".to_string(),
                                         output.detector_session_id.clone(),
                                     );
+                                    // Kept, so the detector this pass proved
+                                    // is the detector the cameras run.
+                                    if let Ok(mut proved) = proved.lock() {
+                                        *proved = Some(Box::new(detector));
+                                    }
                                     DetectionForwardProbeOutcome::Passed {
                                         selected_device: adapter.name,
                                         evidence_fields,
@@ -974,5 +1245,13 @@ impl DetectionForwardProbe for YoloxForwardProbe {
                 }
             }
         })
+    }
+
+    fn take_forward_tested(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        self.forward_tested
+            .lock()
+            .ok()
+            .and_then(|mut proved| proved.take())
+            .map(forward_tested_payload)
     }
 }

@@ -54,7 +54,9 @@ use vigil::fabric::{FabricDetectorBackend, FabricRuntime};
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
-use deterministic_fixture_support::{capture_pipe, free_port, vigil_binary_path, workspace_root};
+use deterministic_fixture_support::{
+    capture_pipe, free_port, vigil_binary_path, wait_until, workspace_root,
+};
 
 async fn within<F: std::future::Future>(fut: F) -> F::Output {
     tokio::time::timeout(Duration::from_secs(30), fut)
@@ -174,11 +176,45 @@ fn run_doctor_acceleration(data_dir: &std::path::Path) -> String {
     )
 }
 
+/// How long the fixture is willing to keep waiting for the worker loop's own
+/// verdict. A liveness guard on the test, never a bound on the load: the
+/// standing owner ruling of 2026-08-14 forbids judging any product outcome by
+/// elapsed time, and a viable slow cold start must still end in a started
+/// worker however long it takes.
+const WORKER_LOOP_VERDICT_WAIT: Duration = Duration::from_secs(120);
+
+/// How long the fixture is willing to keep looking for the settled state. A
+/// liveness guard on the test itself, never a bound the product is asked to
+/// meet: the assertions below read the rendered state, and no outcome here is
+/// decided by how long it took to appear.
+const FABRIC_STATUS_SETTLE_WAIT: Duration = Duration::from_secs(60);
+
+/// The doctor rendering, read once this node's own fabric status has SETTLED —
+/// a serving verdict whose reason is no longer the in-flight `worker-loop-
+/// starting` placeholder. The status task writes that snapshot on its own
+/// refresh, so the fixture waits for the STATE to appear instead of waiting a
+/// chosen interval and hoping (a flat wait passes on a loaded box and fails on
+/// a quiet one, and judging a product outcome by elapsed time is banned
+/// outright by the owner ruling of 2026-08-14).
+fn doctor_once_fabric_status_settles(data_dir: &std::path::Path) -> String {
+    wait_until(
+        "the doctor rendering to carry a settled fabric-worker-serving verdict",
+        FABRIC_STATUS_SETTLE_WAIT,
+        || {
+            let rendered = run_doctor_acceleration(data_dir);
+            let settled = rendered.contains("fabric-worker-serving=true")
+                || (rendered.contains("fabric-worker-serving=false reason=")
+                    && !rendered.contains("reason=worker-loop-starting"));
+            Ok(settled.then_some(rendered))
+        },
+    )
+    .expect("this node's own fabric status must reach the surface an operator reads")
+}
+
 fn spawn_cameraless_fabric_worker(
     data_dir: &std::path::Path,
     health_port: u16,
     model_path: Option<&std::path::Path>,
-    worker_slot_deadline_ms: u64,
 ) -> Worker {
     let mut command = Command::new(vigil_binary_path());
     command
@@ -187,19 +223,13 @@ fn spawn_cameraless_fabric_worker(
         .arg(health_port.to_string())
         .arg("--fabric-hub")
         .arg("true")
+        // Acceleration off: the subject here is the cameraless worker slot
+        // itself, so the node loads the CPU detector it advertises rather than
+        // preparing an accelerated one first. Nothing below waits on elapsed
+        // time — each arm waits for the worker loop's own terminal line.
+        .arg("--accelerated-detection")
+        .arg("false")
         .env("VIGIL_DATA_DIR", data_dir)
-        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
-        // env per the settings-authority census (still no flag/config seam).
-        //
-        // Test-only deadline override (scaffold, fabric.rs): a REAL model load
-        // needs headroom over the production wait in a debug build (~2-3s to
-        // deserialize the fixture checkpoint), so the serving arm passes a
-        // generous bound; the no-model arm passes a short one so its
-        // not-started path resolves quickly.
-        .env(
-            "VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS",
-            worker_slot_deadline_ms.to_string(),
-        )
         .env_remove("VIGIL_RTSP_URL");
     match model_path {
         Some(path) => {
@@ -234,10 +264,8 @@ fn detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camer
         model_path.display()
     );
     // A cameraless worker with a REAL, loadable model staged: it has executable
-    // capability, so it must advertise and serve. Generous slot deadline so the
-    // debug-build checkpoint load (~2-3s) completes before the wait ends.
-    let worker =
-        spawn_cameraless_fabric_worker(data_dir.path(), health_port, Some(&model_path), 20_000);
+    // capability, so it must advertise and serve however long the load takes.
+    let worker = spawn_cameraless_fabric_worker(data_dir.path(), health_port, Some(&model_path));
 
     assert!(
         wait_for_health(health_port, Duration::from_secs(15)),
@@ -245,24 +273,27 @@ fn detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camer
          (zero cameras is not a startup failure)"
     );
 
-    // Bounded wait for the worker loop's own terminal line (started or
-    // not-started); the shortened deadline above keeps this well under the
-    // real 60s.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut logs = String::new();
-    while Instant::now() < deadline {
-        logs = worker.stdout.lock().expect("stdout lock").clone();
-        if logs.contains("fabric_worker_loop_started=true")
-            || logs.contains("fabric_worker_loop_not_started=true")
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
+    // The start is installed while the model is still loading, so the
+    // preparation completes only AFTER something is already waiting for it —
+    // the ordinary cold start, and the one the retired deadline used to give
+    // up on. Waits for the worker loop's own terminal line (started or
+    // not-started); the bound is the fixture's liveness guard, and nothing
+    // here judges the outcome by how long the load took.
+    let logs = wait_until(
+        "the worker loop to say whether it started",
+        WORKER_LOOP_VERDICT_WAIT,
+        || {
+            let logs = worker.stdout.lock().expect("stdout lock").clone();
+            let spoken = logs.contains("fabric_worker_loop_started=true")
+                || logs.contains("fabric_worker_loop_not_started=true");
+            Ok(spoken.then_some(logs))
+        },
+    )
+    .expect("a cameraless node with a loadable model must reach a worker-loop verdict");
 
     assert!(
         health_status(health_port) == Some(200),
-        "the runtime must still be alive (ready) after the worker-slot deadline"
+        "the runtime must still be alive (ready) once the worker loop has spoken"
     );
 
     assert!(
@@ -273,6 +304,12 @@ fn detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camer
     assert!(
         !logs.contains("fabric_worker_loop_not_started=true"),
         "must not hit the not-started line: {logs}"
+    );
+    assert_eq!(
+        logs.matches("fabric_worker_loop_started=true").count(),
+        1,
+        "exactly ONE worker loop serves the fleet for one node — a late-arriving \
+         preparation must not start a second: {logs}"
     );
 
     let node_id = logs
@@ -332,8 +369,9 @@ fn cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_
     // serves nothing.
     let data_dir = tempfile::tempdir().expect("data dir");
     let health_port = free_port().expect("reserve a free port");
-    // No model staged; short slot deadline so the not-started path resolves fast.
-    let worker = spawn_cameraless_fabric_worker(data_dir.path(), health_port, None, 1500);
+    // No model staged: the terminal load failure itself resolves the
+    // not-started path — nothing waits on a deadline for it.
+    let worker = spawn_cameraless_fabric_worker(data_dir.path(), health_port, None);
 
     assert!(
         wait_for_health(health_port, Duration::from_secs(15)),
@@ -341,25 +379,36 @@ fn cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_
          (a missing model is a loud not-serving state, not a startup failure)"
     );
 
-    // Bounded wait past the shortened worker-slot deadline so the not-started
-    // path has resolved and the persisted stats snapshot has settled.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut logs = String::new();
-    while Instant::now() < deadline {
-        logs = worker.stdout.lock().expect("stdout lock").clone();
-        if logs.contains("fabric_worker_loop_not_started=true") {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    thread::sleep(Duration::from_millis(500));
-
+    // A model that cannot be loaded is a SETTLED answer — no detector is
+    // coming — so the not-started line arrives on that failure, not on any
+    // expiry. The bound is the fixture's liveness guard.
+    let logs = wait_until(
+        "the worker loop to report that it did not start",
+        WORKER_LOOP_VERDICT_WAIT,
+        || {
+            let logs = worker.stdout.lock().expect("stdout lock").clone();
+            Ok(logs
+                .contains("fabric_worker_loop_not_started=true")
+                .then_some(logs))
+        },
+    )
+    .expect("a node whose model cannot be loaded must say so rather than wait forever");
     assert!(
         health_status(health_port) == Some(200),
         "the runtime must still be alive (ready) with no staged model: {logs}"
     );
+    assert!(
+        !logs.contains("fabric_worker_loop_started=true"),
+        "a node with no loadable model must never start a worker loop: {logs}"
+    );
+    assert_eq!(
+        logs.matches("fabric_worker_loop_not_started=true").count(),
+        1,
+        "the settled no-detector answer is given ONCE, not repeated by anything \
+         still watching: {logs}"
+    );
 
-    let doctor_output = run_doctor_acceleration(data_dir.path());
+    let doctor_output = doctor_once_fabric_status_settles(data_dir.path());
 
     let node_id = logs
         .lines()

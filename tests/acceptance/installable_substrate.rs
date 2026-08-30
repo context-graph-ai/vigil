@@ -71,17 +71,25 @@ fn vigil_standalone_version_reports_nonempty_build_identity() {
             if !output.status.success() {
                 failures.push(format!("--help exited with {}", output.status));
             }
-            // Superseded expectation: this pinned the command roster to
-            // [run, fabric]. `vigil settings` is the ratified operator surface —
-            // it is how a person reads what every setting is, who chose it, and
-            // what is pending, and how they set or reset one on a running node —
-            // so a binary that does not offer it is missing the surface the
-            // whole settings model is answered through. The roster stays exact,
-            // so an unannounced command still fails here.
+            // The roster is every command an operator may run, and it stays
+            // exact: an unannounced command fails here, and so does one that
+            // works and is never offered. Earlier expectations pinned a
+            // narrower roster ([run, fabric], then [run, settings, fabric])
+            // while events, why, stats, enroll, forget and doctor acceleration
+            // were all dispatched and answered — the one surface an operator
+            // reads to find out what their deployment can do said most of it
+            // did not exist. `detector-probe` stays off the roster: it is the
+            // detection-probe machinery's own subprocess entry point.
             let commands = help_section_tokens(&stdout, "Commands:");
-            if commands != ["run", "settings", "fabric"] {
+            if commands
+                != [
+                    "run", "events", "why", "stats", "settings", "enroll", "forget", "doctor",
+                    "fabric",
+                ]
+            {
                 failures.push(format!(
-                    "--help commands were not exactly [run, settings, fabric]: {commands:?}"
+                    "--help commands were not exactly [run, events, why, stats, settings, \
+                     enroll, forget, doctor, fabric]: {commands:?}"
                 ));
             }
             let options = help_section_tokens(&stdout, "Options:");

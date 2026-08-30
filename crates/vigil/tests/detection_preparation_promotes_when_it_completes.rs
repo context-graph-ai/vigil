@@ -152,7 +152,7 @@ fn a_preparation_under_way_is_reported_as_such_and_promotes_when_it_completes() 
         preparing.evidence_fields
     );
     let progressed = detection_receipt(&accel, |receipt| {
-        receipt.evidence_fields.get(LATEST_PROGRESS).is_some()
+        receipt.evidence_fields.contains_key(LATEST_PROGRESS)
     })
     .expect("the preparation reported progress, so the surface must carry it");
     assert_eq!(

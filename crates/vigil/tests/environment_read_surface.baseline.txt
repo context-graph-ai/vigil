@@ -46,7 +46,6 @@ vigil/doctor.rs|resolve_service_user|VIGIL_SERVICE_USER
 vigil/doctor.rs|doctor_decode_receipt_with_hardware_backend|USER
 vigil/doctor.rs|live_device_access_finding|USER
 vigil/fabric.rs|fabric_bring_up|VIGIL_FABRIC_BRINGUP_DELAY_MS
-vigil/fabric.rs|fabric_bring_up|VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS
 vigil/ha_camera_registration.rs|register_generic_camera|SUPERVISOR_TOKEN
 vigil/runtime.rs|env_is|<dynamic>
 vigil/runtime.rs|env_u64|<dynamic>

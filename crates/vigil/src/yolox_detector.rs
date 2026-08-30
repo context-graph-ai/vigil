@@ -263,16 +263,41 @@ fn detect_decoded_segment<B: Backend>(
     let confidence_threshold = validate_confidence_threshold(confidence_threshold)?;
     let sample_frame_indices =
         media_pipeline::sampled_frame_indices(segment.frames.len(), sample_frames.max(1));
-    let tensor: Tensor<B, 4> =
-        decode_frames_to_tensor::<B>(segment, sample_frames.max(1), &detector.device)?;
-    let model_output: Tensor<B, 3> = detector.model.forward(tensor);
-    let model_forward_sha256 = tensor_digest(model_output.clone());
-    let detector_nms_sha256 = tensor_digest(model_output.clone());
-    let detections = run_nms(
-        model_output,
-        confidence_threshold as f32,
-        &detector.allowed_class_indices,
-    );
+    // This model's declared input is 1x3x640x640. The processor backend also
+    // accepts several sampled frames as one dynamic batch, but the Burn/WGPU
+    // backend does not preserve the checkpoint's detection semantics when that
+    // leading dimension is widened: a five-frame person clip produced no
+    // objects while each selected frame produced the person normally. Keep the
+    // operator's whole sample — never clamp it to one — and execute the
+    // accelerated model at its proved shape once per selected frame. The
+    // resulting detections are combined below with their original frame
+    // identities intact.
+    #[cfg(feature = "detect-burn-wgpu")]
+    let single_frame_forwards =
+        detector.backend_id == ACCEL_BACKEND_ID && sample_frame_indices.len() > 1;
+    #[cfg(not(feature = "detect-burn-wgpu"))]
+    let single_frame_forwards = false;
+
+    let (model_forward_sha256, detector_nms_sha256, detections) = if single_frame_forwards {
+        forward_sampled_frames_one_by_one(
+            detector,
+            segment,
+            &sample_frame_indices,
+            confidence_threshold as f32,
+        )?
+    } else {
+        let tensor: Tensor<B, 4> =
+            decode_frames_to_tensor::<B>(segment, sample_frames.max(1), &detector.device)?;
+        let model_output: Tensor<B, 3> = detector.model.forward(tensor);
+        let model_forward_sha256 = tensor_digest(model_output.clone());
+        let detector_nms_sha256 = tensor_digest(model_output.clone());
+        let detections = run_nms(
+            model_output,
+            confidence_threshold as f32,
+            &detector.allowed_class_indices,
+        );
+        (model_forward_sha256, detector_nms_sha256, detections)
+    };
     let result_sha256 = sha256_hex(result_digest_material(&detections).as_bytes());
     let seq = event_seq();
     let event = DetectorForwardEvent {
@@ -320,6 +345,53 @@ fn detect_decoded_segment<B: Backend>(
         forward_event_nonce: event.nonce,
         forward_event_seq: Some(event.seq),
     })
+}
+
+/// Run every selected frame through a backend whose proved model shape has a
+/// batch dimension of one, without changing how many frames the operator asked
+/// Vigil to sample.
+fn forward_sampled_frames_one_by_one<B: Backend>(
+    detector: &YoloxDetector<B>,
+    segment: &DecodedVideoSegment,
+    sample_frame_indices: &[usize],
+    confidence_threshold: f32,
+) -> Result<(String, String, Vec<BackendDetection>), String> {
+    let mut forward_digests = Vec::with_capacity(sample_frame_indices.len());
+    let mut detections = Vec::new();
+
+    for (sample_index, source_index) in sample_frame_indices.iter().copied().enumerate() {
+        let frame = segment.frames.get(source_index).ok_or_else(|| {
+            format!("sampled detector frame {source_index} is not in the segment")
+        })?;
+        let tensor =
+            decode_rgb_frames_to_tensor::<B>(std::slice::from_ref(frame), 1, &detector.device)?;
+        let model_output: Tensor<B, 3> = detector.model.forward(tensor);
+        forward_digests.push(tensor_digest(model_output.clone()));
+        let mut frame_detections = run_nms(
+            model_output,
+            confidence_threshold,
+            &detector.allowed_class_indices,
+        );
+        for detection in &mut frame_detections {
+            // `run_nms` sees a one-frame tensor and therefore reports batch 0.
+            // Translate that local batch identity back into this segment's
+            // ordered sample identity; the caller maps it to the original
+            // decoded frame index.
+            detection.batch_index = sample_index;
+        }
+        detections.extend(frame_detections);
+    }
+
+    sort_backend_detections(&mut detections);
+    let digest = match forward_digests.as_slice() {
+        [] => return Err("video segment has no sampled detector frames".to_string()),
+        [only] => only.clone(),
+        many => sha256_hex(many.join("|").as_bytes()),
+    };
+    // Both receipts name the same bytes at their shared boundary: the raw
+    // forward tensors handed to NMS. Keep both fields explicit, just as the
+    // batched path does, so the evidence chain remains legible.
+    Ok((digest.clone(), digest, detections))
 }
 
 fn parse_detector_probe_args(args: Vec<OsString>) -> Result<DetectorProbeArgs, String> {
@@ -428,12 +500,16 @@ fn decode_frames_to_tensor<B: Backend>(
     sample_frames: usize,
     device: &Device<B>,
 ) -> Result<Tensor<B, 4>, String> {
-    let (rgb, frame_count) = media_pipeline::sampled_detector_rgb(
-        &segment.frames,
-        sample_frames,
-        WIDTH as u32,
-        HEIGHT as u32,
-    )?;
+    decode_rgb_frames_to_tensor(&segment.frames, sample_frames, device)
+}
+
+fn decode_rgb_frames_to_tensor<B: Backend>(
+    frames: &[media_pipeline::DecodedRgbFrame],
+    sample_frames: usize,
+    device: &Device<B>,
+) -> Result<Tensor<B, 4>, String> {
+    let (rgb, frame_count) =
+        media_pipeline::sampled_detector_rgb(frames, sample_frames, WIDTH as u32, HEIGHT as u32)?;
     let tensor = Tensor::<B, 4>::from_data(
         TensorData::new(rgb, [frame_count, HEIGHT, WIDTH, 3]).convert::<B::FloatElem>(),
         device,
@@ -481,6 +557,11 @@ fn run_nms<B: Backend>(
         })
         .filter(|detection| allowed_class_indices.contains(&detection.class_index))
         .collect::<Vec<_>>();
+    sort_backend_detections(&mut detections);
+    detections
+}
+
+fn sort_backend_detections(detections: &mut [BackendDetection]) {
     detections.sort_by(|left, right| {
         right
             .bbox
@@ -488,7 +569,6 @@ fn run_nms<B: Backend>(
             .partial_cmp(&left.bbox.confidence)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    detections
 }
 
 fn validate_confidence_threshold(value: f64) -> Result<f64, String> {

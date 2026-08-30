@@ -104,14 +104,14 @@ fn spawn_node(
         .arg(review_port.to_string())
         .arg("--detector-model-path")
         .arg(fixture_model_path())
+        // Acceleration off: this fixture's contract is the REAL `burn-cpu`
+        // backend tag every arm below asserts. Under a build that carries the
+        // accelerated detector, the default-on probe would prepare a GPU
+        // detector first and the node would never truthfully advertise
+        // `burn-cpu`.
+        .arg("--accelerated-detection")
+        .arg("false")
         .env("VIGIL_DATA_DIR", data_dir)
-        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
-        // env per the settings-authority census (still no flag/config seam).
-        //
-        // Generous worker-slot deadline: a real checkpoint load in a debug
-        // build needs headroom over the production wait before the cameraless
-        // worker loop is declared started.
-        .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", "20000")
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_TICKET");
     if hub {
@@ -307,15 +307,29 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
         Duration::from_secs(45),
     );
 
-    // Wait for the HUB's own worker role to come up and attempt its first
-    // capability delivery (worker-slot deadline + one push attempt), so the
-    // no-noise assertion below is exercised against a hub whose worker loop
-    // genuinely ran — not vacuously green against a hub still in bring-up.
-    let hub_loop_deadline = Instant::now() + Duration::from_secs(40);
-    while Instant::now() < hub_loop_deadline && !hub.logs().contains("fabric_worker_loop_started") {
-        thread::sleep(Duration::from_millis(500));
-    }
-    thread::sleep(Duration::from_secs(25));
+    // The no-noise assertion below is about a hub whose worker role genuinely
+    // RAN and genuinely finished its first capability delivery — against a hub
+    // still in bring-up it would be vacuously green. So this waits for the two
+    // lines that say both happened: the worker loop's own start line, and the
+    // settled line the delivery attempt prints whichever way it went. Nothing
+    // is inferred from an interval passing.
+    assert!(
+        wait_for_line(&hub, "fabric_worker_loop_started", Duration::from_secs(40)),
+        "the hub's own worker role must start before the no-noise assertion means \
+         anything; hub log:\n{}",
+        hub.logs()
+    );
+    assert!(
+        wait_for_line(
+            &hub,
+            "fabric_capability_push_settled=true",
+            Duration::from_secs(40)
+        ),
+        "the hub's first capability delivery must have SETTLED before its output is \
+         read for failure noise — an absence reached by waiting is indistinguishable \
+         from an attempt that has not happened yet; hub log:\n{}",
+        hub.logs()
+    );
 
     let hub_logs = hub.logs();
     worker.kill_and_wait();
@@ -342,6 +356,17 @@ fn two_real_processes_render_remote_detectors_line_hub_first() {
         !hub_logs.contains("fabric_capability_push_failed"),
         "a healthy hub's worker role must not emit capability-push failure \
          noise — its ledger writes are already canonical; hub log:\n{hub_logs}"
+    );
+    // And the settled line has to say WHY there was no noise: this hub writes
+    // its own canonical ledger, so the honest outcome is that no push was
+    // attempted at all. Asserting `delivered` here would be asserting the wrong
+    // thing for this topology, and asserting only the absence of failure would
+    // pass for a hub that never got as far as trying.
+    assert!(
+        hub_logs.contains("outcome=not-attempted-canonical-store"),
+        "the hub's settled delivery line must name the canonical-store outcome — \
+         a hub whose writes are already canonical has nothing to push, and that is \
+         a different fact from a push that happened to succeed; hub log:\n{hub_logs}"
     );
 }
 

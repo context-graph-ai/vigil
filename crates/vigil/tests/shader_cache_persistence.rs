@@ -26,6 +26,9 @@ const MESA_ENV: &str = "MESA_SHADER_CACHE_DIR";
 const XDG_ENV: &str = "XDG_CACHE_HOME";
 
 #[test]
+// The reads below are the fixture's own save/restore of the ambient environment
+// around the exports under test, not an adjustable value (allow: test env fixture).
+#[allow(clippy::disallowed_methods)]
 fn persistent_gpu_caches_live_under_data_root_and_export_their_env() {
     let data_root = tempfile::tempdir().expect("tempdir");
     let previous_mesa = std::env::var_os(MESA_ENV);

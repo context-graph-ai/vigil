@@ -86,9 +86,6 @@ fn spawn_hub(data_dir: &std::path::Path, health_port: u16, bringup_delay_ms: u64
         .arg("--fabric-hub")
         .arg("true")
         .env("VIGIL_DATA_DIR", data_dir)
-        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
-        // env per the settings-authority census (still no flag/config seam).
-        .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", "20000")
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_TICKET");
     if bringup_delay_ms > 0 {

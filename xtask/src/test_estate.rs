@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use quote::ToTokens;
 use serde::Deserialize;
@@ -19,6 +20,57 @@ struct Ledger {
     file: Vec<FileAllowance>,
     #[serde(default)]
     site: Vec<SiteAllowance>,
+    #[serde(default)]
+    receipt_rewrite: Vec<AdjudicatedReceiptRewrite>,
+    #[serde(default)]
+    reviewer_scrub: Vec<RatifiedReviewerScrub>,
+}
+
+/// One ratified pass over the reviewer attestations of receipts already signed.
+///
+/// The estate's rule is that a signed verdict is never edited. A HYGIENE SCRUB
+/// is the authorized exception: reviewer-identity strings — model names, session
+/// paths — are removed from tracked files under the workspace policy that such
+/// identifiers do not live in tracked content, while the verdict, its date and
+/// its cited commit are left exactly as signed.
+///
+/// The entry names the commit and the receipts it covers, and nothing else is
+/// excused. What each of those receipts must say afterwards is not restated
+/// here: it is read back from the scrub commit itself, so a later edit of any of
+/// them diverges from the scrub's own output and still fails.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RatifiedReviewerScrub {
+    commit: String,
+    receipts: Vec<String>,
+    classification: String,
+    adjudicated_by: String,
+    adjudicated_on: String,
+    reason: String,
+}
+
+/// One in-place rewrite of a receipt that is already history, adjudicated in
+/// the open rather than left to fail for ever or quietly un-gated.
+///
+/// It excuses ONE named receipt for EXACTLY the values it names. The evidence
+/// hashes it lists are the rewritten ones that receipt is permitted to carry;
+/// the relocation moves it lists are the ones whose recorded pre-move body is
+/// permitted to differ from the frozen base. Any other divergence — a further
+/// rewrite of the same receipt, or a rewrite of any other — still fails, so the
+/// gate stays armed.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdjudicatedReceiptRewrite {
+    receipt: String,
+    /// The commit that performed the rewrite, so a reader can go and look.
+    rewriting_commit: String,
+    adjudicated_by: String,
+    adjudicated_on: String,
+    #[serde(default)]
+    evidence_sha256: Vec<String>,
+    #[serde(default)]
+    relocation_moves: Vec<String>,
+    reason: String,
 }
 
 const DOCUMENTATION_CONTRACT_VERSION: u32 = 1;
@@ -223,6 +275,22 @@ struct RelocationMove {
     surviving_test: String,
     body: String,
     body_sha256: String,
+    /// The identity `surviving_test` has since been RENAMED to, when a later
+    /// transition renamed it.
+    ///
+    /// A relocation proof names the test a removed one became, and that name is
+    /// then frozen into the proof forever — so a surviving test whose name was
+    /// later found to be WRONG could not be corrected without invalidating a
+    /// proof that is still perfectly true. A wrong name is a defect: it tells
+    /// every later reader the test protects something it does not. This field
+    /// is how the estate says "that identity is now this one" instead, keeping
+    /// the chain readable end to end. It proves nothing on its own: the
+    /// successor is held to exactly the bar the surviving identity was held to,
+    /// and the surviving identity must genuinely be gone, so a proof can never
+    /// point at a successor while the original is still there to answer for
+    /// itself.
+    #[serde(default)]
+    successor_test: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -548,10 +616,14 @@ fn read_toml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, String> {
     toml::from_str(&content).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+/// The receipt chain, as a repository-relative path, so the file and its own
+/// recorded history are always read from the same one place.
+const TEST_RECEIPTS_PATH: &str = ".config/test-estate-receipts.toml";
+
 fn audit_test_contracts(root: &Path, violations: &mut Vec<String>) -> Result<(), String> {
     let contracts_path = root.join(".config/test-contracts.toml");
     let baseline_path = root.join(".config/test-estate-baseline.toml");
-    let receipts_path = root.join(".config/test-estate-receipts.toml");
+    let receipts_path = root.join(TEST_RECEIPTS_PATH);
     let contracts: TestContracts = read_toml(&contracts_path)?;
     let baseline: TestBaseline = read_toml(&baseline_path)?;
     let receipts: TestReceipts = read_toml(&receipts_path)?;
@@ -674,6 +746,10 @@ fn audit_test_contracts(root: &Path, violations: &mut Vec<String>) -> Result<(),
         &receipts,
         violations,
     );
+    require_pre_move_history(root, violations);
+    audit_receipt_rewrite_adjudications(&read_exception_ledger(root)?, violations);
+    audit_receipt_history(root, &receipts, violations);
+    audit_signed_attestations(root, &receipts, violations);
     println!(
         "test contracts checked: {} active identities in {} behavioral families",
         observed.len(),
@@ -1562,6 +1638,107 @@ fn validate_physical_contract(
     }
 }
 
+/// Every rename the relocation proofs declare, as `old identity -> the identity
+/// it is called today`, resolved through chains.
+///
+/// A receipt is a historical fact and stays byte-intact forever: the vector it
+/// enumerated is the vector that existed when it was written, under the names
+/// those tests had then. So when a test is renamed, history keeps saying the old
+/// name and the source tree says the new one, and the two are reconciled HERE,
+/// at check time, rather than by rewriting receipts — which would falsify the
+/// record to keep it matching.
+///
+/// The renames themselves are not free-floating: each one is declared in a
+/// relocation proof's evidence file, whose bytes are hash-pinned by its receipt
+/// and whose successor is held to the same body fingerprint as the identity it
+/// replaces (`audit_relocation`), so a rename cannot smuggle in a different
+/// test.
+fn collect_identity_renames(
+    root: &Path,
+    receipts: &TestReceipts,
+    violations: &mut Vec<String>,
+) -> BTreeMap<String, String> {
+    let mut direct: BTreeMap<String, String> = BTreeMap::new();
+    for receipt in &receipts.transition {
+        for proof in &receipt.proof {
+            let TestTransitionProof::Relocation {
+                evidence,
+                evidence_sha256,
+                ..
+            } = proof
+            else {
+                continue;
+            };
+            // Read through the hash gate: a rename that reached the checker from
+            // bytes no receipt vouches for would be a rename nobody reviewed.
+            let Ok(bytes) = checked_evidence_bytes(root, evidence, evidence_sha256) else {
+                // The mismatch itself is reported by `audit_relocation`; saying
+                // it twice would just make one fault look like two.
+                continue;
+            };
+            let Ok(parsed) = serde_json::from_slice::<RelocationEvidence>(&bytes) else {
+                continue;
+            };
+            for entry in parsed.moves {
+                let Some(successor) = entry.successor_test else {
+                    continue;
+                };
+                if let Some(existing) = direct.get(&entry.surviving_test)
+                    && existing != &successor
+                {
+                    violations.push(format!(
+                        "test identity `{}` is renamed to both `{existing}` and `{successor}`",
+                        entry.surviving_test
+                    ));
+                    continue;
+                }
+                direct.insert(entry.surviving_test, successor);
+            }
+        }
+    }
+    // Two identities that resolve to one name would erase a test by merging it
+    // into another, which is a removal wearing a rename's clothes.
+    let mut claimed: BTreeMap<&String, &String> = BTreeMap::new();
+    for (from, to) in &direct {
+        if let Some(other) = claimed.insert(to, from) {
+            violations.push(format!(
+                "test identities `{other}` and `{from}` both claim to be renamed to `{to}`"
+            ));
+        }
+    }
+    let mut resolved = BTreeMap::new();
+    for from in direct.keys() {
+        let mut hops = BTreeSet::new();
+        hops.insert(from.clone());
+        let mut current = from;
+        while let Some(next) = direct.get(current) {
+            if !hops.insert(next.clone()) {
+                violations.push(format!(
+                    "test identity renames form a cycle through `{current}`"
+                ));
+                break;
+            }
+            current = next;
+        }
+        if current != from {
+            resolved.insert(from.clone(), current.clone());
+        }
+    }
+    resolved
+}
+
+/// The vector as it stands today: every historical name replaced by the name
+/// the test is called now.
+fn resolve_identities(
+    tests: &BTreeSet<String>,
+    renames: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    tests
+        .iter()
+        .map(|test| renames.get(test).unwrap_or(test).clone())
+        .collect()
+}
+
 fn audit_test_transitions(
     root: &Path,
     baseline: &TestBaseline,
@@ -1571,7 +1748,8 @@ fn audit_test_transitions(
     violations: &mut Vec<String>,
 ) {
     let active_digest = identity_vector_digest(active);
-    if baseline_set == active {
+    let renames = collect_identity_renames(root, receipts, violations);
+    if resolve_identities(baseline_set, &renames) == *active {
         if !receipts.transition.is_empty() {
             violations.push("test transition receipts exist although the active vector equals the frozen baseline".to_string());
         }
@@ -1658,9 +1836,21 @@ fn audit_test_transitions(
         audit_transition_proofs(root, receipt, &removed, &added, violations);
         current_digest = after_digest;
     }
-    if current != *active || current_digest != active_digest {
+    // The chain arithmetic above is untouched history — every digest is the
+    // digest of the names that existed then. Only HERE, where the chain finally
+    // meets the source tree, are those names resolved to what the same tests are
+    // called today. A rename therefore costs no rewritten receipt, and a receipt
+    // never has to be edited to stay true.
+    let resolved = resolve_identities(&current, &renames);
+    let resolved_digest = identity_vector_digest(&resolved);
+    if resolved != *active || resolved_digest != active_digest {
+        let chain_digest = if renames.is_empty() {
+            current_digest.clone()
+        } else {
+            format!("{current_digest} ({resolved_digest} after renames)")
+        };
         violations.push(format!(
-            "test registry changed from the frozen vector without a complete reviewed receipt chain; receipt chain ends at {current_digest}, active vector is {active_digest}"
+            "test registry changed from the frozen vector without a complete reviewed receipt chain; receipt chain ends at {chain_digest}, active vector is {active_digest}"
         ));
     }
 }
@@ -1939,6 +2129,34 @@ fn audit_relocation(
             .iter()
             .map(|record| (record.identity.clone(), record.body.clone()))
             .collect::<BTreeMap<_, _>>();
+        // What the removed tests actually WERE just before the move, read out
+        // of history rather than asserted by the evidence file about itself.
+        // The anchor is the parent of the commit that registered this very
+        // transition: a relocation is registered by the change that performs
+        // it, so that parent is the last tree in which the removed identities
+        // still stood, carrying the bodies this proof claims to have moved.
+        // Absent only when this root has no history to read.
+        //
+        // The guard is the SAME predicate `bodies_before` applies, asked HERE
+        // as well because reading the receipt chain's history is itself a
+        // `git log` against `root`: a root that is not a repository top makes
+        // that read fail outright ("fatal: not a git repository"), and the
+        // audit died before the guard inside `bodies_before` could return the
+        // honest "no history to read". At a real repository top nothing
+        // changes, and a genuine history-read failure there still propagates.
+        let pre_move_bodies = if root_is_a_repository_top(root) {
+            match receipt_registration_commits(root)?.get(receipt_id) {
+                Some(commit) => bodies_before(root, commit)?,
+                None => None,
+            }
+        } else {
+            None
+        };
+        // Read from this checkout's own exception ledger, exactly as the
+        // evidence above is read from this checkout's own evidence tree. A root
+        // with no ledger declares none, so the pin stays fully armed there.
+        let adjudications = adjudicated_receipt_rewrites(root);
+        let mut rewritten_since_the_move = Vec::new();
         let mut removed_seen = BTreeSet::new();
         let mut surviving_seen = BTreeSet::new();
         for entry in &evidence.moves {
@@ -1947,6 +2165,20 @@ fn audit_relocation(
                     "relocation move claims `{}` moved to itself",
                     entry.removed_test
                 ));
+            }
+            if let Some(successor) = &entry.successor_test {
+                if successor == &entry.surviving_test || successor == &entry.removed_test {
+                    return Err(format!(
+                        "relocation move `{}` names a successor identity that is not a rename",
+                        entry.removed_test
+                    ));
+                }
+                if current_bodies.contains_key(&entry.surviving_test) {
+                    return Err(format!(
+                        "relocation move `{}` claims surviving identity `{}` was renamed to `{}`, but `{}` is still present in the source tree",
+                        entry.removed_test, entry.surviving_test, successor, entry.surviving_test
+                    ));
+                }
             }
             if !removed_seen.insert(entry.removed_test.clone()) {
                 return Err(format!(
@@ -1960,6 +2192,14 @@ fn audit_relocation(
                     entry.surviving_test
                 ));
             }
+            if let Some(successor) = &entry.successor_test
+                && !surviving_seen.insert(successor.clone())
+            {
+                return Err(format!(
+                    "relocation evidence repeats surviving identity `{successor}`"
+                ));
+            }
+            let entry_removed = entry.removed_test.clone();
             let recorded = syntax_fingerprint_bytes(entry.body.as_bytes());
             if recorded != entry.body_sha256 {
                 return Err(format!(
@@ -1967,10 +2207,39 @@ fn audit_relocation(
                     entry.removed_test
                 ));
             }
-            let Some(current_body) = current_bodies.get(&entry.surviving_test) else {
+            // The pre-move body is a historical fact, so it is checked against
+            // history. Held only to its own recorded text and to today's tree,
+            // it is self-asserted: rewrite both together — which is exactly
+            // what "refreshing" a proof to match a re-authored survivor does —
+            // and the move keeps proving movement while the body it claims to
+            // have moved is gone.
+            let move_is_adjudicated = adjudication_for(&adjudications, receipt_id)
+                .is_some_and(|entry| entry.relocation_moves.contains(&entry_removed));
+            if let Some(pre_move_bodies) = pre_move_bodies.as_deref()
+                && !move_is_adjudicated
+            {
+                // An identity that tree never had is not evidence of anything —
+                // history is silent about it rather than accusing. The proof's
+                // other legs still apply to it.
+                if let Some(pre_move_body) = pre_move_bodies.get(&entry.removed_test)
+                    && syntax_fingerprint_bytes(pre_move_body.as_bytes()) != entry.body_sha256
+                {
+                    // Collected rather than returned: a proof with several
+                    // rewritten bodies should name all of them at once, so
+                    // clearing one does not simply reveal the next.
+                    rewritten_since_the_move.push(entry_removed.clone());
+                }
+            }
+            // The identity that has to answer for this move today: the
+            // surviving test, or the identity it was renamed to.
+            let expected_now = entry
+                .successor_test
+                .as_ref()
+                .unwrap_or(&entry.surviving_test);
+            let Some(current_body) = current_bodies.get(expected_now) else {
                 return Err(format!(
-                    "relocation move `{}` names surviving identity `{}`, which is not present in the current source tree",
-                    entry.removed_test, entry.surviving_test
+                    "relocation move `{}` names surviving identity `{expected_now}`, which is not present in the current source tree",
+                    entry.removed_test
                 ));
             };
             if !added.contains(&entry.surviving_test) {
@@ -1982,8 +2251,8 @@ fn audit_relocation(
             let current_fingerprint = syntax_fingerprint_bytes(current_body.as_bytes());
             if current_fingerprint != entry.body_sha256 {
                 return Err(format!(
-                    "relocation move `{}` surviving test `{}` body differs from its recorded pre-move body",
-                    entry.removed_test, entry.surviving_test
+                    "relocation move `{}` surviving test `{expected_now}` body differs from its recorded pre-move body",
+                    entry.removed_test
                 ));
             }
         }
@@ -1992,12 +2261,620 @@ fn audit_relocation(
                 "relocation evidence removed identities do not match its receipt".to_string(),
             );
         }
+        if !rewritten_since_the_move.is_empty() {
+            return Err(format!(
+                "relocation moves {rewritten_since_the_move:?} record pre-move bodies that are not what those identities actually were in the tree this transition moved them out of; a relocation proves movement, so the body it moved is the one history recorded, never one refreshed to match what the surviving test says today"
+            ));
+        }
         Ok(())
     })();
     if let Err(error) = result {
         violations.push(format!(
             "test transition receipt `{receipt_id}` relocation proof is invalid: {error}"
         ));
+    }
+}
+
+/// Every test body as it stood at the FROZEN base, keyed by identity.
+///
+/// Read out of git rather than out of the working tree, because the working
+/// tree is the thing a relocation proof is being checked AGAINST: a pre-move
+/// body taken from today's source proves nothing about what the test used to
+/// be, and a receipt whose recorded body is refreshed whenever the surviving
+/// test changes records only that the two were edited together.
+///
+/// Test bodies keyed by identity, as one tree recorded them.
+type BodiesByIdentity = BTreeMap<String, String>;
+
+/// Whether `root` is the TOP of a repository whose history can be read.
+///
+/// It has to be the repository's own top, not merely inside it: git resolves an
+/// archive's pathspec relative to the path it is given, so asking a
+/// subdirectory for `crates` asks for a directory that is not there. The
+/// guard's own self-tests audit temporary trees that sit inside this worktree
+/// and are exactly that case.
+fn root_is_a_repository_top(root: &Path) -> bool {
+    let top = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output();
+    let Ok(top) = top else { return false };
+    if !top.status.success() {
+        return false;
+    }
+    let top = PathBuf::from(String::from_utf8_lossy(&top.stdout).trim().to_string());
+    match (top.canonicalize(), root.canonicalize()) {
+        (Ok(top), Ok(root)) => top == root,
+        _ => false,
+    }
+}
+
+/// The real check's own guarantee that the pre-move pin is actually in force.
+fn require_pre_move_history(root: &Path, violations: &mut Vec<String>) {
+    if !root_is_a_repository_top(root) {
+        violations.push(
+            "this checkout is not a repository top, so no relocation proof can be held to the \
+             body its removed identity actually had before the move; a relocation would be left \
+             proving only what its own evidence file says about itself"
+                .to_string(),
+        );
+    }
+}
+
+fn read_tree_test_bodies(root: &Path, treeish: &str) -> Result<BodiesByIdentity, String> {
+    let stamp: String = treeish
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(16)
+        .collect();
+    let scratch = std::env::temp_dir().join(format!(
+        "vigil-test-estate-tree-{}-{stamp}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch)
+        .map_err(|error| format!("create {}: {error}", scratch.display()))?;
+    let archive = scratch.join("frozen-base.tar");
+    let archived = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("archive")
+        .arg("--format=tar")
+        .arg("-o")
+        .arg(&archive)
+        .arg(treeish)
+        .arg("crates")
+        .output()
+        .map_err(|error| format!("run git archive at {treeish}: {error}"))?;
+    if !archived.status.success() {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err(format!(
+            "git archive at {treeish} failed: {}",
+            String::from_utf8_lossy(&archived.stderr).trim()
+        ));
+    }
+    let extracted = std::process::Command::new("tar")
+        .arg("-xf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&scratch)
+        .output()
+        .map_err(|error| format!("extract the tree at {treeish}: {error}"))?;
+    if !extracted.status.success() {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err(format!(
+            "extracting the tree at {treeish} failed: {}",
+            String::from_utf8_lossy(&extracted.stderr).trim()
+        ));
+    }
+    let records = collect_test_records(&scratch);
+    let _ = fs::remove_dir_all(&scratch);
+    Ok(records?
+        .into_iter()
+        .map(|record| (record.identity, record.body))
+        .collect())
+}
+
+/// Every transition receipt's evidence hashes as the chain FIRST recorded them,
+/// keyed by receipt id.
+///
+/// A receipt is a historical fact and stays byte-intact forever. What that rule
+/// has never had is a machine to enforce it: the file is ordinary tracked text,
+/// so a later pass can reach back into a receipt written months ago and point
+/// its evidence hash at re-hashed bytes, and every check downstream keeps
+/// passing — against a record that no longer says what was proved. So the
+/// chain's own recorded history, in git, is what the present file is held to.
+///
+/// Evidence hashes pin bytes: there is no workflow in which they legitimately
+/// change under a receipt id that already exists, so the FIRST recording is the
+/// one every later revision answers to. The reviewer attestation beside them is
+/// held still by [`audit_signed_attestations`], from the revision that signed
+/// it, because that field is written twice on purpose.
+///
+/// A revision this build cannot parse is skipped rather than guessed at: the
+/// receipt schema itself has changed over the life of the chain, and a refusal
+/// to read an older shape is not evidence that a receipt was rewritten.
+fn first_recorded_receipt_facts(root: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut first: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (_commit, text) in receipt_chain_revisions(root)? {
+        let Ok(parsed) = toml::from_str::<TestReceipts>(&text) else {
+            continue;
+        };
+        for receipt in parsed.transition {
+            let hashes = receipt_evidence_hashes(&receipt);
+            first.entry(receipt.id).or_insert(hashes);
+        }
+    }
+    Ok(first)
+}
+
+/// The commit that first recorded each transition receipt, keyed by receipt id.
+///
+/// A relocation's PRE-MOVE tree is that commit's parent: the transition is
+/// registered by the change that performs the move, so the revision before it is
+/// the last one in which the removed identities still existed, carrying the
+/// bodies the proof claims to have moved.
+fn receipt_registration_commits(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut first: BTreeMap<String, String> = BTreeMap::new();
+    for (commit, text) in receipt_chain_revisions(root)? {
+        let Ok(parsed) = toml::from_str::<TestReceipts>(&text) else {
+            continue;
+        };
+        for receipt in parsed.transition {
+            first.entry(receipt.id).or_insert_with(|| commit.clone());
+        }
+    }
+    Ok(first)
+}
+
+/// Every test body as it stood in `commit`'s PARENT, keyed by identity.
+fn bodies_before(root: &Path, commit: &str) -> Result<Option<Arc<BodiesByIdentity>>, String> {
+    if !root_is_a_repository_top(root) {
+        return Ok(None);
+    }
+    static BODIES: OnceLock<Mutex<BTreeMap<String, Arc<BodiesByIdentity>>>> = OnceLock::new();
+    let cache = BODIES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(held) = cache.lock()
+        && let Some(bodies) = held.get(commit)
+    {
+        return Ok(Some(Arc::clone(bodies)));
+    }
+    let bodies = Arc::new(read_tree_test_bodies(root, &format!("{commit}^"))?);
+    if let Ok(mut held) = cache.lock() {
+        held.insert(commit.to_string(), Arc::clone(&bodies));
+    }
+    Ok(Some(bodies))
+}
+
+/// The receipt chain's text at every commit that ever touched it, oldest first.
+///
+/// A revision this build cannot read back as text is skipped; a revision it can
+/// read but cannot PARSE is left to the callers, because the receipt schema has
+/// changed over the life of the chain and a refusal to read an older shape is
+/// not evidence that anything was rewritten.
+fn receipt_chain_revisions(root: &Path) -> Result<Vec<(String, String)>, String> {
+    let history = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("log")
+        .arg("--reverse")
+        .arg("--format=%H")
+        .arg("--")
+        .arg(TEST_RECEIPTS_PATH)
+        .output()
+        .map_err(|error| format!("read the receipt chain's history: {error}"))?;
+    if !history.status.success() {
+        return Err(format!(
+            "reading the receipt chain's history failed: {}",
+            String::from_utf8_lossy(&history.stderr).trim()
+        ));
+    }
+    let mut revisions = Vec::new();
+    for commit in String::from_utf8_lossy(&history.stdout).lines() {
+        let commit = commit.trim();
+        if commit.is_empty() {
+            continue;
+        }
+        let shown = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .arg("show")
+            .arg(format!("{commit}:{TEST_RECEIPTS_PATH}"))
+            .output()
+            .map_err(|error| format!("read {TEST_RECEIPTS_PATH} at {commit}: {error}"))?;
+        if !shown.status.success() {
+            continue;
+        }
+        if let Ok(text) = String::from_utf8(shown.stdout) {
+            revisions.push((commit.to_string(), text));
+        }
+    }
+    Ok(revisions)
+}
+
+/// Every evidence hash a receipt's proofs name, in proof order.
+fn receipt_evidence_hashes(receipt: &TestTransitionReceipt) -> Vec<String> {
+    let mut evidence_sha256 = Vec::new();
+    for proof in &receipt.proof {
+        match proof {
+            TestTransitionProof::OwnerRuling { .. } => {}
+            TestTransitionProof::MutationComparison {
+                before_sha256,
+                after_sha256,
+                mutants_sha256,
+                ..
+            } => {
+                evidence_sha256.push(before_sha256.clone());
+                evidence_sha256.push(after_sha256.clone());
+                evidence_sha256.push(mutants_sha256.clone());
+            }
+            TestTransitionProof::RedundantFaultDetection {
+                evidence_sha256: hash,
+                ..
+            }
+            | TestTransitionProof::Relocation {
+                evidence_sha256: hash,
+                ..
+            } => {
+                evidence_sha256.push(hash.clone());
+            }
+        }
+    }
+    evidence_sha256
+}
+
+/// The exception ledger this checkout declares, parsed.
+fn read_exception_ledger(root: &Path) -> Result<Ledger, String> {
+    let path = root.join(".config/test-estate-exceptions.toml");
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    toml::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+/// What each ratified scrub left its receipts saying, keyed by receipt id.
+///
+/// Read back from the scrub commit rather than restated in the ledger, so the
+/// exception cannot drift from the thing it ratifies and a later edit of a
+/// covered receipt still fails.
+fn ratified_scrub_attestations(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut scrubbed = BTreeMap::new();
+    for scrub in ratified_reviewer_scrubs(root) {
+        let shown = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .arg("show")
+            .arg(format!("{}:{TEST_RECEIPTS_PATH}", scrub.commit))
+            .output()
+            .map_err(|error| format!("read the chain at {}: {error}", scrub.commit))?;
+        if !shown.status.success() {
+            return Err(format!(
+                "the ratified scrub commit {} cannot be read from this checkout",
+                scrub.commit
+            ));
+        }
+        let text = String::from_utf8(shown.stdout)
+            .map_err(|error| format!("the chain at {} is not text: {error}", scrub.commit))?;
+        let parsed: TestReceipts = toml::from_str(&text)
+            .map_err(|error| format!("parse the chain at {}: {error}", scrub.commit))?;
+        let at_the_scrub: BTreeMap<String, String> = parsed
+            .transition
+            .into_iter()
+            .map(|receipt| (receipt.id, receipt.reviewer))
+            .collect();
+        for id in &scrub.receipts {
+            let Some(reviewer) = at_the_scrub.get(id) else {
+                return Err(format!(
+                    "the ratified scrub {} names receipt `{id}`, which is not in the chain at that \
+                     commit",
+                    scrub.commit
+                ));
+            };
+            scrubbed.insert(id.clone(), reviewer.clone());
+        }
+    }
+    Ok(scrubbed)
+}
+
+/// The ratified reviewer scrubs this checkout declares.
+fn ratified_reviewer_scrubs(root: &Path) -> Vec<RatifiedReviewerScrub> {
+    fs::read_to_string(root.join(".config/test-estate-exceptions.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<Ledger>(&text).ok())
+        .map(|ledger| ledger.reviewer_scrub)
+        .unwrap_or_default()
+}
+
+/// The adjudicated receipt rewrites this checkout declares.
+///
+/// Read from the exception ledger at its known path under `root`, the same way
+/// a relocation proof reads the evidence it is pinned to. A root with no ledger
+/// — the guard's own self-tests audit synthetic trees — declares none, so the
+/// gate there is fully armed. `check` parses this same file up front and fails
+/// the run outright when it will not parse, so a malformed entry can never
+/// reach here as "no adjudications".
+fn adjudicated_receipt_rewrites(root: &Path) -> Vec<AdjudicatedReceiptRewrite> {
+    static LEDGERS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Vec<AdjudicatedReceiptRewrite>>>>> =
+        OnceLock::new();
+    let cache = LEDGERS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(held) = cache.lock()
+        && let Some(entries) = held.get(root)
+    {
+        return entries.as_ref().clone();
+    }
+    let entries = Arc::new(
+        fs::read_to_string(root.join(".config/test-estate-exceptions.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<Ledger>(&text).ok())
+            .map(|ledger| ledger.receipt_rewrite)
+            .unwrap_or_default(),
+    );
+    if let Ok(mut held) = cache.lock() {
+        held.insert(root.to_path_buf(), Arc::clone(&entries));
+    }
+    entries.as_ref().clone()
+}
+
+/// The adjudication covering one receipt, if this checkout declares one.
+fn adjudication_for<'a>(
+    adjudications: &'a [AdjudicatedReceiptRewrite],
+    receipt_id: &str,
+) -> Option<&'a AdjudicatedReceiptRewrite> {
+    adjudications
+        .iter()
+        .find(|entry| entry.receipt == receipt_id)
+}
+
+/// Every adjudication says who ruled it, when, and which commit it covers.
+fn audit_receipt_rewrite_adjudications(ledger: &Ledger, violations: &mut Vec<String>) {
+    for scrub in &ledger.reviewer_scrub {
+        if !valid_reason(&scrub.reason) {
+            violations.push(format!(
+                "the ratified reviewer scrub {} has an empty or placeholder reason",
+                scrub.commit
+            ));
+        }
+        for (field, value) in [
+            ("commit", &scrub.commit),
+            ("classification", &scrub.classification),
+            ("adjudicated_by", &scrub.adjudicated_by),
+            ("adjudicated_on", &scrub.adjudicated_on),
+        ] {
+            if value.trim().is_empty() {
+                violations.push(format!(
+                    "a ratified reviewer scrub names no {field}; an authorization nobody signed \
+                     and nothing dates is not one"
+                ));
+            }
+        }
+        if scrub.receipts.is_empty() {
+            violations.push(format!(
+                "the ratified reviewer scrub {} covers no receipts; a scrub enumerates exactly \
+                 what it touched so every other edit still fails",
+                scrub.commit
+            ));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for entry in &ledger.receipt_rewrite {
+        if !seen.insert(entry.receipt.clone()) {
+            violations.push(format!(
+                "receipt `{}` is adjudicated twice in the exception ledger",
+                entry.receipt
+            ));
+        }
+        if !valid_reason(&entry.reason) {
+            violations.push(format!(
+                "the adjudicated rewrite of receipt `{}` has an empty or placeholder reason",
+                entry.receipt
+            ));
+        }
+        for (field, value) in [
+            ("rewriting_commit", &entry.rewriting_commit),
+            ("adjudicated_by", &entry.adjudicated_by),
+            ("adjudicated_on", &entry.adjudicated_on),
+        ] {
+            if value.trim().is_empty() {
+                violations.push(format!(
+                    "the adjudicated rewrite of receipt `{}` names no {field}; an adjudication \
+                     nobody signed and nothing dates is not one",
+                    entry.receipt
+                ));
+            }
+        }
+        if entry.evidence_sha256.is_empty() && entry.relocation_moves.is_empty() {
+            violations.push(format!(
+                "the adjudicated rewrite of receipt `{}` excuses nothing in particular; an \
+                 adjudication names the exact values it covers so every other divergence still \
+                 fails",
+                entry.receipt
+            ));
+        }
+    }
+}
+
+/// The leading token that makes a reviewer field a signed verdict.
+///
+/// The state IS the token, which is why no schema field carries it: a reviewer
+/// field that opens with this is an independent review's verdict; anything else
+/// — a `READY-FOR-ATTESTATION` hand-off, a registration note the author wrote
+/// about their own work — is a placeholder, and placeholders exist to be
+/// replaced.
+const SIGNED_ATTESTATION_PREFIX: &str = "ATTESTATION:";
+
+/// Whether a reviewer field carries a verdict somebody has actually signed.
+///
+/// The leading token is authoritative when it is there. Verdicts older than the
+/// token are still verdicts, so they are recognised the only other way
+/// available — by what the text says about itself. That second leg cannot be
+/// [`valid_completed_review_attestation`] alone: it is a keyword blacklist for
+/// "todo/tbd/placeholder/pending/proposed/review required", and none of those
+/// words appear in what this chain's hand-off actually says, so on its own it
+/// reads a `READY-FOR-ATTESTATION` note or a self-performed registration pass as
+/// a completed review and freezes the first half of the ceremony — forbidding
+/// the review itself.
+fn reviewer_attestation_is_signed(value: &str) -> bool {
+    if value.trim_start().starts_with(SIGNED_ATTESTATION_PREFIX) {
+        return true;
+    }
+    let normalized = value.trim().to_ascii_lowercase();
+    valid_completed_review_attestation(value)
+        && ![
+            "ready-for-attestation",
+            "not yet run",
+            "not an independent review",
+            "registration pass",
+            "self-performed",
+        ]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+/// The FIRST signed verdict the chain recorded for each receipt, keyed by id.
+///
+/// Walked over the same history the evidence hashes are read from, and recorded
+/// only from the revision where the reviewer field first opens with
+/// [`SIGNED_ATTESTATION_PREFIX`]. Everything before that is the ceremony's first
+/// half and is free to be replaced; from that revision on, the verdict is a
+/// historical fact like the evidence beside it.
+fn first_signed_attestations(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut first: BTreeMap<String, String> = BTreeMap::new();
+    for (_commit, text) in receipt_chain_revisions(root)? {
+        let Ok(parsed) = toml::from_str::<TestReceipts>(&text) else {
+            continue;
+        };
+        for receipt in parsed.transition {
+            if reviewer_attestation_is_signed(&receipt.reviewer) {
+                first.entry(receipt.id).or_insert(receipt.reviewer);
+            }
+        }
+    }
+    Ok(first)
+}
+
+/// A verdict a reviewer has signed cannot be edited afterwards.
+///
+/// The estate's attestation ceremony is deliberately two commits — the author
+/// records the transition `READY-FOR-ATTESTATION`, and an independent reviewer's
+/// verdict REPLACES that in a commit of its own — so exactly that one transition
+/// is permitted. Once the field carries a signed verdict, any further change to
+/// it fails: an edit to a signed record is invisible to everything that reads
+/// the receipt, which is the whole reason the record is worth having.
+///
+/// The chain's older attestations do not carry the prefix at all — they predate
+/// it — so they are placeholders by this rule and stay mutable. That is not a
+/// hole: the prefix is what an attester writes today, so every verdict signed
+/// from here on is frozen from the revision that signed it.
+fn audit_signed_attestations(root: &Path, receipts: &TestReceipts, violations: &mut Vec<String>) {
+    let signed = match first_signed_attestations(root) {
+        Ok(signed) => signed,
+        Err(error) => {
+            violations.push(format!(
+                "the receipt chain's own recorded history could not be read, so no signed \
+                 attestation can be held to what it says: {error}"
+            ));
+            return;
+        }
+    };
+    let scrubbed = match ratified_scrub_attestations(root) {
+        Ok(scrubbed) => scrubbed,
+        Err(error) => {
+            violations.push(format!(
+                "a ratified reviewer scrub names a commit this checkout cannot read, so the \
+                 receipts it covers cannot be held to what the scrub left them saying: {error}"
+            ));
+            return;
+        }
+    };
+    for receipt in &receipts.transition {
+        // A receipt the ratified scrub covers answers to what the SCRUB left it
+        // saying, not to what it said before: the scrub is authorized history.
+        // Everything after the scrub is an ordinary edit of a signed verdict and
+        // fails, because that is what this compares against.
+        let Some(recorded) = scrubbed
+            .get(&receipt.id)
+            .or_else(|| signed.get(&receipt.id))
+        else {
+            // No signed verdict in history yet: the ceremony's first half is
+            // still standing, and replacing it is what the review is.
+            continue;
+        };
+        if &receipt.reviewer != recorded {
+            violations.push(format!(
+                "test transition receipt `{}` rewrites a reviewer attestation that is already \
+                 signed; the estate's ceremony replaces a READY-FOR-ATTESTATION hand-off with the \
+                 independent verdict exactly once, and what a reviewer signed off cannot be \
+                 edited after the fact — an edit there is invisible to everything that reads the \
+                 receipt. Record a new transition instead",
+                receipt.id
+            ));
+        }
+    }
+}
+
+/// Whether every evidence hash that has CHANGED under this receipt is one an
+/// adjudication names for it.
+///
+/// Narrow on purpose: the adjudication lists the rewritten values it covers, so
+/// a further rewrite of the same receipt introduces a value nobody adjudicated
+/// and still fails. A receipt with no adjudication is never excused.
+fn rewrite_is_adjudicated(
+    adjudications: &[AdjudicatedReceiptRewrite],
+    receipt: &TestTransitionReceipt,
+    today: &[String],
+    recorded: &[String],
+) -> bool {
+    let Some(adjudication) = adjudication_for(adjudications, &receipt.id) else {
+        return false;
+    };
+    if today.len() != recorded.len() {
+        return false;
+    }
+    today
+        .iter()
+        .zip(recorded)
+        .filter(|(now, then)| now != then)
+        .all(|(now, _)| adjudication.evidence_sha256.contains(now))
+}
+
+/// Hold every receipt's evidence to what the chain first recorded for it.
+///
+/// The rule this enforces is already written down where the renames are
+/// resolved: a receipt stays byte-intact, and history that no longer matches
+/// the source tree is reconciled at check time rather than by rewriting the
+/// record. This is the gate. A transition whose evidence hashes differ from the
+/// chain's own first recording of them has been rewritten in place, whatever
+/// the reason — and the reason is exactly what a silent rewrite hides.
+fn audit_receipt_history(root: &Path, receipts: &TestReceipts, violations: &mut Vec<String>) {
+    let adjudications = adjudicated_receipt_rewrites(root);
+    let first = match first_recorded_receipt_facts(root) {
+        Ok(first) => first,
+        Err(error) => {
+            violations.push(format!(
+                "the receipt chain's own recorded history could not be read, so no receipt can be \
+                 held to what it first said: {error}"
+            ));
+            return;
+        }
+    };
+    for receipt in &receipts.transition {
+        let Some(recorded) = first.get(&receipt.id) else {
+            // Written in this working tree and not committed yet: there is no
+            // history to hold it to, and the commit is what creates one.
+            continue;
+        };
+        let today = receipt_evidence_hashes(receipt);
+        if &today != recorded && !rewrite_is_adjudicated(&adjudications, receipt, &today, recorded)
+        {
+            violations.push(format!(
+                "test transition receipt `{}` names evidence hashes {today:?}, but the chain first \
+                 recorded {recorded:?}; a receipt is a historical fact and stays byte-intact — \
+                 evidence that has changed under a receipt is a new transition, never an edit to \
+                 an old one",
+                receipt.id
+            ));
+        }
     }
 }
 
@@ -4367,6 +5244,24 @@ fn audit_haos_hardware_dockerfile(content: &str, violations: &mut Vec<String>) {
             ));
         }
     }
+    // Every HA add-on stage must provision the owner plane's runtime root the
+    // exact same way addons/vigil/Dockerfile does, or a real HA Supervisor
+    // install permanently answers "does not answer owner requests" to every
+    // live command (`vigil why`/`events`/`stats`/`settings`) — see
+    // provision-runtime-root.sh's own header comment for the mechanism.
+    let owner_plane_env = "ENV CONTEXTDB_OWNER_READ_RUNTIME_DIR=/data/owner-plane";
+    let owner_plane_copy = "COPY --chmod=755 vigil/addons/vigil/provision-runtime-root.sh /etc/cont-init.d/10-runtime-root";
+    let addon_stage_count = content
+        .matches("FROM ghcr.io/home-assistant/base:3.22 AS vigil-addon-hw-")
+        .count();
+    if addon_stage_count == 0
+        || content.matches(owner_plane_env).count() < addon_stage_count
+        || content.matches(owner_plane_copy).count() < addon_stage_count
+    {
+        violations.push(format!(
+            "every Home Assistant add-on stage (`FROM ghcr.io/home-assistant/base:3.22 AS vigil-addon-hw-*`) must provision the owner-plane runtime root exactly like addons/vigil/Dockerfile: both `{owner_plane_env}` and `{owner_plane_copy}` once per stage"
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -6709,6 +7604,21 @@ jobs:
                 .iter()
                 .any(|item| item.contains("GStreamer, Burn/WGPU, and Fabric"))
         );
+        let mut unprovisioned_haos_hardware = Vec::new();
+        audit_haos_hardware_dockerfile(
+            &haos_hardware_dockerfile.replacen(
+                "COPY --chmod=755 vigil/addons/vigil/provision-runtime-root.sh /etc/cont-init.d/10-runtime-root\nEXPOSE 8099 8098\nCMD [\"/usr/local/bin/vigil\", \"run\"]\n\nFROM rust:alpine3.22 AS vigil-hw-builder-arm64",
+                "EXPOSE 8099 8098\nCMD [\"/usr/local/bin/vigil\", \"run\"]\n\nFROM rust:alpine3.22 AS vigil-hw-builder-arm64",
+                1,
+            ),
+            &mut unprovisioned_haos_hardware,
+        );
+        assert!(
+            unprovisioned_haos_hardware
+                .iter()
+                .any(|item| item.contains("owner-plane runtime root")),
+            "{unprovisioned_haos_hardware:?}"
+        );
 
         let status_leak = closeout.replacen(
             "permissions:\n  contents: read",
@@ -7063,6 +7973,318 @@ jobs:
         assert!(
             violations.is_empty(),
             "a genuine byte-identical relocation must pass: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
+    fn rename_receipts(evidence_path: &str, evidence_sha256: &str) -> TestReceipts {
+        TestReceipts {
+            version: 1,
+            transition: vec![TestTransitionReceipt {
+                id: "rename-fixture".to_string(),
+                base_sha: FROZEN_TEST_BASE_SHA.to_string(),
+                before_vector_sha256: String::new(),
+                after_vector_sha256: String::new(),
+                removed_tests: Vec::new(),
+                added_tests: Vec::new(),
+                surviving_tests: Vec::new(),
+                zero_lost_detection: String::new(),
+                rationale: String::new(),
+                reviewer: String::new(),
+                proof: vec![TestTransitionProof::Relocation {
+                    removed_tests: Vec::new(),
+                    evidence: evidence_path.to_string(),
+                    evidence_sha256: evidence_sha256.to_string(),
+                    reviewer: String::new(),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn identity_renames_resolve_through_a_chain_of_successors() {
+        // A test renamed twice is still the same test. History keeps saying the
+        // first name; the tree says the last one; the checker joins them up.
+        let root =
+            std::env::temp_dir().join(format!("vigil-xtask-rename-chain-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior rename fixture");
+        }
+        let evidence_json = r#"{
+            "version": 1,
+            "moves": [
+                {
+                    "removed_test": "xtask::before::a",
+                    "surviving_test": "xtask::after::first_name",
+                    "body": "{ }",
+                    "body_sha256": "sha256:unused",
+                    "successor_test": "xtask::after::second_name"
+                },
+                {
+                    "removed_test": "xtask::before::b",
+                    "surviving_test": "xtask::after::second_name",
+                    "body": "{ }",
+                    "body_sha256": "sha256:unused",
+                    "successor_test": "xtask::after::final_name"
+                }
+            ]
+        }"#;
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "rename-chain", evidence_json);
+        let receipts = rename_receipts(&evidence_path, &evidence_sha256);
+        let mut violations = Vec::new();
+        let renames = collect_identity_renames(&root, &receipts, &mut violations);
+        assert!(
+            violations.is_empty(),
+            "a plain chain is legal: {violations:?}"
+        );
+        let historical = BTreeSet::from([
+            "xtask::after::first_name".to_string(),
+            "xtask::untouched::keeper".to_string(),
+        ]);
+        assert_eq!(
+            resolve_identities(&historical, &renames),
+            BTreeSet::from([
+                "xtask::after::final_name".to_string(),
+                "xtask::untouched::keeper".to_string(),
+            ]),
+            "a name renamed twice must resolve to what the test is called now, and every other \
+             identity must pass through untouched"
+        );
+        fs::remove_dir_all(&root).expect("remove rename fixture");
+    }
+
+    #[test]
+    fn two_identities_may_not_be_renamed_into_one() {
+        // Merging two identities into one name would erase a test while looking
+        // like a rename: the vector would still balance, and one test's coverage
+        // would be gone.
+        let root =
+            std::env::temp_dir().join(format!("vigil-xtask-rename-merge-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior rename fixture");
+        }
+        let evidence_json = r#"{
+            "version": 1,
+            "moves": [
+                {
+                    "removed_test": "xtask::before::a",
+                    "surviving_test": "xtask::after::one",
+                    "body": "{ }",
+                    "body_sha256": "sha256:unused",
+                    "successor_test": "xtask::after::merged"
+                },
+                {
+                    "removed_test": "xtask::before::b",
+                    "surviving_test": "xtask::after::two",
+                    "body": "{ }",
+                    "body_sha256": "sha256:unused",
+                    "successor_test": "xtask::after::merged"
+                }
+            ]
+        }"#;
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "rename-merge", evidence_json);
+        let receipts = rename_receipts(&evidence_path, &evidence_sha256);
+        let mut violations = Vec::new();
+        let _ = collect_identity_renames(&root, &receipts, &mut violations);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("both claim to be renamed to")),
+            "two identities renamed into one must be refused: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove rename fixture");
+    }
+
+    #[test]
+    fn a_rename_declared_by_bytes_no_receipt_vouches_for_is_ignored() {
+        // The rename map is only as trustworthy as the hash gate in front of it:
+        // evidence whose bytes do not match the receipt's recorded hash must
+        // rename nothing at all.
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-rename-unhashed-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior rename fixture");
+        }
+        let evidence_json = r#"{
+            "version": 1,
+            "moves": [
+                {
+                    "removed_test": "xtask::before::a",
+                    "surviving_test": "xtask::after::original",
+                    "body": "{ }",
+                    "body_sha256": "sha256:unused",
+                    "successor_test": "xtask::after::smuggled"
+                }
+            ]
+        }"#;
+        let (evidence_path, _real_sha) =
+            write_relocation_evidence(&root, "rename-unhashed", evidence_json);
+        let receipts = rename_receipts(
+            &evidence_path,
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let mut violations = Vec::new();
+        let renames = collect_identity_renames(&root, &receipts, &mut violations);
+        assert!(
+            renames.is_empty(),
+            "evidence outside the hash gate must rename nothing: {renames:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove rename fixture");
+    }
+
+    #[test]
+    fn relocation_proof_follows_a_surviving_test_that_was_later_renamed() {
+        // A test whose NAME turned out to be wrong has to be renameable, or the
+        // estate forces a knowingly false name to stay forever just because an
+        // old — and still true — relocation proof happens to mention it.
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-successor-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let block_source = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        write_relocation_fixture_source(&root, block_source);
+        let (body, fingerprint) = relocation_body_and_fingerprint(block_source);
+        // The proof was written when the surviving test was called
+        // `xtask::relocated::misnamed`; the source now calls it
+        // `xtask::relocated::keeper`, and the proof says so.
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move::keeper",
+                        "surviving_test": "xtask::relocated::misnamed",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}",
+                        "successor_test": "xtask::relocated::keeper"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "successor", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-successor",
+            &["xtask::keeper_before_move::keeper".to_string()],
+            &BTreeSet::from(["xtask::relocated::misnamed".to_string()]),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations.is_empty(),
+            "a renamed surviving test must keep proving the move it always proved: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
+    #[test]
+    fn relocation_proof_rejects_a_successor_while_the_original_is_still_there() {
+        // The successor field says one identity BECAME another. If the original
+        // is still in the tree, nothing was renamed, and accepting it would let
+        // a proof quietly point away from the test still standing there to
+        // answer for it.
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-successor-alive-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let block_source = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        write_relocation_fixture_source(&root, block_source);
+        let (body, fingerprint) = relocation_body_and_fingerprint(block_source);
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move::keeper",
+                        "surviving_test": "xtask::relocated::keeper",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}",
+                        "successor_test": "xtask::relocated::something_else"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "successor-alive", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-successor-alive",
+            &["xtask::keeper_before_move::keeper".to_string()],
+            &BTreeSet::from(["xtask::relocated::keeper".to_string()]),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("is still present in the source tree")),
+            "a successor claimed while the original survives must be refused: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("remove relocation fixture");
+    }
+
+    #[test]
+    fn relocation_proof_rejects_a_renamed_survivor_whose_body_changed() {
+        // A rename is a rename. It is not a licence to change what the test
+        // does: the successor is held to exactly the bar the surviving identity
+        // was held to.
+        let root = std::env::temp_dir().join(format!(
+            "vigil-xtask-relocation-successor-body-{}",
+            std::process::id()
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("remove prior relocation fixture");
+        }
+        let recorded_block = "{ let doubled = 2 * 21; assert_eq!(doubled, 42); }";
+        let changed_block = "{ let doubled = 2 * 21; assert_eq!(doubled, 43); }";
+        write_relocation_fixture_source(&root, changed_block);
+        let (body, fingerprint) = relocation_body_and_fingerprint(recorded_block);
+        let evidence_json = format!(
+            r#"{{
+                "version": 1,
+                "moves": [
+                    {{
+                        "removed_test": "xtask::keeper_before_move::keeper",
+                        "surviving_test": "xtask::relocated::misnamed",
+                        "body": {body:?},
+                        "body_sha256": "{fingerprint}",
+                        "successor_test": "xtask::relocated::keeper"
+                    }}
+                ]
+            }}"#
+        );
+        let (evidence_path, evidence_sha256) =
+            write_relocation_evidence(&root, "successor-body", &evidence_json);
+        let mut violations = Vec::new();
+        audit_relocation(
+            &root,
+            "relocation-successor-body",
+            &["xtask::keeper_before_move::keeper".to_string()],
+            &BTreeSet::from(["xtask::relocated::misnamed".to_string()]),
+            &evidence_path,
+            &evidence_sha256,
+            &mut violations,
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("body differs from its recorded pre-move body")),
+            "a renamed survivor whose body drifted must still be refused: {violations:?}"
         );
         fs::remove_dir_all(&root).expect("remove relocation fixture");
     }

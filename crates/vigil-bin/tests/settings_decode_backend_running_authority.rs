@@ -24,7 +24,6 @@
 #![cfg(feature = "decode-gstreamer")]
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 
@@ -34,11 +33,12 @@ use vigil::settings_model::{Author, Surface};
 use vigil::settings_projection::{
     AUTHOR_KEY, NAME_KEY, NONE, RUNNING_KEY, SETTING_LINE_PREFIX, SURFACE_KEY, VALUE_KEY,
 };
+use vigil::settings_store::SettingsStore;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    TcpPortReservation, capture_pipe, vigil_binary_path, wait_for_store_owner,
 };
 
 struct Deployment {
@@ -88,20 +88,20 @@ impl Deployment {
             stdout,
             stderr,
         };
-        let socket_path = self.data_dir.join("control.sock");
-        wait_until(
-            &format!("the control socket at {} to appear", socket_path.display()),
-            RUNTIME_STARTUP_TIMEOUT,
-            || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "{error}. The runtime must come up and publish its control socket. Output so \
-                 far:\n{}\n{}",
-                run.stdout(),
-                run.stderr()
-            )
-        });
+        // Readiness is the store's OWNER ROUTE answering: this runtime holds
+        // the deployment's store, so a command aimed at the deployment reaches
+        // it rather than being answered by the asking process. Proven by
+        // asking a real question — never a sleep, and never a printed line,
+        // which a runtime that started nothing could also produce.
+        wait_for_store_owner(&self.data_dir, &SettingsStore::store_path(&self.data_dir))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}. The runtime must come up and own this deployment's store. Output \
+                     so far:\n{}\n{}",
+                    run.stdout(),
+                    run.stderr()
+                )
+            });
         run
     }
 

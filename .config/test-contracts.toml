@@ -91,6 +91,8 @@ tests = [
   "vigil::live_backends::tests::a_command_issued_during_the_startup_probe_is_carried_when_the_probe_answers", # crates/vigil/src/live_backends.rs
   "vigil::live_backends::tests::a_live_preparation_reports_its_progress", # crates/vigil/src/live_backends.rs
   "vigil::live_backends::tests::a_move_asked_for_before_any_handle_exists_claims_nothing_and_is_not_lost", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_repeat_of_an_applied_request_performs_zero_builds_child", # crates/vigil/src/live_backends.rs
+  "vigil::live_backends::tests::a_repeat_of_an_applied_request_performs_zero_detector_builds", # crates/vigil/src/live_backends.rs
   "vigil::live_backends::tests::a_startup_preparation_that_finishes_late_installs_nothing_after_a_newer_command", # crates/vigil/src/live_backends.rs
   "vigil::live_backends::tests::a_superseded_pass_leaves_the_running_claim_on_the_backend_still_in_use", # crates/vigil/src/live_backends.rs
   "vigil::live_backends::tests::a_superseded_preparation_installs_nothing_through_the_production_path", # crates/vigil/src/live_backends.rs
@@ -156,7 +158,7 @@ gate = "slow-acceptance"
 tests = [
   "vigil-bin::first_light_loop::camera_registered_by_rtsp_url_persists_as_site_entity", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::camera_survives_store_reopen", # crates/vigil-bin/tests/first_light_loop.rs
-  "vigil-bin::first_light_loop::cli_read_when_runtime_busy_errors_cleanly", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::cli_read_never_opens_a_store_a_live_runtime_owns", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::confidence_is_detector_output_not_threshold_derived", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::configured_camera_name_drives_provenance_and_clip_prefix", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::credentialed_existing_camera_rtsp_url_is_redacted_on_startup", # crates/vigil-bin/tests/first_light_loop.rs
@@ -189,7 +191,7 @@ tests = [
   "vigil-bin::first_light_loop::vigil_why_latest_walks_the_newest_event", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::vigil_why_reports_config_as_of_event_time_not_current", # crates/vigil-bin/tests/first_light_loop.rs
-  "vigil-bin::first_light_loop::vigil_why_served_over_socket_while_store_is_locked", # crates/vigil-bin/tests/first_light_loop.rs
+  "vigil-bin::first_light_loop::vigil_why_served_by_the_store_owner_while_the_store_is_locked", # crates/vigil-bin/tests/first_light_loop.rs
   "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context", # crates/vigil-bin/tests/first_light_loop.rs
 ]
 [[contract]]
@@ -263,23 +265,31 @@ tests = [
 ]
 [[contract]]
 id = "distributed-worker-lifecycle-routing-and-receipts"
-lineage = "Accepted distributed-compute worker, ledger, routing, fallback, and receipt criteria."
+lineage = "Accepted distributed-compute worker, ledger, routing, fallback, and receipt criteria. Extended to the node's one worker answer when the set of cameras that RUN changes while the deployment is up: the eligible-source count is fixed once at bring-up from the startup disable markers, so a camera an operator switches on afterwards takes a standing that count never included -- its failure can complete a count the counted cameras have not answered yet, and a detector it loads after the node has reported having none is discarded."
 sources = [
+  "crates/vigil-bin/tests/a_camera_nodes_failed_detector_load_settles_its_worker_slot.rs",
+  "crates/vigil-bin/tests/a_camera_thread_that_ends_early_is_still_accounted_for_by_its_node.rs",
+  "crates/vigil-bin/tests/a_multi_camera_node_answers_its_worker_question_once.rs",
   "crates/vigil-bin/tests/boot_readiness.rs",
   "crates/vigil-bin/tests/cameraless_worker.rs",
   "crates/vigil-bin/tests/capability_delivery.rs",
   "crates/vigil-bin/tests/fabric_ticket_command.rs",
   "crates/vigil-bin/tests/fabric_ticket_health_exposure.rs",
   "crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs",
+  "crates/vigil-bin/tests/only_a_writer_held_ledger_unlocks_the_cached_ticket.rs",
   "crates/vigil-bin/tests/two_process_fabric.rs",
   "crates/vigil-bin/tests/worker_intent_loudness.rs",
   "crates/vigil/src/fabric.rs",
+  "crates/vigil/tests/a_camera_enabled_after_bring_up_is_a_detector_source_this_node_counts.rs",
+  "crates/vigil/tests/a_detector_from_a_camera_enabled_later_still_reaches_the_fleet.rs",
+  "crates/vigil/tests/a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector.rs",
   "crates/vigil/tests/capability_lifecycle.rs",
   "crates/vigil/tests/dead_capability_steal.rs",
   "crates/vigil/tests/detector_worker.rs",
   "crates/vigil/tests/fabric_enrollment.rs",
   "crates/vigil/tests/fabric_worker_lease_knob.rs",
   "crates/vigil/tests/kill_worker_fallback.rs",
+  "crates/vigil/tests/no_camera_thread_ends_without_answering_for_its_node.rs",
   "crates/vigil/tests/promotion_readvertise.rs",
   "crates/vigil/tests/provenance_receipts.rs",
   "crates/vigil/tests/result_join_authority.rs",
@@ -289,6 +299,12 @@ sources = [
 evidence_kind = "integration"
 gate = "fabric"
 tests = [
+  "vigil-bin::a_camera_nodes_failed_detector_load_settles_its_worker_slot::a_camera_node_whose_detector_will_not_load_settles_its_worker_answer_with_the_real_error", # crates/vigil-bin/tests/a_camera_nodes_failed_detector_load_settles_its_worker_slot.rs
+  "vigil-bin::a_camera_nodes_failed_detector_load_settles_its_worker_slot::the_doctor_tells_a_camera_operator_their_node_is_not_serving_and_why", # crates/vigil-bin/tests/a_camera_nodes_failed_detector_load_settles_its_worker_slot.rs
+  "vigil-bin::a_camera_thread_that_ends_early_is_still_accounted_for_by_its_node::a_camera_that_ended_early_does_not_cost_the_node_the_detector_its_neighbour_loaded", # crates/vigil-bin/tests/a_camera_thread_that_ends_early_is_still_accounted_for_by_its_node.rs
+  "vigil-bin::a_camera_thread_that_ends_early_is_still_accounted_for_by_its_node::a_node_settles_when_one_camera_ended_early_and_the_other_could_not_load_a_detector", # crates/vigil-bin/tests/a_camera_thread_that_ends_early_is_still_accounted_for_by_its_node.rs
+  "vigil-bin::a_multi_camera_node_answers_its_worker_question_once::a_node_whose_every_camera_is_switched_off_still_answers_whether_it_serves_the_fleet", # crates/vigil-bin/tests/a_multi_camera_node_answers_its_worker_question_once.rs
+  "vigil-bin::a_multi_camera_node_answers_its_worker_question_once::a_switched_off_camera_neither_settles_the_worker_answer_nor_holds_it_up", # crates/vigil-bin/tests/a_multi_camera_node_answers_its_worker_question_once.rs
   "vigil-bin::boot_readiness::boot_prints_phase_markers", # crates/vigil-bin/tests/boot_readiness.rs
   "vigil-bin::boot_readiness::health_becomes_ready_before_fabric_attaches", # crates/vigil-bin/tests/boot_readiness.rs
   "vigil-bin::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model", # crates/vigil-bin/tests/cameraless_worker.rs
@@ -305,11 +321,24 @@ tests = [
   "vigil-bin::fabric_ticket_single_retrieval_path::redact_marker_occurrences_removes_every_occurrence_of_a_repeated_marker_on_one_line", # crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs
   "vigil-bin::fabric_ticket_single_retrieval_path::redact_ticket_removes_every_occurrence_on_a_doubled_instruction_line", # crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs
   "vigil-bin::fabric_ticket_single_retrieval_path::sweep_detects_a_ticket_embedded_in_a_binary_non_utf8_file", # crates/vigil-bin/tests/fabric_ticket_single_retrieval_path.rs
+  "vigil-bin::only_a_writer_held_ledger_unlocks_the_cached_ticket::a_cache_stamped_by_another_identity_is_refused_even_while_a_writer_holds_the_ledger", # crates/vigil-bin/tests/only_a_writer_held_ledger_unlocks_the_cached_ticket.rs
+  "vigil-bin::only_a_writer_held_ledger_unlocks_the_cached_ticket::a_direct_reader_parks_inside_hydration_of_the_fabric_ledger", # crates/vigil-bin/tests/only_a_writer_held_ledger_unlocks_the_cached_ticket.rs
+  "vigil-bin::only_a_writer_held_ledger_unlocks_the_cached_ticket::a_ledger_held_by_readers_is_refused_instead_of_answered_from_the_cache", # crates/vigil-bin/tests/only_a_writer_held_ledger_unlocks_the_cached_ticket.rs
   "vigil-bin::two_process_fabric::two_real_processes_age_out_a_dead_worker_from_remote_detectors", # crates/vigil-bin/tests/two_process_fabric.rs
   "vigil-bin::two_process_fabric::two_real_processes_render_only_the_restarted_workers_current_backend", # crates/vigil-bin/tests/two_process_fabric.rs
   "vigil-bin::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_first", # crates/vigil-bin/tests/two_process_fabric.rs
   "vigil-bin::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_up_late", # crates/vigil-bin/tests/two_process_fabric.rs
   "vigil-bin::worker_intent_loudness::worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering", # crates/vigil-bin/tests/worker_intent_loudness.rs
+  "vigil::a_camera_enabled_after_bring_up_is_a_detector_source_this_node_counts::a_camera_switched_on_later_is_a_source_the_node_waits_for_before_it_is_out", # crates/vigil/tests/a_camera_enabled_after_bring_up_is_a_detector_source_this_node_counts.rs
+  "vigil::a_camera_enabled_after_bring_up_is_a_detector_source_this_node_counts::a_camera_switched_on_later_that_fails_does_not_cost_the_node_a_detector_still_loading", # crates/vigil/tests/a_camera_enabled_after_bring_up_is_a_detector_source_this_node_counts.rs
+  "vigil::a_camera_enabled_after_bring_up_is_a_detector_source_this_node_counts::a_node_whose_cameras_are_exactly_the_ones_it_counted_still_answers_when_they_are_out", # crates/vigil/tests/a_camera_enabled_after_bring_up_is_a_detector_source_this_node_counts.rs
+  "vigil::a_detector_from_a_camera_enabled_later_still_reaches_the_fleet::a_detector_from_a_camera_switched_on_later_serves_a_node_that_reported_none", # crates/vigil/tests/a_detector_from_a_camera_enabled_later_still_reaches_the_fleet.rs
+  "vigil::a_detector_from_a_camera_enabled_later_still_reaches_the_fleet::an_operator_stop_is_still_the_last_word_after_a_node_reported_no_detector", # crates/vigil/tests/a_detector_from_a_camera_enabled_later_still_reaches_the_fleet.rs
+  "vigil::a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector::a_camera_switched_off_at_startup_is_not_a_detector_source_this_node_waits_on", # crates/vigil/tests/a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector.rs
+  "vigil::a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector::a_camera_that_fails_after_the_node_is_already_serving_does_not_stop_it_serving", # crates/vigil/tests/a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector.rs
+  "vigil::a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector::a_node_is_out_of_detectors_only_when_every_camera_that_runs_has_failed", # crates/vigil/tests/a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector.rs
+  "vigil::a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector::an_operator_stop_still_wins_over_a_detector_that_landed_during_teardown", # crates/vigil/tests/a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector.rs
+  "vigil::a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector::one_cameras_failed_load_does_not_discard_the_detector_another_camera_is_still_loading", # crates/vigil/tests/a_node_with_several_cameras_serves_if_any_of_them_loads_a_detector.rs
   "vigil::capability_lifecycle::a_dead_worker_ages_out_of_remote_detectors", # crates/vigil/tests/capability_lifecycle.rs
   "vigil::capability_lifecycle::a_live_worker_stays_rendered_on_a_consumer_edge_across_several_ttls", # crates/vigil/tests/capability_lifecycle.rs
   "vigil::capability_lifecycle::a_restarted_worker_renders_only_its_current_backend", # crates/vigil/tests/capability_lifecycle.rs
@@ -326,10 +355,19 @@ tests = [
   "vigil::fabric::ticket_cache_freshness_tests::fresh_when_the_stamped_identity_matches_the_identity_on_disk", # crates/vigil/src/fabric.rs
   "vigil::fabric::ticket_cache_freshness_tests::stale_when_no_identity_stamp_was_ever_written", # crates/vigil/src/fabric.rs
   "vigil::fabric::ticket_cache_freshness_tests::stale_when_the_identity_on_disk_has_rotated_since_the_stamp_was_written", # crates/vigil/src/fabric.rs
+  "vigil::fabric::worker_detector_slot_tests::a_cancel_after_a_ready_answer_still_stops_a_start_that_has_not_run", # crates/vigil/src/fabric.rs
+  "vigil::fabric::worker_detector_slot_tests::a_detector_that_arrives_before_anything_waits_still_starts_exactly_one_worker", # crates/vigil/src/fabric.rs
+  "vigil::fabric::worker_detector_slot_tests::a_settled_slot_releases_its_settle_closure_so_the_bundle_can_drop", # crates/vigil/src/fabric.rs
+  "vigil::fabric::worker_detector_slot_tests::a_start_installed_after_the_node_was_cancelled_never_runs", # crates/vigil/src/fabric.rs
+  "vigil::fabric::worker_detector_slot_tests::a_worker_loop_spawned_at_bring_up_shares_the_nodes_own_shutdown_flag", # crates/vigil/src/fabric.rs
+  "vigil::fabric::worker_detector_slot_tests::an_operator_stop_settles_a_waiting_start_and_nothing_starts_after_it", # crates/vigil/src/fabric.rs
   "vigil::fabric_enrollment::main_prints_join_instruction_and_malformed_ticket_names_fix", # crates/vigil/tests/fabric_enrollment.rs
   "vigil::fabric_worker_lease_knob::explicit_fabric_worker_lease_ms_flows_into_the_claimed_lease_deadline", # crates/vigil/tests/fabric_worker_lease_knob.rs
   "vigil::fabric_worker_lease_knob::worker_lease_defaults_to_five_minutes_when_unset", # crates/vigil/tests/fabric_worker_lease_knob.rs
   "vigil::kill_worker_fallback::worker_death_midlease_falls_back_local_with_named_receipt", # crates/vigil/tests/kill_worker_fallback.rs
+  "vigil::no_camera_thread_ends_without_answering_for_its_node::a_camera_that_already_answered_is_not_counted_a_second_time_when_its_thread_ends", # crates/vigil/tests/no_camera_thread_ends_without_answering_for_its_node.rs
+  "vigil::no_camera_thread_ends_without_answering_for_its_node::a_camera_thread_that_ends_without_a_detector_answers_with_the_reason_it_ended_on", # crates/vigil/tests/no_camera_thread_ends_without_answering_for_its_node.rs
+  "vigil::no_camera_thread_ends_without_answering_for_its_node::a_camera_thread_that_panics_before_it_answers_still_answers_for_its_node", # crates/vigil/tests/no_camera_thread_ends_without_answering_for_its_node.rs
   "vigil::promotion_readvertise::late_promotion_advertises_a_new_backend_row_and_keeps_the_old_one", # crates/vigil/tests/promotion_readvertise.rs
   "vigil::provenance_receipts::remote_detection_carries_node_and_backend_one_vocabulary", # crates/vigil/tests/provenance_receipts.rs
   "vigil::result_join_authority::remote_result_joins_or_is_rejected_and_is_idempotent", # crates/vigil/tests/result_join_authority.rs
@@ -555,6 +593,7 @@ evidence_kind = "behavioral-unit"
 gate = "pull-request"
 tests = [
   "vigil::runtime::tests::a_planned_decode_reselect_is_not_counted_as_a_stream_fault", # crates/vigil/src/runtime.rs
+  "vigil::runtime::tests::correction_writer_drains_accepted_work_before_store_close_can_follow", # crates/vigil/src/runtime.rs
   "vigil::runtime::tests::detector_decision_delay_is_zero_without_env_and_honors_short_values", # crates/vigil/src/runtime.rs
   "vigil::runtime::tests::detector_gate_periodically_enqueues_motion_free_segments_for_stationary_scan", # crates/vigil/src/runtime.rs
   "vigil::runtime::tests::detector_gate_still_enqueues_motion_positive_segments", # crates/vigil/src/runtime.rs
@@ -767,6 +806,19 @@ tests = [
   "xtask::verify::tests::slow_shards_run_only_the_frozen_archive_without_build_selection",
 ]
 [[contract]]
+id = "xtask-target-dir-resolution-tests"
+lineage = "The shared xtask::target_dir helper (xtask/src/lib.rs): resolves the Cargo build/target directory the way Cargo itself does -- CARGO_TARGET_DIR when set (absolute, or root-relative), else <root>/target -- so every staging/lookup site built on it stops hardcoding root.join(\"target/...\") and silently missing a lane-scoped build directory (brief-xtask-target-w16)."
+sources = [
+  "xtask/src/lib.rs",
+]
+evidence_kind = "structural"
+gate = "pull-request"
+tests = [
+  "xtask::tests::target_dir_falls_back_to_root_target_when_unset",
+  "xtask::tests::target_dir_honors_an_absolute_cargo_target_dir",
+  "xtask::tests::target_dir_resolves_a_relative_cargo_target_dir_against_root",
+]
+[[contract]]
 id = "test-estate-guard-self-enforcement"
 lineage = "The test-estate guard's own adversarial fixtures enforce inventory, transition, CI, documentation, nondeterminism, and schema invariants."
 sources = [
@@ -775,6 +827,7 @@ sources = [
 evidence_kind = "structural"
 gate = "pull-request"
 tests = [
+  "xtask::test_estate::tests::a_rename_declared_by_bytes_no_receipt_vouches_for_is_ignored",
   "xtask::test_estate::tests::all_test_estate_registries_reject_unknown_fields",
   "xtask::test_estate::tests::authoritative_nextest_json_preserves_exact_binary_identity",
   "xtask::test_estate::tests::bind_to_port_zero_is_detected_independent_of_helper_name",
@@ -792,6 +845,7 @@ tests = [
   "xtask::test_estate::tests::documentation_contract_requires_honest_review_status_and_known_schema_values",
   "xtask::test_estate::tests::every_enforced_paragraph_must_carry_one_well_formed_claim_id",
   "xtask::test_estate::tests::ha_smoke_required_steps_cannot_skip_or_warn_green",
+  "xtask::test_estate::tests::identity_renames_resolve_through_a_chain_of_successors",
   "xtask::test_estate::tests::ledger_rejects_unknown_fields",
   "xtask::test_estate::tests::mandatory_prerequisite_branch_cannot_return_green",
   "xtask::test_estate::tests::paragraph_normalization_is_whitespace_stable_but_word_sensitive",
@@ -804,26 +858,34 @@ tests = [
   "xtask::test_estate::tests::release_note_hardware_names_do_not_substitute_for_named_target_builds",
   "xtask::test_estate::tests::relocating_same_syntax_changes_the_exact_site_identity",
   "xtask::test_estate::tests::relocation_proof_accepts_a_byte_identical_move",
+  "xtask::test_estate::tests::relocation_proof_follows_a_surviving_test_that_was_later_renamed",
   "xtask::test_estate::tests::relocation_proof_rejects_a_mapping_that_is_not_one_to_one",
   "xtask::test_estate::tests::relocation_proof_rejects_a_recorded_fingerprint_that_does_not_match_its_own_body",
+  "xtask::test_estate::tests::relocation_proof_rejects_a_renamed_survivor_whose_body_changed",
+  "xtask::test_estate::tests::relocation_proof_rejects_a_successor_while_the_original_is_still_there",
   "xtask::test_estate::tests::relocation_proof_rejects_a_surviving_body_that_changed",
   "xtask::test_estate::tests::relocation_proof_rejects_a_surviving_identity_this_transition_did_not_add",
   "xtask::test_estate::tests::sleep_hidden_in_macro_tokens_is_a_site",
   "xtask::test_estate::tests::source_scan_definition_ignores_doc_links_but_catches_executable_reads",
+  "xtask::test_estate::tests::two_identities_may_not_be_renamed_into_one",
   "xtask::test_estate::tests::wall_and_monotonic_clocks_and_elapsed_calls_are_sites",
 ]
 [[contract]]
 id = "composed-binary-product-paths-require-the-real-compiled-vigil-binary"
 lineage = "Accepted composition-root contract: correction/event/HTTP/CLI product paths provable only against the real compiled `vigil` binary wiring core to the Home Assistant adapter."
 sources = [
+  "crates/vigil-bin/tests/an_ignored_environment_variable_reaches_the_operator.rs",
   "crates/vigil-bin/tests/binary_cli_surface_smoke.rs",
   "crates/vigil-bin/tests/correction_core_paths.rs",
+  "crates/vigil-bin/tests/help_names_every_public_command.rs",
   "crates/vigil-bin/tests/http_data_plane_binary_coexistence.rs",
   "crates/vigil-bin/tests/mqtt_composed_product.rs",
 ]
 evidence_kind = "integration"
 gate = "pull-request"
 tests = [
+  "vigil-bin::an_ignored_environment_variable_reaches_the_operator::a_behavior_variable_in_the_environment_is_reported_as_ignored_with_where_to_set_it", # crates/vigil-bin/tests/an_ignored_environment_variable_reaches_the_operator.rs
+  "vigil-bin::an_ignored_environment_variable_reaches_the_operator::a_deployment_with_no_such_variable_set_is_told_nothing", # crates/vigil-bin/tests/an_ignored_environment_variable_reaches_the_operator.rs
   "vigil-bin::binary_cli_surface_smoke::help_flag_names_the_fabric_ticket_command", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
   "vigil-bin::binary_cli_surface_smoke::help_flag_names_the_run_command", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
   "vigil-bin::binary_cli_surface_smoke::no_arguments_prints_help_and_exits_nonzero", # crates/vigil-bin/tests/binary_cli_surface_smoke.rs
@@ -833,6 +895,11 @@ tests = [
   "vigil-bin::correction_core_paths::correction_rejected_for_non_detection_anchor", # crates/vigil-bin/tests/correction_core_paths.rs
   "vigil-bin::correction_core_paths::detection_only_events_excludes_corrections", # crates/vigil-bin/tests/correction_core_paths.rs
   "vigil-bin::correction_core_paths::detection_publishes_event_to_real_broker", # crates/vigil-bin/tests/correction_core_paths.rs
+  "vigil-bin::help_names_every_public_command::every_advertised_command_is_dispatched_by_the_binary", # crates/vigil-bin/tests/help_names_every_public_command.rs
+  "vigil-bin::help_names_every_public_command::every_command_that_asks_the_running_deployment_is_advertised", # crates/vigil-bin/tests/help_names_every_public_command.rs
+  "vigil-bin::help_names_every_public_command::help_names_no_internal_subcommand", # crates/vigil-bin/tests/help_names_every_public_command.rs
+  "vigil-bin::help_names_every_public_command::help_prints_exactly_the_declared_public_inventory", # crates/vigil-bin/tests/help_names_every_public_command.rs
+  "vigil-bin::help_names_every_public_command::the_declared_inventory_is_exactly_the_nine_public_commands", # crates/vigil-bin/tests/help_names_every_public_command.rs
   "vigil-bin::http_data_plane_binary_coexistence::health_liveness_still_serves_alongside_data_plane_in_single_binary", # crates/vigil-bin/tests/http_data_plane_binary_coexistence.rs
   "vigil-bin::mqtt_composed_product::correction_commands_via_mqtt_land_in_cg_through_the_composed_binary", # crates/vigil-bin/tests/mqtt_composed_product.rs
   "vigil-bin::mqtt_composed_product::snapshot_command_publishes_the_latest_detector_evidence_through_the_composed_binary", # crates/vigil-bin/tests/mqtt_composed_product.rs
@@ -855,6 +922,7 @@ lineage = "Accepted operator-settings pin/unpin, secret-disclosure, and environm
 sources = [
   "crates/vigil/src/secret.rs",
   "crates/vigil/src/settings.rs",
+  "crates/vigil/tests/a_settings_listing_holds_one_handle.rs",
   "crates/vigil/tests/addon_least_supervisor_role.rs",
   "crates/vigil/tests/addon_optional_class_lists.rs",
   "crates/vigil/tests/automation_handle_capability_scan.rs",
@@ -868,6 +936,7 @@ sources = [
 evidence_kind = "behavioral-unit"
 gate = "pull-request"
 tests = [
+  "vigil::a_settings_listing_holds_one_handle::a_settings_listing_opens_this_deployments_store_once_and_reports_every_secret", # crates/vigil/tests/a_settings_listing_holds_one_handle.rs
   "vigil::addon_least_supervisor_role::the_manifest_asks_for_the_ordinary_role_a_self_options_write_needs", # crates/vigil/tests/addon_least_supervisor_role.rs
   "vigil::addon_least_supervisor_role::the_packaged_documentation_does_not_claim_the_ordinary_role_cannot_self_write", # crates/vigil/tests/addon_least_supervisor_role.rs
   "vigil::addon_optional_class_lists::an_installation_that_authored_neither_list_carries_no_required_key", # crates/vigil/tests/addon_optional_class_lists.rs
@@ -1358,6 +1427,7 @@ tests = [
   "vigil::settings_echo_ledger_home::the_deployment_holds_its_echo_record_in_its_store_and_writes_no_file_beside_it", # crates/vigil/tests/settings_echo_ledger_home.rs
   "vigil::settings_echo_read_back_on_surface_ingest::a_value_a_person_typed_over_the_mirrored_one_is_ingested_as_their_own_record", # crates/vigil/tests/settings_echo_read_back_on_surface_ingest.rs
   "vigil::settings_echo_read_back_on_surface_ingest::ingesting_vigils_own_mirrored_write_records_the_read_back_and_authors_nothing", # crates/vigil/tests/settings_echo_read_back_on_surface_ingest.rs
+  "vigil::settings_pushed_table_boundary::a_stopped_node_reads_the_record_its_hub_pushed_and_says_what_holds_it", # crates/vigil/tests/settings_pushed_table_boundary.rs
   "vigil::settings_pushed_table_boundary::the_hub_role_handle_writes_the_pushed_table_successfully", # crates/vigil/tests/settings_pushed_table_boundary.rs
   "vigil::settings_pushed_table_boundary::the_ordinary_node_side_handle_is_refused_a_write_to_the_pushed_table", # crates/vigil/tests/settings_pushed_table_boundary.rs
   "vigil::settings_record_coexistence::a_config_file_value_never_reverts_a_vigil_settings_change_at_restart", # crates/vigil/tests/settings_record_coexistence.rs
@@ -1392,9 +1462,12 @@ tests = [
   "vigil::settings_write_durability::a_write_of_one_authors_record_never_commits_a_state_where_that_record_is_absent", # crates/vigil/tests/settings_write_durability.rs
   "vigil::settings_write_durability::an_explicit_reset_never_commits_a_state_where_the_setting_is_missing", # crates/vigil/tests/settings_write_durability.rs
   "vigil::stationary_scan_interval_accepts_off::the_settings_store_accepts_zero_as_periodic_rescanning_turned_off", # crates/vigil/tests/stationary_scan_interval_accepts_off.rs
+  "vigil::store_open_failure_classes::a_holder_pid_wider_than_thirty_two_bits_is_reported_whole", # crates/vigil/tests/store_open_failure_classes.rs
+  "vigil::store_open_failure_classes::a_holder_that_published_no_pid_is_reported_as_unknown_rather_than_as_a_number", # crates/vigil/tests/store_open_failure_classes.rs
   "vigil::store_open_failure_classes::a_locked_store_still_refuses_a_second_runtime_naming_the_holder", # crates/vigil/tests/store_open_failure_classes.rs
   "vigil::store_open_failure_classes::a_separate_process_holds_the_store_lock_while_the_parent_classifies", # crates/vigil/tests/store_open_failure_classes.rs
   "vigil::store_open_failure_classes::an_absent_store_is_created_rather_than_treated_as_a_failure", # crates/vigil/tests/store_open_failure_classes.rs
+  "vigil::store_open_failure_classes::an_unknown_holder_is_never_classified_as_a_holder_called_zero", # crates/vigil/tests/store_open_failure_classes.rs
   "vigil::supervisor_options_reflection::a_local_vigil_settings_change_reflects_immediately", # crates/vigil/tests/supervisor_options_reflection.rs
   "vigil::supervisor_options_reflection::a_missing_supervisor_permission_is_reported_as_a_reflection_failure_naming_the_manifest_declaration", # crates/vigil/tests/supervisor_options_reflection.rs
   "vigil::supervisor_options_reflection::a_pushed_value_is_reflected_without_requesting_a_restart", # crates/vigil/tests/supervisor_options_reflection.rs
@@ -1440,6 +1513,8 @@ sources = [
   "crates/vigil-bin/tests/settings_persistence_across_restart.rs",
   "crates/vigil-bin/tests/settings_queue_capacity_environment_attribution_live.rs",
   "crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs",
+  "crates/vigil-bin/tests/store_and_data_directory_independence.rs",
+  "crates/vigil-bin/tests/storeless_command_answers_without_guessing.rs",
   "crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs",
 ]
 evidence_kind = "acceptance"
@@ -1466,6 +1541,7 @@ tests = [
   "vigil-bin::settings_live_application_while_running::a_dormant_pin_runs_again_when_its_domain_is_turned_off", # crates/vigil-bin/tests/settings_live_application_while_running.rs
   "vigil-bin::settings_live_application_while_running::a_pinned_processor_backend_outranks_the_accelerated_one_this_artifact_carries", # crates/vigil-bin/tests/settings_live_application_while_running.rs
   "vigil-bin::settings_live_application_while_running::a_rate_change_made_while_running_takes_effect_without_a_restart", # crates/vigil-bin/tests/settings_live_application_while_running.rs
+  "vigil-bin::settings_live_application_while_running::a_rate_withdrawn_while_running_is_taken_back_without_a_restart", # crates/vigil-bin/tests/settings_live_application_while_running.rs
   "vigil-bin::settings_live_application_while_running::turning_the_automation_off_makes_the_pinned_detection_backend_what_runs", # crates/vigil-bin/tests/settings_live_application_while_running.rs
   "vigil-bin::settings_live_operator_visibility::listing_after_the_run_stops_serves_what_was_persisted", # crates/vigil-bin/tests/settings_live_operator_visibility.rs
   "vigil-bin::settings_live_operator_visibility::listing_an_unstarted_deployment_leaves_no_store_on_disk", # crates/vigil-bin/tests/settings_live_operator_visibility.rs
@@ -1489,15 +1565,187 @@ tests = [
   "vigil-bin::settings_store_authority_over_the_running_process::a_stored_recognition_class_list_governs_the_running_process_over_the_configuration_file", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
   "vigil-bin::settings_store_authority_over_the_running_process::a_stored_site_name_governs_the_running_process_over_the_configuration_file", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
   "vigil-bin::settings_store_authority_over_the_running_process::every_setting_the_loader_reaches_is_also_answerable_from_the_store_alone", # crates/vigil-bin/tests/settings_store_authority_over_the_running_process.rs
-  "vigil-bin::storeless_runtime_degraded_mode::a_configured_service_id_on_a_storeless_run_reports_configured_not_yet_persisted", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::store_and_data_directory_independence::a_change_made_while_the_runtime_owns_the_store_lands_only_in_that_store", # crates/vigil-bin/tests/store_and_data_directory_independence.rs
+  "vigil-bin::store_and_data_directory_independence::a_change_made_with_nothing_running_lands_only_in_the_configured_store", # crates/vigil-bin/tests/store_and_data_directory_independence.rs
+  "vigil-bin::store_and_data_directory_independence::the_running_node_and_a_separate_command_record_against_one_node_key", # crates/vigil-bin/tests/store_and_data_directory_independence.rs
+  "vigil-bin::storeless_command_answers_without_guessing::a_command_that_cannot_read_the_store_answers_without_inventing_this_deployments_state", # crates/vigil-bin/tests/storeless_command_answers_without_guessing.rs
+  "vigil-bin::storeless_command_answers_without_guessing::each_read_shape_keeps_its_own_status_and_stream_when_the_store_cannot_be_read", # crates/vigil-bin/tests/storeless_command_answers_without_guessing.rs
+  "vigil-bin::storeless_command_answers_without_guessing::no_answer_shape_carries_an_identity_when_the_store_cannot_be_read", # crates/vigil-bin/tests/storeless_command_answers_without_guessing.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_configured_service_id_is_not_reported_by_a_command_that_cannot_see_the_run", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_degraded_run_creates_no_second_store_and_publishes_no_transport_of_its_own", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::a_degraded_run_writes_nothing_even_when_a_stream_connects", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::a_degraded_run_writes_nothing_including_the_persisted_service_identity", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
-  "vigil-bin::storeless_runtime_degraded_mode::a_storeless_run_reports_the_same_identity_on_the_startup_line_and_the_degraded_listing", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_first_start_with_the_store_outside_data_dir_answers_directly_and_creates_only_that_store", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_storeless_command_never_recovers_an_identity_from_a_configuration_it_was_not_given", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_storeless_command_never_reports_a_name_that_only_ever_was_a_startup_option", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+  "vigil-bin::storeless_runtime_degraded_mode::a_storeless_command_says_the_store_is_unreadable_instead_of_naming_a_node_it_cannot_see", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::an_unreadable_store_still_starts_cameras_detection_and_broker_alerting", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::degraded_delivery_is_reported_best_effort_never_assured", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::each_camera_reports_its_own_condition_rather_than_the_nodes_unmanaged_state", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::recording_review_corrections_and_settings_changes_each_refuse_with_a_statement_of_what_is_unavailable", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::the_liveness_answer_stays_protected_while_the_body_names_the_real_condition", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
   "vigil-bin::storeless_runtime_degraded_mode::the_unmanaged_state_is_restated_on_every_operator_surface_for_as_long_as_it_lasts", # crates/vigil-bin/tests/storeless_runtime_degraded_mode.rs
+]
+[[contract]]
+id = "live-read-commands-keep-their-answers-across-the-owner-route-change"
+lineage = "Accepted read-intent criteria 45-46 and the owner ruling of 2026-08-18: why, events and stats keep their command behavior, response content and route reporting while the owner channel moves from vigil's unix control socket to the context-graph store's owner route, and VIGIL_CONTROL_SOCKET is retired with a refusal rather than silently ignored. Driven over real vigil run operating-system processes, the only way to exercise inter-process store ownership."
+sources = [
+  "crates/vigil-bin/tests/a_claimed_store_never_licenses_a_command_to_read_it_directly.rs",
+  "crates/vigil-bin/tests/a_packaged_deployment_states_one_runtime_root.rs",
+  "crates/vigil-bin/tests/a_recoverable_store_is_recovered_and_a_damaged_one_is_left_alone.rs",
+  "crates/vigil-bin/tests/a_refusal_reads_the_same_on_both_routes.rs",
+  "crates/vigil-bin/tests/a_silent_owner_channel_does_not_cost_the_operator_their_answer.rs",
+  "crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs",
+  "crates/vigil-bin/tests/a_waiting_runtime_still_stops_when_asked.rs",
+  "crates/vigil-bin/tests/control_socket_override_is_a_migration_error.rs",
+  "crates/vigil-bin/tests/hydrating_reader_does_not_degrade_a_starting_runtime.rs",
+  "crates/vigil-bin/tests/live_commands_survive_the_transport_change.rs",
+  "crates/vigil/tests/a_failed_open_is_classified_from_the_error_it_returned.rs",
+  "crates/vigil/tests/the_startup_wait_for_readers_is_kernel_driven.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil-bin::a_claimed_store_never_licenses_a_command_to_read_it_directly::a_command_meeting_a_claimed_store_is_told_who_holds_it_and_reads_nothing_itself", # crates/vigil-bin/tests/a_claimed_store_never_licenses_a_command_to_read_it_directly.rs
+  "vigil-bin::a_claimed_store_never_licenses_a_command_to_read_it_directly::a_store_claimed_but_not_yet_announced_is_never_reported_free_to_this_command", # crates/vigil-bin/tests/a_claimed_store_never_licenses_a_command_to_read_it_directly.rs
+  "vigil-bin::a_claimed_store_never_licenses_a_command_to_read_it_directly::a_store_nobody_holds_still_lets_the_same_command_read_it_and_leaves_the_footprint", # crates/vigil-bin/tests/a_claimed_store_never_licenses_a_command_to_read_it_directly.rs
+  "vigil-bin::a_packaged_deployment_states_one_runtime_root::a_daemon_told_where_its_runtime_root_is_serves_every_command_told_the_same_root", # crates/vigil-bin/tests/a_packaged_deployment_states_one_runtime_root.rs
+  "vigil-bin::a_packaged_deployment_states_one_runtime_root::a_deployment_that_states_no_runtime_root_is_unchanged", # crates/vigil-bin/tests/a_packaged_deployment_states_one_runtime_root.rs
+  "vigil-bin::a_recoverable_store_is_recovered_and_a_damaged_one_is_left_alone::a_settings_read_settles_the_image_a_killed_runtime_left_and_answers", # crates/vigil-bin/tests/a_recoverable_store_is_recovered_and_a_damaged_one_is_left_alone.rs
+  "vigil-bin::a_recoverable_store_is_recovered_and_a_damaged_one_is_left_alone::a_store_that_is_not_a_store_is_answered_unreadable_and_never_opened_for_writing", # crates/vigil-bin/tests/a_recoverable_store_is_recovered_and_a_damaged_one_is_left_alone.rs
+  "vigil-bin::a_refusal_reads_the_same_on_both_routes::a_failed_request_reads_the_same_served_by_the_owner_and_read_directly", # crates/vigil-bin/tests/a_refusal_reads_the_same_on_both_routes.rs
+  "vigil-bin::a_silent_owner_channel_does_not_cost_the_operator_their_answer::a_silent_owner_channel_falls_back_to_the_store_and_answers", # crates/vigil-bin/tests/a_silent_owner_channel_does_not_cost_the_operator_their_answer.rs
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::a_busy_answer_carries_no_owner_route_trailer_contradicting_it", # crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::a_direct_reader_parks_inside_hydration_of_the_deployments_store", # crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::a_refused_command_leaves_the_deployment_directory_exactly_as_it_found_it", # crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::an_edit_answers_that_the_store_is_busy_rather_than_unreadable", # crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::every_read_only_settings_shape_is_served_while_a_reader_holds_the_store", # crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::the_same_commands_answer_normally_once_the_reader_has_finished", # crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::why_and_events_are_served_while_a_reader_holds_the_store", # crates/vigil-bin/tests/a_store_busy_with_readers_is_not_an_unreadable_store.rs
+  "vigil-bin::a_waiting_runtime_still_stops_when_asked::a_direct_reader_parks_inside_hydration_while_the_runtime_is_stopped", # crates/vigil-bin/tests/a_waiting_runtime_still_stops_when_asked.rs
+  "vigil-bin::a_waiting_runtime_still_stops_when_asked::a_runtime_waiting_for_a_reader_stops_when_it_is_asked_to", # crates/vigil-bin/tests/a_waiting_runtime_still_stops_when_asked.rs
+  "vigil-bin::a_waiting_runtime_still_stops_when_asked::a_stop_delivered_before_the_reader_lets_go_beats_the_store_open", # crates/vigil-bin/tests/a_waiting_runtime_still_stops_when_asked.rs
+  "vigil-bin::a_waiting_runtime_still_stops_when_asked::an_orderly_stop_removes_the_owner_socket_created_by_that_run", # crates/vigil-bin/tests/a_waiting_runtime_still_stops_when_asked.rs
+  "vigil-bin::control_socket_override_is_a_migration_error::a_read_command_refuses_to_run_while_the_retired_variable_is_set", # crates/vigil-bin/tests/control_socket_override_is_a_migration_error.rs
+  "vigil-bin::control_socket_override_is_a_migration_error::the_runtime_refuses_to_start_while_the_retired_variable_is_set", # crates/vigil-bin/tests/control_socket_override_is_a_migration_error.rs
+  "vigil-bin::control_socket_override_is_a_migration_error::vigil_carries_no_control_socket_path_or_socket_transport", # crates/vigil-bin/tests/control_socket_override_is_a_migration_error.rs
+  "vigil-bin::hydrating_reader_does_not_degrade_a_starting_runtime::a_direct_reader_parks_inside_hydration_until_its_parent_releases_it", # crates/vigil-bin/tests/hydrating_reader_does_not_degrade_a_starting_runtime.rs
+  "vigil-bin::hydrating_reader_does_not_degrade_a_starting_runtime::a_hydrating_reader_does_not_permanently_degrade_a_starting_runtime", # crates/vigil-bin/tests/hydrating_reader_does_not_degrade_a_starting_runtime.rs
+  "vigil-bin::hydrating_reader_does_not_degrade_a_starting_runtime::a_startup_open_refused_by_readers_names_the_readers_holding_the_store", # crates/vigil-bin/tests/hydrating_reader_does_not_degrade_a_starting_runtime.rs
+  "vigil-bin::live_commands_survive_the_transport_change::every_read_command_falls_back_to_the_direct_path_when_no_runtime_owns_the_store", # crates/vigil-bin/tests/live_commands_survive_the_transport_change.rs
+  "vigil-bin::live_commands_survive_the_transport_change::the_live_answer_is_byte_for_byte_the_direct_answer_under_the_route_marker", # crates/vigil-bin/tests/live_commands_survive_the_transport_change.rs
+  "vigil-bin::live_commands_survive_the_transport_change::why_events_and_stats_answer_over_the_live_route_while_the_runtime_owns_the_store", # crates/vigil-bin/tests/live_commands_survive_the_transport_change.rs
+  "vigil::a_failed_open_is_classified_from_the_error_it_returned::a_decision_taken_after_the_store_opened_is_never_classified_as_an_unreadable_store", # crates/vigil/tests/a_failed_open_is_classified_from_the_error_it_returned.rs
+  "vigil::a_failed_open_is_classified_from_the_error_it_returned::a_failure_is_classified_into_the_condition_it_reports_without_touching_a_store", # crates/vigil/tests/a_failed_open_is_classified_from_the_error_it_returned.rs
+  "vigil::a_failed_open_is_classified_from_the_error_it_returned::the_guard_recognizes_a_re_opening_classifier_and_leaves_an_error_classifier_alone", # crates/vigil/tests/a_failed_open_is_classified_from_the_error_it_returned.rs
+  "vigil::a_failed_open_is_classified_from_the_error_it_returned::the_review_command_answer_is_built_from_the_failure_not_from_a_second_open", # crates/vigil/tests/a_failed_open_is_classified_from_the_error_it_returned.rs
+  "vigil::a_failed_open_is_classified_from_the_error_it_returned::the_settings_answer_is_built_from_the_failure_not_from_a_second_open", # crates/vigil/tests/a_failed_open_is_classified_from_the_error_it_returned.rs
+  "vigil::the_startup_wait_for_readers_is_kernel_driven::the_guard_recognizes_a_sleep_retry_wait_and_leaves_a_kernel_wait_alone", # crates/vigil/tests/the_startup_wait_for_readers_is_kernel_driven.rs
+  "vigil::the_startup_wait_for_readers_is_kernel_driven::the_wait_for_a_stores_readers_carries_no_timer_of_its_own", # crates/vigil/tests/the_startup_wait_for_readers_is_kernel_driven.rs
+  "vigil::the_startup_wait_for_readers_is_kernel_driven::the_wait_for_a_stores_readers_goes_through_the_seam_that_owns_it", # crates/vigil/tests/the_startup_wait_for_readers_is_kernel_driven.rs
+]
+[[contract]]
+id = "settings-find-is-the-search-verb-and-domain-is-gone"
+lineage = "Owner ruling DR-28 (2026-08-29): the operator-facing operation over the settings listing is SEARCH. `vigil settings find <text>` filters the whole rendered answer — setting lines, the control lines and the explanations alike — and that breadth is intentional; the former `domain` name is removed with no compatibility alias, because it promised a declared grouping and delivered a substring search. A missing search term is a usage error, and a search that matches nothing is a SUCCESSFUL no-match result rather than an unknown-domain refusal. Help offers the verb that exists, and the ordinary listing keeps its switch/member control lines."
+sources = [
+  "crates/vigil-bin/tests/settings_find_is_the_search_verb.rs",
+]
+evidence_kind = "acceptance"
+gate = "pull-request"
+tests = [
+  "vigil-bin::settings_find_is_the_search_verb::a_search_that_matches_nothing_succeeded_and_found_nothing", # crates/vigil-bin/tests/settings_find_is_the_search_verb.rs
+  "vigil-bin::settings_find_is_the_search_verb::a_search_with_no_text_is_a_usage_error", # crates/vigil-bin/tests/settings_find_is_the_search_verb.rs
+  "vigil-bin::settings_find_is_the_search_verb::find_narrows_the_listing_to_every_line_carrying_the_text", # crates/vigil-bin/tests/settings_find_is_the_search_verb.rs
+  "vigil-bin::settings_find_is_the_search_verb::help_offers_find_and_no_longer_offers_domain", # crates/vigil-bin/tests/settings_find_is_the_search_verb.rs
+  "vigil-bin::settings_find_is_the_search_verb::the_removed_domain_verb_is_refused_and_names_find", # crates/vigil-bin/tests/settings_find_is_the_search_verb.rs
+]
+[[contract]]
+id = "two-read-only-commands-asked-at-once-both-answer"
+lineage = "The concurrent direct-reader contract as the owner settled it (2026-08-29): ContextDB's genuine read sessions coexist, and the documented busy answer is what a WRITER meets while readers hydrate — never a read meeting another read. Vigil's read-only fallbacks must therefore take a genuine read-only path rather than Context Graph's writable Store, so two questions asked at once both answer and neither changes the store. Driven cross-process because inter-process store ownership cannot be exercised inside one process, where Context Graph shares a single handle per path."
+sources = [
+  "crates/vigil-bin/tests/two_concurrent_read_only_commands_both_answer.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil-bin::two_concurrent_read_only_commands_both_answer::concurrent_review_reads_are_never_answered_as_a_locked_store", # crates/vigil-bin/tests/two_concurrent_read_only_commands_both_answer.rs
+  "vigil-bin::two_concurrent_read_only_commands_both_answer::the_commands_read_the_store_this_deployment_seeded", # crates/vigil-bin/tests/two_concurrent_read_only_commands_both_answer.rs
+  "vigil-bin::two_concurrent_read_only_commands_both_answer::the_same_reads_asked_one_after_another_all_answer", # crates/vigil-bin/tests/two_concurrent_read_only_commands_both_answer.rs
+  "vigil-bin::two_concurrent_read_only_commands_both_answer::two_concurrent_settings_reads_both_answer_and_change_nothing", # crates/vigil-bin/tests/two_concurrent_read_only_commands_both_answer.rs
+]
+[[contract]]
+id = "asking-a-never-started-deployment-brings-none-into-existence"
+lineage = "The blanket invariant AGENTS.md states over the whole live-command family — events, why, stats, settings, enroll and forget — and the fourth condition docs/cli.md now spells out beside the other three: a deployment nobody has started has no store, so a read or an edit answers from that emptiness and leaves the directory exactly as it was. Two of the six used to materialize a real store and its lock, which turned a mistyped path, or `./vigil-data` in the wrong shell, into a deployment and left the next `vigil run` opening a store no runtime ever wrote. Driven as real processes, each command in a directory of its own, and checked against the directory's whole contents afterwards rather than the store path alone."
+sources = [
+  "crates/vigil-bin/tests/a_read_of_a_never_started_deployment_creates_nothing.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::a_store_path_that_cannot_be_resolved_is_never_answered_as_a_first_start", # crates/vigil-bin/tests/a_read_of_a_never_started_deployment_creates_nothing.rs
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::no_edit_shape_brings_a_never_started_deployment_into_existence", # crates/vigil-bin/tests/a_read_of_a_never_started_deployment_creates_nothing.rs
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::no_live_command_brings_a_never_started_deployment_into_existence", # crates/vigil-bin/tests/a_read_of_a_never_started_deployment_creates_nothing.rs
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::the_review_commands_answer_a_never_started_deployment_honestly", # crates/vigil-bin/tests/a_read_of_a_never_started_deployment_creates_nothing.rs
+]
+[[contract]]
+id = "an-unserved-why-request-refuses-rather-than-answering"
+lineage = "The read-command family contract pinned at docs/cli.md:377-378 and the two `why` statements it governs (docs/cli.md:111 and :122): a request this deployment could not serve refuses — the answer leaves on standard error with exit status 2, and the other stream stays quiet — and an argument that is not a detection id is refused as that rather than reported as a missing event, so an operator who mistyped one is not sent looking for a recording nobody named. Driven over real `vigil run` operating-system processes because both roads an operator meets have to answer the same way: the running owner serving over its store's own owner channel, and the direct read of an idle store."
+sources = [
+  "crates/vigil-bin/tests/why_refuses_an_id_it_cannot_serve.rs",
+]
+evidence_kind = "acceptance"
+gate = "slow-acceptance"
+tests = [
+  "vigil-bin::why_refuses_an_id_it_cannot_serve::a_malformed_detection_id_is_refused_as_a_malformed_id_and_not_as_a_missing_event", # crates/vigil-bin/tests/why_refuses_an_id_it_cannot_serve.rs
+  "vigil-bin::why_refuses_an_id_it_cannot_serve::an_unknown_detection_id_is_refused_on_both_routes", # crates/vigil-bin/tests/why_refuses_an_id_it_cannot_serve.rs
+]
+[[contract]]
+id = "owner-route-shares-the-store-with-recognition-and-the-review-plane"
+lineage = "Accepted read-intent criterion 46 and the recognition arm folded in on 2026-08-24: one writable open carries the owner handler alongside the deployment's own embedder registrations, and the in-process HTTP review plane answers without spending any of the owner channel's reader slots."
+sources = [
+  "crates/vigil/tests/http_review_plane_owns_no_owner_slot.rs",
+  "crates/vigil/tests/recognition_and_the_owner_route_share_one_open.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil::http_review_plane_owns_no_owner_slot::the_review_plane_still_answers_while_every_owner_reader_slot_is_occupied", # crates/vigil/tests/http_review_plane_owns_no_owner_slot.rs
+  "vigil::recognition_and_the_owner_route_share_one_open::a_recognition_runtime_answers_the_owner_route_and_keeps_embedding_on_the_same_handle", # crates/vigil/tests/recognition_and_the_owner_route_share_one_open.rs
+]
+[[contract]]
+id = "a-packaged-live-command-reaches-the-daemon-it-was-shipped-with"
+lineage = "Accepted add-on promise that `vigil why`, `vigil events` and `vigil stats` run inside the container reach the daemon standing next to them. Two boundaries a packaged deployment crosses and an unpackaged one never does: the daemon drops to the configured runtime user before it opens its store while live-command dispatch keeps the exec's user, and the owner channel authorizes on that user alone (contextdb local_transport::authentication::authenticate_peer); and the daemon resolves its store through the add-on's /data/options.json while the command joins a default filename onto a data directory and never reads that file. Pinned at the source because the identity drop needs root the harness lacks and /data/options.json is an absolute path no fixture can occupy; the end-to-end proof belongs to the add-on image gate, and the same-user premise of the runtime-root journey is now asserted rather than assumed. The identity half was corrected on the read-command dispatch only, so `vigil settings` -- the surface an operator reaches for to CHANGE their deployment, over the same owner channel -- still opened that channel as the exec's user; the family is now pinned as a family, from the deployment's own list of the commands that ask it for an answer, and the settings dispatch is proven from outside the process to perform the identity step at all. Two further boundaries a packaged deployment crosses: the family list is now proven CLOSED against the dispatch itself, so a subcommand that reaches the owner channel without being in it fails on the day it is written rather than on the day an operator finds it refused; and the daemon's runtime-user plan is held to the companion lock its store REALLY has -- contextdb names it by APPENDING `.lock` to the whole store filename (`/data/store.contextgraph` is guarded by `/data/store.contextgraph.lock`), so a plan that chowns an extension-replaced `/data/store.lock` prepares a path nothing creates and leaves the real companion owned by root, which is a store the dropped runtime user cannot open."
+sources = [
+  "crates/vigil-bin/tests/the_settings_command_becomes_the_runtime_user_like_every_live_command.rs",
+  "crates/vigil/tests/a_live_command_resolves_the_store_the_daemon_opened.rs",
+  "crates/vigil/tests/a_packaged_live_command_becomes_the_deployments_runtime_user.rs",
+  "crates/vigil/tests/every_command_that_reaches_the_owner_channel_is_in_the_family.rs",
+  "crates/vigil/tests/every_live_command_dispatch_becomes_the_runtime_user_and_nothing_more.rs",
+  "crates/vigil/tests/the_daemon_prepares_the_lock_file_its_store_really_has.rs",
+]
+evidence_kind = "integration"
+gate = "pull-request"
+tests = [
+  "vigil-bin::the_settings_command_becomes_the_runtime_user_like_every_live_command::a_deployment_that_states_no_runtime_identity_still_gets_its_settings_answer", # crates/vigil-bin/tests/the_settings_command_becomes_the_runtime_user_like_every_live_command.rs
+  "vigil-bin::the_settings_command_becomes_the_runtime_user_like_every_live_command::the_live_commands_that_already_read_it_refuse_the_same_way", # crates/vigil-bin/tests/the_settings_command_becomes_the_runtime_user_like_every_live_command.rs
+  "vigil-bin::the_settings_command_becomes_the_runtime_user_like_every_live_command::the_settings_command_reads_this_deployments_runtime_identity_before_it_answers", # crates/vigil-bin/tests/the_settings_command_becomes_the_runtime_user_like_every_live_command.rs
+  "vigil::a_live_command_resolves_the_store_the_daemon_opened::a_deployment_with_no_add_on_options_resolves_from_its_environment_alone", # crates/vigil/tests/a_live_command_resolves_the_store_the_daemon_opened.rs
+  "vigil::a_live_command_resolves_the_store_the_daemon_opened::a_live_command_reads_the_store_path_the_add_on_states", # crates/vigil/tests/a_live_command_resolves_the_store_the_daemon_opened.rs
+  "vigil::a_live_command_resolves_the_store_the_daemon_opened::a_packaged_deployment_that_states_no_store_falls_back_to_its_own_data_directory", # crates/vigil/tests/a_live_command_resolves_the_store_the_daemon_opened.rs
+  "vigil::a_live_command_resolves_the_store_the_daemon_opened::a_stated_store_path_is_never_rebuilt_from_the_data_directory", # crates/vigil/tests/a_live_command_resolves_the_store_the_daemon_opened.rs
+  "vigil::a_live_command_resolves_the_store_the_daemon_opened::the_environment_still_outranks_the_add_ons_options", # crates/vigil/tests/a_live_command_resolves_the_store_the_daemon_opened.rs
+  "vigil::a_packaged_live_command_becomes_the_deployments_runtime_user::a_live_command_becomes_the_same_runtime_user_the_daemon_dropped_to", # crates/vigil/tests/a_packaged_live_command_becomes_the_deployments_runtime_user.rs
+  "vigil::a_packaged_live_command_becomes_the_deployments_runtime_user::a_live_command_never_prepares_the_store_it_came_to_read", # crates/vigil/tests/a_packaged_live_command_becomes_the_deployments_runtime_user.rs
+  "vigil::a_packaged_live_command_becomes_the_deployments_runtime_user::a_live_command_refuses_an_unusable_group_list_as_loudly_as_the_daemon", # crates/vigil/tests/a_packaged_live_command_becomes_the_deployments_runtime_user.rs
+  "vigil::every_command_that_reaches_the_owner_channel_is_in_the_family::every_dispatch_that_asks_the_running_deployment_belongs_to_the_family", # crates/vigil/tests/every_command_that_reaches_the_owner_channel_is_in_the_family.rs
+  "vigil::every_command_that_reaches_the_owner_channel_is_in_the_family::every_member_of_the_family_really_has_a_dispatch_that_asks_the_running_deployment", # crates/vigil/tests/every_command_that_reaches_the_owner_channel_is_in_the_family.rs
+  "vigil::every_command_that_reaches_the_owner_channel_is_in_the_family::the_dispatch_reader_tells_an_arm_that_reaches_the_daemon_from_one_that_does_not", # crates/vigil/tests/every_command_that_reaches_the_owner_channel_is_in_the_family.rs
+  "vigil::every_command_that_reaches_the_owner_channel_is_in_the_family::the_dispatch_takes_the_identity_step_from_the_family_list_and_not_a_second_list", # crates/vigil/tests/every_command_that_reaches_the_owner_channel_is_in_the_family.rs
+  "vigil::every_live_command_dispatch_becomes_the_runtime_user_and_nothing_more::every_command_that_asks_the_running_deployment_becomes_its_runtime_user", # crates/vigil/tests/every_live_command_dispatch_becomes_the_runtime_user_and_nothing_more.rs
+  "vigil::every_live_command_dispatch_becomes_the_runtime_user_and_nothing_more::no_command_that_asks_the_running_deployment_prepares_the_store_it_came_to_read", # crates/vigil/tests/every_live_command_dispatch_becomes_the_runtime_user_and_nothing_more.rs
+  "vigil::every_live_command_dispatch_becomes_the_runtime_user_and_nothing_more::the_settings_command_asks_the_running_deployment_like_every_other_live_command", # crates/vigil/tests/every_live_command_dispatch_becomes_the_runtime_user_and_nothing_more.rs
+  "vigil::the_daemon_prepares_the_lock_file_its_store_really_has::the_daemon_hands_its_runtime_user_the_companion_lock_its_store_really_has", # crates/vigil/tests/the_daemon_prepares_the_lock_file_its_store_really_has.rs
+  "vigil::the_daemon_prepares_the_lock_file_its_store_really_has::the_daemon_prepares_no_lock_path_this_deployment_does_not_have", # crates/vigil/tests/the_daemon_prepares_the_lock_file_its_store_really_has.rs
+  "vigil::the_daemon_prepares_the_lock_file_its_store_really_has::the_daemon_still_prepares_the_store_it_is_about_to_open_and_the_directory_it_lives_in", # crates/vigil/tests/the_daemon_prepares_the_lock_file_its_store_really_has.rs
 ]

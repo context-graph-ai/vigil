@@ -3412,9 +3412,14 @@ mod tests {
 
         crate::settings_application::mark_running_process();
         let deployment = tempfile::tempdir().expect("a temporary deployment directory");
-        let store = crate::settings_store::SettingsStore::open(deployment.path())
+        // Keep one owner alive until every operator-surface reader below has
+        // finished. The production runtime owns its store for the whole time
+        // it serves a command; if this fixture drops its only enduring handle,
+        // the short-lived reader threads can all exit while the surface is in
+        // its final open and turn this consistency proof into an owner-shutdown
+        // race instead.
+        let _store_owner = crate::settings_store::SettingsStore::open(deployment.path())
             .expect("a store for the deployment under test");
-        drop(store);
 
         // The configuration under test, established rather than assumed: with
         // the domain left at its default the operator cannot author a backend

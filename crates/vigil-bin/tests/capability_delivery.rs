@@ -89,10 +89,12 @@ fn spawn_worker_against_dead_ticket(
         .arg("--detector-model-path")
         .arg(model_path)
         .env("VIGIL_DATA_DIR", data_dir)
+        // Acceleration off: the subject here is capability DELIVERY over the
+        // fabric, so the worker must reach its push attempt on the CPU backend
+        // rather than first preparing an accelerated detector.
+        .arg("--accelerated-detection")
+        .arg("false")
         .env("VIGIL_FABRIC_TICKET", ticket)
-        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
-        // env per the settings-authority census (still no flag/config seam).
-        .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", 20_000.to_string())
         .env_remove("VIGIL_RTSP_URL")
         .env_remove("VIGIL_FABRIC_HUB")
         .stdin(Stdio::null())
@@ -162,13 +164,15 @@ fn failed_capability_push_emits_named_error() {
          /health — a dead hub is not a startup failure"
     );
 
-    // Bounded wait for the named failure line the worker's own push attempt
-    // must emit once it gives up on the unreachable hub.
+    // Bounded wait for the attempt to be OVER — the settled line, which this
+    // node prints after whatever it has to say about the outcome. Waiting on
+    // the failure line alone would read the output one line too early, in the
+    // window where the attempt has spoken but not yet resolved.
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut logs = String::new();
     while Instant::now() < deadline {
         logs = worker.combined_logs();
-        if logs.contains("fabric_capability_push_failed") {
+        if logs.contains("fabric_capability_push_settled=true") {
             break;
         }
         thread::sleep(Duration::from_millis(100));
@@ -185,6 +189,15 @@ fn failed_capability_push_emits_named_error() {
         logs.contains("fabric_capability_push_failed"),
         "a worker whose capability push never reaches an unreachable hub must \
          say so with a named, greppable line (fabric_capability_push_failed) — \
+         got: {logs}"
+    );
+    // The attempt is also OVER, and says so once: an operator watching this
+    // node must be able to tell a delivery that failed from one still in
+    // flight, which a failure line alone cannot carry.
+    assert!(
+        logs.contains("outcome=failed"),
+        "the settled delivery line must record this attempt as failed, so a \
+         failed push is distinguishable from one that has not resolved yet — \
          got: {logs}"
     );
 }

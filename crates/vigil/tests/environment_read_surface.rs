@@ -944,6 +944,15 @@ const BASELINE_STARTING_SITE_COUNT: usize =
 /// entry as a read migrates to a declared setting) still leaves a SUBSET of
 /// the authorized membership and stays green — the ratchet the baseline
 /// exists to enable is preserved.
+///
+/// "Frozen" is about what this list may GRANT, not about its length. An
+/// entry whose variable no longer exists anywhere — neither in source nor
+/// in the baseline — is struck from it, because leaving it standing tells a
+/// reader that a read exists which does not, and it keeps authorizing a
+/// baseline entry nobody could justify today. A removal can only ever
+/// tighten the authorized membership, so it cannot smuggle a read in; an
+/// ADDITION still may, which is why additions go to
+/// [`AMENDED_ENVIRONMENT_READ_SITES`] below and never here.
 const ORIGINAL_ENVIRONMENT_READ_SITES: &[(&str, &str, &str)] = &[
     ("vigil/config.rs", "env_overrides", "VIGIL_DATA_DIR"),
     ("vigil/config.rs", "env_overrides", "VIGIL_STORE_PATH"),
@@ -1119,11 +1128,6 @@ const ORIGINAL_ENVIRONMENT_READ_SITES: &[(&str, &str, &str)] = &[
         "vigil/fabric.rs",
         "fabric_bring_up",
         "VIGIL_FABRIC_BRINGUP_DELAY_MS",
-    ),
-    (
-        "vigil/fabric.rs",
-        "fabric_bring_up",
-        "VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS",
     ),
     (
         "vigil/detection_accel.rs",

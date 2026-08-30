@@ -3,6 +3,10 @@
 version = 1
 
 [[file]]
+path = "crates/vigil/tests/a_failed_open_is_classified_from_the_error_it_returned.rs"
+reason = "Reviewed structural lineage, and structural BY NECESSITY: the contract is that a read command classifies the typed failure its own open returned rather than opening the store a second time to ask again, and the defect only shows behaviorally in the window between those two opens -- a holder that lets go in between makes the second open succeed, so the review commands answer capability-unavailable and the settings surface prints the stale first error, about a store that is no longer the one that refused the command. That window cannot be timed from a test, and both behavioral constructions attempted first came out GREEN against the defective source and were kept as regressions rather than passed off as captures: the whole-deployment-directory fingerprint (a refused command must touch this deployment's storage not at all, which catches the writable node handle the second open goes through if it ever leaves a trace) and the write-protected-store arm (the second open meets a permission failure the first never saw). A path that classifies the failure in hand has no second observation to disagree with, so the race stops existing rather than becoming rare -- which is exactly what this guard reads for. It forbids two named shapes on the read-command path only, carries a positive control that the forbidden shape is recognized and a negative control that an error-classifying path satisfies it whatever its classifier and type end up being called, and leaves the startup path -- a different caller, whose job IS to open and take the store -- entirely alone."
+
+[[file]]
 path = "crates/vigil/tests/addon_config_surface.rs"
 reason = "Legacy add-on YAML/help surface scanner; replace with the typed packaging contract checker."
 
@@ -33,6 +37,10 @@ reason = "Reviewed frozen inventory of secret-shaped command-line flags; reads c
 [[file]]
 path = "crates/vigil/tests/detection_accel_backend.rs"
 reason = "Mixed accelerated-backend behavior and existing live-wiring source parser; move the parser to the central structural checker."
+
+[[file]]
+path = "crates/vigil/tests/every_command_that_reaches_the_owner_channel_is_in_the_family.rs"
+reason = "Reviewed structural scan, and structural BY NECESSITY: the contract is that the list of subcommands which become this deployment's runtime user before they open the owner channel is CLOSED -- no dispatch arm reaches that channel from outside it -- and the defect it guards is a subcommand's ABSENCE from a list, which has no behavior to observe. A behavioral form can only exercise the subcommands someone thought to name, which is the same set someone thought to add to the list, so it would have passed against the omission that left `vigil settings` opening the owner channel as whoever ran it while the read commands beside it were served. The scan reads only the command dispatch in crates/vigil/src/lib.rs, in both directions (every arm that routes to print_control_or_direct or print_settings is a member, and every member has such an arm), asserts the dispatch takes the identity step from the family list itself rather than a second hand-written one, and carries a planted-text positive/negative control plus a both-kinds-present check on the real dispatch, so a reader that recognized nothing cannot pass quietly."
 
 [[file]]
 path = "crates/vigil/tests/environment_read_surface.rs"
@@ -93,3 +101,7 @@ reason = "Reads the worker-detector bootstrap and the camera registration to pro
 [[file]]
 path = "crates/vigil/tests/probe_timer_removal.rs"
 reason = "Reads the shipped source for the two withdrawn detection timers, because the surface that matters most is the remedy Vigil prints when a preparation fails: an operator told to lengthen a wait that decides nothing spends their time on a value with no effect. The declared-roster half of the same contract is asserted behaviorally beside it."
+
+[[file]]
+path = "crates/vigil/tests/the_startup_wait_for_readers_is_kernel_driven.rs"
+reason = "Reviewed structural lineage, and structural BY NECESSITY: the contract is that the startup wait for a store's direct readers wakes on the RELEASE rather than on a timer, which the standing owner ruling of 2026-08-14 requires outright (an automatic re-attempt fires on a real event, never on a periodic timer). Both behavioral halves are already pinned unfakeably beside it -- a runtime that waits and comes up owning the store when the reader releases (crates/vigil-bin/tests/hydrating_reader_does_not_degrade_a_starting_runtime.rs) and a waiting runtime that still stops promptly with the abandoned-on-shutdown line (crates/vigil-bin/tests/a_waiting_runtime_still_stops_when_asked.rs) -- and both pass against the 250 ms sleep-retry loop and against a kernel wait alike, because the two are externally indistinguishable in outcome: what separates them is a quarter-second of latency on every start and a wakeup every 250 ms for as long as the wait lasts. Asserting on either would be exactly the elapsed-time judgment the ruling forbids, so the behavioral legs stay where they are as regressions the replacement must keep passing and the shape is what is read here. Scoped to the reader-clearing wait alone (one named function body, plus the pacing constant's declaration in the same file); every other sleep in vigil is a different caller and is untouched. Carries a positive control that the guard recognizes a sleep-retry wait and a negative control that a wait blocking on contextdb's own wait_for_reader_release satisfies it whatever the surrounding arrangement ends up being."

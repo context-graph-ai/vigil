@@ -66,15 +66,17 @@ returns a clean error instead of substituting another event.
 <!-- enforced by: `vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
 <!-- enforced by: `vigil-bin::first_light_loop::vigil_why_on_unknown_event_id_errors_cleanly` -->
 
-Malformed detection IDs are also intended to return a clean error, but the mapped error-path test
-uses a well-formed unknown UUID.
+A malformed detection ID is refused as a malformed ID rather than reported as a missing event: the
+answer names what was typed and the form a detection ID takes, so an operator who mistyped one is
+sent to their own typing rather than to a recording nobody ever named.
 
-<!-- vigil-unenforced: classification=documentation-gap; reason=`The mapped why error test proves a well-formed unknown UUID only, not malformed identifier rejection.` -->
+<!-- vigil-claim: `vigil.docs-why-this-fired.a-malformed-detection-id-is-refused-as` -->
+<!-- enforced by: `vigil-bin::why_refuses_an_id_it_cannot_serve::a_malformed_detection_id_is_refused_as_a_malformed_id_and_not_as_a_missing_event` -->
 
-When the daemon owns the open store, the CLI asks it over the local control socket. If no runtime is holding the store, the CLI reads the same local store directly. It does not send the review request to a cloud service.
+When the daemon owns the open store, the CLI asks that process for the answer over the store's own owner channel — the store path is the whole address, and there is no separate socket to configure or clean up. If no runtime is holding the store, the CLI reads the same local store directly. It does not send the review request to a cloud service.
 
 <!-- vigil-claim: `vigil.docs-why-this-fired.when-the-daemon-owns-the-open-store` -->
-<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_served_over_socket_while_store_is_locked` -->
+<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_served_by_the_store_owner_while_the_store_is_locked` -->
 <!-- enforced by: `vigil-bin::first_light_loop::review_and_stats_surfaces_make_no_network_call` -->
 
 ## Use the local review data

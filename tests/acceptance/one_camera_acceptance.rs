@@ -232,6 +232,10 @@ fn frigate_replacement_loop_runs_over_direct_rtsp_synthetic() {
 
 #[test]
 #[ignore = "physical: requires VIGIL_ACCEPTANCE_RTSP_URL and a recorded 30-minute real-camera window; run this exact test explicitly"]
+// The physical run's own inputs: the camera it is pointed at and how long a
+// window it is given. This test does nothing at all without them, and neither
+// is a value the product adjusts (allow: test harness input).
+#[allow(clippy::disallowed_methods)]
 fn frigate_replacement_real_camera_event_lands_and_walks() {
     let mut failures = Vec::new();
 
@@ -637,6 +641,9 @@ fn hard_event_window(failures: &mut Vec<String>) -> Option<(i64, i64)> {
     }
 }
 
+// A timestamp the physical run is handed by whoever recorded the window it
+// checks against (allow: test harness input).
+#[allow(clippy::disallowed_methods)]
 fn required_epoch_env(key: &str, failures: &mut Vec<String>) -> Option<i64> {
     match env::var(key) {
         Ok(value) if !value.trim().is_empty() => match value.trim().parse::<i64>() {
@@ -1158,6 +1165,10 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+// Locating an external tool the harness shells out to, by the variable that
+// names it and then by PATH — neither is a product setting (allow: test
+// harness input).
+#[allow(clippy::disallowed_methods)]
 fn tool_path(env_key: &str, binary: &str) -> Option<PathBuf> {
     if let Some(path) = env::var_os(env_key).map(PathBuf::from)
         && path.is_file()

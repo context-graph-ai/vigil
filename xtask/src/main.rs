@@ -15,6 +15,7 @@ mod verify;
 // working exactly as before while the one parsing implementation becomes
 // callable from outside this crate too.
 pub(crate) use xtask::repo_root;
+pub(crate) use xtask::target_dir;
 pub(crate) use xtask::test_estate;
 
 const PERSON_SHA: &str = "a65415f0da868f59014777ace1b702f6d7c6274c18e5af3e344cf710c37526ea";

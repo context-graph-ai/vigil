@@ -60,10 +60,8 @@ fn bind_spec(identity: &Path) -> String {
     format!("iroh:?identity={}", identity.display())
 }
 
-fn node_id_of(key: &Path) -> String {
-    FabricIdentity::load_or_generate(key)
-        .expect("identity")
-        .node_id()
+fn identity_of(key: &Path) -> Arc<FabricIdentity> {
+    Arc::new(FabricIdentity::load_or_generate(key).expect("identity"))
 }
 
 fn start_hub(
@@ -71,11 +69,20 @@ fn start_hub(
     tenant: &str,
 ) -> (Arc<Database>, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
     let hub_db = Arc::new(Database::open_memory());
-    let server = Arc::new(SyncServer::with_authenticated_transport_for_test(
-        hub_db.clone(),
-        broker.server_as(&format!("hub-{tenant}")),
-        TenantId::from(tenant),
-    ));
+    // The hub signs what it serves, so it holds a real fabric identity and is
+    // known by that identity's own node id — production carries both, and the
+    // protocol refuses a pull it cannot attribute to an authenticated hub.
+    let hub_identity = Arc::new(FabricIdentity::generate());
+    let hub_node = hub_identity.node_id();
+    let server = Arc::new(
+        SyncServer::with_authenticated_transport_and_identity_for_test(
+            hub_db.clone(),
+            broker.server_as(&hub_node),
+            TenantId::from(tenant),
+            hub_node.clone(),
+            hub_identity,
+        ),
+    );
     let shutdown = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
         let server = server.clone();
@@ -236,18 +243,22 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
     // Submitter (holder): has the encoded frames, submits the job.
     let holder_dir = tempfile::tempdir().expect("holder dir");
     let holder_key = identity_file(&holder_dir);
-    let holder_node = node_id_of(&holder_key);
+    let holder_identity = identity_of(&holder_key);
+    let holder_node = holder_identity.node_id();
     let encoded_units = encoded_h264_units(6);
     let framed = encode_length_framed_units(&encoded_units);
     let hash = BlobHash::of(&framed);
 
     let holder_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&holder_db).expect("holder ledger schema");
-    let holder_client = Arc::new(SyncClient::with_authenticated_transport_for_test(
-        holder_db.clone(),
-        broker.client_as(&holder_node),
-        TenantId::from(tenant),
-    ));
+    let holder_client = Arc::new(
+        SyncClient::with_authenticated_transport_and_identity_for_test(
+            holder_db.clone(),
+            broker.client_as(&holder_node),
+            TenantId::from(tenant),
+            holder_identity,
+        ),
+    );
     let holder_blob_service = Arc::new(BlobStore::new(
         holder_db.clone(),
         MovementPolicy {
@@ -287,14 +298,16 @@ async fn worker_advertises_truthful_backend_claims_materializes_runs_records_onc
     // executes via vigil's own WorkExecutor + a spy detector backend.
     let worker_dir = tempfile::tempdir().expect("worker dir");
     let worker_key = identity_file(&worker_dir);
-    let worker_node = node_id_of(&worker_key);
+    let worker_identity = identity_of(&worker_key);
+    let worker_node = worker_identity.node_id();
 
     let worker_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&worker_db).expect("worker ledger schema");
-    let worker_client = SyncClient::with_authenticated_transport_for_test(
+    let worker_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         worker_db.clone(),
         broker.client_as(&worker_node),
         TenantId::from(tenant),
+        worker_identity,
     );
     let worker_blob_service = Arc::new(BlobStore::new(
         worker_db.clone(),

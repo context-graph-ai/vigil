@@ -55,10 +55,8 @@ fn identity_file(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("fabric-identity.key")
 }
 
-fn node_id_of(key: &Path) -> String {
-    FabricIdentity::load_or_generate(key)
-        .expect("identity")
-        .node_id()
+fn identity_of(key: &Path) -> Arc<FabricIdentity> {
+    Arc::new(FabricIdentity::load_or_generate(key).expect("identity"))
 }
 
 fn start_hub(
@@ -66,11 +64,20 @@ fn start_hub(
     tenant: &str,
 ) -> (Arc<Database>, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
     let hub_db = Arc::new(Database::open_memory());
-    let server = Arc::new(SyncServer::with_authenticated_transport_for_test(
-        hub_db.clone(),
-        broker.server_as(&format!("hub-{tenant}")),
-        TenantId::from(tenant),
-    ));
+    // The hub signs what it serves, so it holds a real fabric identity and is
+    // known by that identity's own node id — production carries both, and the
+    // protocol refuses a pull it cannot attribute to an authenticated hub.
+    let hub_identity = Arc::new(FabricIdentity::generate());
+    let hub_node = hub_identity.node_id();
+    let server = Arc::new(
+        SyncServer::with_authenticated_transport_and_identity_for_test(
+            hub_db.clone(),
+            broker.server_as(&hub_node),
+            TenantId::from(tenant),
+            hub_node.clone(),
+            hub_identity,
+        ),
+    );
     let shutdown = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
         let server = server.clone();
@@ -188,13 +195,15 @@ async fn worker_death_midlease_falls_back_local_with_named_receipt() {
     // The submitter (node A) will also run its own standing worker loop.
     let a_dir = tempfile::tempdir().expect("a dir");
     let a_key = identity_file(&a_dir);
-    let a_node = node_id_of(&a_key);
+    let a_identity = identity_of(&a_key);
+    let a_node = a_identity.node_id();
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client = SyncClient::with_authenticated_transport_for_test(
+    let a_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         a_db.clone(),
         broker.client_as(&a_node),
         TenantId::from(tenant),
+        a_identity,
     );
 
     let deadline_ms = T0 + DEADLINE_OFFSET;
@@ -207,13 +216,15 @@ async fn worker_death_midlease_falls_back_local_with_named_receipt() {
     // `poll_and_execute_once` itself uses — no bespoke fallback protocol.
     let b_dir = tempfile::tempdir().expect("b dir");
     let b_key = identity_file(&b_dir);
-    let b_node = node_id_of(&b_key);
+    let b_identity = identity_of(&b_key);
+    let b_node = b_identity.node_id();
     let b_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&b_db).expect("B ledger schema");
-    let b_client = SyncClient::with_authenticated_transport_for_test(
+    let b_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         b_db.clone(),
         broker.client_as(&b_node),
         TenantId::from(tenant),
+        b_identity,
     );
     within(b_client.pull_default())
         .await

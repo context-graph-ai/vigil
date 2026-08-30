@@ -467,6 +467,6 @@ lineage = "Physical release receipt checklist; registration is not a completed r
 
 [[asset]]
 path = "tests/ha-os-vm/store_probe.rs"
-sha256 = "sha256:2b4fd62d97a06d454edf2824f195f4b81239cef061df78f9031ed69b1189c946"
+sha256 = "sha256:f4cad1b65c05715091f5853fc732766108510a49dd5eadb581ba58b419954773"
 kind = "probe-source"
 lineage = "Static store probe source consumed by HA-OS acceptance."

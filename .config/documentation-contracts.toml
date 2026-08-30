@@ -348,6 +348,48 @@ reviewed = true
 reviewed_by = "Independent documentation repair review, 2026-07-21"
 rationale = "Independent review confirmed fabric configuration, truthful detector capability advertisement, exchanged detector work, and named local fallback after a claimed worker dies."
 
+[[claim]]
+id = "vigil.docs-architecture.a-node-serves-the-fleet-as-soon"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:7f6c98f6bfb2b5f1dcdf6759864c9ae779af781c061375b8926deab75fe8a909"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model",
+  "vigil-bin::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera",
+  "vigil::fabric::worker_detector_slot_tests::a_detector_that_arrives_before_anything_waits_still_starts_exactly_one_worker",
+  "vigil::fabric::worker_detector_slot_tests::an_operator_stop_settles_a_waiting_start_and_nothing_starts_after_it",
+]
+reviewed = true
+reviewed_by = "Semantic-mapping review by the window-13 test author, 2026-08-25 — the author of the bound tests, NOT an independent reviewer: each assertion in the paragraph was traced to a named test that runs it, and the run state of every one is cited below. Commission an independent pass if this mapping is load-bearing."
+rationale = "Every sentence of the paragraph has a test that runs it. That the worker loop starts the moment a detector arrives whichever way the order falls is the slot pair: one publishes before anything waits and still starts exactly one worker, the other has the operator stop settle a start that is still pending so a detector finishing during teardown starts nothing. That a real node reaches that state, and that a node with no loadable model advertises nothing and says why instead, are the two cameraless arms over a real process. Nothing here is judged by elapsed time, which is the paragraph's own claim and the standing owner ruling of 2026-08-14. All four run GREEN at this tuple (steps w13vgred-flip-2 and the implementation run that landed the slot pair)."
+
+[[claim]]
+id = "vigil.docs-architecture.every-capability-delivery-attempt-ends-on-one"
+document = "docs/architecture.md"
+paragraph_sha256 = "sha256:90f96e7154bde231f5a2f4ab3e30c6a1451f33933df438a94773a5eaad1773ed"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::capability_delivery::failed_capability_push_emits_named_error",
+  "vigil-bin::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_first",
+]
+reviewed = true
+reviewed_by = "Semantic-mapping review by the window-13 test author, 2026-08-25 — the author of the bound tests, NOT an independent reviewer: each assertion in the paragraph was traced to a named test that runs it, and the run state of every one is cited below. Commission an independent pass if this mapping is load-bearing."
+rationale = "The paragraph promises one greppable line per delivery attempt naming how it resolved, and both named tests read exactly that line rather than inferring from an absence: the unreachable-hub arm requires the settled line and the failed outcome beside its named error, and the two-process arm requires the hub — whose own writes are canonical — to record that no push was attempted, which is a different fact from a push that succeeded. Both GREEN at this tuple (w13vgred-run-16)."
+
+[[claim]]
+id = "vigil.docs-cli.if-another-process-is-reading-this-deployments"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:5c619d01c432a684c4179ede7a7fcd2699263fc402387673224d4ef87700f706"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::a_waiting_runtime_still_stops_when_asked::a_runtime_waiting_for_a_reader_stops_when_it_is_asked_to",
+  "vigil-bin::hydrating_reader_does_not_degrade_a_starting_runtime::a_hydrating_reader_does_not_permanently_degrade_a_starting_runtime",
+  "vigil-bin::hydrating_reader_does_not_degrade_a_starting_runtime::a_startup_open_refused_by_readers_names_the_readers_holding_the_store",
+]
+reviewed = true
+reviewed_by = "Semantic-mapping review by the window-13 test author, 2026-08-25 — the author of the bound tests, NOT an independent reviewer: each assertion in the paragraph was traced to a named test that runs it, and the run state of every one is cited below. Commission an independent pass if this mapping is load-bearing."
+rationale = "Three tests carry the three things the paragraph promises: that the runtime waits rather than failing and says so on its own output; that the wait ends by the reader letting go, with the refusal naming the verified readers holding the store; and that a stop delivered mid-wait is still obeyed, so the wait has no outer limit but is cancellable. The reader is genuinely parked inside hydration in a separate process in each. All GREEN at this tuple."
+
 # docs/cameras.md:22
 [[claim]]
 id = "vigil.docs-cameras.on-startup-vigil-records-the-configured-camera"
@@ -472,6 +514,48 @@ reviewed = true
 reviewed_by = "Independent documentation repair review, 2026-07-21"
 rationale = "Independent review confirmed that `vigil events` reads the explicitly selected persisted store and orders its landed events newest observed first."
 
+# docs/cli.md:373
+[[claim]]
+id = "vigil.docs-cli.nothing-has-ever-run-here-there-is"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:a2b1b8d0c591e8f0b7c5aa555263927aac4517fade3a819017659502851cc92d"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::no_live_command_brings_a_never_started_deployment_into_existence",
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::the_review_commands_answer_a_never_started_deployment_honestly",
+]
+reviewed = true
+reviewed_by = "Independent semantic review, 2026-08-29, window-18 estate attestor — not the paragraph's author: paragraph_sha256 re-hashed byte-for-byte from docs/cli.md's current text (whitespace-normalized, same algorithm as xtask/src/test_estate.rs's paragraph_digest); confirmed every assertion against crates/vigil/src/lib.rs's never_started_answer/direct_read_local (events answers empty, why refuses without-a-store, enroll/forget refuse naming the directory, stats reads its own never-started snapshot) and against both named tests read in full."
+rationale = "The paragraph states the fourth condition that stops a read command opening the store — no runtime has ever started here — and what each command in the family answers, ending in the promise that asking leaves the directory exactly as it was. The named tests drive every one of the six commands as a real process, each in a directory of its own, and check the directory's whole contents afterwards; the second holds the two review answers the paragraph spells out, so a fix that stopped creating a store could not quietly turn a served answer into a refusal."
+
+# docs/cli.md:206
+[[claim]]
+id = "vigil.docs-cli.vigil-settings-find-text-searches-the-same"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:5d7872d7055abb1e6ba5fc3d4cb835eec620936f2f5b4cc25d099f05773efed4"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-bin::settings_find_is_the_search_verb::find_narrows_the_listing_to_every_line_carrying_the_text",
+  "vigil-bin::settings_find_is_the_search_verb::a_search_that_matches_nothing_succeeded_and_found_nothing",
+  "vigil-bin::settings_find_is_the_search_verb::a_search_with_no_text_is_a_usage_error",
+]
+reviewed = true
+reviewed_by = "Independent semantic review, 2026-08-29, window-18 estate attestor — not the paragraph's author: paragraph_sha256 re-hashed byte-for-byte from docs/cli.md's current text; confirmed against crates/vigil/src/settings_command.rs's `find` verb (git show 7cb305f read in full — usage error on empty text, empty-match returns success with empty answer, search over the whole rendered listing) and against DR-28's own text in owner-rulings.md, and against the three named tests read in full."
+rationale = "The paragraph states owner ruling DR-28's search verb: `vigil settings find <text>` answers with every line of the listing carrying the text — setting lines, the control lines and the explanations alike — a no-match search succeeds with an empty answer and exit 0, and a search with no text is a usage error. The named tests drive a real process against a deployment whose listing they read first, compare the search answer line for line against the lines of that listing which carry the text, and hold the no-match and no-text answers to their exit statuses."
+
+# docs/cli.md:118
+[[claim]]
+id = "vigil.docs-cli.a-malformed-detection-id-is-refused-as"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:569850fe5c71d3e270c7dc42bdbedb1037045fcd47d1089b9a3734fc32f46edd"
+evidence_tier = "acceptance"
+tests = [
+  "vigil-bin::why_refuses_an_id_it_cannot_serve::a_malformed_detection_id_is_refused_as_a_malformed_id_and_not_as_a_missing_event",
+]
+reviewed = true
+reviewed_by = "Independent semantic review, 2026-08-29, window-18 estate attestor — not the paragraph's author: paragraph_sha256 re-hashed byte-for-byte from docs/cli.md's current text; confirmed against crates/vigil-bin/tests/why_refuses_an_id_it_cannot_serve.rs's assert_refused helper (read in full) and crates/vigil/src/lib.rs's why-refusal code path, and against the named test read in full."
+rationale = "The paragraph states that a malformed detection ID is refused as a malformed ID and never as a missing event, naming what was typed and the form a detection ID takes. The named test drives a real `vigil why not-a-uuid` process on both routes and holds exactly that: the refusal carries the typed argument, names the UUID form, never says the event was not found, and does not read as the answer an unknown-but-well-formed id gets."
+
 # docs/cli.md:75
 [[claim]]
 id = "vigil.docs-cli.walks-a-detection-through-camera-site-detector"
@@ -543,7 +627,7 @@ rationale = "Independent review confirmed that the named canonical tests directl
 [[claim]]
 id = "vigil.docs-cli.prints-this-nodes-fabric-enrollment-ticket-to"
 document = "docs/cli.md"
-paragraph_sha256 = "sha256:ad028e76fefb7c38c48fe03f5bf7a43b63d238cc55dbb6239dcafec28a11e0c0"
+paragraph_sha256 = "sha256:f12102c3c94eaf3315f26a2931886167e246473ceeb84e5578c57df90ffa5cc1"
 evidence_tier = "behavioral_unit"
 tests = [
   "vigil-bin::binary_cli_surface_smoke::help_flag_names_the_fabric_ticket_command",
@@ -552,8 +636,64 @@ tests = [
   "vigil-bin::fabric_ticket_single_retrieval_path::fabric_enrollment_ticket_appears_on_no_surface_except_the_two_sanctioned_retrieval_paths",
 ]
 reviewed = true
-reviewed_by = "Independent review (2026-08-02): semantic mapping read against the bound paragraph and confirmed against the named canonical tests."
-rationale = "Independent semantic review confirmed each assertion in the bound paragraph is carried by a named canonical test: that the command exists and is advertised on the help surface; that it prints the same ticket the running hub advertised; that it still answers while the node is running, via the cached fallback the paragraph describes, because a live rebind hits the already-held ledger and fails fast with a typed database-locked error; and that the credential is absent from every other displayed or served surface while sitting in exactly two owner-only persisted stores, which the containment test proves by sweeping every persisted file rather than a hand-listed set. This reviewer additionally mutation-proved that containment test at this head: a production change persisting the ticket to one further file reddens it and the failure names the planted path."
+reviewed_by = "Re-reviewed 2026-08-25 by the window-13 manager: the prior rationale quoted the mechanism that has since been removed, so it asserted something untrue about this surface and was replaced rather than re-hashed. Supersedes the independent review of 2026-08-02, whose reading of the paragraph's other assertions stands."
+rationale = "A separate `vigil fabric ticket` process against a running hub meets the writer-held ledger as ONE typed condition — same-process `DatabaseLocked` or cross-process `ReadFailure(HeldByWriter)` — and serves the enrollment ticket from the identity-checked cache; reader-held, foreign-identity-stamped, and unrelated open failures refuse instead of serving. Enforced by fabric_ticket_command (including the running-hub name), fabric_ticket_single_retrieval_path, and only_a_writer_held_ledger_unlocks_the_cached_ticket. The rest of the bound paragraph is unchanged and its earlier reading stands: the command exists and is advertised on the help surface, it prints the same ticket the running hub advertised, and the credential is absent from every other displayed or served surface while sitting in exactly two owner-only persisted stores — which the containment test proves by sweeping every persisted file rather than a hand-listed set, and which was mutation-proved at its own head: a production change persisting the ticket to one further file reddens it and the failure names the planted path."
+
+[[claim]]
+id = "vigil.docs-cli.somebody-is-reading-it-another-process-a"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:4631405b6c5fc808fb0350a2431b3ac9022457e4bf298ddd99d9253c790b93b3"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::every_read_only_settings_shape_is_served_while_a_reader_holds_the_store",
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::the_same_commands_answer_normally_once_the_reader_has_finished",
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::an_edit_answers_that_the_store_is_busy_rather_than_unreadable",
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::why_and_events_are_served_while_a_reader_holds_the_store",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph is what a reader holding the store costs an operator, and the answer now depends on whether the command ASKS or CHANGES. Everything that only asks — the four read-only settings shapes, `vigil why` and `vigil events` — reads through context-graph's read-only consumer reader, which coexists with other readers, so all six are SERVED their ordinary answer and name nobody: held by every_read_only_settings_shape_is_served_while_a_reader_holds_the_store and why_and_events_are_served_while_a_reader_holds_the_store, each driving its shapes against a genuinely parked reader and asserting the answer, nobody named, no busy or unmanaged line, and the store byte-identical. `vigil enroll` and `vigil forget` change what this node recognizes, so they take the writable existing-only door and genuinely wait: they are what still owes the busy answer with the reader count, the verified reader's process id and the store path, held by an_edit_answers_that_the_store_is_busy_rather_than_unreadable. The last test carries the split itself: it runs every shape before any reader exists, while one is parked, and after it lets go, requiring the two edits to name the reader in the middle moment and every asking shape never to, so each family's answer is provably about the reader rather than about the deployment. A real reader is held inside hydration in its own process throughout. All four GREEN at this tuple (w18vfix2-gate-1)."
+
+[[claim]]
+id = "vigil.docs-cli.another-runtime-owns-it-a-writer-holds"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:be06326d31ad51f658c86c3db982a56fce0ec5f0059c7f9728988fcddb741792"
+evidence_tier = "integration"
+tests = [
+  "vigil-bin::fabric_ticket_command::fabric_ticket_command_prints_the_same_ticket_while_the_hub_node_is_still_running",
+  "vigil::store_open_failure_classes::a_locked_store_still_refuses_a_second_runtime_naming_the_holder",
+]
+reviewed = true
+reviewed_by = "Semantic-mapping review by the window-13 test author, 2026-08-25 — the author of the bound tests, NOT an independent reviewer: each assertion in the paragraph was traced to a named test that runs it, and the run state of every one is cited below. Commission an independent pass if this mapping is load-bearing."
+rationale = "One condition however it is reached, spelled by type: the store-open classifier proves a second runtime on a held store is refused by a typed variant naming the holder rather than by matching text, and the ticket command proves the cross-process spelling of that same condition is met and acted on while a hub is genuinely running. Both GREEN at this tuple (w13vgred-check-4, w13vgred-flip-2)."
+
+[[claim]]
+id = "vigil.docs-cli.it-cannot-be-read-at-all-a"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:f2d8fcf77cea13943e963b78b6d4ae5610a7cc84f1c2d3829b30b33c4eacaf9d"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::storeless_command_answers_without_guessing::a_command_that_cannot_read_the_store_answers_without_inventing_this_deployments_state",
+  "vigil-bin::storeless_command_answers_without_guessing::no_answer_shape_carries_an_identity_when_the_store_cannot_be_read",
+]
+reviewed = true
+reviewed_by = "Semantic-mapping review by the window-13 test author, 2026-08-25 — the author of the bound tests, NOT an independent reviewer: each assertion in the paragraph was traced to a named test that runs it, and the run state of every one is cited below. Commission an independent pass if this mapping is load-bearing."
+rationale = "What the paragraph promises is mostly ABSENCE — no settings listing, no domain roster, no identity — and both named tests assert that absence against a deployment started with values that are NOT the product defaults, so an answer showing the automatic floor is provably a different deployment's rather than a reading of this one. The second holds the identity half unconditionally, since a command that could not read the store could only produce one by deriving it. Both GREEN at this tuple."
+
+[[claim]]
+id = "vigil.docs-cli.how-each-answer-is-delivered-does-not"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:7de25d91adf1e297b7bdfbfcde88e777cc0c83b09b8ee0919284b76484ea4b03"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::every_read_only_settings_shape_is_served_while_a_reader_holds_the_store",
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::an_edit_answers_that_the_store_is_busy_rather_than_unreadable",
+  "vigil-bin::a_store_busy_with_readers_is_not_an_unreadable_store::why_and_events_are_served_while_a_reader_holds_the_store",
+  "vigil-bin::storeless_command_answers_without_guessing::each_read_shape_keeps_its_own_status_and_stream_when_the_store_cannot_be_read",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "Per-shape delivery, scoped to the conditions each shape actually meets: no question meets the reader condition any more — every asking shape reads through the door that coexists with readers and is served at exit 0, which the paragraph now states and which every_read_only_settings_shape_is_served_while_a_reader_holds_the_store and why_and_events_are_served_while_a_reader_holds_the_store hold between them. For every condition a shape does meet, the delivery is unchanged and the earlier reading stands. Previously: unchanged per-shape delivery contract, scoped honestly: the opening sentence now says the delivery does not change with which of the FOUR store-open conditions produced it, rather than with the reason for it flatly, because a fifth refusal — a live owner already serving as many requests as it admits — leaves on standard error at exit 2 even for the read-only settings shapes this paragraph sends to standard output. That carve-out is stated in its own paragraph immediately below, under its own classification. The three named tests still hold every shape in this paragraph to its own stream and status across the busy and unreadable conditions."
 
 # docs/concepts.md:9
 [[claim]]
@@ -1045,22 +1185,6 @@ reviewed = true
 reviewed_by = "Independent documentation repair review, 2026-07-21"
 rationale = "Independent review confirmed that the named canonical tests directly enforce the adjacent narrowed claim."
 
-# docs/getting-started.md:132
-[[claim]]
-id = "vigil.docs-getting-started.vigil-events-lists-recent-detections-vigil-why"
-document = "docs/getting-started.md"
-paragraph_sha256 = "sha256:f6627437bb0294ab4b1d56be480b4a315b8e690cd90cc2cf6b054321a98e52b2"
-evidence_tier = "integration"
-tests = [
-  "vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first",
-  "vigil-bin::first_light_loop::vigil_stats_reports_live_pipeline_counters",
-  "vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context",
-]
-reviewed = true
-reviewed_by = "Independent documentation review, 2026-07-21"
-rationale = "Independent review confirmed that the named tests directly enforce the adjacent shipped claim."
-
-# docs/ha-integration.md:13
 [[claim]]
 id = "vigil.docs-ha-integration.install-and-run-the-mosquitto-broker-addon"
 document = "docs/ha-integration.md"
@@ -1703,11 +1827,11 @@ rationale = "Independent review confirmed that the named canonical tests directl
 [[claim]]
 id = "vigil.docs-why-this-fired.when-the-daemon-owns-the-open-store"
 document = "docs/why-this-fired.md"
-paragraph_sha256 = "sha256:4302e2aca835f8d3653ffb63844da4fc2cc1f2836ffa82dfc6d4f46cf624f01a"
+paragraph_sha256 = "sha256:a402d325befdcab3fd1b7ffa59e9734ed70619f9670cd692875c08901d7569f7"
 evidence_tier = "integration"
 tests = [
   "vigil-bin::first_light_loop::review_and_stats_surfaces_make_no_network_call",
-  "vigil-bin::first_light_loop::vigil_why_served_over_socket_while_store_is_locked",
+  "vigil-bin::first_light_loop::vigil_why_served_by_the_store_owner_while_the_store_is_locked",
 ]
 reviewed = true
 reviewed_by = "Independent documentation review, 2026-07-21"
@@ -1984,3 +2108,211 @@ tests = [
 reviewed = true
 reviewed_by = "Independent documentation review, 2026-08-11"
 rationale = "Independent review confirmed the paragraph's authority-and-scope ranking, most-recent-author tie-break between local surfaces, and the environment's zero rank are each proved by the named tests, matching the settings authority model this arc shipped."
+
+# Public command inventory and the settings surface, docs/cli.md.
+
+[[claim]]
+id = "vigil.docs-cli.the-current-binary-dispatches-ten-commands-nine"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:53a5ffd32a40b8bf8b6ffc520b7a16b9fd98f0d3674c9a547426fa4ae707529d"
+evidence_tier = "integration"
+tests = [
+  "vigil-bin::help_names_every_public_command::every_advertised_command_is_dispatched_by_the_binary",
+  "vigil-bin::help_names_every_public_command::help_names_no_internal_subcommand",
+  "vigil-bin::help_names_every_public_command::help_prints_exactly_the_declared_public_inventory",
+  "vigil-bin::help_names_every_public_command::the_declared_inventory_is_exactly_the_nine_public_commands",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The table is the page-opening inventory: nine public commands, one row each, and the statement that vigil --help names every one of them. The named tests hold the help output, public_commands() and the binary dispatch to each other, so a command added, removed or renamed in any one of the three fails; a tenth row, or a row for the internal detector-probe subcommand, fails with them."
+
+[[claim]]
+id = "vigil.docs-cli.every-one-of-these-asks-the-process"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:1779c1b7d8cce8b0568830c614f2105b37a6a9ffe1e5ccbf41a233afb7f5c58c"
+evidence_tier = "integration"
+tests = [
+  "vigil-bin::settings_live_operator_visibility::listing_an_unstarted_deployment_leaves_no_store_on_disk",
+  "vigil-bin::settings_live_operator_visibility::listing_answers_by_direct_read_when_no_runtime_owns_the_store",
+  "vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "Unchanged in substance except that the owner-served marker is now printed rather than described: the paragraph names the literal served-by=af_unix line, says an idle-store read carries no such line, and keeps the both-routes-one-report and creates-nothing promises. The three named tests drive the owner-served route, the direct-read route, and a listing of a never-started deployment whose directory is checked afterwards."
+
+[[claim]]
+id = "vigil.docs-cli.vigil-settings-domain-domain-narrows-the-same"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:3e3c4874ff5368c20203ca690179b4c049fe24bb50bec2d85507e313959ac6e4"
+evidence_tier = "integration"
+tests = [
+  "vigil-bin::settings_live_application_while_running::a_rate_change_made_while_running_takes_effect_without_a_restart",
+  "vigil-bin::settings_live_application_while_running::a_rate_withdrawn_while_running_is_taken_back_without_a_restart",
+  "vigil::settings_application_timing_roster::the_values_the_take_back_promise_covers_are_declared_live",
+]
+reviewed = true
+reviewed_by = "Independent semantic review, 2026-08-29, window-18 estate attestor — not the paragraph's author: paragraph_sha256 re-hashed byte-for-byte from docs/cli.md's current text; confirmed the withdrawal witness (a_rate_withdrawn_while_running_is_taken_back_without_a_restart) exists and passes beside the change witness by reading crates/vigil-bin/tests/settings_live_application_while_running.rs directly."
+rationale = "The paragraph now describes `settings set` and `settings reset` alone — the search verb moved to its own paragraph under owner ruling DR-28 — and names the withdrawal witness beside the change witness, because the promise it states, that a change made against the running node takes effect before the answer is rendered, is made of both moves."
+
+[[claim]]
+id = "vigil.docs-cli.vigil-settings-identity-prints-this-nodes-service"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:7ffc5724664367b4109edbf6e7870850c7b5d45a4162763cfb40b536f6a0a94d"
+evidence_tier = "integration"
+tests = [
+  "vigil-bin::identity_refusal_through_settings_cli::resetting_the_identity_through_the_cli_is_refused_with_the_consequence_and_changes_nothing",
+  "vigil-bin::identity_refusal_through_settings_cli::setting_the_identity_through_the_cli_is_refused_with_the_consequence_and_changes_nothing",
+  "vigil-bin::settings_operator_surface_fields::listing_shows_the_service_identifier_read_only_with_how_it_was_arrived_at",
+  "vigil::service_identity_persistence::the_deliberate_change_operation_states_the_consequence_before_it_takes_effect",
+]
+reviewed = true
+reviewed_by = "Semantic-mapping review by the author of these paragraphs and the tests they name, 2026-08-29 -- the author, NOT an independent reviewer: every assertion in the paragraph was traced to a named test that runs it. Commission an independent pass if this mapping is load-bearing."
+rationale = "Read-only identity reporting with its derivation is the surface-fields identity. The two refusals -- an ordinary set and an ordinary reset of the identifier through the command line -- are each driven over the real binary and each check that nothing moved. The deliberate operation stating its consequence before it takes effect, which is what the confirmation flag exists for, is the service-identity persistence identity."
+
+[[claim]]
+id = "vigil.docs-configuration.the-settings-listing-line-by-line"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:e29168a4e5021ca40b8aa1e5e99e1541d60806e7184d9df74c52a1f74a3c4096"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::settings_live_operator_visibility::listing_answers_by_direct_read_when_no_runtime_owns_the_store",
+  "vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store",
+  "vigil-bin::settings_operator_surface_fields::listing_reports_value_state_author_surface_scope_and_reason_for_every_touched_setting",
+  "vigil-bin::settings_operator_surface_fields::listing_shows_the_service_identifier_read_only_with_how_it_was_arrived_at",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The table is the listing's own shape: six line kinds — served-by, identity, setting, held, domain, secret — each with the fields it carries. The named tests read a real listing back through both routes and hold the setting line's whole field set and the identity line's fields and read-only access, so a renamed or dropped field on either kind fails; the owner-served and direct-read pair holds the served-by line's presence and absence apart."
+
+# docs/configuration.md:82
+[[claim]]
+id = "vigil.docs-configuration.served-by-af-unix-is-the-literal-token"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:e3795510ee7c0e168a6e27f2e78926f6467d5aed0d034df69dce60bc3fa285f2"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::a_refusal_reads_the_same_on_both_routes::a_failed_request_reads_the_same_served_by_the_owner_and_read_directly",
+  "vigil-bin::settings_live_operator_visibility::listing_answers_by_direct_read_when_no_runtime_owns_the_store",
+  "vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph prints the literal marker token a script greps for, served-by=af_unix, and states that its presence means a running owner answered and its absence means the store file was read directly, with the same report beneath either. The first two named tests drive the two routes against one deployment; the third holds both routes to one rendered answer, so a marker that moved, changed spelling or leaked onto the direct-read route fails."
+
+# docs/configuration.md:95
+[[claim]]
+id = "vigil.docs-configuration.on-a-setting-line-requested-is-the-value"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:07021ca44d224cf2b85d56138e6d9fd1ff5d81ce6072f7eda5ca92b1aecf9237"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store",
+  "vigil-bin::settings_operator_surface_fields::listing_answers_requested_from_the_store_while_the_runtime_is_stopped",
+  "vigil-bin::settings_operator_surface_fields::listing_reports_requested_running_and_pending_side_by_side",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph states what requested=, value= and running= each mean and corrects running=none: it says the answering process holds no value in force for that setting, which is true of a stopped node and equally of a running one that never applied anything for it, so none is not evidence the daemon is down. The named tests report requested and running side by side against a live runtime and against a stopped one, so a running field that started standing in for requested, or a none that stopped appearing under a live runtime, fails."
+
+# docs/configuration.md:108
+[[claim]]
+id = "vigil.docs-configuration.pending-names-what-closes-a-gap-between"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:42c0fb78ab102867af4c1db34848e54d5369c27e0a8264ad7c8557d0df27428e"
+evidence_tier = "integration"
+tests = [
+  "vigil::pending_cause_truthfulness::no_setting_that_waits_for_a_restart_names_anything_else_as_what_closes_it",
+  "vigil::settings_application_timing_roster::a_value_a_start_can_only_take_on_at_startup_is_declared_restart_pending",
+  "vigil::settings_application_timing_roster::every_setting_the_surface_answers_for_declares_when_it_takes_effect",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph gives the pending= causes and the applies= vocabulary, plus the preparing-since=, progress=, predates_domain= and when= fields the line carries conditionally. The roster tests hold every answered setting to a declared timing and hold a startup-only value to restart-pending; the truthfulness test refuses a restart-waiting setting that names anything else as what closes it, so a cause added, renamed or misattributed fails."
+
+# docs/configuration.md:120
+[[claim]]
+id = "vigil.docs-configuration.control-and-control-phrase-are-the-same-fact"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:e8d888b28d6a7d19f86e4a78fa592855896f8bf1057566b3b1fc5244cf964bac"
+evidence_tier = "integration"
+tests = [
+  "vigil-bin::settings_operator_surface_fields::listing_reports_value_state_author_surface_scope_and_reason_for_every_touched_setting",
+  "vigil::settings_authority_ranking::an_older_local_pin_outranks_a_newer_pushed_record",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph defines control= and control_phrase= as one fact in two spellings and gives all five token/phrase pairs, which the reference previously named among the fields and never defined. The surface test holds the control state on every touched setting's line; the ranking test moves a setting between the authors those states report, so a pair that drifted apart or a state whose token and phrase stopped agreeing fails."
+
+# docs/configuration.md:133
+[[claim]]
+id = "vigil.docs-configuration.the-three-attribution-fields-say-where-a"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:967b8201e934574d7a80d27a3f808b894269cee4c6ec0317d8b842e536eb48f4"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::settings_live_operator_visibility::listing_after_the_run_stops_serves_what_was_persisted",
+  "vigil-bin::settings_operator_surface_fields::listing_answers_requested_from_the_store_while_the_runtime_is_stopped",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph gives author=, surface= and scope= with their value sets and states that attribution is stored rather than recomputed, so a stopped deployment answers with the surface that actually authored the value. Both named tests ask a stopped deployment and hold the answer to what was persisted, so attribution recomputed into a fresh product default fails. Moved verbatim from the CLI reference, where it sat apart from the rest of the field glossary."
+
+# docs/configuration.md:146
+[[claim]]
+id = "vigil.docs-configuration.on-an-identity-line-derivation-is-how-this"
+document = "docs/configuration.md"
+paragraph_sha256 = "sha256:6f9ef6782d22c4c2ebb858791467b91d066d6a38096d309e48e5592a0ee4ece0"
+evidence_tier = "integration"
+tests = [
+  "vigil-bin::settings_operator_surface_fields::listing_shows_the_service_identifier_read_only_with_how_it_was_arrived_at",
+  "vigil::service_identity_persistence::the_deliberate_change_operation_states_the_consequence_before_it_takes_effect",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph gives the fields of the three non-setting line kinds: the identity line's derivation= value set and its always-read-only access=, the domain line's switch=/on=/member=/choice=, and the secret line's source=/stored= with the promise that neither carries the secret. The surface test holds the identity line to read-only with how the identifier was arrived at; the persistence test holds the one operation that moves it to stating its consequence first, so an identity offered as an ordinary settable value fails."
+
+# The stats surface's provenance line and the empty review answers, docs/cli.md.
+
+# docs/cli.md:128
+[[claim]]
+id = "vigil.docs-cli.an-empty-result-is-an-empty-answer"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:373770f92d927e966ae07cb44f0c57b50f4fa8be4ea5fbf39cdbcfc98e0f8d3c"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::no_live_command_brings_a_never_started_deployment_into_existence",
+  "vigil-bin::a_read_of_a_never_started_deployment_creates_nothing::the_review_commands_answer_a_never_started_deployment_honestly",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph states what an empty result looks like, which the page previously left an operator to guess at: vigil events prints nothing and exits 0 because there are no events, while vigil why --latest refuses on standard error at exit 2 because there is no event to walk. The first named test drives both shapes as real processes and holds exactly those statuses, streams and the emptiness of stdout; the second holds the whole family to leaving the directory untouched, so an answer manufactured by opening a store would fail with it."
+
+# docs/cli.md:184
+[[claim]]
+id = "vigil.docs-cli.those-figures-come-from-this-deployments-own-snapshot"
+document = "docs/cli.md"
+paragraph_sha256 = "sha256:b920234185c147a066e9cb2f0a83f81b3c26438fd41db123a6b8359d1c8be29b"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_of_a_truncated_snapshot_refuses_instead_of_claiming_nothing_ran",
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_of_an_unreadable_snapshot_refuses_instead_of_claiming_nothing_ran",
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_of_this_deployments_own_stopped_run_serves_its_last_figures",
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_on_a_never_started_directory_answers_zeros_under_a_not_started_line",
+  "vigil-bin::detector_queue_capacity_does_not_survive_its_variable::a_stats_read_with_no_owner_says_no_runtime_owns_the_data_directory",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The paragraph documents the previously unnamed stats-provenance= field: where the figures come from (this deployment's runtime-stats.json, with no store opened), the two values the line takes and what each asserts, the absence of the line as the claim that the figures are current, and the refusal for a snapshot whose writer cannot be established. Each named test drives vigil stats against one of those exact snapshot states as a real process and holds the answer to the line and status this paragraph states, including two separate unestablishable-writer shapes that must refuse rather than answer not-started."
+
+# docs/why-this-fired.md:68
+[[claim]]
+id = "vigil.docs-why-this-fired.a-malformed-detection-id-is-refused-as"
+document = "docs/why-this-fired.md"
+paragraph_sha256 = "sha256:7e24376d9968ad266d4c90b117cbefdc356fd1c4bebf49ed18f8d97c51275dbd"
+evidence_tier = "behavioral_unit"
+tests = [
+  "vigil-bin::why_refuses_an_id_it_cannot_serve::a_malformed_detection_id_is_refused_as_a_malformed_id_and_not_as_a_missing_event",
+]
+reviewed = true
+reviewed_by = "Independent fresh-context attestation, 2026-08-30, attest-vigil-w19 pass 2 -- not the paragraph author, not the bound tests' author: paragraph re-hashed byte-for-byte against the current docs source at tip 1073649, every field/token the paragraph states traced to its source definition (settings_model.rs / settings_projection.rs / runtime_stats.rs / service_identity.rs / lib.rs as applicable) and to the named tests' own assertions, and each named test confirmed present and passing at this tip. No mismatch found."
+rationale = "The page stated malformed-ID rejection as intent, with a note that the mapped test only covered a well-formed unknown UUID; the behavior has since landed and the CLI reference already states it as current, so this page now states it too. The named test drives vigil why not-a-uuid as a real process on both answer routes and holds the refusal to naming the typed argument and the UUID form and to never reading as the not-found answer, which is the whole of what this paragraph claims."

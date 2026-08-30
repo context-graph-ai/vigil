@@ -153,10 +153,8 @@ fn identity_file(dir: &tempfile::TempDir) -> PathBuf {
     dir.path().join("fabric-identity.key")
 }
 
-fn node_id_of(key: &Path) -> String {
-    FabricIdentity::load_or_generate(key)
-        .expect("identity")
-        .node_id()
+fn identity_of(key: &Path) -> Arc<FabricIdentity> {
+    Arc::new(FabricIdentity::load_or_generate(key).expect("identity"))
 }
 
 fn start_hub(
@@ -164,11 +162,20 @@ fn start_hub(
     tenant: &str,
 ) -> (Arc<Database>, Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
     let hub_db = Arc::new(Database::open_memory());
-    let server = Arc::new(SyncServer::with_authenticated_transport_for_test(
-        hub_db.clone(),
-        broker.server_as(&format!("hub-{tenant}")),
-        TenantId::from(tenant),
-    ));
+    // The hub signs what it serves, so it holds a real fabric identity and is
+    // known by that identity's own node id — production carries both, and the
+    // protocol refuses a pull it cannot attribute to an authenticated hub.
+    let hub_identity = Arc::new(FabricIdentity::generate());
+    let hub_node = hub_identity.node_id();
+    let server = Arc::new(
+        SyncServer::with_authenticated_transport_and_identity_for_test(
+            hub_db.clone(),
+            broker.server_as(&hub_node),
+            TenantId::from(tenant),
+            hub_node.clone(),
+            hub_identity,
+        ),
+    );
     let shutdown = Arc::new(AtomicBool::new(false));
     let task = tokio::spawn({
         let server = server.clone();
@@ -308,13 +315,15 @@ fn db_row_count(db: &Database, table: &str, job_id: &str) -> usize {
 async fn claim_and_die(broker: &InProcessBroker, tenant: &str, job_id: &str) -> String {
     let b_dir = tempfile::tempdir().expect("b dir");
     let b_key = identity_file(&b_dir);
-    let b_node = node_id_of(&b_key);
+    let b_identity = identity_of(&b_key);
+    let b_node = b_identity.node_id();
     let b_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&b_db).expect("B ledger schema");
-    let b_client = SyncClient::with_authenticated_transport_for_test(
+    let b_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         b_db.clone(),
         broker.client_as(&b_node),
         TenantId::from(tenant),
+        b_identity,
     );
     within(b_client.pull_default())
         .await
@@ -351,13 +360,15 @@ async fn dead_worker_steal_reclaims_locally_with_named_receipt() {
 
     let a_dir = tempfile::tempdir().expect("a dir");
     let a_key = identity_file(&a_dir);
-    let a_node = node_id_of(&a_key);
+    let a_identity = identity_of(&a_key);
+    let a_node = a_identity.node_id();
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client = SyncClient::with_authenticated_transport_for_test(
+    let a_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         a_db.clone(),
         broker.client_as(&a_node),
         TenantId::from(tenant),
+        a_identity,
     );
 
     let deadline_ms = T0 + HORIZON;
@@ -480,13 +491,15 @@ async fn own_self_reclaimed_claim_is_never_stolen() {
     let (_hub_db, shutdown, task) = start_hub(&broker, tenant);
 
     let a_dir = tempfile::tempdir().expect("a dir");
-    let a_node = node_id_of(&identity_file(&a_dir));
+    let a_identity = identity_of(&identity_file(&a_dir));
+    let a_node = a_identity.node_id();
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client = SyncClient::with_authenticated_transport_for_test(
+    let a_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         a_db.clone(),
         broker.client_as(&a_node),
         TenantId::from(tenant),
+        a_identity,
     );
 
     let deadline_ms = T0 + HORIZON;
@@ -534,13 +547,15 @@ async fn foreign_node_never_steals() {
     let (_hub_db, shutdown, task) = start_hub(&broker, tenant);
 
     let a_dir = tempfile::tempdir().expect("a dir");
-    let a_node = node_id_of(&identity_file(&a_dir));
+    let a_identity = identity_of(&identity_file(&a_dir));
+    let a_node = a_identity.node_id();
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client = SyncClient::with_authenticated_transport_for_test(
+    let a_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         a_db.clone(),
         broker.client_as(&a_node),
         TenantId::from(tenant),
+        a_identity,
     );
 
     let deadline_ms = T0 + HORIZON;
@@ -552,13 +567,15 @@ async fn foreign_node_never_steals() {
     // ledger (pulls it) and the claimant is long dead, but it must not steal —
     // the C5 fallback duty belongs to the submitter alone.
     let c_dir = tempfile::tempdir().expect("c dir");
-    let c_node = node_id_of(&identity_file(&c_dir));
+    let c_identity = identity_of(&identity_file(&c_dir));
+    let c_node = c_identity.node_id();
     let c_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&c_db).expect("C ledger schema");
-    let c_client = SyncClient::with_authenticated_transport_for_test(
+    let c_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         c_db.clone(),
         broker.client_as(&c_node),
         TenantId::from(tenant),
+        c_identity,
     );
     within(c_client.pull_default())
         .await
@@ -593,13 +610,15 @@ async fn result_before_steal_makes_steal_a_noop() {
     let (_hub_db, shutdown, task) = start_hub(&broker, tenant);
 
     let a_dir = tempfile::tempdir().expect("a dir");
-    let a_node = node_id_of(&identity_file(&a_dir));
+    let a_identity = identity_of(&identity_file(&a_dir));
+    let a_node = a_identity.node_id();
     let a_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&a_db).expect("A ledger schema");
-    let a_client = SyncClient::with_authenticated_transport_for_test(
+    let a_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         a_db.clone(),
         broker.client_as(&a_node),
         TenantId::from(tenant),
+        a_identity,
     );
 
     let deadline_ms = T0 + HORIZON;
@@ -608,13 +627,15 @@ async fn result_before_steal_makes_steal_a_noop() {
 
     // Worker B pulls, claims, and this time DOES complete + record a result.
     let b_dir = tempfile::tempdir().expect("b dir");
-    let b_node = node_id_of(&identity_file(&b_dir));
+    let b_identity = identity_of(&identity_file(&b_dir));
+    let b_node = b_identity.node_id();
     let b_db = Arc::new(Database::open_memory());
     install_work_ledger_schema(&b_db).expect("B ledger schema");
-    let b_client = SyncClient::with_authenticated_transport_for_test(
+    let b_client = SyncClient::with_authenticated_transport_and_identity_for_test(
         b_db.clone(),
         broker.client_as(&b_node),
         TenantId::from(tenant),
+        b_identity,
     );
     within(b_client.pull_default())
         .await

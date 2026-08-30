@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use context_graph::{EmbedderConfig, Store, StoreConfig};
+use contextdb_core::store_companion_path;
 use tempfile::TempDir;
 use vigil::settings_model::{SERVICE_IDENTITY_SETTING, SettingRecord};
 use vigil::settings_store::SettingsStore;
@@ -21,6 +22,11 @@ pub(crate) struct VigilBinary {
 }
 
 impl VigilBinary {
+    // Which binary this acceptance run drives: the operator-supplied override
+    // first, then the handle Cargo gives a test on the binary it just built.
+    // Neither is a product setting — there is no shipped surface either could
+    // move onto (allow: test harness input).
+    #[allow(clippy::disallowed_methods)]
     pub(crate) fn new() -> Self {
         let path = resolve_vigil_binary(
             std::env::var_os("VIGIL_ACCEPTANCE_BIN"),
@@ -453,7 +459,7 @@ impl StoreProbe {
     }
 
     pub(crate) fn live_lock_held(&self) -> StoreLockProbeResult {
-        let lock_path = self.path.with_extension("lock");
+        let lock_path = store_companion_path(&self.path);
         if !lock_path.exists() {
             return StoreLockProbeResult {
                 locked: false,
@@ -584,9 +590,17 @@ impl StoreProbe {
                 // substring-matching Debug text that rots when the format
                 // shifts. Assertion INTENT is unchanged — the store is still
                 // required to be contended by THIS pid.
+                // The holder is carried as `Option<u64>` upstream: a writer
+                // owns the store, and whether its process id is KNOWN is a
+                // separate fact. A store held by a writer this probe cannot
+                // name is not proof that THIS process holds it, so an unknown
+                // holder is not contention by `pid` — inventing one, or
+                // reading it as zero, would make this probe pass on a store
+                // held by somebody else entirely.
                 let blocked = matches!(
                     &error,
-                    context_graph::CgError::StoreLocked { holder_pid, .. } if *holder_pid == pid
+                    context_graph::CgError::StoreLocked { holder_pid, .. }
+                        if *holder_pid == Some(u64::from(pid))
                 );
                 StoreContentionProbeResult {
                     blocked,
@@ -611,12 +625,31 @@ impl StoreProbe {
                 store.db_path().display()
             )),
             Err(error) => match &error {
-                context_graph::CgError::StoreLocked { holder_pid, .. } => {
+                // A writer holds the store; whether this probe can NAME it is
+                // a second fact, carried as `Option<u64>` upstream. Each shape
+                // is answered on its own terms: a known holder is checked
+                // against the spawned tree and reported whole, and a holder
+                // this probe cannot name says exactly that instead of standing
+                // in a pid it does not have.
+                context_graph::CgError::StoreLocked {
+                    holder_pid: Some(holder_pid),
+                    ..
+                } => {
                     let holder_pid = *holder_pid;
-                    if process_is_or_descendant(root_pid, holder_pid) {
+                    // Reported WHOLE, never truncated into the width this
+                    // probe's own tree walk happens to use: a holder that does
+                    // not fit is a holder this probe cannot follow, and saying
+                    // so is honest where a narrowed pid would name a different
+                    // process.
+                    let Ok(narrow_holder_pid) = u32::try_from(holder_pid) else {
+                        return ProcessTreeOwnerProbeResult::failure(format!(
+                            "public Store::open contention holder pid {holder_pid} is wider than this probe's process-tree walk can follow, so it cannot be checked against spawned pid {root_pid}: {error:?}"
+                        ));
+                    };
+                    if process_is_or_descendant(root_pid, narrow_holder_pid) {
                         ProcessTreeOwnerProbeResult {
                             owned: true,
-                            owner_pid: Some(holder_pid),
+                            owner_pid: Some(narrow_holder_pid),
                             detail: format!(
                                 "public Store::open was blocked by pid {holder_pid} in spawned process tree {root_pid}"
                             ),
@@ -627,6 +660,11 @@ impl StoreProbe {
                         ))
                     }
                 }
+                context_graph::CgError::StoreLocked {
+                    holder_pid: None, ..
+                } => ProcessTreeOwnerProbeResult::failure(format!(
+                    "public Store::open was blocked by a writer holding the store, but the holder published no process id, so it cannot be shown to be spawned pid {root_pid} or its descendant: {error:?}"
+                )),
                 _ => ProcessTreeOwnerProbeResult::failure(format!(
                     "public Store::open contention result was not StoreLocked: {error:?}"
                 )),
@@ -694,6 +732,9 @@ pub(crate) struct StoreIdentity {
 pub(crate) struct DockerProbe;
 
 impl DockerProbe {
+    // Which container image the acceptance run probes, supplied by whoever
+    // launched it (allow: test harness input).
+    #[allow(clippy::disallowed_methods)]
     pub(crate) fn image() -> String {
         resolve_acceptance_image(std::env::var("VIGIL_ACCEPTANCE_IMAGE").ok())
             .unwrap_or_else(|error| panic!("{error}"))
@@ -884,7 +925,14 @@ fn verify_container_live_store_and_health(name: &str, volume: &Path, output: &mu
         output.push('\n');
         ok = false;
     }
-    let contention = StoreProbe::new(&store_path).public_open_blocked_by_process(pid);
+    // The writer inside the container publishes its OWN pid-namespace view of
+    // itself (std::process::id() == 1 inside the container's pid namespace)
+    // into the store's companion contention record, never the host pid this
+    // function otherwise uses for the /proc-based legs above. Comparing the
+    // host pid against that record can never match across a pid namespace, so
+    // this leg alone must resolve the container's innermost namespace pid.
+    let contention =
+        StoreProbe::new(&store_path).public_open_blocked_by_process(innermost_namespace_pid(pid));
     if !contention.blocked {
         output.push_str(&contention.detail);
         output.push('\n');
@@ -897,6 +945,37 @@ fn verify_container_live_store_and_health(name: &str, volume: &Path, output: &mu
         ok = false;
     }
     ok
+}
+
+/// Resolve the INNERMOST pid-namespace id a host pid is known by, read from
+/// the last field of `/proc/<host_pid>/status`'s `NSpid:` line (the kernel
+/// lists one pid per namespace level, outermost first). A container's writer
+/// publishes exactly this innermost id into the store's companion contention
+/// record (typically `1`), never the host pid. Fails loudly rather than
+/// falling back to the host pid: a silent fallback would make the contention
+/// assertion pass or fail for the wrong reason instead of naming a namespace
+/// resolution it could not make.
+fn innermost_namespace_pid(host_pid: u32) -> u32 {
+    let status = fs::read_to_string(format!("/proc/{host_pid}/status")).unwrap_or_else(|error| {
+        panic!(
+            "cannot resolve innermost pid-namespace id for host pid {host_pid}: failed to read /proc/{host_pid}/status: {error}"
+        )
+    });
+    let nspid_line = status.lines().find_map(|line| line.strip_prefix("NSpid:")).unwrap_or_else(|| {
+        panic!(
+            "cannot resolve innermost pid-namespace id for host pid {host_pid}: /proc/{host_pid}/status has no NSpid: line"
+        )
+    });
+    let last_field = nspid_line.split_whitespace().last().unwrap_or_else(|| {
+        panic!(
+            "cannot resolve innermost pid-namespace id for host pid {host_pid}: NSpid: line \"{nspid_line}\" has no fields"
+        )
+    });
+    last_field.parse::<u32>().unwrap_or_else(|error| {
+        panic!(
+            "cannot resolve innermost pid-namespace id for host pid {host_pid}: NSpid: last field \"{last_field}\" is not a valid pid: {error}"
+        )
+    })
 }
 
 #[derive(Clone)]

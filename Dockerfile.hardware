@@ -34,6 +34,11 @@ ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
+# CubeCL's WGPU device-service threads otherwise inherit Rust's 2 MiB default
+# stack. A detector honoring a multi-frame sample as repeated proved-shape
+# (1x3x640x640) forwards needs more than that; 32 MiB is virtual reservation per
+# worker and prevents a real person clip from aborting the process mid-sample.
+ENV RUST_MIN_STACK=33554432
 EXPOSE 8099 8098
 CMD ["/usr/local/bin/vigil", "run"]
 
@@ -57,6 +62,9 @@ ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
+# Kept on the deployable add-on as well as the generic hardware image: s6 keeps
+# this environment for both the daemon and diagnostic commands.
+ENV RUST_MIN_STACK=33554432
 # The one runtime root both sides of the owner plane meet on — mirrors
 # addons/vigil/Dockerfile exactly (same script, same env value, same init
 # wiring): prepared at container init, not build time, because /data is a
@@ -96,6 +104,9 @@ ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
+# Burn/CubeCL's WGPU service threads need the same proved multi-frame stack
+# floor on every architecture that ships the accelerated detector.
+ENV RUST_MIN_STACK=33554432
 EXPOSE 8099 8098
 CMD ["/usr/local/bin/vigil", "run"]
 
@@ -119,6 +130,8 @@ ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
+# Kept on the deployable add-on as well as the generic hardware image.
+ENV RUST_MIN_STACK=33554432
 # The one runtime root both sides of the owner plane meet on — mirrors
 # addons/vigil/Dockerfile exactly (same script, same env value, same init
 # wiring): prepared at container init, not build time, because /data is a

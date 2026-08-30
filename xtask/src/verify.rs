@@ -712,7 +712,7 @@ fn rehearse_archive_handoff(root: &Path, archive: &Path) -> Result<PathBuf, Stri
     fs::create_dir_all(&restored).map_err(|error| format!("create handoff restore: {error}"))?;
     fs::copy(archive, staged.join("nextest-slow.tar.zst"))
         .map_err(|error| format!("stage slow archive: {error}"))?;
-    let source_binary = root.join("target/release/vigil");
+    let source_binary = super::target_dir(root).join("release/vigil");
     let staged_binary = staged.join("vigil-acceptance-bin");
     fs::copy(&source_binary, &staged_binary).map_err(|error| {
         format!(
@@ -1911,7 +1911,7 @@ struct ResourceSnapshot {
 
 impl ResourceSnapshot {
     fn read(root: &Path) -> Result<Self, String> {
-        let target = root.join("target");
+        let target = super::target_dir(root);
         Ok(Self {
             memory: read_memory()?,
             target_bytes: directory_bytes(&target)?,

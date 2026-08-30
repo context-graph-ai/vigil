@@ -1993,6 +1993,17 @@ fn stage_records_backend_truth(commands: &[String], backend_name: &str) -> bool 
     })
 }
 
+/// The stack floor the accelerated detector's CubeCL device-service workers
+/// need when one configured sample contains several proved-shape forwards.
+const WGPU_WORKER_STACK_ENV: &str = "ENV RUST_MIN_STACK=33554432";
+
+fn stage_provisions_wgpu_worker_stack(stage: &DockerStage) -> bool {
+    stage
+        .commands
+        .iter()
+        .any(|command| command.trim() == WGPU_WORKER_STACK_ENV)
+}
+
 fn assert_generic_dockerfile_binds_hardware_profile(
     stages: &[DockerStage],
     profile: &RuntimeProfile,
@@ -2050,6 +2061,11 @@ fn assert_generic_dockerfile_binds_hardware_profile(
         stage_records_backend_truth(&target.commands, profile.detector_backend.as_str()),
         "generic Docker hardware target must record detector backend {} from profile {}",
         profile.detector_backend,
+        profile.name
+    );
+    assert!(
+        stage_provisions_wgpu_worker_stack(target),
+        "hardware image {} must provision the WGPU device-service stack needed to honor multi-frame detection without aborting",
         profile.name
     );
 
@@ -2156,6 +2172,10 @@ fn hardware_addon_image_carries_manifest_hardware_profile() {
         return;
     };
     let final_stage = stages.last().expect("stage list is non-empty");
+    assert!(
+        stage_provisions_wgpu_worker_stack(final_stage),
+        "the Supervisor-built add-on must preserve the WGPU device-service stack floor carried by every source-built hardware image"
+    );
     let hardware_profile_list = hardware_addon_profiles
         .values()
         .copied()

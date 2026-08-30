@@ -156,7 +156,7 @@ fn lock_is_held(path: &Path) -> Result<bool, String> {
 }
 
 fn lock_path(path: &Path) -> PathBuf {
-    path.with_extension("lock")
+    contextdb_core::store_companion_path(path)
 }
 
 fn next_path(args: &mut impl Iterator<Item = String>, label: &str) -> Result<PathBuf, String> {

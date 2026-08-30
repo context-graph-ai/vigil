@@ -9,8 +9,8 @@ Vigil serves health and the review HTTP data plane from the same Rust process.
 
 The edge application is packaged as one Rust binary and is intended to own configuration, camera
 ingest, media decode, motion gating, object detection, event evidence, Context Graph writes, the
-local CLI control socket, Home Assistant MQTT tasks, and optional recognition without a separate
-database server. The current suite does not bind that complete process inventory in one direct
+local owner channel the CLI reaches it on, Home Assistant MQTT tasks, and optional recognition
+without a separate database server. The current suite does not bind that complete process inventory in one direct
 acceptance.
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`No direct acceptance binds the complete one-process subsystem inventory and absence of a separate database server.` -->
@@ -87,7 +87,7 @@ Evidence is durable before the Observation is written. If clip or image persiste
 
 The daemon exposes two local review paths over the same store-backed functions:
 
-- the CLI (`vigil events`, `vigil why`, and `vigil stats`), routed through the daemon's Unix control socket while it owns the store;
+- the CLI (`vigil events`, `vigil why`, `vigil stats`, and `vigil settings`), routed to whichever process owns the store, over that store's own owner channel — there is no separate control socket to configure, publish or clean up, and no socket path anywhere on this surface;
 - the HTTP review data plane on port `8098` by default;
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`No combined test binds the CLI and HTTP review-path inventory.` -->
@@ -161,6 +161,32 @@ work, and fall back locally if a claimed remote worker dies before returning its
 <!-- enforced by: `vigil::fabric_config_defaults::all_offload_and_fabric_knobs_have_sane_defaults_and_work_unset` -->
 <!-- enforced by: `vigil::detector_worker::worker_advertises_truthful_backend_claims_materializes_runs_records_once` -->
 <!-- enforced by: `vigil::kill_worker_fallback::worker_death_midlease_falls_back_local_with_named_receipt` -->
+
+A node serves the fleet as soon as its detector exists, not on a schedule. The worker loop starts
+the moment a detector arrives — the first camera's, or, on a node with no camera at all, the one it
+loads for itself — however long that took, and it starts exactly once however many detectors follow.
+Nothing anywhere on that path watches a clock: there is no deadline on becoming ready and no setting
+that adjusts one, because a slow cold start is not a failure and a node written off for one stays
+not-serving for the rest of its life. A node that genuinely cannot serve says why with the real
+reason — a model that is missing or will not load names the staging fix and advertises nothing, and
+a node with no serving role says that instead — and an operator stopping the node cancels a start
+that is still waiting rather than bringing a worker up on the way down.
+
+<!-- vigil-claim: `vigil.docs-architecture.a-node-serves-the-fleet-as-soon` -->
+<!-- enforced by: `vigil::fabric::worker_detector_slot_tests::a_detector_that_arrives_before_anything_waits_still_starts_exactly_one_worker` -->
+<!-- enforced by: `vigil::fabric::worker_detector_slot_tests::an_operator_stop_settles_a_waiting_start_and_nothing_starts_after_it` -->
+<!-- enforced by: `vigil-bin::cameraless_worker::detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera` -->
+<!-- enforced by: `vigil-bin::cameraless_worker::cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model` -->
+
+Every capability delivery attempt ends on one greppable line saying it resolved and how — delivered,
+refused, or never attempted because this node hosts the hub over its own store and has no hub to
+dial. A delivery that simply worked used to print nothing at all, which left an operator with an
+absence to guess from and no way to tell an attempt that succeeded from one that had not happened
+yet. A refused delivery still prints its own named error line beside it.
+
+<!-- vigil-claim: `vigil.docs-architecture.every-capability-delivery-attempt-ends-on-one` -->
+<!-- enforced by: `vigil-bin::capability_delivery::failed_capability_push_emits_named_error` -->
+<!-- enforced by: `vigil-bin::two_process_fabric::two_real_processes_render_remote_detectors_line_hub_first` -->
 
 Fabric is not a cloud requirement and does not provide multi-site product management. Enrollment and frame movement must be deliberately configured; the ordinary single-node runtime works with no ticket and no hub.
 

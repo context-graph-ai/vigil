@@ -30,7 +30,6 @@
 
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;

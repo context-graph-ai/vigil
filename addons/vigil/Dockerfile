@@ -32,6 +32,10 @@ ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
+# Burn/CubeCL creates WGPU device-service threads with Rust's default stack.
+# Honoring a multi-frame detector sample as repeated proved-shape forwards needs
+# a 32 MiB virtual stack reservation or the service can abort mid-sample.
+ENV RUST_MIN_STACK=33554432
 # The one runtime root both sides of the owner plane meet on. A container has no
 # per-user runtime directory — nothing creates one for a service with no login
 # session — so the package states the root instead of leaving the daemon to bind

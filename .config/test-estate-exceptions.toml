@@ -10,8 +10,8 @@ reason = "Exact current timing and port surface is frozen migration debt; change
 
 [[file]]
 path = "crates/vigil-bin/tests/cameraless_worker.rs"
-sleeps = 5
-raw_clocks = 7
+sleeps = 2
+raw_clocks = 3
 free_port_helpers = 0
 elapsed_calls = 1
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
@@ -42,15 +42,15 @@ reason = "Exact current timing and port surface is frozen migration debt; change
 
 [[file]]
 path = "crates/vigil-bin/tests/two_process_fabric.rs"
-sleeps = 14
-raw_clocks = 11
+sleeps = 12
+raw_clocks = 9
 free_port_helpers = 0
 elapsed_calls = 9
 reason = "Exact current timing and port surface is frozen migration debt; changes fail the executable guard and are not independent ratification."
 
 [[file]]
 path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
-sleeps = 3
+sleeps = 2
 raw_clocks = 3
 free_port_helpers = 0
 elapsed_calls = 1
@@ -235,62 +235,6 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 [[site]]
 path = "crates/vigil-bin/tests/boot_readiness.rs"
 scope = "wait_for_line"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil-bin/tests/cameraless_worker.rs"
-scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil-bin/tests/cameraless_worker.rs"
-scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil-bin/tests/cameraless_worker.rs"
-scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil-bin/tests/cameraless_worker.rs"
-scope = "cameraless_worker_without_a_loadable_model_does_not_advertise_and_reports_no_model"
-kind = "sleep"
-fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (50))
-
-[[site]]
-path = "crates/vigil-bin/tests/cameraless_worker.rs"
-scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil-bin/tests/cameraless_worker.rs"
-scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil-bin/tests/cameraless_worker.rs"
-scope = "detector_job_registers_as_vigil_detector_class_slot_populates_without_a_camera"
 kind = "sleep"
 fingerprint = "sha256:521ab92b21494e509f0bad103335613577eaa9ab4f87fcdd12b094e7878c4cc8"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
@@ -666,7 +610,7 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 
 [[site]]
 path = "crates/vigil-bin/tests/first_light_loop.rs"
-scope = "vigil_why_served_over_socket_while_store_is_locked"
+scope = "vigil_why_served_by_the_store_owner_while_the_store_is_locked"
 kind = "raw_clock"
 fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
@@ -674,7 +618,7 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 
 [[site]]
 path = "crates/vigil-bin/tests/first_light_loop.rs"
-scope = "vigil_why_served_over_socket_while_store_is_locked"
+scope = "vigil_why_served_by_the_store_owner_while_the_store_is_locked"
 kind = "raw_clock"
 fingerprint = "sha256:c0afc3b9dfe27e6d0543d52fc0fed13c35e6fb9cafc070b019b6bd0e248cb838"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
@@ -930,38 +874,6 @@ reason = "Exact current timing or port site is frozen migration debt; relocation
 
 [[site]]
 path = "crates/vigil-bin/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil-bin/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "raw_clock"
-fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil-bin/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
-
-[[site]]
-path = "crates/vigil-bin/tests/two_process_fabric.rs"
-scope = "two_real_processes_render_remote_detectors_line_hub_first"
-kind = "sleep"
-fingerprint = "sha256:96cf58866e041272502b4429a4d080f7ce57c1e59aa192bcbc142f24932c9417"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_secs (25))
-
-[[site]]
-path = "crates/vigil-bin/tests/two_process_fabric.rs"
 scope = "two_real_processes_render_remote_detectors_line_hub_up_late"
 kind = "sleep"
 fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
@@ -1135,14 +1047,6 @@ kind = "raw_clock"
 fingerprint = "sha256:1131d5cacbccf832d87583f0a23ef218a9ae40f4881bf7ac85ec42795a645701"
 reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
 # syntax: Instant :: now ()
-
-[[site]]
-path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
-scope = "worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering"
-kind = "sleep"
-fingerprint = "sha256:1efc6cb71bfc7d3b0f22a7cc4e3e12e9cdcea375a8d71707eaa1582b306005de"
-reason = "Exact current timing or port site is frozen migration debt; relocation or duplication fails the executable guard."
-# syntax: thread :: sleep (Duration :: from_millis (500))
 
 [[site]]
 path = "crates/vigil-bin/tests/worker_intent_loudness.rs"
@@ -1586,3 +1490,52 @@ kind = "sleep"
 fingerprint = "sha256:a757046c3b693f04fc0745f189511a7f3a706d6513f73e0141ce0bdf7680b77f"
 reason = "One of the three gathering waits this contract's interleaving needs; the file entry for crates/vigil/src/live_backends.rs carries the reasoning."
 # syntax: std :: thread :: sleep (COME_ROUND)
+
+# Adjudicated in-place rewrites of receipts that are already history.
+#
+# The byte-intact rule is machine-gated: a transition whose recorded evidence
+# hashes, or whose recorded pre-move bodies, no longer match what the chain and
+# the frozen base first recorded fails `test-estate-check`. An entry here excuses
+# ONE named receipt for EXACTLY the values it names, and nothing else — a further
+# rewrite of the same receipt, or a rewrite of any other, still fails.
+[[receipt_rewrite]]
+receipt = "carry-test-coverage-through-the-vigil-ha-vigil-bin-split"
+rewriting_commit = "500bea8; 544ad7a"
+adjudicated_by = "window-14 manager (first hash, 2026-08-26); window-17 independent estate attestor (second hash, 2026-08-29)"
+adjudicated_on = "2026-08-26; 2026-08-29"
+# The rewritten evidence hash this receipt is permitted to carry. Any other
+# divergence is a new rewrite and fails.
+evidence_sha256 = [
+  "sha256:8f38b45206822f556761421e0197e7830d9b1f2be2a09c464cf25356a3d1343e",
+  "sha256:44a7fb7c103a9f63fa05c1ea666637739296facf52812eb33fb53a5ea3efbe3d",
+]
+reason = "The carry-test-coverage-through-the-vigil-ha-vigil-bin-split flags are the documented earlier-window in-place rewrite (commit 500bea8 era) -- disclosed in prose at the time, and the chain has been repeatedly attested since; restoring the old bytes now would itself be a second rewrite. Adjudicated-by window-14 manager 2026-08-26. The second hash covers one further change, recorded 2026-08-29: crates/vigil-bin/tests/first_light_loop.rs's vigil_why_served_over_socket_while_store_is_locked is renamed to vigil_why_served_by_the_store_owner_while_the_store_is_locked, because the name asserted a transport Vigil no longer has -- the answer comes from the process owning the store over Context Graph's owner channel, and docs/why-this-fired.md printed the old name as the enforcing identity beside prose that already said so. This proof is the identity's relocation target, and the sanctioned form for renaming one is the successor_test field, exactly as vigil-bin::first_light_loop::cli_read_when_runtime_busy_errors_cleanly was renamed; adding that field is the only edit to the evidence file, no move mapping and no recorded body changed, and the test body is untouched by the rename. RATIFIED by the window-17 independent estate attestor, 2026-08-29, on independent verification, not the author's word: `git show --stat 544ad7a` and the full diff read together show exactly four files touched -- .config/test-estate-evidence/vigil-ha-vigil-bin-split/relocation.json (successor_test field added, nothing else), .config/test-estate-exceptions.toml (this receipt_rewrite entry plus the two matching `scope` renames on the pre-existing raw_clock site entries for the same test), crates/vigil-bin/tests/first_light_loop.rs (the fn signature line only -- `fn vigil_why_served_over_socket_while_store_is_locked()` to `fn vigil_why_served_by_the_store_owner_while_the_store_is_locked()`, zero body-line change), and docs/why-this-fired.md (the matching `enforced by:` comment). Independently recomputed sha256sum of .config/test-estate-evidence/vigil-ha-vigil-bin-split/relocation.json at tip 9e6019a: 44a7fb7c103a9f63fa05c1ea666637739296facf52812eb33fb53a5ea3efbe3d, matching the listed second hash byte for byte. The successor_test field is confirmed as the evidence file's only change."
+
+# Ratified hygiene scrubs of reviewer attestations that were already signed.
+#
+# A signed verdict is never edited. This is the authorized exception, enumerated
+# rather than floored: the commit and the exact receipts it touched are named,
+# and what each of them says afterwards is read back from that commit, so any
+# later edit of a covered receipt still fails.
+[[reviewer_scrub]]
+commit = "e43e03b82608c091feb4f40cba507657356da2cf"
+classification = "tracked-content hygiene scrub"
+adjudicated_by = "window-14 manager"
+adjudicated_on = "2026-08-26"
+reason = "Reviewer-identity strings (model names, session paths) were removed per the workspace policy that model/session identifiers do not live in tracked files; verdicts, dates and cited commits untouched. That is authorized history, not tampering."
+receipts = [
+  "carry-test-coverage-through-the-vigil-ha-vigil-bin-split",
+  "close-automation-handle-alias-and-transport-manifest-declaration-gaps",
+  "close-automation-handle-and-optional-dependency-scan-gaps",
+  "extract-process-cleanup-scan-into-the-guard-test-family",
+  "merge-overlapping-or-false-positive-oracles",
+  "recognize-qualified-path-declare-calls-in-the-settings-registry-boundary-scan",
+  "recognize-turbofish-calls-in-the-process-cleanup-and-settings-registry-guards",
+  "register-development-verification-compartment-guards",
+  "register-test-estate-guard-self-tests",
+  "replace-rejected-contracts-and-add-deterministic-harness-witnesses",
+  "settings-surface-coverage-paragraph-binding-canary",
+  "table-drive-pure-decision-and-parser-permutations",
+  "widen-transport-purity-scan-to-every-production-crate",
+  "widen-vigil-bin-dependency-guard-to-build-dependencies-and-fix-the-baseline-count-pin",
+]

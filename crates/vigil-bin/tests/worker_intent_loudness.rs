@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
-use deterministic_fixture_support::{capture_pipe, free_port, vigil_binary_path};
+use deterministic_fixture_support::{capture_pipe, free_port, vigil_binary_path, wait_until};
 
 fn health_status(port: u16) -> Option<u16> {
     use std::io::{Read, Write};
@@ -79,6 +79,34 @@ fn run_doctor_acceleration(data_dir: &std::path::Path) -> String {
     )
 }
 
+/// How long the fixture is willing to keep looking for the settled state. A
+/// liveness guard on the test itself, never a bound the product is asked to
+/// meet: the assertions below read the rendered state, and no outcome here is
+/// decided by how long it took to appear.
+const FABRIC_STATUS_SETTLE_WAIT: Duration = Duration::from_secs(60);
+
+/// The doctor rendering, read once this node's own fabric status has SETTLED —
+/// a serving verdict whose reason is no longer the in-flight `worker-loop-
+/// starting` placeholder. The status task writes that snapshot on its own
+/// refresh, so the fixture waits for the STATE to appear instead of waiting a
+/// chosen interval and hoping (a flat wait passes on a loaded box and fails on
+/// a quiet one, and judging a product outcome by elapsed time is banned
+/// outright by the owner ruling of 2026-08-14).
+fn doctor_once_fabric_status_settles(data_dir: &std::path::Path) -> String {
+    wait_until(
+        "the doctor rendering to carry a settled fabric-worker-serving verdict",
+        FABRIC_STATUS_SETTLE_WAIT,
+        || {
+            let rendered = run_doctor_acceleration(data_dir);
+            let settled = rendered.contains("fabric-worker-serving=true")
+                || (rendered.contains("fabric-worker-serving=false reason=")
+                    && !rendered.contains("reason=worker-loop-starting"));
+            Ok(settled.then_some(rendered))
+        },
+    )
+    .expect("this node's own fabric status must reach the surface an operator reads")
+}
+
 #[test]
 fn worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_doctor_rendering() {
     let data_dir = tempfile::tempdir().expect("data dir");
@@ -98,9 +126,6 @@ fn worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_
         .arg("false")
         .env("VIGIL_DATA_DIR", data_dir.path())
         .env("VIGIL_FABRIC_TICKET", "not-a-real-ticket")
-        // No --fabric-worker-slot-deadline-ms CLI flag exists yet; left as
-        // env per the settings-authority census (still no flag/config seam).
-        .env("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS", "1500")
         .env_remove("VIGIL_RTSP_URL")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -114,9 +139,10 @@ fn worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_
         "the node must still come up standalone despite the malformed ticket (criterion C6)"
     );
 
-    // Bounded wait past the shortened worker-slot deadline so the persisted
-    // stats snapshot doctor reads has settled.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Bounded wait for the not-started line this node emits once its own
+    // enrollment fails, so the persisted stats snapshot doctor reads has
+    // settled. The bound is the test's liveness guard, not the outcome.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
         let logs = stdout.lock().expect("stdout lock").clone();
         if logs.contains("fabric_worker_loop_not_started=true") {
@@ -124,9 +150,7 @@ fn worker_intent_present_but_not_serving_gets_a_named_greppable_line_on_its_own_
         }
         thread::sleep(Duration::from_millis(50));
     }
-    thread::sleep(Duration::from_millis(500));
-
-    let doctor_output = run_doctor_acceleration(data_dir.path());
+    let doctor_output = doctor_once_fabric_status_settles(data_dir.path());
 
     let _ = child.kill();
     let _ = child.wait();

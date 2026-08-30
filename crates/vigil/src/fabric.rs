@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -359,8 +359,8 @@ impl FabricRuntime {
         let db_path = data_dir.join("fabric-ledger.db");
         let db = Arc::new(Database::open(&db_path).map_err(|err| {
             let message = format!("fabric: open ledger database {}: {err}", db_path.display());
-            if matches!(err, contextdb_core::Error::DatabaseLocked { .. }) {
-                FabricStartError::DatabaseLocked { message }
+            if store_is_held_by_a_writer(&err) {
+                FabricStartError::StoreHeldByWriter { message }
             } else {
                 FabricStartError::Other(message)
             }
@@ -936,9 +936,30 @@ impl FabricRuntime {
             // already in the canonical store, so there is no dialable hub to
             // miss and nothing to retry — printing the failure line here
             // would just be permanent, meaningless noise on a healthy hub.
-            if !writes_are_canonical && let Err(error) = client.push().await {
-                println!("fabric_capability_push_failed=true backend={backend_tag} error={error}");
-            }
+            let delivery = if writes_are_canonical {
+                "not-attempted-canonical-store"
+            } else {
+                match client.push().await {
+                    Ok(_) => "delivered",
+                    Err(error) => {
+                        println!(
+                            "fabric_capability_push_failed=true backend={backend_tag} error={error}"
+                        );
+                        "failed"
+                    }
+                }
+            };
+            // The attempt is OVER, whichever way it went, and says so on one
+            // line. A delivery that succeeds otherwise prints nothing at all,
+            // which leaves anyone watching this node — an operator reading the
+            // log, or a test — with no positive signal that the attempt ever
+            // resolved and only an absence to infer it from. An absence
+            // reached by waiting is indistinguishable from an attempt that has
+            // not happened yet.
+            println!(
+                "fabric_capability_push_settled=true backend={backend_tag} \
+                 capability={capability_id} outcome={delivery}"
+            );
             let _ = contextdb_server::work_ledger::run_worker_loop(
                 &client,
                 &config,
@@ -1168,6 +1189,575 @@ impl FabricDetectorBackend for FabricProductionDetectorBackend {
     }
 }
 
+/// How this node's one worker-detector question was answered.
+pub(crate) enum WorkerSlotOutcome {
+    /// A detector loaded. This is the instance the worker loop serves with,
+    /// and the truthful backend tag it advertises to the fleet.
+    Ready(Arc<crate::detector::PromotableDetector>, String),
+    /// No detector will arrive on this node: the model is missing or could not
+    /// be loaded. This is a settled answer, not a failure to wait long enough,
+    /// and it carries the reason an operator has to act on — the staging fix a
+    /// worker box names, or the real load error a camera's detector failed
+    /// with. Carried on the answer rather than written beside it because
+    /// whoever answers is the only one who knows why, and the surfaces that
+    /// render it are reached from the settle.
+    NoDetector(String),
+    /// The operator stopped the node before the question was answered.
+    Cancelled,
+}
+
+/// The one worker detector this node serves the fleet with, handed over the
+/// moment it exists.
+///
+/// A COMPLETION, not a watch. Whatever produces the detector — the first
+/// camera's thread, or a cameraless box's own bootstrap — publishes it here
+/// from its own thread and the waiting start runs right then; a load that
+/// genuinely cannot produce one settles the slot as `NoDetector` with the real
+/// error already recorded; an operator stopping the node settles it as
+/// `Cancelled`. The start runs on that answer whichever order those happen in,
+/// including when the detector is already here before anything is waiting —
+/// and runs once more if a detector arrives after the node had answered that
+/// none was coming, because a camera an operator switches on afterwards is a
+/// camera that RUNS ([`WorkerDetectorSlot::on_answer`]).
+///
+/// Nothing here reads a clock, by standing owner ruling: no product outcome in
+/// Vigil is decided by wall-clock duration, and no deadline may fail a viable
+/// slow cold start. A cold start that takes as long as it takes still starts
+/// exactly one worker; the previous 60-second watch stopped watching and left a
+/// healthy process not serving for the rest of its life.
+#[derive(Default)]
+pub(crate) struct WorkerDetectorSlot {
+    state: Mutex<WorkerSlotState>,
+}
+
+/// How far this node's one worker question has been answered — the ONLY thing
+/// that decides whether a further answer is heard.
+enum WorkerSlotAnswered {
+    /// Nothing has answered yet.
+    Nothing,
+    /// The node reported that no detector is coming. True of the sources that
+    /// had reported when it was said, and not a sentence the node is held to
+    /// for the rest of its life: a detector, or the operator's stop, still
+    /// answers over it — exactly once.
+    NoDetector,
+    /// A detector arrived, or the operator stopped the node. The last word.
+    Final,
+}
+
+struct WorkerSlotState {
+    /// The answers this node has given that the start has not been handed yet,
+    /// in the order it gave them. Non-empty only while no start is installed
+    /// (or while the installed one is out being run).
+    undelivered: std::collections::VecDeque<WorkerSlotOutcome>,
+    /// Installed by the fabric bring-up and borrowed by whichever thread is
+    /// running it — `None` while it is out, which is what keeps the answers
+    /// this node gives in order across threads.
+    serve: Option<Box<dyn FnMut(WorkerSlotOutcome) + Send>>,
+    /// Whether a start has been installed at all, which `serve` alone cannot
+    /// say while it is out being run or after it was released.
+    serve_installed: bool,
+    /// How far the question has been answered.
+    answered: WorkerSlotAnswered,
+    /// How many detector sources this node will really run: declared by the
+    /// bring-up before any of them can answer, and GROWN by a camera thread
+    /// that takes its standing afterwards (the runtime-enable road).
+    eligible_sources: usize,
+    /// How many camera threads have taken up a standing as a detector source
+    /// on this node. The first `eligible_sources` of them are the cameras the
+    /// bring-up already counted; each one past that is a camera an operator
+    /// switched on while the deployment was up, and grows the count.
+    standings_taken: usize,
+    /// How many sources have reported that no detector is coming from them.
+    failed_sources: usize,
+    /// The FIRST failure reported, which is the one the operator surface
+    /// prints when every eligible source is out.
+    first_failure_reason: Option<String>,
+}
+
+impl Default for WorkerSlotState {
+    fn default() -> Self {
+        Self {
+            undelivered: std::collections::VecDeque::new(),
+            serve: None,
+            serve_installed: false,
+            answered: WorkerSlotAnswered::Nothing,
+            // One source, which is the cameraless bootstrap and every caller
+            // that has not declared otherwise: its failure is the node's
+            // answer.
+            eligible_sources: 1,
+            standings_taken: 0,
+            failed_sources: 0,
+            first_failure_reason: None,
+        }
+    }
+}
+
+impl WorkerDetectorSlot {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many camera detector sources this node will really run, declared
+    /// ONCE by the bring-up before any camera thread can answer.
+    ///
+    /// A node's worker question is answered by whichever source produces a
+    /// detector FIRST; it is only unanswerable when EVERY eligible source has
+    /// failed. Declaring the count up front is what makes "every" knowable:
+    /// the sources answer from their own threads in any order, and a slot that
+    /// settled on the first failure would discard a Ready that a later camera
+    /// was already loading. Cameras disabled at startup are not eligible —
+    /// their threads park on the enable flag and never reach a detector load,
+    /// so counting one would leave the node waiting on an answer that is never
+    /// coming.
+    ///
+    /// The default is 1, which is the cameraless bootstrap and every existing
+    /// caller: one source, and its failure is the node's answer. A node that
+    /// runs no eligible camera is that same one source — the cameraless
+    /// bootstrap it runs instead — so a declared zero is held at one rather
+    /// than leaving the node with nothing that can answer for it.
+    pub(crate) fn expect_detector_sources(&self, eligible: usize) {
+        let mut state = self.lock();
+        state.eligible_sources = eligible.max(1).max(state.standings_taken);
+    }
+
+    /// Run `serve` when this node's worker question is answered — and AGAIN
+    /// if a detector arrives after the node has already answered that it has
+    /// none.
+    ///
+    /// "No detector is coming" is true of the sources that had reported when
+    /// it was said, and it is what the operator acts on: they stage a model,
+    /// fix an endpoint, and switch a camera on. That camera is a camera that
+    /// RUNS, so the detector it loads is this node's detector and the worker
+    /// loop starts on it. A node that kept the earlier answer holds a working
+    /// detector idle and tells the operator it has none until somebody
+    /// restarts the deployment.
+    ///
+    /// Delivery, exactly: `serve` runs for the node's first answer. If that
+    /// answer was `NoDetector`, it runs a second time for whichever of a
+    /// `Ready` or the operator's `Cancelled` arrives next, and never again — a
+    /// further failure report is one more source out on a node already out,
+    /// and changes nothing. Nothing ever supersedes a `Ready` (the first
+    /// detector wins) or a `Cancelled` (a node on its way down must not bring
+    /// a worker loop up and claim fleet work it will abandon). Installed
+    /// before or after the first answer, as `on_settled` is today.
+    pub(crate) fn on_answer(&self, serve: impl FnMut(WorkerSlotOutcome) + Send + 'static) {
+        {
+            let mut state = self.lock();
+            if state.serve_installed {
+                return;
+            }
+            state.serve_installed = true;
+            state.serve = Some(Box::new(serve));
+        }
+        self.deliver();
+    }
+
+    /// Run `settle` exactly once, the moment this node's worker-detector
+    /// question is answered — immediately when it already is.
+    ///
+    /// The one-answer wrapper over [`WorkerDetectorSlot::on_answer`], for the
+    /// callers whose contract really is a single answer. The wrapped closure
+    /// is released the moment it runs, so whatever it captured drops with it.
+    ///
+    /// Compiled only where something asks for a single answer, which since the
+    /// bring-up moved to [`WorkerDetectorSlot::on_answer`] is the harness: the
+    /// worker-slot door and this module's own tests. A shipped artifact builds
+    /// neither, and the node's real start hears every answer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn on_settled(&self, settle: impl FnOnce(WorkerSlotOutcome) + Send + 'static) {
+        let mut settle = Some(settle);
+        self.on_answer(move |outcome| {
+            if let Some(settle) = settle.take() {
+                settle(outcome);
+            }
+        });
+    }
+
+    /// A detector loaded. The first one wins — a node with several cameras
+    /// serves the fleet with one detector, not one per camera.
+    pub(crate) fn publish(
+        &self,
+        detector: Arc<crate::detector::PromotableDetector>,
+        backend_tag: String,
+    ) {
+        self.answer(WorkerSlotOutcome::Ready(detector, backend_tag));
+    }
+
+    /// One detector source is terminally out: its model is missing or will not
+    /// load. `reason` is what an operator is shown next to
+    /// `fabric-worker-serving=false`, so it names the thing that is wrong
+    /// rather than restating the outcome.
+    ///
+    /// This settles the node's question only when EVERY eligible source has
+    /// reported failure; the reason carried is the first one reported, so the
+    /// surface prints a single `reason=`. A source that fails while another is
+    /// still loading takes the node no further than it already was.
+    pub(crate) fn no_detector(&self, reason: String) {
+        let every_source_is_out = {
+            let mut state = self.lock();
+            if state.first_failure_reason.is_none() {
+                state.first_failure_reason = Some(reason);
+            }
+            state.failed_sources += 1;
+            (state.failed_sources >= state.eligible_sources)
+                .then(|| state.first_failure_reason.clone())
+                .flatten()
+        };
+        // Outside the lock, because `answer` takes it again — and the start it
+        // may run must never hold this node's slot.
+        if let Some(reason) = every_source_is_out {
+            self.answer(WorkerSlotOutcome::NoDetector(reason));
+        }
+    }
+
+    /// Take up ONE camera thread's standing as a detector source for this
+    /// node, held for exactly as long as that thread could still produce a
+    /// detector and released the moment it could not — however it ends.
+    ///
+    /// The node's worker question is answered when a detector arrives, or
+    /// when every eligible source has reported that it is terminally out
+    /// ([`WorkerDetectorSlot::expect_detector_sources`]). That arithmetic only
+    /// completes if every source that stops being one says so, and a camera
+    /// thread has more endings than the detector-load failure: its analysis
+    /// endpoint may not resolve into a session credential, and it may panic.
+    /// Neither reported, so a node that counted such a camera waited on an
+    /// answer that was never coming and kept `worker-loop-starting` for the
+    /// life of the process.
+    ///
+    /// `reason_if_it_never_answers` is what an operator is shown beside
+    /// `fabric-worker-serving=false` when this camera's ending is the one the
+    /// node settles on, so it names the thing that is wrong rather than
+    /// restating the outcome.
+    ///
+    /// Taken by the camera thread once it is really a running source — after
+    /// the enable-flag park, whether that park ended at startup or when an
+    /// operator switched the camera on later.
+    ///
+    /// TAKING the standing is what makes the camera one of the sources this
+    /// node measures "every source is out" against, so a camera switched on
+    /// at runtime GROWS the count the bring-up declared. The first
+    /// `eligible_sources` standings are the cameras
+    /// [`crate::runtime::eligible_detector_sources`] already counted, so they
+    /// grow nothing; each standing past that is a camera the operator added
+    /// while the deployment was up. Without the growth that camera's failure
+    /// is one report against a count the counted cameras have not met yet, and
+    /// the node declares itself out of detectors while one of them is still
+    /// loading one — the operator having caused it by doing the only thing the
+    /// settings surface offered them. A thread that ends before the park does
+    /// (the node is shutting down) never gets here, so it is never counted.
+    pub(crate) fn camera_source(
+        self: &Arc<Self>,
+        reason_if_it_never_answers: &str,
+    ) -> CameraDetectorSource {
+        {
+            let mut state = self.lock();
+            state.standings_taken += 1;
+            state.eligible_sources = state.eligible_sources.max(state.standings_taken);
+        }
+        CameraDetectorSource {
+            slot: Arc::clone(self),
+            reason_if_it_never_answers: Some(reason_if_it_never_answers.to_string()),
+        }
+    }
+
+    /// The operator stopped this node before a detector arrived.
+    pub(crate) fn cancel(&self) {
+        self.answer(WorkerSlotOutcome::Cancelled);
+    }
+
+    fn answer(&self, outcome: WorkerSlotOutcome) {
+        {
+            let mut state = self.lock();
+            let heard = match state.answered {
+                WorkerSlotAnswered::Nothing => true,
+                // A detector, or the operator's stop, answers over "no
+                // detector is coming". One more source going out on a node
+                // already out changes nothing.
+                WorkerSlotAnswered::NoDetector => {
+                    !matches!(outcome, WorkerSlotOutcome::NoDetector(_))
+                }
+                WorkerSlotAnswered::Final => false,
+            };
+            if !heard {
+                // A final answer already stands and nothing has run on it. The
+                // operator's stop is the one thing allowed to replace it: a
+                // detector that loaded during teardown leaves `Ready` sitting
+                // in this slot, and a start installed afterwards would bring a
+                // worker loop up on a node that is on its way down. Any other
+                // second answer is still ignored — the first detector wins.
+                if matches!(state.answered, WorkerSlotAnswered::Final)
+                    && matches!(outcome, WorkerSlotOutcome::Cancelled)
+                    && let Some(standing) = state.undelivered.back_mut()
+                {
+                    *standing = outcome;
+                }
+                return;
+            }
+            state.answered = if matches!(outcome, WorkerSlotOutcome::NoDetector(_)) {
+                WorkerSlotAnswered::NoDetector
+            } else {
+                WorkerSlotAnswered::Final
+            };
+            state.undelivered.push_back(outcome);
+        }
+        self.deliver();
+    }
+
+    /// Hand the installed start every answer it has not been handed yet, in
+    /// the order this node gave them, with the slot UNLOCKED — the start
+    /// spawns the worker loop, and no other publisher should be held behind
+    /// that. Whichever thread has the start out runs them all; a thread that
+    /// arrives while it is out has already left its answer in the queue and
+    /// returns, so the answers still reach the start in order.
+    fn deliver(&self) {
+        loop {
+            let (mut serve, outcome) = {
+                let mut state = self.lock();
+                let Some(serve) = state.serve.take() else {
+                    return;
+                };
+                match state.undelivered.pop_front() {
+                    Some(outcome) => (serve, outcome),
+                    None => {
+                        state.serve = Some(serve);
+                        return;
+                    }
+                }
+            };
+            serve(outcome);
+            let mut state = self.lock();
+            if state.undelivered.is_empty() {
+                if matches!(state.answered, WorkerSlotAnswered::Final) {
+                    // The node's last word has been served, so nothing will
+                    // ever be handed to this start again. Releasing it here is
+                    // what lets the fabric bundle it captured drop; a slot
+                    // that kept it would hold that bundle for the life of the
+                    // process.
+                    return;
+                }
+                state.serve = Some(serve);
+                return;
+            }
+            state.serve = Some(serve);
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, WorkerSlotState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// One camera thread's standing as this node's detector source.
+///
+/// Dropped without having answered — a `return`, an `?`, or an unwind — it
+/// reports the reason it was taken with. Answered, it reports that answer and
+/// nothing further: a camera that has already reported is ONE source that
+/// reported, and a node that counted it twice would declare itself out of
+/// detectors while another camera was still loading one.
+///
+/// The release is a `Drop` rather than a call at each ending on purpose. The
+/// panic road has no site to put a call on — the unwind leaves the body
+/// without running another line of it — and a `return` added to this thread
+/// later cannot forget what it never had to remember.
+pub(crate) struct CameraDetectorSource {
+    slot: Arc<WorkerDetectorSlot>,
+    /// The standing reason, taken by whichever answer arrives — so `Drop`
+    /// reports for a standing that never answered, and only for that one.
+    reason_if_it_never_answers: Option<String>,
+}
+
+impl CameraDetectorSource {
+    /// This camera's detector loaded, advertising `backend_tag` to the fleet.
+    pub(crate) fn detector_ready(
+        mut self,
+        detector: Arc<crate::detector::PromotableDetector>,
+        backend_tag: String,
+    ) {
+        self.reason_if_it_never_answers = None;
+        self.slot.publish(detector, backend_tag);
+    }
+
+    /// This camera's detector source is terminally out, with the reason an
+    /// operator acts on.
+    pub(crate) fn failed(mut self, reason: String) {
+        self.reason_if_it_never_answers = None;
+        self.slot.no_detector(reason);
+    }
+}
+
+impl Drop for CameraDetectorSource {
+    fn drop(&mut self) {
+        if let Some(reason) = self.reason_if_it_never_answers.take() {
+            self.slot.no_detector(reason);
+        }
+    }
+}
+
+/// The node's worker-detector question, opened for the harness.
+///
+/// Not a shipped surface: no artifact builds `test-support`
+/// (`artifact_never_enables_test_support.rs`), so in every shipped build this
+/// door is not merely private — it is not compiled at all. It exists because
+/// the aggregation contract is about ORDER: which of several camera sources
+/// answers first, and what the node does with the answers that follow. An
+/// integration test can construct that order directly and a process-level
+/// fixture cannot construct it at all.
+#[cfg(feature = "test-support")]
+pub mod worker_slot_door {
+    use std::sync::Arc;
+
+    use super::{WorkerDetectorSlot, WorkerSlotOutcome};
+
+    /// What this node's one worker question was finally answered with. The
+    /// detector instance is deliberately absent: these contracts are about
+    /// WHICH answer settles and what the operator is told, never about
+    /// detection.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SettledAnswer {
+        /// A detector loaded, advertising this backend tag to the fleet.
+        Ready { backend_tag: String },
+        /// No detector is coming from anywhere on this node, with the reason
+        /// an operator acts on.
+        NoDetector { reason: String },
+        /// The operator stopped the node.
+        Cancelled,
+    }
+
+    /// What the start was told, in this door's vocabulary.
+    fn settled_answer(outcome: WorkerSlotOutcome) -> SettledAnswer {
+        match outcome {
+            WorkerSlotOutcome::Ready(_, backend_tag) => SettledAnswer::Ready { backend_tag },
+            WorkerSlotOutcome::NoDetector(reason) => SettledAnswer::NoDetector { reason },
+            WorkerSlotOutcome::Cancelled => SettledAnswer::Cancelled,
+        }
+    }
+
+    /// A detector that does nothing but exist. The slot carries an instance
+    /// because the real worker loop serves with one; nothing this door pins
+    /// ever detects anything, so the instance only has to BE one.
+    struct AnswerOnlyDetector;
+
+    impl crate::detector::Detector for AnswerOnlyDetector {
+        fn model_sha256(&self) -> &str {
+            "answer-only"
+        }
+
+        fn detect_segment(
+            &self,
+            _media: &crate::media_pipeline::DecodedVideoSegment,
+            _clip_sha256: String,
+            _sample_frames: usize,
+            _confidence_threshold: f64,
+        ) -> Result<crate::yolox_detector::DetectorOutput, String> {
+            Err("this detector exists to be an answer, and decodes nothing".to_string())
+        }
+    }
+
+    /// One node's worker-detector question, driven the way the runtime drives
+    /// it.
+    ///
+    /// Holds the slot behind an `Arc` rather than by value, which is what lets
+    /// a standing outlive the call that took it — the same shape the runtime
+    /// already has, where the slot is an `Arc` cloned into every camera
+    /// thread.
+    pub struct WorkerSlotDoor {
+        slot: Arc<WorkerDetectorSlot>,
+    }
+
+    impl Default for WorkerSlotDoor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl WorkerSlotDoor {
+        /// A fresh node, before any camera source has answered.
+        pub fn new() -> Self {
+            Self {
+                slot: Arc::new(WorkerDetectorSlot::new()),
+            }
+        }
+
+        /// Take up one camera thread's standing as a detector source for this
+        /// node (see [`WorkerDetectorSlot::camera_source`]).
+        pub fn camera_source(&self, reason_if_it_never_answers: &str) -> CameraDetectorSource {
+            CameraDetectorSource {
+                inner: self.slot.camera_source(reason_if_it_never_answers),
+            }
+        }
+
+        /// The bring-up's declaration of how many camera detector sources this
+        /// node will really run (see
+        /// [`WorkerDetectorSlot::expect_detector_sources`]).
+        pub fn expect_detector_sources(&self, eligible: usize) {
+            self.slot.expect_detector_sources(eligible);
+        }
+
+        /// The start the fabric bring-up installs, recording what it was told.
+        pub fn on_settled(&self, record: impl FnOnce(SettledAnswer) + Send + 'static) {
+            self.slot
+                .on_settled(move |outcome| record(settled_answer(outcome)));
+        }
+
+        /// Every answer this node's worker question reaches, in order, as the
+        /// fabric bring-up's own start sees them
+        /// (see [`WorkerDetectorSlot::on_answer`]).
+        pub fn on_answer(&self, mut record: impl FnMut(SettledAnswer) + Send + 'static) {
+            self.slot
+                .on_answer(move |outcome| record(settled_answer(outcome)));
+        }
+
+        /// One camera's detector loaded, advertising `backend_tag`.
+        pub fn detector_ready(&self, backend_tag: &str) {
+            self.slot.publish(
+                Arc::new(crate::detector::PromotableDetector::new(Box::new(
+                    AnswerOnlyDetector,
+                ))),
+                backend_tag.to_string(),
+            );
+        }
+
+        /// One camera's detector source is terminally out, with the reason an
+        /// operator is shown.
+        pub fn detector_source_failed(&self, reason: &str) {
+            self.slot.no_detector(reason.to_string());
+        }
+
+        /// The operator stopped this node.
+        pub fn cancel(&self) {
+            self.slot.cancel();
+        }
+    }
+
+    /// One camera thread's standing, as the harness drives it. The detector
+    /// instance is deliberately absent for the same reason [`SettledAnswer`]
+    /// carries none: these contracts are about WHICH answer settles and what
+    /// the operator is told, never about detection.
+    pub struct CameraDetectorSource {
+        inner: super::CameraDetectorSource,
+    }
+
+    impl CameraDetectorSource {
+        /// This camera's detector loaded, advertising `backend_tag`.
+        pub fn detector_ready(self, backend_tag: &str) {
+            self.inner.detector_ready(
+                Arc::new(crate::detector::PromotableDetector::new(Box::new(
+                    AnswerOnlyDetector,
+                ))),
+                backend_tag.to_string(),
+            );
+        }
+
+        /// This camera's detector source is terminally out, with the reason
+        /// an operator is shown.
+        pub fn failed(self, reason: &str) {
+            self.inner.failed(reason.to_string());
+        }
+    }
+}
+
 /// Node-level fabric state, shared (via `Arc`) across every camera's
 /// detector thread and the background worker/result-consumer task. Only
 /// constructed when `fabric_ticket`/`fabric_hub` is configured
@@ -1200,15 +1790,13 @@ pub(crate) struct FabricBundle {
     /// with no loadable model never fills it, never advertises, and reports
     /// `fabric-worker-serving=false reason=no-model` (advertisement requires
     /// executable capability — PO ruling 2026-07-13).
-    /// Shared with the camera detector threads (which populate it the moment a
+    /// Shared with the camera detector threads (which publish the moment a
     /// detector loads) and, for a cameraless worker box, the bootstrap thread.
-    /// An `Arc<OnceLock<..>>` rather than an owned `OnceLock` so it is created in
-    /// `run_inner` BEFORE this bundle exists: fabric now attaches asynchronously,
-    /// so a camera's detector may load before the bundle is built, and the
-    /// worker loop must still observe that detector the instant the bundle
-    /// appears.
-    pub(crate) worker_detector_slot:
-        Arc<OnceLock<(Arc<crate::detector::PromotableDetector>, String)>>,
+    /// Shared rather than owned so it is created in `run_inner` BEFORE this
+    /// bundle exists: fabric attaches asynchronously, so a camera's detector may
+    /// load before the bundle is built, and the start must still run for that
+    /// detector rather than be missed.
+    pub(crate) worker_detector_slot: Arc<WorkerDetectorSlot>,
     /// Whether this node's fabric worker loop is actually running and serving
     /// the fleet — flipped `true` the moment the loop starts. The status task
     /// renders it onto the shared `fabric-status` line so a not-serving node
@@ -1216,9 +1804,13 @@ pub(crate) struct FabricBundle {
     /// looking identical to a healthy idle one.
     pub(crate) worker_serving: Arc<AtomicBool>,
     /// The named reason the worker loop is not serving (enrollment rejected,
-    /// no detector loaded in time) — rendered next to `fabric-worker-serving=
+    /// no loadable detection model) — rendered next to `fabric-worker-serving=
     /// false`. Empty once serving.
     pub(crate) worker_serving_reason: Arc<Mutex<String>>,
+    /// The node's OWN shutdown flag — the one an operator's stop sets. Carried
+    /// here so the worker loop this bundle starts is stopped by the same thing
+    /// that stops everything else on the node; see [`worker_loop_stop`].
+    pub(crate) shutdown: Arc<AtomicBool>,
     pub(crate) tokio_handle: tokio::runtime::Handle,
     pub(crate) node_id: String,
 }
@@ -1243,6 +1835,19 @@ pub(crate) struct PendingOffloadSegment {
     pub(crate) receipts: Arc<crate::workgraph::StageReceiptLog>,
 }
 
+/// The stop a worker loop started at bring-up runs under: the node's OWN
+/// shutdown flag, shared, never a fresh one minted for the loop.
+///
+/// A loop handed a flag nothing else holds can never be stopped by anything.
+/// The operator asks the node to stop, every other part of it stops, and the
+/// worker loop keeps claiming and executing fleet jobs until the process dies
+/// — on a node that has already given up its cameras. Sharing the node's flag
+/// is what makes the operator's stop reach it.
+#[cfg(feature = "fabric")]
+fn worker_loop_stop(node_shutdown: &Arc<AtomicBool>) -> Arc<AtomicBool> {
+    Arc::clone(node_shutdown)
+}
+
 /// Bring up this node's fabric wiring exactly once, before any camera
 /// thread starts. Returns `None` (today's behavior, byte-identical) unless
 /// `fabric_ticket`/`fabric_hub` is configured — the `fabric` cargo feature
@@ -1253,7 +1858,8 @@ pub(crate) fn fabric_bring_up(
     config: &config::RuntimeConfig,
     stats: &RuntimeStatsState,
     accel: &Arc<crate::acceleration::AccelerationState>,
-    worker_detector_slot: Arc<OnceLock<(Arc<crate::detector::PromotableDetector>, String)>>,
+    worker_detector_slot: Arc<WorkerDetectorSlot>,
+    shutdown: Arc<AtomicBool>,
 ) -> Option<Arc<FabricBundle>> {
     if config.fabric_ticket.is_none() && !config.fabric_hub {
         return None;
@@ -1262,8 +1868,13 @@ pub(crate) fn fabric_bring_up(
     // surface — add-on options/env, fabric.toml, CLI — ever sets it): lets the
     // boot-readiness test make fabric bring-up deliberately slow so it can prove
     // /health reaches Ready WITHOUT waiting for the fabric ledger to open. Inert
-    // in production, mirroring VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS.
-    if let Some(delay_ms) = std::env::var("VIGIL_FABRIC_BRINGUP_DELAY_MS")
+    // in production.
+    // A declared test-only diagnostic, not a setting: it has no shipped
+    // surface to move onto, which is the condition the workspace lint exists
+    // to enforce.
+    #[allow(clippy::disallowed_methods)]
+    let bringup_delay_ms = std::env::var("VIGIL_FABRIC_BRINGUP_DELAY_MS");
+    if let Some(delay_ms) = bringup_delay_ms
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
@@ -1326,11 +1937,16 @@ pub(crate) fn fabric_bring_up(
     // still serve the fleet with whatever backend it has — so it bootstraps
     // its OWN worker detector below, independent of cameras (owner steer
     // 2026-07-13).
+    //
+    // "Will load" is the SAME eligibility the bring-up declared on the slot
+    // (`crate::runtime::eligible_detector_sources`): a camera an operator
+    // switched off at startup parks on its enable flag and never reaches a
+    // detector load. Asking only whether a camera is CONFIGURED left a node
+    // whose every camera is switched off skipping this bootstrap while nothing
+    // else could ever settle the slot — the node kept the
+    // `worker-loop-starting` placeholder for the rest of its life.
     let serves_role = fabric_runtime.serves_fabric_role();
-    let has_camera_source = config
-        .cameras
-        .iter()
-        .any(|camera| camera.rtsp_url.is_some());
+    let has_camera_source = crate::runtime::eligible_detector_sources(config) > 0;
     // Seed the honest not-serving reason before the worker loop resolves: a
     // node with worker intent but a rejected ticket can never serve, and says
     // exactly that; an enrollable node is transiently "starting" until its
@@ -1367,6 +1983,7 @@ pub(crate) fn fabric_bring_up(
         worker_detector_slot,
         worker_serving: worker_serving.clone(),
         worker_serving_reason: worker_serving_reason.clone(),
+        shutdown,
         tokio_handle: handle.clone(),
         node_id: node_id.clone(),
     });
@@ -1378,7 +1995,7 @@ pub(crate) fn fabric_bring_up(
     // populate the slot so the worker loop starts and advertises. Runs on a
     // detached thread so a slow model load never delays `/health` becoming
     // ready. A node that DOES own cameras keeps its existing behavior (the
-    // first camera detector wins the `OnceLock`); this only fills the gap for a
+    // first camera detector to publish wins); this only fills the gap for a
     // dedicated worker box.
     if serves_role && !has_camera_source {
         let boot_bundle = bundle.clone();
@@ -1389,75 +2006,92 @@ pub(crate) fn fabric_bring_up(
             match crate::runtime::bootstrap_worker_detector(&boot_config, &boot_accel, &boot_stats)
             {
                 Some((detector, backend_tag)) => {
-                    let _ = boot_bundle
+                    boot_bundle
                         .worker_detector_slot
-                        .set((detector, backend_tag));
+                        .publish(detector, backend_tag);
                 }
                 None => {
                     // No executable capability: name the staging fix and do
                     // NOT advertise a detector row (PO ruling 2026-07-13).
-                    if let Ok(mut reason) = boot_bundle.worker_serving_reason.lock() {
-                        *reason = "no-model — stage a loadable detection model on this worker \
-                                   (set detector_model_path / VIGIL_DETECTOR_MODEL_PATH)"
-                            .to_string();
-                    }
+                    // The question is ANSWERED — no detector is coming — so
+                    // the slot settles rather than leaving a start pending on
+                    // something that will never happen. The staging fix rides
+                    // ON the answer, so the one place that renders a settled
+                    // not-serving reason renders this one too.
+                    boot_bundle.worker_detector_slot.no_detector(
+                        "no-model — stage a loadable detection model on this worker \
+                         (set detector_model_path / VIGIL_DETECTOR_MODEL_PATH)"
+                            .to_string(),
+                    );
                 }
             }
         });
     }
 
-    // Worker loop, started once the first camera's detector (or a
-    // detector-less standalone worker box, bounded below) is ready. Claims +
-    // executes ANY matching `vigil.detector` job, including this node's own
-    // deferred submissions once their deadline passes (criterion C5/C8).
+    // Worker loop, started BY the detector arriving — the first camera's, or a
+    // cameraless worker box's own bootstrap. Claims + executes ANY matching
+    // `vigil.detector` job, including this node's own deferred submissions once
+    // their deadline passes (criterion C5/C8).
+    //
+    // A node with no serving role never starts one and already carries the
+    // reason why (a rejected ticket, or no hub at all), so it says so once here
+    // rather than leaving a start waiting on a detector that would change
+    // nothing.
     let worker_bundle = bundle.clone();
-    handle.spawn(async move {
-        // Test-only override for the bounded wait below (default unchanged:
-        // 60s) — lets an integration test shorten the wait instead of
-        // sleeping through the real deadline. Inert in production: no
-        // shipped surface (add-on options/env, fabric.toml, CLI) ever sets
-        // this variable.
-        let worker_slot_deadline_ms = std::env::var("VIGIL_FABRIC_WORKER_SLOT_DEADLINE_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(60_000);
-        let deadline = tokio::time::Instant::now()
-            + tokio::time::Duration::from_millis(worker_slot_deadline_ms);
-        loop {
-            if let Some((detector, backend_tag)) = worker_bundle.worker_detector_slot.get() {
-                let backend = Arc::new(crate::fabric::FabricProductionDetectorBackend::new(
-                    detector.clone(),
-                    backend_tag.clone(),
-                ));
-                let shutdown = Arc::new(AtomicBool::new(false));
-                worker_bundle.runtime.spawn_worker_loop(backend, shutdown);
-                worker_bundle
-                    .worker_serving
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                if let Ok(mut reason) = worker_bundle.worker_serving_reason.lock() {
-                    reason.clear();
+    if serves_role {
+        let handoff_handle = handle.clone();
+        worker_bundle
+            .clone()
+            .worker_detector_slot
+            .on_answer(move |outcome| match outcome {
+                crate::fabric::WorkerSlotOutcome::Ready(detector, backend_tag) => {
+                    // Cloned per answer because this start can run more than
+                    // once: a node that reported having no detector and then
+                    // had a camera switched on serves on the SECOND answer
+                    // (`WorkerDetectorSlot::on_answer`), through this same arm.
+                    let worker_bundle = worker_bundle.clone();
+                    // Spawned onto the fabric runtime because the worker loop
+                    // is a tokio task; the publisher's own thread hands it over
+                    // and goes back to what it was doing.
+                    handoff_handle.spawn(async move {
+                        let backend =
+                            Arc::new(crate::fabric::FabricProductionDetectorBackend::new(
+                                detector.clone(),
+                                backend_tag.clone(),
+                            ));
+                        worker_bundle
+                            .runtime
+                            .spawn_worker_loop(backend, worker_loop_stop(&worker_bundle.shutdown));
+                        worker_bundle
+                            .worker_serving
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        if let Ok(mut reason) = worker_bundle.worker_serving_reason.lock() {
+                            reason.clear();
+                        }
+                        println!("fabric_worker_loop_started=true backend={backend_tag}");
+                    });
                 }
-                println!("fabric_worker_loop_started=true backend={backend_tag}");
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                // Do not overwrite a more specific reason already set (a
-                // rejected ticket, or a detector-load failure) — only fill in
-                // the deadline reason for a node that had a serving role and
-                // simply never had a detector become available in time.
-                if let Ok(mut reason) = worker_bundle.worker_serving_reason.lock()
-                    && (reason.is_empty() || reason.as_str() == "worker-loop-starting")
-                {
-                    *reason = "no-local-detector-loaded-within-deadline".to_string();
+                crate::fabric::WorkerSlotOutcome::NoDetector(settled_reason) => {
+                    // The answer's own reason is what an operator reads back
+                    // through `fabric-worker-serving=false reason=…`: the
+                    // staging fix a worker box named, or the real error a
+                    // camera's detector load failed with. A more specific
+                    // reason already standing (a rejected ticket) is left
+                    // alone; the seeded starting placeholder is not a reason
+                    // and is replaced.
+                    if let Ok(mut reason) = worker_bundle.worker_serving_reason.lock()
+                        && (reason.is_empty() || reason.as_str() == "worker-loop-starting")
+                    {
+                        *reason = settled_reason;
+                    }
+                    println!("fabric_worker_loop_not_started=true reason=no_local_detector_loaded");
                 }
-                println!(
-                    "fabric_worker_loop_not_started=true reason=no_local_detector_loaded_within_deadline"
-                );
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-        }
-    });
+                // The node is going down. Nothing to say and nothing to start.
+                crate::fabric::WorkerSlotOutcome::Cancelled => {}
+            });
+    } else {
+        println!("fabric_worker_loop_not_started=true reason=no_serving_role");
+    }
 
     // Result-consumer + remote-capability refresher (criteria C4/C7):
     // periodically pulls, refreshes the remote-capability cache the
@@ -1729,7 +2363,7 @@ fn read_own_ticket_identity_stamp(fabric_data_dir: &Path) -> Option<String> {
 }
 
 /// The freshness gate `run_ticket_command` applies before trusting the
-/// cached ticket on a `DatabaseLocked` fallback: `true` only when the
+/// cached ticket on a store-held-by-a-writer fallback: `true` only when the
 /// identity stamped alongside the cache ([`write_own_ticket_identity_stamp`])
 /// still matches the identity `identity_path` loads TODAY. Absent stamp,
 /// unreadable identity, or a mismatch are all treated as untrustworthy
@@ -1745,6 +2379,219 @@ fn cached_ticket_identity_is_current(fabric_data_dir: &Path, identity_path: &Pat
                 .map(|cached_node_id| cached_node_id == current_node_id)
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod worker_detector_slot_tests {
+    use super::{WorkerDetectorSlot, WorkerSlotOutcome};
+    use std::sync::{Arc, Mutex};
+
+    /// A detector that does nothing but exist: these contracts are about WHEN
+    /// the worker start runs and how many times, never about detection.
+    struct StubDetector;
+
+    impl crate::detector::Detector for StubDetector {
+        fn model_sha256(&self) -> &str {
+            "stub"
+        }
+
+        fn detect_segment(
+            &self,
+            _media: &crate::media_pipeline::DecodedVideoSegment,
+            _clip_sha256: String,
+            _sample_frames: usize,
+            _confidence_threshold: f64,
+        ) -> Result<crate::yolox_detector::DetectorOutput, String> {
+            Err("this stub detector decodes nothing".to_string())
+        }
+    }
+
+    fn stub_handle() -> Arc<crate::detector::PromotableDetector> {
+        Arc::new(crate::detector::PromotableDetector::new(Box::new(
+            StubDetector,
+        )))
+    }
+
+    /// What the start was told, so a test reads events rather than waiting for
+    /// any amount of time to pass.
+    type Recorded = Arc<Mutex<Vec<String>>>;
+
+    fn note(seen: &Recorded, outcome: WorkerSlotOutcome) {
+        let entry = match outcome {
+            WorkerSlotOutcome::Ready(_, backend_tag) => format!("started:{backend_tag}"),
+            WorkerSlotOutcome::NoDetector(reason) => format!("no-detector:{reason}"),
+            WorkerSlotOutcome::Cancelled => "cancelled".to_string(),
+        };
+        seen.lock().expect("recorded outcomes").push(entry);
+    }
+
+    /// The detector can finish loading before anything is waiting for it — a
+    /// camera thread routinely beats the fabric bring-up, which is the whole
+    /// reason the slot is shared and created before the bundle. The start must
+    /// still run, once, with that detector. A handover that only reacts to the
+    /// arrival would drop this one on the floor and leave a node with a
+    /// perfectly good detector serving nothing for the rest of its life; the
+    /// polling loop this replaced could not miss it, so the event shape has to
+    /// prove it does not either.
+    #[test]
+    fn a_detector_that_arrives_before_anything_waits_still_starts_exactly_one_worker() {
+        let slot = WorkerDetectorSlot::new();
+        let seen: Recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+
+        slot.publish(stub_handle(), "burn-cpu".to_string());
+        assert!(
+            seen.lock().expect("recorded outcomes").is_empty(),
+            "nothing has asked to be started yet, so nothing may have started"
+        );
+
+        slot.on_settled(move |outcome| note(&recorded, outcome));
+        assert_eq!(
+            *seen.lock().expect("recorded outcomes"),
+            vec!["started:burn-cpu".to_string()],
+            "the start must run with the detector that was already here"
+        );
+
+        // A node with several cameras serves the fleet with ONE detector, so a
+        // second detector arriving afterwards starts nothing further.
+        slot.publish(stub_handle(), "burn-wgpu".to_string());
+        assert_eq!(
+            *seen.lock().expect("recorded outcomes"),
+            vec!["started:burn-cpu".to_string()],
+            "a later detector must not start a second worker loop"
+        );
+    }
+
+    /// An operator stopping the node while a start is still waiting on a
+    /// detector must settle that start, and a detector that finishes loading
+    /// during teardown must not bring a worker loop up on a node on its way
+    /// down.
+    #[test]
+    fn an_operator_stop_settles_a_waiting_start_and_nothing_starts_after_it() {
+        let slot = WorkerDetectorSlot::new();
+        let seen: Recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+
+        slot.on_settled(move |outcome| note(&recorded, outcome));
+        assert!(
+            seen.lock().expect("recorded outcomes").is_empty(),
+            "no detector has arrived, so the start is still waiting"
+        );
+
+        slot.cancel();
+        assert_eq!(
+            *seen.lock().expect("recorded outcomes"),
+            vec!["cancelled".to_string()],
+            "the operator's stop is what settles a start nothing else answered"
+        );
+
+        slot.publish(stub_handle(), "burn-cpu".to_string());
+        assert_eq!(
+            *seen.lock().expect("recorded outcomes"),
+            vec!["cancelled".to_string()],
+            "a detector finishing during teardown must start nothing"
+        );
+    }
+
+    /// Teardown's real order, which the black-box surface cannot construct: a
+    /// detector finishes loading and answers the slot, the operator's stop
+    /// arrives, and only THEN does the bring-up install the start. The answer
+    /// that was already sitting there has not run, so the stop is still the
+    /// node's last word — otherwise a node on its way down brings a worker
+    /// loop up and starts claiming fleet jobs it will abandon.
+    #[test]
+    fn a_cancel_after_a_ready_answer_still_stops_a_start_that_has_not_run() {
+        let slot = WorkerDetectorSlot::new();
+        let seen: Recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+
+        slot.publish(stub_handle(), "burn-cpu".to_string());
+        slot.cancel();
+        slot.on_settled(move |outcome| note(&recorded, outcome));
+
+        assert_eq!(
+            *seen.lock().expect("recorded outcomes"),
+            vec!["cancelled".to_string()],
+            "the operator's stop arrived before anything ran on the detector's answer, so the \
+             start must be told the node is going down — not handed a detector to serve the \
+             fleet with"
+        );
+    }
+
+    /// The same window from the other side: the node was cancelled first, and
+    /// a start installed afterwards must never start a worker loop. A start
+    /// that ran on a stale `Ready` here would be a loop nobody asked for on a
+    /// node that is already stopping.
+    #[test]
+    fn a_start_installed_after_the_node_was_cancelled_never_runs() {
+        let slot = WorkerDetectorSlot::new();
+        let seen: Recorded = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&seen);
+
+        slot.cancel();
+        slot.publish(stub_handle(), "burn-cpu".to_string());
+        slot.on_settled(move |outcome| note(&recorded, outcome));
+
+        assert_eq!(
+            *seen.lock().expect("recorded outcomes"),
+            vec!["cancelled".to_string()],
+            "a start installed after the node was cancelled is told the node is going down, and \
+             starts nothing"
+        );
+    }
+
+    /// The teardown half of the same defect, invisible from every operator
+    /// surface: the start the bring-up installs captures the fabric bundle,
+    /// and the bundle holds this slot — so a slot that keeps an unrun closure
+    /// keeps the bundle alive with it, for the life of the process. Settling
+    /// the slot has to RELEASE the closure, which is what lets the bundle go.
+    #[test]
+    fn a_settled_slot_releases_its_settle_closure_so_the_bundle_can_drop() {
+        let slot = WorkerDetectorSlot::new();
+        // Stands in for the bundle the real start captures: what matters is
+        // that the closure is the only thing holding it.
+        let captured = Arc::new(());
+        let held = Arc::downgrade(&captured);
+        slot.on_settled(move |_outcome| {
+            let _bundle = &captured;
+        });
+        assert!(
+            held.upgrade().is_some(),
+            "sanity: while the question is unanswered the start is still installed and still \
+             holds what it captured"
+        );
+
+        slot.no_detector("no-model".to_string());
+
+        assert!(
+            held.upgrade().is_none(),
+            "a settled slot still holds the start it ran, so the fabric bundle that start \
+             captured can never be dropped — the slot and the bundle keep each other alive for \
+             the whole life of the process"
+        );
+    }
+
+    /// The worker loop the bring-up starts is stopped by the NODE's own
+    /// shutdown flag. A loop handed a fresh flag nothing else holds runs until
+    /// the process dies: the operator stops the node, the cameras go, and this
+    /// loop keeps claiming fleet jobs it is no longer able to finish.
+    #[test]
+    fn a_worker_loop_spawned_at_bring_up_shares_the_nodes_own_shutdown_flag() {
+        let node_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let loop_stop = super::worker_loop_stop(&node_shutdown);
+
+        assert!(
+            Arc::ptr_eq(&node_shutdown, &loop_stop),
+            "the worker loop must run under the node's own stop, not a flag minted beside it"
+        );
+        node_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            loop_stop.load(std::sync::atomic::Ordering::SeqCst),
+            "an operator stopping the node must be what the worker loop reads, or the stop never \
+             reaches it"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1877,10 +2724,13 @@ mod ledger_permission_tightening_tests {
 /// SAME on-disk fabric ledger the running node's own `Database::open`
 /// already holds. In practice that contention is caught EARLY — at the
 /// ledger open, before this command ever reaches the endpoint bind step —
-/// and surfaces as a TYPED [`FabricStartError::DatabaseLocked`], carried
-/// through from `contextdb_core::Error::DatabaseLocked` at the exact call
-/// site that observes it ([`FabricRuntime::start`]'s `Database::open`)
-/// rather than flattened to a string and re-matched by substring here. That
+/// and surfaces as a TYPED [`FabricStartError::StoreHeldByWriter`], carried
+/// through at the exact call site that observes it ([`FabricRuntime::start`]'s
+/// `Database::open`) rather than flattened to a string and re-matched by
+/// substring here. contextdb names that one condition in two typed shapes —
+/// same-process `DatabaseLocked` and cross-process `HeldByWriter` — and a
+/// separate `vigil fabric ticket` process always meets the cross-process one;
+/// [`store_is_held_by_a_writer`] recognizes both. That
 /// failure is the expected, ordinary case — this command exists
 /// specifically for an operator to run against a live node — so on exactly
 /// that lock-conflict failure this falls back to the ticket the running
@@ -1939,7 +2789,7 @@ pub(crate) fn run_ticket_command(args: Vec<std::ffi::OsString>) -> Result<(), St
             println!("ticket={}", runtime.own_ticket());
             Ok(())
         }
-        Err(bind_error @ FabricStartError::DatabaseLocked { .. }) => {
+        Err(bind_error @ FabricStartError::StoreHeldByWriter { .. }) => {
             let identity_path = fabric_data_dir.join("fabric-identity.key");
             if !cached_ticket_identity_is_current(&fabric_data_dir, &identity_path) {
                 return Err(format!("fabric ticket: {bind_error}"));
@@ -1956,6 +2806,35 @@ pub(crate) fn run_ticket_command(args: Vec<std::ffi::OsString>) -> Result<(), St
     }
 }
 
+/// Whether this ledger open was refused because a WRITER already owns the
+/// store — which is the ordinary condition when an operator runs `vigil
+/// fabric ticket` against the node they are running.
+///
+/// contextdb reports that one fact in TWO typed shapes, by who is holding it.
+/// A second open from THIS process is [`contextdb_core::Error::DatabaseLocked`];
+/// an open from ANOTHER process — which a separate `vigil fabric ticket`
+/// invocation always is — is a `HeldByWriter` read failure naming the holding
+/// process id and the store. Both say the running node owns its own ledger,
+/// so both are the same condition here and both permit the cached-ticket
+/// fallback. Reading only the same-process shape left the cross-process one —
+/// the only shape this command ever actually meets — classified as an ordinary
+/// error, and the fallback the command exists for never fired.
+///
+/// Matched on the type, never on the message. Every other read failure stays
+/// an ordinary error: `HeldByReaders` above all, which is a crowd of readers
+/// rather than the running node's own write ownership, and must never unlock a
+/// cached answer.
+fn store_is_held_by_a_writer(error: &contextdb_core::Error) -> bool {
+    match error {
+        contextdb_core::Error::DatabaseLocked { .. } => true,
+        contextdb_core::Error::ReadFailure(failure) => matches!(
+            failure.kind(),
+            contextdb_core::read_contract::ReadFailureKind::HeldByWriter
+        ),
+        _ => false,
+    }
+}
+
 /// Typed outcome of [`FabricRuntime::start`]. Every non-lock failure carries
 /// only a message (there is currently only one classification a caller
 /// needs to act on differently — see [`run_ticket_command`]'s fallback); a
@@ -1963,11 +2842,13 @@ pub(crate) fn run_ticket_command(args: Vec<std::ffi::OsString>) -> Result<(), St
 /// rather than re-introducing string matching.
 #[derive(Debug)]
 pub enum FabricStartError {
-    /// `contextdb_core::Error::DatabaseLocked` observed at
-    /// `Database::open`, carried through as a type rather than flattened to
-    /// a string and re-parsed by substring at the call site that needs to
-    /// distinguish it.
-    DatabaseLocked { message: String },
+    /// A writer already owns the ledger store, observed at `Database::open`
+    /// in either typed shape contextdb reports it in — same-process
+    /// `DatabaseLocked` or cross-process `HeldByWriter` (see
+    /// [`store_is_held_by_a_writer`]) — carried through as a type rather than
+    /// flattened to a string and re-parsed by substring at the call site that
+    /// needs to distinguish it.
+    StoreHeldByWriter { message: String },
     /// Any other bring-up failure.
     Other(String),
 }
@@ -1975,7 +2856,7 @@ pub enum FabricStartError {
 impl std::fmt::Display for FabricStartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FabricStartError::DatabaseLocked { message } | FabricStartError::Other(message) => {
+            FabricStartError::StoreHeldByWriter { message } | FabricStartError::Other(message) => {
                 write!(f, "{message}")
             }
         }

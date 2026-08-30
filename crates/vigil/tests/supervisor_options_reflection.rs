@@ -889,10 +889,21 @@ fn a_setting_this_process_takes_on_live_is_mirrored_without_replacing_the_contai
     // itself has nothing a restart could add, and the restart it was taking
     // killed the very command that asked for the change.
     let directory = tempfile::tempdir().expect("temporary data directory");
+    // A deployment that has been STARTED, which is the only kind a change can
+    // be made against: `settings set` refuses a directory nobody has ever run
+    // anything in rather than creating a store there, so a fixture that skipped
+    // this would be asserting about a refusal.
+    drop(
+        vigil::settings_store::SettingsStore::open(directory.path())
+            .expect("start this deployment's store"),
+    );
     let client = RecordingSupervisor::new(current_options());
 
     let answer = vigil::settings_command::answer_with_reflection(
         directory.path(),
+        // The store this deployment owns. Named rather than derived: a change
+        // mirrored out of some other store would be another deployment's.
+        &vigil::settings_store::SettingsStore::store_path(directory.path()),
         &format!("set {LIVE_APPLIED_SETTING} 4"),
         &client,
     );
@@ -923,10 +934,21 @@ fn a_setting_only_a_restart_brings_into_force_is_mirrored_and_then_restarted() {
     // the policy at its default it still happens. An implementation that
     // dropped the restart for every setting fails here.
     let directory = tempfile::tempdir().expect("temporary data directory");
+    // A deployment that has been STARTED, which is the only kind a change can
+    // be made against: `settings set` refuses a directory nobody has ever run
+    // anything in rather than creating a store there, so a fixture that skipped
+    // this would be asserting about a refusal.
+    drop(
+        vigil::settings_store::SettingsStore::open(directory.path())
+            .expect("start this deployment's store"),
+    );
     let client = RecordingSupervisor::new(current_options());
 
     let answer = vigil::settings_command::answer_with_reflection(
         directory.path(),
+        // The store this deployment owns. Named rather than derived: a change
+        // mirrored out of some other store would be another deployment's.
+        &vigil::settings_store::SettingsStore::store_path(directory.path()),
         &format!("set {STARTUP_ONLY_SETTING} 12"),
         &client,
     );

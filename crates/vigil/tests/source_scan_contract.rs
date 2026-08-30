@@ -5,19 +5,14 @@ use std::path::{Path, PathBuf};
 #[test]
 fn live_read_and_owner_control_source_contracts_are_fast() {
     let vigil_sources = collect_rust_source_files(&workspace_root().join("crates/vigil/src"));
-    let context_graph_sources = collect_rust_source_files(
-        &workspace_root()
-            .parent()
-            .expect("workspace parent")
-            .join("context-graph/crates/context-graph/src"),
-    );
+    let context_graph_sources = collect_rust_source_files(&context_graph_src());
 
     let mut failures = Vec::new();
     assert_context_graph_owns_generic_owner_control_transport(
         &context_graph_sources,
         &mut failures,
     );
-    assert_vigil_keeps_only_control_path_and_handler_layer(&vigil_sources, &mut failures);
+    assert_vigil_keeps_only_the_owner_route_and_handler_layer(&vigil_sources, &mut failures);
     assert_live_reads_stay_store_backed(&vigil_sources, &context_graph_sources, &mut failures);
 
     if !failures.is_empty() {
@@ -528,27 +523,37 @@ fn assert_context_graph_owns_generic_owner_control_transport(
 ) {
     let transport = sources
         .iter()
-        .find(|source| source.path.ends_with("control_transport.rs"));
+        .find(|source| source.path.ends_with("owner_control.rs"));
     let Some(transport) = transport else {
-        failures.push("context-graph is missing src/control_transport.rs".to_string());
+        failures.push("context-graph is missing src/owner_control.rs".to_string());
         return;
     };
 
+    // The generic owner plane: a handler registered at the writable open, a
+    // client that names the STORE PATH and nothing else, and a typed answer
+    // for "nobody holds this store". The bytes on the wire are contextdb's
+    // read session, so no socket primitive belongs here either.
     for required in [
         "pub type ControlHandler",
-        "pub fn start_control_listener",
-        "pub fn request_control",
-        "UnixListener",
-        "UnixStream",
-        ".accept()",
-        "read_to_string",
-        "write_all",
-        "flush",
+        "pub fn request_owner",
+        "pub fn owner_read_config",
+        "CONTROL_NAMESPACE",
+        "OwnerControlError",
+        "store_path",
         "handler",
     ] {
         if !transport.text.contains(required) {
             failures.push(format!(
-                "context-graph owner-control transport omitted {required}"
+                "context-graph owner-control plane omitted {required}"
+            ));
+        }
+    }
+
+    for retired in ["UnixListener", "UnixStream", "socket_path"] {
+        if transport.text.contains(retired) {
+            failures.push(format!(
+                "context-graph owner-control plane still carries socket primitive {retired}; the \
+                 store path is the whole address"
             ));
         }
     }
@@ -574,7 +579,7 @@ fn assert_context_graph_owns_generic_owner_control_transport(
     }
 }
 
-fn assert_vigil_keeps_only_control_path_and_handler_layer(
+fn assert_vigil_keeps_only_the_owner_route_and_handler_layer(
     sources: &[SourceFile],
     failures: &mut Vec<String>,
 ) {
@@ -593,11 +598,17 @@ fn assert_vigil_keeps_only_control_path_and_handler_layer(
         }
     }
 
+    // `VIGIL_CONTROL_SOCKET` stays required for a different reason than it used
+    // to be: the variable no longer places anything, and the only place it may
+    // still appear is the refusal that tells an operator it has no effect.
+    // `served-by=af_unix` stays required verbatim: route reporting is part of
+    // what the transport change must leave untouched, so the marker keeps its
+    // ratified bytes and a caller that already greps for them keeps working.
     for required in [
         "VIGIL_CONTROL_SOCKET",
-        "control.sock",
-        "request_control",
-        "start_control_listener",
+        "owner_control",
+        "request_owner",
+        "owner_read_config",
         "handle_owner_request",
         "\"why\"",
         "\"events\"",
@@ -606,7 +617,20 @@ fn assert_vigil_keeps_only_control_path_and_handler_layer(
     ] {
         if !vigil_text.contains(required) {
             failures.push(format!(
-                "vigil source omitted required control handler/path marker {required}"
+                "vigil source omitted required owner-route/handler marker {required}"
+            ));
+        }
+    }
+
+    for retired in [
+        "control.sock",
+        "control_socket_path",
+        "request_control",
+        "start_control_listener",
+    ] {
+        if vigil_text.contains(retired) {
+            failures.push(format!(
+                "vigil source still names the retired control socket through {retired}"
             ));
         }
     }
@@ -678,6 +702,36 @@ fn workspace_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("workspace root")
         .to_path_buf()
+}
+
+/// The context-graph checkout this workspace actually COMPILES against, read
+/// out of the path dependency the root manifest declares. A fixed
+/// `../context-graph` guess reads whatever happens to sit beside the repo,
+/// which during any co-development of the two repos is a different tree from
+/// the one the build used — a scan that green-lights a checkout nothing links
+/// against proves nothing.
+fn context_graph_src() -> PathBuf {
+    let manifest_path = workspace_root().join("Cargo.toml");
+    let manifest = fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display()));
+    let declared = manifest
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("context-graph")?;
+            let rest = rest.trim_start().strip_prefix('=')?;
+            let start = rest.find("path")?;
+            let rest = &rest[start..];
+            let opening = rest.find('"')? + 1;
+            let closing = rest[opening..].find('"')? + opening;
+            Some(rest[opening..closing].to_string())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "{} must declare context-graph as a path dependency",
+                manifest_path.display()
+            )
+        });
+    workspace_root().join(declared).join("src")
 }
 
 fn collect_rust_source_files(root: &Path) -> Vec<SourceFile> {

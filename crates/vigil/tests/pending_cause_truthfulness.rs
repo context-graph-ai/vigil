@@ -56,8 +56,11 @@ fn target() -> ScopeTarget {
 fn rendered_surface() -> (tempfile::TempDir, Vec<String>) {
     let directory = tempfile::tempdir().expect("temporary data directory");
     let store = SettingsStore::open(directory.path()).expect("open the node-side settings store");
+    // Taken off the handle that created it: the report is read from the very
+    // file this fixture owns.
+    let store_path = store.path().to_path_buf();
     drop(store);
-    let report = report_by_direct_read_at(directory.path(), &target())
+    let report = report_by_direct_read_at(directory.path(), &store_path, &target())
         .expect("build the operator report for this deployment");
     let lines = report.render_lines();
     (directory, lines)

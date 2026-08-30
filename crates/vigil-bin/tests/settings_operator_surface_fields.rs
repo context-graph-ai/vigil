@@ -25,11 +25,9 @@
 //! alongside the field keys it already exports.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use vigil::settings_model::{
     Author, DETECTOR_CLASSES_SETTING, DETECTOR_QUEUE_CAPACITY_SETTING,
@@ -46,6 +44,7 @@ use vigil::settings_reflection::RESTART_ON_REFLECT_SETTING;
 /// declared there — so the spelling is retyped here deliberately. Only the
 /// implementation can fix that by declaring it alongside the others.
 const VALUE_KEY: &str = "value";
+use vigil::settings_store::SettingsStore;
 
 /// The setting-name field. Same situation as `VALUE_KEY`: no declared constant,
 /// so the literal stands until the implementation declares one.
@@ -54,7 +53,8 @@ const NAME_KEY: &str = "name";
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, vigil_binary_path,
+    wait_for_store_owner, wait_for_store_owner_to_release, wait_until,
 };
 
 /// The startup receipt naming the identity the runtime announces. Spelled here
@@ -188,21 +188,23 @@ impl Drop for LiveVigil {
     }
 }
 
-/// Wait for the runtime's control socket to APPEAR and accept a connection.
-/// Never a sleep and never a printed line: the "runtime loop ready" line is
-/// emitted before the listener binds, so a reader that trusts it races the
-/// listener and silently falls through to the direct store read.
-fn wait_for_control_socket(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!(
-            "the control socket at {} to appear and accept a connection",
-            socket_path.display()
-        ),
-        Duration::from_secs(30),
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .expect("the runtime must publish its control socket");
+/// Readiness is the store's OWNER ROUTE answering: the runtime holds this
+/// deployment's store, so a command aimed at the deployment reaches that
+/// runtime instead of being answered by the asking process. Proven by asking a
+/// real question and getting an owner-served answer — never a sleep, and never
+/// a printed line, which a runtime that started nothing could also produce.
+fn wait_for_the_store_owner(data_dir: &Path) {
+    wait_for_store_owner(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the runtime must own this deployment's store and answer through it");
+}
+
+/// The inverse wait: nobody owns the store any more, so the previous process
+/// is genuinely down and the store is free. That is what makes an offline read
+/// genuinely offline — a store still held would have the running process
+/// answering it.
+fn wait_for_the_store_to_be_free(data_dir: &Path) {
+    wait_for_store_owner_to_release(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the runtime must release the store before the offline read");
 }
 
 /// `vigil settings …` against `data_dir`. `VIGIL_DATA_DIR` is the bootstrap
@@ -280,7 +282,7 @@ fn listing_reports_value_state_author_surface_scope_and_reason_for_every_touched
     fs::write(&config_path, "cameras = []\n").expect("write config");
 
     let live = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
 
     let output = vigil_settings(&data_dir, &[]);
     live.stop();
@@ -354,7 +356,7 @@ fn listing_reports_requested_running_and_pending_side_by_side() {
     fs::write(&config_path, "cameras = []\n").expect("write config");
 
     let live = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
 
     // The detector queue capacity has TWO ways in, and they are not the same
     // thing. `VIGIL_DETECTOR_QUEUE_CAPACITY` stays exactly where it is: a
@@ -446,7 +448,7 @@ fn listing_answers_requested_from_the_store_while_the_runtime_is_stopped() {
 
     {
         let live = LiveVigil::spawn(&config_path, &data_dir);
-        wait_for_control_socket(&data_dir);
+        wait_for_the_store_owner(&data_dir);
         // Two digits deliberately, and not the product default: a substring or
         // character-level match cannot land on "23" by accident the way it can
         // on a bare "7".
@@ -459,12 +461,7 @@ fn listing_answers_requested_from_the_store_while_the_runtime_is_stopped() {
         live.stop();
     }
 
-    let socket_path = data_dir.join("control.sock");
-    assert!(
-        UnixStream::connect(&socket_path).is_err(),
-        "the runtime must be genuinely stopped before the offline read, or this test proves \
-         nothing about answering from the store"
-    );
+    wait_for_the_store_to_be_free(&data_dir);
 
     let output = vigil_settings(&data_dir, &[]);
     assert!(
@@ -516,7 +513,7 @@ fn listing_shows_the_service_identifier_read_only_with_how_it_was_arrived_at() {
     fs::write(&config_path, "cameras = []\nsite_name = \"home farm\"\n").expect("write config");
 
     let live = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
 
     let announced = live.announced_service_id();
     let output = vigil_settings(&data_dir, &[]);

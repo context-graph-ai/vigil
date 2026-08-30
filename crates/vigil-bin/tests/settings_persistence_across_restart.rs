@@ -14,13 +14,12 @@
 //! (`crates/vigil/src/lib.rs:322-330`), so this fails today.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
-use std::time::Duration;
 
 use vigil::settings_model::{Author, DETECTOR_SAMPLE_FRAMES_SETTING, Surface};
 use vigil::settings_projection::{AUTHOR_KEY, CONTROL_STATE_KEY, SETTING_LINE_PREFIX, SURFACE_KEY};
+use vigil::settings_store::SettingsStore;
 
 /// The effective-value field key, and the setting-name field key. Neither is
 /// declared in `settings_projection` the way control/author/surface/scope/reason
@@ -32,7 +31,8 @@ const NAME_KEY: &str = "name";
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    TcpPortReservation, capture_pipe, vigil_binary_path, wait_for_store_owner,
+    wait_for_store_owner_to_release,
 };
 
 struct LiveVigil {
@@ -81,37 +81,23 @@ impl Drop for LiveVigil {
     }
 }
 
-/// Readiness is the control socket APPEARING and accepting a connection —
-/// never a sleep, never a printed line.
-fn wait_for_control_socket(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!("the control socket at {} to appear", socket_path.display()),
-        Duration::from_secs(30),
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .expect("the runtime must publish its control socket");
+/// Readiness is the store's OWNER ROUTE answering: the runtime holds this
+/// deployment's store, so a command aimed at the deployment reaches that
+/// runtime instead of being answered by the asking process. Proven by asking a
+/// real question and getting an owner-served answer — never a sleep, and never
+/// a printed line, which a runtime that started nothing could also produce.
+fn wait_for_the_store_owner(data_dir: &Path) {
+    wait_for_store_owner(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the runtime must own this deployment's store and answer through it");
 }
 
-/// The inverse wait: the socket is gone, so the process is genuinely down and
-/// the "restart" is a real second process rather than a second question to the
-/// first one.
-fn wait_for_control_socket_to_go_away(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!(
-            "the control socket at {} to stop accepting connections",
-            socket_path.display()
-        ),
-        Duration::from_secs(30),
-        || {
-            Ok(match UnixStream::connect(&socket_path) {
-                Ok(_) => None,
-                Err(_) => Some(()),
-            })
-        },
-    )
-    .expect("the first runtime must be fully stopped before the restart");
+/// The inverse wait: nobody owns the store any more, so the previous process
+/// is genuinely down and the store is free. That is what makes the next start a
+/// real second process rather than a second question to the first one — and a
+/// store still held would refuse it outright.
+fn wait_for_the_store_to_be_free(data_dir: &Path) {
+    wait_for_store_owner_to_release(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the previous runtime must release the store before the next one starts");
 }
 
 fn vigil_settings(data_dir: &Path, args: &[&str]) -> Output {
@@ -172,7 +158,7 @@ fn a_pin_and_its_attribution_survive_a_full_process_restart() {
     fs::write(&config_path, "cameras = []\ndetector_sample_frames = 12\n").expect("write config");
 
     let first_run = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
 
     let pinned = vigil_settings(&data_dir, &["set", DETECTOR_SAMPLE_FRAMES_SETTING, "41"]);
     assert!(
@@ -201,11 +187,11 @@ fn a_pin_and_its_attribution_survive_a_full_process_restart() {
     );
 
     first_run.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     // A genuinely second process against the same data directory — the restart.
     let second_run = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     let after = vigil_settings(&data_dir, &[]);
     second_run.stop();
 

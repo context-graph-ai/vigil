@@ -13,7 +13,6 @@ use context_graph::{
     AuditFilter, AuditTarget, CreateContext, CreateDecision, CreateEntity, CreateIntention,
     EntityPatch, EntityType, EvidenceKind, EvidenceProducer, EvidenceRef, IntentionOrigin,
     IntentionStatus, ListEntityFilter, ObservationId, RecordObservation, RetentionStatus, Store,
-    start_control_listener,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -83,7 +82,10 @@ fn apply_surface(
     {
         return;
     }
-    let store = match crate::settings_store::SettingsStore::open(&config.data_dir) {
+    // The store this run resolved, not one rebuilt from the data directory: an
+    // operator's `--store-path` need not live under it, and opening a derived
+    // path would CREATE a second store nobody configured and record into it.
+    let store = match crate::settings_store::SettingsStore::open_at(&config.store_path) {
         Ok(store) => store,
         Err(error) => {
             println!(
@@ -181,7 +183,7 @@ fn report_surface_outcome(
 fn apply_resolved_settings(config: &mut crate::config::RuntimeConfig) {
     use crate::settings_model::{Author, SettingValue};
 
-    let store = match crate::settings_store::SettingsStore::open(&config.data_dir) {
+    let store = match crate::settings_store::SettingsStore::open_at(&config.store_path) {
         Ok(store) => store,
         Err(error) => {
             println!("settings-unresolved {error}");
@@ -617,6 +619,21 @@ fn endpoint_source(from_store: bool, present: bool) -> &'static str {
 fn adopt_resolved_detector_model(config: &crate::config::RuntimeConfig) {
     crate::detection_accel::register_detector_model_path(config.detector_model_path.clone());
     crate::detection_accel::register_detector_class_indices(&config.detector_class_indices);
+    // The detector and the operator answer take on the SAME resolved class
+    // list at the same point. Previously the build registry received the class
+    // indices while the settings registry received nothing, so a running
+    // detector looking for the operator's classes was reported as
+    // `running=none pending=restart` even after a restart.
+    let detector_classes = config
+        .detector_class_indices
+        .iter()
+        .filter_map(|index| crate::yolox_detector::COCO_CLASSES.get(*index).copied())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::settings_application::bring_into_force(
+        crate::settings_model::DETECTOR_CLASSES_SETTING,
+        crate::settings_model::SettingValue::list(detector_classes),
+    );
     crate::settings_application::bring_into_force(
         crate::settings_model::DETECTOR_MODEL_PATH_SETTING,
         crate::settings_model::SettingValue::text(
@@ -723,9 +740,8 @@ fn spawn_fabric_bring_up(
     stats: &RuntimeStatsState,
     accel: &Arc<crate::acceleration::AccelerationState>,
     fabric_slot: &Arc<std::sync::OnceLock<Arc<FabricBundle>>>,
-    worker_detector_candidate: &Arc<
-        std::sync::OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
-    >,
+    worker_detector_candidate: &Arc<crate::fabric::WorkerDetectorSlot>,
+    shutdown_flag: &Arc<AtomicBool>,
 ) {
     if config.fabric_ticket.is_none() && !config.fabric_hub {
         return;
@@ -747,6 +763,9 @@ fn spawn_fabric_bring_up(
     let bringup_accel = accel.clone();
     let bringup_slot = fabric_slot.clone();
     let bringup_candidate = worker_detector_candidate.clone();
+    // The node's own stop, carried into the bring-up so the worker loop it
+    // starts is stopped by the same thing that stops the rest of the node.
+    let bringup_shutdown = shutdown_flag.clone();
     thread::spawn(move || {
         let started = Instant::now();
         match fabric_bring_up(
@@ -754,6 +773,7 @@ fn spawn_fabric_bring_up(
             &bringup_stats,
             &bringup_accel,
             bringup_candidate,
+            bringup_shutdown,
         ) {
             Some(bundle) => {
                 let _ = bringup_slot.set(bundle);
@@ -808,7 +828,7 @@ fn run_inner(
     // the gap where nothing was said, and the store replaces it below.
     crate::settings_cache::apply_cached_startup_values(&mut config);
     validate_compiled_capability_requests(config.fabric_ticket.is_some(), config.fabric_hub)?;
-    privilege::prepare_runtime_user(&config.store_path)?;
+    privilege::prepare_runtime_user(Some(&config.store_path))?;
     // This process runs the cameras, so a value it resolves is a value in force
     // and a change it is handed applies to a live machine.
     crate::settings_application::mark_running_process();
@@ -864,15 +884,25 @@ fn run_inner(
     let fabric_slot: Arc<std::sync::OnceLock<Arc<FabricBundle>>> =
         Arc::new(std::sync::OnceLock::new());
     #[cfg(feature = "fabric")]
-    let worker_detector_candidate: Arc<
-        std::sync::OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
-    > = Arc::new(std::sync::OnceLock::new());
+    let worker_detector_candidate: Arc<crate::fabric::WorkerDetectorSlot> =
+        Arc::new(crate::fabric::WorkerDetectorSlot::new());
+    // Declared HERE, before any camera thread exists and before the fabric
+    // bring-up installs a start: how many camera detector sources this node
+    // will really run. The sources answer from their own threads in any order,
+    // and "every eligible source has failed" is only knowable if the count was
+    // fixed before the first of them spoke.
+    #[cfg(feature = "fabric")]
+    worker_detector_candidate.expect_detector_sources(eligible_detector_sources(&config));
 
     log_startup(&config);
 
-    let mut control = None;
+    // A run with no store of its own that nonetheless holds one to answer its
+    // operator through — the degraded arm's owner route. The store-backed run
+    // answers through the store it already holds and needs no second slot.
+    let mut degraded_owner_route: Option<store::OpenStore> = None;
     let mut camera_handles: Vec<JoinHandle<()>> = Vec::new();
     let mut command_listener: Option<Box<dyn crate::site_channel::CommandListener>> = None;
+    let mut correction_writer: Option<JoinHandle<()>> = None;
     let mut detection_publisher: Option<Arc<dyn crate::site_channel::DetectionChannel>> = None;
     let mut site_presence: Option<Box<dyn crate::site_channel::SitePresence>> = None;
     let mut review_server = None;
@@ -885,8 +915,70 @@ fn run_inner(
         config.store_path.display()
     );
     let store_open_started = Instant::now();
-    let opened = match store::open_with_recognition(&config.store_path, &config.recognition) {
-        Ok((store, embedder)) => {
+    // The handler answers through the very store this open is about to
+    // produce, and the store can only carry a handler that already exists — so
+    // the two meet in a slot the open fills the moment it returns. A frame that
+    // arrives inside that window is told the runtime is still opening its
+    // store, which is true; it is never answered from nothing and never
+    // panics.
+    let owner_store_slot: Arc<std::sync::OnceLock<Store>> = Arc::new(std::sync::OnceLock::new());
+    // The store owns the ContextDB owner service, and that service owns this
+    // handler. A strong handler reference back to a slot containing the store
+    // would therefore keep the store alive forever: orderly teardown could
+    // never reach ContextDB's channel release. The runtime owns the slot; an
+    // individual request borrows it strongly only while that request runs.
+    let handler_store = Arc::downgrade(&owner_store_slot);
+    let handler_stats = stats.clone();
+    // The deployment directory travels with the handler because the settings
+    // answer is about the deployment, not about the memory graph: opening a
+    // second store inside the handler would re-derive what this process
+    // already holds.
+    let handler_data_dir = config.data_dir.clone();
+    // The EXACT file this runtime resolved and is about to open, carried beside
+    // the data directory rather than rebuilt from it: an operator's
+    // `--store-path` need not live under `data_dir`, and an answer that
+    // re-derived the location would act on a store nobody configured.
+    let handler_store_path = config.store_path.clone();
+    let read_handler: context_graph::ControlHandler = Arc::new(move |request: String| {
+        let stats = handler_stats.snapshot();
+        let Some(handler_store) = handler_store.upgrade() else {
+            return format!(
+                "{}{} the runtime is stopping\n",
+                live_read::OWNER_SERVED_PREFIX,
+                live_read::OWNER_ERROR_PREFIX
+            );
+        };
+        match handler_store.get() {
+            Some(store) => live_read::handle_owner_request(
+                store,
+                &stats,
+                &handler_data_dir,
+                &handler_store_path,
+                &request,
+            ),
+            None => format!(
+                "{}{} the runtime is still opening its store\n",
+                live_read::OWNER_SERVED_PREFIX,
+                live_read::OWNER_ERROR_PREFIX
+            ),
+        }
+    });
+    let opened = match store::open_with_recognition(
+        &config.store_path,
+        &config.recognition,
+        read_handler.clone(),
+        &shutdown.stop(),
+    ) {
+        Ok(store::StartupOpen::ShutdownRequested) => {
+            // Asked to stop before this run ever owned its store. Nothing was
+            // taken and nothing was written, so there is nothing to tear down
+            // and nothing to say about the store's condition: this process was
+            // told to stop and it stops, inside the grace it is given.
+            println!("boot_phase=stopped-before-store-open");
+            return Ok(());
+        }
+        Ok(store::StartupOpen::Opened(store, embedder)) => {
+            let store = *store;
             println!(
                 "boot_phase=store-open-done elapsed_ms={}",
                 store_open_started.elapsed().as_millis()
@@ -1031,6 +1123,7 @@ fn run_inner(
                 &accel,
                 &fabric_slot,
                 &worker_detector_candidate,
+                &shutdown_flag,
             );
             println!("runtime loop ready");
             if config.cameras.is_empty() {
@@ -1046,20 +1139,11 @@ fn run_inner(
             } else {
                 health.set(HealthStatus::Ready, "store open and runtime loop ready");
             }
-            let owner_store = store.handle.clone();
-            let owner_stats = stats.clone();
-            // The deployment directory travels with the handler because the
-            // settings answer is about the deployment, not about the memory
-            // graph: opening a second store inside the handler would re-derive
-            // what this process already holds.
-            let owner_data_dir = config.data_dir.clone();
-            let read_handler: context_graph::ControlHandler = Arc::new(move |request: String| {
-                let stats = owner_stats.snapshot();
-                live_read::handle_owner_request(&owner_store, &stats, &owner_data_dir, &request)
-            });
-            let control_socket_path = crate::control_socket::control_socket_path(&config.data_dir);
-            control =
-                start_control_listener(&control_socket_path, shutdown_flag.clone(), read_handler);
+            // The handler registered at this store's open now has the handle
+            // it answers through. Nothing was started to make that happen and
+            // nothing has to be stopped: the operator's route lives exactly as
+            // long as this store handle does.
+            let _ = owner_store_slot.set(store.handle.clone());
             match crate::http_data_plane::spawn_review_data_plane(
                 store.handle.clone(),
                 config.data_dir.clone(),
@@ -1170,28 +1254,17 @@ fn run_inner(
                 let (correction_tx, correction_rx) =
                     std::sync::mpsc::sync_channel::<crate::correction::CorrectionRequest>(64);
                 let store_worker = Arc::new(store.handle.clone());
-                thread::Builder::new()
-                    // This name is also the physical HA-OS audit boundary: TH-23
-                    // attaches syscall tracing to this dedicated writer before it
-                    // publishes a correction. Keep the write isolated here so
-                    // camera, MQTT, and fabric traffic cannot create false egress
-                    // findings for the local correction path.
-                    .name("vigil-correct".to_string())
-                    .spawn(move || {
-                        for req in correction_rx {
-                            let fingerprint =
-                                crate::correction::correction_execution_fingerprint(&req);
-                            match crate::correction::record_correction(&store_worker, req) {
-                                Ok(_) => println!(
-                                    "correction_writer_receipt={fingerprint} status=landed"
-                                ),
-                                Err(_) => println!(
-                                    "correction_writer_receipt={fingerprint} status=failed"
-                                ),
-                            }
+                correction_writer = Some(spawn_correction_writer(correction_rx, move |req| {
+                    let fingerprint = crate::correction::correction_execution_fingerprint(&req);
+                    match crate::correction::record_correction(&store_worker, req) {
+                        Ok(_) => {
+                            println!("correction_writer_receipt={fingerprint} status=landed")
                         }
-                    })
-                    .map_err(|error| format!("could not start correction writer: {error}"))?;
+                        Err(_) => {
+                            println!("correction_writer_receipt={fingerprint} status=failed")
+                        }
+                    }
+                })?);
                 // Matches the pre-seam derivation exactly (`store.db_path()`'s
                 // parent, not `config.data_dir`): an operator-overridden
                 // `--store-path` need not live under `data_dir`, and the
@@ -1275,25 +1348,62 @@ fn run_inner(
                     &accel,
                     &fabric_slot,
                     &worker_detector_candidate,
+                    &shutdown_flag,
                 );
 
-                // The operator surface answers over the same control socket it
-                // always does — that is where the unmanaged statement is read,
-                // so it is the last thing a degraded run may lose.
-                let handler_stats = stats.clone();
-                let handler_data_dir = degraded_control_data_dir(&config);
-                let read_handler: context_graph::ControlHandler =
+                // The operator surface still answers, because that is where
+                // the unmanaged statement is read and it is the last thing a
+                // degraded run may lose. The route is the store's own channel
+                // now, so answering means HOLDING the store — which this run
+                // can do exactly when the store is there and openable. That is
+                // the case a component failure leaves behind: the store was
+                // never reached, not broken.
+                //
+                // Where it is not openable, or is not there at all, this run
+                // holds nothing and claims nothing. It must not create a store
+                // to get itself a channel: a run that writes nothing is the
+                // whole promise of the degraded path. The operator's command
+                // then reads the store directly and is refused by the same
+                // code, naming the same capability, for the same reason.
+                let degraded_stats = stats.clone();
+                // The deployment's own directory, exactly as this runtime
+                // resolved it — its node key and identity cache live there and
+                // must keep living there — with the store file it resolved
+                // carried separately beside it.
+                let degraded_data_dir = config.data_dir.clone();
+                let degraded_store_path = config.store_path.clone();
+                let degraded_handler: context_graph::ControlHandler =
                     Arc::new(move |request: String| {
-                        let stats = handler_stats.snapshot();
-                        live_read::handle_degraded_request(&stats, &handler_data_dir, &request)
+                        let stats = degraded_stats.snapshot();
+                        live_read::handle_degraded_request(
+                            &stats,
+                            &degraded_data_dir,
+                            &degraded_store_path,
+                            &request,
+                        )
                     });
-                let control_socket_path =
-                    crate::control_socket::control_socket_path(&config.data_dir);
-                control = start_control_listener(
-                    &control_socket_path,
-                    shutdown_flag.clone(),
-                    read_handler,
-                );
+                if config.store_path.exists() {
+                    match store::open_as_owner(&config.store_path, degraded_handler) {
+                        Ok(held) => {
+                            println!(
+                                "degraded_owner_route=true path={}",
+                                config.store_path.display()
+                            );
+                            degraded_owner_route = Some(held);
+                        }
+                        Err(error) => {
+                            println!(
+                                "degraded_owner_route=false path={} error={error}",
+                                config.store_path.display()
+                            );
+                        }
+                    }
+                } else {
+                    println!(
+                        "degraded_owner_route=false path={} reason=no-store-to-hold",
+                        config.store_path.display()
+                    );
+                }
 
                 // The review surfaces answer too, and what they answer is why
                 // they cannot serve what was asked for. A port refusing
@@ -1408,18 +1518,32 @@ fn run_inner(
 
     shutdown.wait();
 
-    // Teardown order — store handle drops LAST:
+    // A worker start still waiting on a detector belongs to a node that is now
+    // stopping: settle it so nothing is left pending, and so a detector that
+    // finishes loading during teardown does not start a worker loop on a node
+    // on its way down.
+    #[cfg(feature = "fabric")]
+    worker_detector_candidate.cancel();
+
+    // Teardown order — the store owner closes LAST:
     //  1. Command listener (holds Arc<Store>; signals shutdown, blocks until thread exits)
-    //  2. Detection channel (camera threads must exit first so all senders are gone)
-    //  3. Camera probe threads (each holds a Store clone via Arc)
-    //  4. Control listener (read_handler captures a Store clone)
-    //  5. Review data plane (holds a Store clone)
-    //  6. Health server (no Store reference — safe to join before or after store)
-    //  7. drop(store) — all other Store holders are now joined and their clones dropped
+    //  2. Correction writer (the stopped listener drops its only sender; join
+    //     drains every correction it already accepted before releasing Store)
+    //  3. Storeless presence connection, when that is the run being stopped
+    //  4. Camera probe threads (each holds a Store clone via Arc)
+    //  5. Detection channel, after camera senders are gone
+    //  6. Review data plane (holds a Store clone)
+    //  7. Health server (no Store reference — safe to join before or after store)
+    //  8. Explicit owner close — all other ordinary Store holders are now
+    //     joined and their clones dropped. ContextDB stops admission, cancels
+    //     and drains a request already inside the owner handler, then removes
+    //     this run's channel. Relying on the last Arc drop cannot begin that
+    //     sequence when the in-flight handler itself is the remaining holder.
     if let Some(listener) = command_listener {
         listener.shutdown_and_join();
         println!("mqtt_subscriber_stopped=true");
     }
+    join_correction_writer(correction_writer)?;
     // The presence connection stands where the listener does on a store-backed
     // run, and comes down in the same place for the same reason.
     if let Some(presence) = site_presence {
@@ -1434,13 +1558,68 @@ fn run_inner(
         channel.shutdown_and_join();
         println!("mqtt_detection_publisher_stopped=true");
     }
-    if let Some(handle) = control.take() {
-        let _ = handle.join();
-    }
     if let Some(handle) = review_server {
         handle.shutdown();
     }
     server.join();
+    close_owner_store(degraded_owner_route.map(|store| store.handle))?;
+    close_owner_store(store)?;
+    Ok(())
+}
+
+fn spawn_correction_writer(
+    correction_rx: std::sync::mpsc::Receiver<crate::correction::CorrectionRequest>,
+    mut apply: impl FnMut(crate::correction::CorrectionRequest) + Send + 'static,
+) -> Result<JoinHandle<()>, String> {
+    thread::Builder::new()
+        // This name is also the physical HA-OS audit boundary: TH-23 attaches
+        // syscall tracing to this dedicated writer before it publishes a
+        // correction. Keep the write isolated here so camera, MQTT, and fabric
+        // traffic cannot create false egress findings for the local path.
+        .name("vigil-correct".to_string())
+        .spawn(move || {
+            for request in correction_rx {
+                apply(request);
+            }
+        })
+        .map_err(|error| format!("could not start correction writer: {error}"))
+}
+
+fn join_correction_writer(correction_writer: Option<JoinHandle<()>>) -> Result<(), String> {
+    join_correction_writer_with(correction_writer, |writer| writer.join())
+}
+
+fn join_correction_writer_with(
+    correction_writer: Option<JoinHandle<()>>,
+    join: impl FnOnce(JoinHandle<()>) -> thread::Result<()>,
+) -> Result<(), String> {
+    let Some(correction_writer) = correction_writer else {
+        return Ok(());
+    };
+    join(correction_writer)
+        .map_err(|_| "correction writer panicked during shutdown".to_string())?;
+    println!("correction_writer_stopped=true");
+    Ok(())
+}
+
+/// Close one runtime-owned store through ContextDB's lifecycle door.
+///
+/// A Store clone can still be held by a request already inside the custom
+/// owner handler. `Database::close` deliberately does not depend on this being
+/// the last Arc: it stops admission, cancels and drains admitted work, and
+/// removes the exact channel before returning. Calling it only after every
+/// other runtime worker has joined preserves the store-last teardown order.
+fn close_owner_store(store: Option<Store>) -> Result<(), String> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let store_path = store.db_path().to_path_buf();
+    store.sync_database().close().map_err(|error| {
+        format!(
+            "store close error path={} error={error}",
+            store_path.display()
+        )
+    })?;
     drop(store);
     Ok(())
 }
@@ -1510,11 +1689,19 @@ fn resolve_service_identity(config: &mut config::RuntimeConfig, store_backed: bo
     let resolved = if !store_backed {
         Err(None)
     } else if configured.is_empty() {
-        crate::service_identity::resolve_persisted(&config.store_path, &config.site_name)
-            .map_err(|error| Some(error.to_string()))
+        crate::service_identity::resolve_persisted(
+            &config.data_dir,
+            &config.store_path,
+            &config.site_name,
+        )
+        .map_err(|error| Some(error.to_string()))
     } else {
-        crate::service_identity::resolve_persisted_configured(&config.store_path, &configured)
-            .map_err(|error| Some(error.to_string()))
+        crate::service_identity::resolve_persisted_configured(
+            &config.data_dir,
+            &config.store_path,
+            &configured,
+        )
+        .map_err(|error| Some(error.to_string()))
     };
     let identity = match resolved {
         Ok(identity) => identity,
@@ -1547,24 +1734,6 @@ fn resolve_service_identity(config: &mut config::RuntimeConfig, store_backed: bo
     // working the question out again from the deployment directory's name.
     crate::service_identity::record_in_force(&identity);
     config.service_id = identity.value;
-}
-
-/// The deployment directory a run with no store behind it answers from.
-///
-/// Derived from the configured store path's parent, exactly as the
-/// store-backed path derives it from the opened store's own location: an
-/// operator-overridden `--store-path` need not live under `data_dir`, and a
-/// degraded run that answered from `data_dir` instead would resolve a settings
-/// change against a place no store lives — creating a fresh, healthy store
-/// there and writing into it, which is precisely the write an unmanaged run
-/// must never make.
-fn degraded_control_data_dir(config: &config::RuntimeConfig) -> PathBuf {
-    config
-        .store_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| config.data_dir.clone())
 }
 
 /// The identity a run with no store behind it uses: derived for this run only
@@ -1673,44 +1842,55 @@ pub(crate) fn bootstrap_worker_detector(
     let mut resolved = config.clone();
     apply_resolved_settings(&mut resolved);
     let config = &resolved;
-    let selection = crate::detection_accel::select_detection_acceleration(
+    // ONE construction seam for this node's worker detector: the preparation
+    // below proves the backend through it, the load below serves through it,
+    // and the rebuild registered further down calls it again on a later
+    // backend move. One input decides which classes this detector emits — the
+    // resolved class setting carried on the configuration. Recognition is not
+    // consulted here and has no branch; that coupling is what made a widened
+    // class list detect nothing.
+    let build = Arc::new(detector_build_for(
+        config.detector_model_path.clone(),
+        config.detector_class_indices.clone(),
+    ));
+    // The preparation seam, not the doctor-style selection. Both decide the
+    // same backend the same way — build a detector, run a forward pass through
+    // it on this machine — but the selection throws that instance away and
+    // leaves a second cold model load to produce a different one. On a worker
+    // box with no camera thread that second load IS the cold-start window, and
+    // the instance proved and the instance served could differ. This hands the
+    // proved instance back.
+    let prepared = crate::detection_accel::prepare_detection_backend(
         config.accelerated_detection,
         &config.detector_model_id,
         yolox_detector::MODEL_INPUT_SHAPE,
+        &|backend: &str| build(backend),
+        // This handle has nothing loaded yet: the node is coming up and this
+        // is its first and only worker detector, so there is no retained
+        // instance to come back to.
+        &|_backend: &str| false,
     );
-    let receipt = selection.receipt;
+    // Published here, at the point and on the condition the selection call
+    // this replaced published it, so the backend an operator surface names is
+    // unchanged by this routing. Whether a startup claim should instead wait
+    // for the detector to be genuinely installed — the rule the backend-move
+    // coordinator already follows — is a separate question and is not decided
+    // here.
+    crate::settings_application::bring_into_force(
+        crate::settings_backends::DETECTION_BACKEND_SETTING,
+        crate::settings_model::SettingValue::text(prepared.selection.backend.clone()),
+    );
+    let receipt = prepared.selection.receipt;
     let active_backend_tag = receipt.active_backend.clone();
-    let accelerated_selected =
-        selection.backend == crate::detection_accel::ACCELERATED_DETECTION_BACKEND;
-    // One input decides which classes this detector emits: the resolved class
-    // setting, carried on the configuration. Recognition is not consulted here
-    // and has no branch — that coupling is what made a widened class list
-    // detect nothing.
-    let detector_load: Result<Box<dyn crate::detector::Detector>, String> = if accelerated_selected
-    {
-        #[cfg(feature = "detect-burn-wgpu")]
-        {
-            yolox_detector::load_accelerated_detector_with_classes(
-                config.detector_model_path.as_deref(),
-                &config.detector_class_indices,
-            )
-            .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-        }
-        #[cfg(not(feature = "detect-burn-wgpu"))]
-        {
-            yolox_detector::load_cpu_detector_with_classes(
-                config.detector_model_path.as_deref(),
-                &config.detector_class_indices,
-            )
-            .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-        }
-    } else {
-        yolox_detector::load_cpu_detector_with_classes(
-            config.detector_model_path.as_deref(),
-            &config.detector_class_indices,
-        )
-        .map(|detector| Box::new(detector) as Box<dyn crate::detector::Detector>)
-    };
+    // The instance the forward pass proved is the instance this node serves.
+    // Where no forward test ran — the processor answer, or an artifact
+    // carrying no accelerated detector — the detector for the selected backend
+    // is built here, once.
+    let detector_load: Result<Box<dyn crate::detector::Detector>, String> =
+        match prepared.forward_tested {
+            Some(detector) => Ok(detector),
+            None => build(&prepared.selection.backend),
+        };
 
     match detector_load {
         Ok(detector) => {
@@ -1745,10 +1925,7 @@ pub(crate) fn bootstrap_worker_detector(
                     camera: WORKER_DETECTOR_HANDLE.to_string(),
                     model_id: config.detector_model_id.clone(),
                     accelerated_detection: config.accelerated_detection,
-                    build: Arc::new(detector_build_for(
-                        config.detector_model_path.clone(),
-                        config.detector_class_indices.clone(),
-                    )),
+                    build: Arc::clone(&build) as Arc<_>,
                     receipt: Arc::new(detection_receipt_sink(stats.clone())),
                 },
             );
@@ -1765,6 +1942,44 @@ pub(crate) fn bootstrap_worker_detector(
             None
         }
     }
+}
+
+/// The settled not-serving reason a camera node carries when its own detector
+/// model will not load.
+///
+/// It names the model that was staged and what loading it actually said, on one
+/// line, because that line is the whole of what an operator gets: their node is
+/// not serving the fleet and never will until this is fixed, and the surfaces
+/// they can reach — `vigil doctor acceleration`, the fabric status line — show
+/// this and nothing else. A generic "no detector loaded" would send them
+/// looking for an error that scrolled past on a log they may not have.
+#[cfg(feature = "fabric")]
+fn detector_load_failure_reason(config: &config::RuntimeConfig, error: &str) -> String {
+    let model = config
+        .detector_model_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| config.detector_model_id.clone());
+    // One line, whatever the layer below wrapped: this is rendered inline
+    // beside `fabric-worker-serving=false reason=`.
+    let error = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!(
+        "detector-model-would-not-load — stage a loadable detection model on this node \
+         (detector_model_path / VIGIL_DETECTOR_MODEL_PATH); {model} failed to load: {error}"
+    )
+}
+
+/// What an operator is shown when a camera thread stops watching without ever
+/// reaching a detector at all: its analysis endpoint could not be resolved
+/// into a session credential, or the thread died. Named per camera, because
+/// the operator has to know WHICH camera to go and look at, and pointing at
+/// the endpoint is what they can act on.
+#[cfg(feature = "fabric")]
+fn camera_stopped_watching_reason(camera_name: &str) -> String {
+    format!(
+        "camera-stopped-watching — {camera_name} stopped watching before it loaded a detector; \
+         check that camera's analysis endpoint and its credentials"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1789,9 +2004,7 @@ pub fn start_rtsp_probe(
     // detector, when it loads, publishes itself into `worker_detector_candidate`
     // (independent of fabric timing) for the worker loop to claim.
     #[cfg(feature = "fabric")] fabric_slot: Arc<std::sync::OnceLock<Arc<FabricBundle>>>,
-    #[cfg(feature = "fabric")] worker_detector_candidate: Arc<
-        std::sync::OnceLock<(Arc<crate::detector::PromotableDetector>, String)>,
-    >,
+    #[cfg(feature = "fabric")] worker_detector_candidate: Arc<crate::fabric::WorkerDetectorSlot>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         // A panic on this thread must not kill a camera silently while
@@ -1807,6 +2020,23 @@ pub fn start_rtsp_probe(
             if shutdown.load(Ordering::SeqCst) {
                 return;
             }
+            // This camera is really a running detector source from here on, so
+            // it takes up its standing as one — held until it answers, and
+            // released by `Drop` however this thread ends. Taken AFTER the
+            // enable-flag park, so a camera switched off at startup is never
+            // counted while it is off, and a camera an operator switches ON
+            // while the deployment is up takes its standing here and GROWS the
+            // count (`WorkerDetectorSlot::camera_source`) — the shutdown road
+            // above returns before this line, so a thread ending on the
+            // operator's stop is never counted. Every road out below — the
+            // endpoint that will not resolve, the model that will not load, a
+            // detector that arrives, and a panic this thread's own
+            // `catch_unwind` swallows — reports exactly once through it.
+            #[cfg(feature = "fabric")]
+            let mut worker_source = Some(
+                worker_detector_candidate
+                    .camera_source(&camera_stopped_watching_reason(&config.camera_name)),
+            );
             let rtsp_source = match media_pipeline::prepare_rtsp_source(
                 &rtsp_url,
                 config.rtsp_username.as_deref(),
@@ -1980,6 +2210,21 @@ pub fn start_rtsp_probe(
                     // The detector is this camera's: without one, this camera
                     // is watching nothing, whatever the others are doing.
                     health.set_camera(&config.camera_name, CameraCondition::IngestFailed);
+                    // And this node's worker question is ANSWERED. A model
+                    // that will not load is terminal, not slow: nothing else
+                    // on this node is going to produce a detector, so the slot
+                    // settles here carrying the real error. Without it the
+                    // node keeps the `worker-loop-starting` placeholder for
+                    // the rest of its life — an operator whose node will never
+                    // serve the fleet is told on every surface they can reach
+                    // that it is still coming up, with nothing to act on and
+                    // no error to search for. The start the bring-up installed
+                    // is released with it, so the fabric bundle it captured
+                    // can drop.
+                    #[cfg(feature = "fabric")]
+                    if let Some(source) = worker_source.take() {
+                        source.failed(detector_load_failure_reason(&config, &error));
+                    }
                     None
                 }
             };
@@ -2017,12 +2262,13 @@ pub fn start_rtsp_probe(
                     // job, not one per camera — see `FabricBundle`'s doc).
                     // Published into the shared candidate slot independently of
                     // fabric attach timing: the bundle's `worker_detector_slot`
-                    // IS this same `Arc<OnceLock>`, so a detector that loads
-                    // before fabric finishes attaching is still claimed the
-                    // instant the worker loop starts.
+                    // IS this same slot, so a detector that loads before fabric
+                    // finishes attaching still starts the worker loop — the
+                    // hand-over runs whichever of the two lands second.
                     #[cfg(feature = "fabric")]
-                    let _ = worker_detector_candidate
-                        .set((Arc::clone(&handle), active_backend_tag.clone()));
+                    if let Some(source) = worker_source.take() {
+                        source.detector_ready(Arc::clone(&handle), active_backend_tag.clone());
+                    }
                     handle
                 });
             // Two legs, one spelling. The operator's queue depth is the
@@ -2855,6 +3101,41 @@ fn build_captured_segment(
         observed_at,
         media,
     })
+}
+
+/// How many of this deployment's cameras are really a detector source for
+/// this node's one worker question.
+///
+/// A camera is a source when it has an analysis endpoint to run — the same
+/// `rtsp_url` the camera fan-out spawns a thread for — AND an operator has not
+/// switched it off at startup. A switched-off camera's thread parks on its
+/// enable flag and never reaches a detector load, so it will never answer:
+/// counting one leaves the node waiting on an answer that is never coming, and
+/// the operator reads `worker-loop-starting` for the rest of the process's
+/// life.
+///
+/// Read from the SAME disable marker the fan-out reads
+/// (`<data_dir>/camera-disabled/<slug>`), so the count and the threads cannot
+/// disagree about which cameras run.
+///
+/// This is the count AT BRING-UP, not the node's final answer to "how many
+/// sources". A camera an operator switches on afterwards is a camera that
+/// RUNS: its thread wakes from the enable-flag park, takes up its standing,
+/// and grows this count as it does (`WorkerDetectorSlot::camera_source`).
+#[cfg(feature = "fabric")]
+pub(crate) fn eligible_detector_sources(config: &crate::config::RuntimeConfig) -> usize {
+    config
+        .cameras
+        .iter()
+        .filter(|camera| camera.rtsp_url.is_some())
+        .filter(|camera| {
+            !config
+                .data_dir
+                .join("camera-disabled")
+                .join(camera_slug(&camera.name))
+                .exists()
+        })
+        .count()
 }
 
 fn camera_slug(camera_name: &str) -> String {
@@ -4122,9 +4403,13 @@ mod tests {
     use super::{
         CaptureSessionEnd, DetectorSegmentDecision, LatestSegmentQueue, LatestSegmentRecv,
         classify_capture_end, decision_delay_from_env, detector_segment_decision,
+        join_correction_writer_with, spawn_correction_writer,
     };
     use crate::config;
+    use crate::correction::{CorrectionRequest, CorrectionType};
     use crate::ha_camera_registration::generic_camera_url;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
     #[test]
@@ -4177,6 +4462,73 @@ mod tests {
             LatestSegmentRecv::Item(value) => panic!("unexpected pending segment {value}"),
         }
         assert_eq!(queue.push_latest(1), Err(1));
+    }
+
+    #[test]
+    fn correction_writer_drains_accepted_work_before_store_close_can_follow() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let completed = Arc::new(AtomicBool::new(false));
+        let close_continued = Arc::new(AtomicBool::new(false));
+        let worker_entered = Arc::clone(&entered);
+        let worker_release = Arc::clone(&release);
+        let worker_completed = Arc::clone(&completed);
+        let writer = spawn_correction_writer(receiver, move |_request| {
+            worker_entered.wait();
+            worker_release.wait();
+            worker_completed.store(true, Ordering::SeqCst);
+        })
+        .expect("start the correction writer");
+
+        sender
+            .send(CorrectionRequest {
+                detection_id: "accepted-before-stop".to_string(),
+                label: None,
+                correction_type: CorrectionType::FalseAlarm,
+            })
+            .expect("the live listener accepts one correction");
+        entered.wait();
+        drop(sender);
+
+        let (join_reached_sender, join_reached_receiver) = std::sync::mpsc::sync_channel(0);
+        let (joined_sender, joined_receiver) = std::sync::mpsc::channel();
+        let completed_at_close = Arc::clone(&completed);
+        let close_continued_by_joiner = Arc::clone(&close_continued);
+        let joining = std::thread::spawn(move || {
+            let joined = join_correction_writer_with(Some(writer), |writer| {
+                join_reached_sender
+                    .send(())
+                    .expect("announce the exact correction-writer join point");
+                writer.join()
+            });
+            let worker_finished_before_close = completed_at_close.load(Ordering::SeqCst);
+            close_continued_by_joiner.store(true, Ordering::SeqCst);
+            joined_sender
+                .send((joined, worker_finished_before_close))
+                .expect("report the correction-writer drain and close boundary");
+        });
+
+        join_reached_receiver
+            .recv()
+            .expect("teardown reaches the correction-writer join point");
+        assert!(
+            !completed.load(Ordering::SeqCst) && !close_continued.load(Ordering::SeqCst),
+            "the accepted correction is still held and store close has not continued after the join point",
+        );
+
+        release.wait();
+        let (joined, worker_finished_before_close) = joined_receiver
+            .recv()
+            .expect("receive the correction-writer drain and close boundary");
+        joined.expect("the correction writer exits cleanly after its sender closes");
+        joining.join().expect("join the test's join observer");
+        assert!(
+            worker_finished_before_close
+                && completed.load(Ordering::SeqCst)
+                && close_continued.load(Ordering::SeqCst),
+            "store close continues only after the accepted correction finished",
+        );
     }
 
     #[test]

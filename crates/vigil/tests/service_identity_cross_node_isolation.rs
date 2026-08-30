@@ -61,7 +61,7 @@ fn a_service_identity_record_at_another_nodes_scope_target_never_resolves_here_b
 
     // This node now goes through its real first-start path, deriving and
     // persisting its own record at its own generated key.
-    let own = resolve_persisted(&store_path, SITE_NAME)
+    let own = resolve_persisted(&data_dir, &store_path, SITE_NAME)
         .expect("this node's first start resolves and persists its own identity");
     assert_ne!(
         own.value, FOREIGN_IDENTITY,

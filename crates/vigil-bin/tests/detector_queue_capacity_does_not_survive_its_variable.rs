@@ -16,7 +16,6 @@
 //! stale file is the defect.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -24,12 +23,14 @@ use vigil::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING;
 use vigil::settings_projection::{
     NAME_KEY, RUNNING_SOURCE_KEY, SETTING_LINE_PREFIX, SHADOWED_SETTING_KEY,
 };
+use vigil::settings_store::SettingsStore;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
     RUNTIME_STARTUP_TIMEOUT, RtspFixture, TcpPortReservation, capture_pipe, rtsp_fixture_lock,
-    vigil_binary_path, wait_until, workspace_root,
+    vigil_binary_path, wait_for_store_owner, wait_for_store_owner_to_release, wait_until,
+    workspace_root,
 };
 
 const QUEUE_CAPACITY_VARIABLE: &str = "VIGIL_DETECTOR_QUEUE_CAPACITY";
@@ -115,18 +116,18 @@ impl Deployment {
             stdout,
             stderr,
         };
-        let socket_path = self.data_dir.join("control.sock");
-        wait_until(
-            &format!("the control socket at {} to appear", socket_path.display()),
-            RUNTIME_STARTUP_TIMEOUT,
-            || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "{error}. The runtime must publish its control socket. Output so far:\n{}",
-                run.logs()
-            )
-        });
+        // Readiness is the store's OWNER ROUTE answering: this runtime holds
+        // the deployment's store, so the separate `vigil stats` process below
+        // reaches it rather than answering from its own snapshot — which is
+        // exactly the difference this file is about. Proven by asking a real
+        // question, never by a sleep or a printed line.
+        wait_for_store_owner(&self.data_dir, &SettingsStore::store_path(&self.data_dir))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}. The runtime must own this deployment's store. Output so far:\n{}",
+                    run.logs()
+                )
+            });
         run
     }
 
@@ -210,22 +211,11 @@ impl Deployment {
         .unwrap_or_else(|error| panic!("{error}. Run output:\n{}", run.logs()))
     }
 
-    fn wait_for_the_control_socket_to_go_away(&self) {
-        let socket_path = self.data_dir.join("control.sock");
-        wait_until(
-            &format!(
-                "the control socket at {} to stop accepting connections",
-                socket_path.display()
-            ),
-            RUNTIME_STARTUP_TIMEOUT,
-            || {
-                Ok(match UnixStream::connect(&socket_path) {
-                    Ok(_) => None,
-                    Err(_) => Some(()),
-                })
-            },
-        )
-        .expect("the first run must be genuinely down before the second one starts");
+    /// The inverse wait: nobody owns the store any more, so the first run is
+    /// genuinely down and the store is free for the second one to take.
+    fn wait_for_the_store_to_be_free(&self) {
+        wait_for_store_owner_to_release(&self.data_dir, &SettingsStore::store_path(&self.data_dir))
+            .expect("the first run must release the store before the second one starts");
     }
 
     fn snapshot_path(&self) -> PathBuf {
@@ -321,7 +311,7 @@ fn a_queue_depth_levered_by_an_environment_variable_does_not_outlive_it() {
         levered.logs()
     );
     levered.stop();
-    deployment.wait_for_the_control_socket_to_go_away();
+    deployment.wait_for_the_store_to_be_free();
     assert!(
         deployment.snapshot_path().exists(),
         "sanity: the stopped run left its snapshot behind at {} — that file is what the next two \

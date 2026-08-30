@@ -30,3 +30,15 @@ between machines you enrolled yourself. Turn this off per camera with the
 `fabric_allow_frame_offload` option (default on) — this node still joins the
 fabric and can still accept offloaded work from other nodes, it simply never
 sends this camera's own clips elsewhere.
+
+## Live commands inside the container
+
+The add-on states one runtime root for the owner plane —
+`CONTEXTDB_OWNER_READ_RUNTIME_DIR=/data/owner-plane`, created on the persistent
+data volume at container init — so `vigil why`, `vigil events`, `vigil stats`
+and `vigil settings` run inside this container reach the running daemon and are
+answered by it, rather than reporting on a store nobody is holding.
+
+Run them from a shell in this container, for example `vigil settings` to read
+what this deployment is running at and `vigil settings set <setting> <value>`
+to change it; the full form of each is in the CLI reference's Settings section.

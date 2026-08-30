@@ -96,11 +96,18 @@ fn assert_sync_class_reaches_the_executed_statement(table: &TableDeclaration) {
 }
 
 /// The labels a statement constrains WRITES to, read out of the two forms the
-/// store beneath Vigil accepts: `SCOPE_LABEL ('...')`, which constrains reads
-/// and writes together, and `SCOPE_LABEL_READ ('...') WRITE ('...')`, where only
-/// the WRITE list constrains writing. A read-only label yields no write
-/// constraint here, which is the whole point: it does not stop a node from
-/// authoring.
+/// store beneath Vigil accepts: `SCOPE_LABEL ('...')`, which constrains WRITES
+/// ONLY, and `SCOPE_LABEL_READ ('...') WRITE ('...')`, where the two lists are
+/// stated apart and only the WRITE list constrains writing. A read-only label
+/// yields no write constraint here, which is the whole point: it does not stop
+/// a node from authoring.
+///
+/// The plain form used to be described here as constraining "reads and writes
+/// together", and it does not: the engine narrows a read from a
+/// `SCOPE_LABEL_READ` set and from nothing else, so a table carrying only the
+/// plain form is fully visible to every handle that may open it. That is why
+/// the stopped-store settings reader declares no scope label — a node must
+/// still SEE what its hub pushed, whatever it may write.
 fn write_constrained_labels(statement: &str) -> Vec<String> {
     let upper = statement.to_ascii_uppercase();
 

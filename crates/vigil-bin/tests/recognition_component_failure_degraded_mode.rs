@@ -13,19 +13,35 @@
 //! `SiglipVisionEmbedder::load` fails cleanly (`missing weights file
 //! .../model.safetensors`) rather than panicking, so no corrupt binary needs
 //! staging to reach this fault.
+//!
+//! The store is SEEDED before the daemon starts, because that is the
+//! deployment these tests are about: a node that has been running has a store,
+//! and a component failure does not remove it. It also decides who answers.
+//! A degraded run holds its store when the file is already there and holds
+//! nothing when it is not (`runtime.rs` prints `degraded_owner_route=true` or
+//! `degraded_owner_route=false … reason=no-store-to-hold`), and only the run
+//! itself knows which component failed — so an operator command answered by
+//! the asking process could not name the component however well it was
+//! worded. Every test here therefore travels the RUN's own route, asserted
+//! rather than assumed. The first start, where no store exists yet and the
+//! answer is genuinely produced by the asking process, is a different journey
+//! and is pinned beside the store-unreadable fixture in
+//! `storeless_runtime_degraded_mode.rs`.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
 
+use vigil::OWNER_SERVED_PREFIX;
 use vigil::settings_degraded::{NOT_IN_FORCE_LINE_PREFIX, RECOGNITION_EMBEDDER_COMPONENT};
+use vigil::settings_store::SettingsStore;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, get, toml_path, vigil_binary_path, wait_until, workspace_root,
+    TcpPortReservation, capture_pipe, get, toml_path, vigil_binary_path, wait_for_store_owner,
+    wait_for_tcp_port, workspace_root,
 };
 
 const CAMERA_NAME: &str = "loading dock";
@@ -40,22 +56,30 @@ fn fixture_detector_model_path() -> PathBuf {
 
 struct ComponentFailureDeployment {
     _tmp: tempfile::TempDir,
-    _socket_tmp: tempfile::TempDir,
     data_dir: PathBuf,
     config_path: PathBuf,
-    socket_path: PathBuf,
 }
 
 impl ComponentFailureDeployment {
     /// Recognition switched on (`recognition_weights_dir` set) against a real,
     /// empty directory — never a corrupt or absent one, so the fault is
     /// unambiguously "nothing loadable here" rather than a filesystem error a
-    /// reader could mistake for something else.
+    /// reader could mistake for something else — over a store that already
+    /// exists and opens, which is what lets the degraded run hold it and
+    /// answer through it.
     fn prepare() -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let socket_tmp = tempfile::tempdir().expect("tempdir for the control socket");
         let data_dir = tmp.path().join("data");
         fs::create_dir_all(&data_dir).expect("data dir");
+        // Seed the deployment's store: created and closed here, at the
+        // location the product decides for this directory rather than a
+        // filename guessed in a test.
+        drop(SettingsStore::open(&data_dir).expect("seed the deployment's store"));
+        assert!(
+            SettingsStore::store_path(&data_dir).exists(),
+            "the fixture must start with a real, readable store, or the run below holds nothing \
+             and these tests prove the wrong journey"
+        );
         let weights_dir = tmp.path().join("weights");
         fs::create_dir_all(&weights_dir).expect("empty weights dir");
 
@@ -67,14 +91,18 @@ impl ComponentFailureDeployment {
         );
         fs::write(&config_path, config).expect("write the camera config");
 
-        let socket_path = socket_tmp.path().join("control.sock");
         Self {
             _tmp: tmp,
-            _socket_tmp: socket_tmp,
             data_dir,
             config_path,
-            socket_path,
         }
+    }
+
+    /// The store this deployment is configured on — the one an operator's
+    /// command has to be aimed at, because the store path IS the address of
+    /// the run that holds it.
+    fn store_path(&self) -> PathBuf {
+        SettingsStore::store_path(&self.data_dir)
     }
 
     fn start(&self) -> ComponentFailureRun {
@@ -104,8 +132,8 @@ impl ComponentFailureDeployment {
             .arg("--detector-model-path")
             .arg(&model_path)
             .env("VIGIL_DATA_DIR", &self.data_dir)
-            .env("VIGIL_CONTROL_SOCKET", &self.socket_path)
             .env_remove("VIGIL_STORE_PATH")
+            .env_remove("VIGIL_CONTROL_SOCKET")
             .env_remove("VIGIL_FABRIC_TICKET")
             .env_remove("VIGIL_FABRIC_HUB")
             .env_remove("VIGIL_RECOGNITION_WEIGHTS_DIR")
@@ -124,18 +152,33 @@ impl ComponentFailureDeployment {
             stdout,
         };
 
-        wait_until(
-            &format!(
-                "the component-failure runtime's control socket at {} to appear",
-                self.socket_path.display()
-            ),
-            Duration::from_secs(30),
-            || Ok(UnixStream::connect(&self.socket_path).ok().map(|_| ())),
-        )
-        .unwrap_or_else(|error| {
+        // The surfaces the run kept must be up...
+        wait_for_tcp_port(health_port, Duration::from_secs(30)).unwrap_or_else(|error| {
             panic!(
-                "{error}. A failed recognition component must not stop Vigil starting — the \
-                 store was never even opened. Process output so far:\n{}",
+                "{error}. A failed recognition component must not stop Vigil starting — the store \
+                 was never even opened. Process output so far:\n{}",
+                run.stdout()
+            )
+        });
+        wait_for_tcp_port(review_port, Duration::from_secs(30)).unwrap_or_else(|error| {
+            panic!(
+                "{error}. A degraded run must still answer the surfaces it lost, so it can say \
+                 what is unavailable rather than leaving an operator with a connection error. \
+                 Process output so far:\n{}",
+                run.stdout()
+            )
+        });
+        // ...and so must the route an operator's command travels. The store
+        // was never reached, so it is intact and this run holds it; readiness
+        // is that route answering a real question. Asserted rather than
+        // assumed, because a run that came up holding nothing would leave every
+        // command below answered by the asking process — which cannot know
+        // which component failed, and so would quietly prove nothing.
+        wait_for_store_owner(&self.data_dir, &self.store_path()).unwrap_or_else(|error| {
+            panic!(
+                "{error}. A failed recognition component must not cost the operator surface its \
+                 route: the store was never opened, so this run can and must hold it. Process \
+                 output so far:\n{}",
                 run.stdout()
             )
         });
@@ -147,8 +190,11 @@ impl ComponentFailureDeployment {
         Command::new(vigil_binary_path())
             .args(args)
             .env("VIGIL_DATA_DIR", &self.data_dir)
-            .env("VIGIL_CONTROL_SOCKET", &self.socket_path)
-            .env_remove("VIGIL_STORE_PATH")
+            // The owner route is addressed by the store path alone, so the
+            // command says which store it means rather than leaving it to be
+            // derived: this run holds THAT file, and nothing else.
+            .env("VIGIL_STORE_PATH", self.store_path())
+            .env_remove("VIGIL_CONTROL_SOCKET")
             .stdin(Stdio::null())
             .output()
             .unwrap_or_else(|error| panic!("spawn vigil {args:?}: {error}"))
@@ -196,7 +242,16 @@ fn settings_surface(deployment: &ComponentFailureDeployment) -> String {
         output.status.code(),
         combined(&output)
     );
-    String::from_utf8_lossy(&output.stdout).to_string()
+    let rendered = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(
+        rendered.starts_with(OWNER_SERVED_PREFIX),
+        "and it must be the RUNNING node that answered, through the store it holds. Which \
+         component failed is a fact of this run and of nothing else, so an answer the asking \
+         process produced for itself could not carry it however well it was worded — the \
+         assertions below would then be checking prose rather than the operator's real \
+         surface. Got:\n{rendered}"
+    );
+    rendered
 }
 
 /// The store is intact here — only the recognition component failed to load

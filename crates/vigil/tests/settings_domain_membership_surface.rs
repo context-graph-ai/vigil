@@ -123,8 +123,13 @@ fn each_domain_names_the_settings_it_governs_and_what_vigil_currently_chooses() 
         let _store =
             SettingsStore::open(deployment.path()).expect("open the node-side settings store");
     }
-    let report =
-        report_by_direct_read(deployment.path()).expect("build the settings report by direct read");
+    // The store this deployment just created, named rather than derived, so the
+    // report is read from that deployment and no other.
+    let report = report_by_direct_read(
+        deployment.path(),
+        &SettingsStore::store_path(deployment.path()),
+    )
+    .expect("build the settings report by direct read");
 
     let rendered_switches: BTreeSet<String> = report
         .domains

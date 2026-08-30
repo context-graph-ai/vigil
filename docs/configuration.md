@@ -39,12 +39,120 @@ authored most recently wins. The environment holds no rank at all, because it is
 <!-- enforced by: `vigil::settings_record_coexistence::between_local_surfaces_the_most_recent_author_wins` -->
 <!-- enforced by: `vigil::environment_behavior_var_reported_ignored::an_environment_variable_naming_a_behavior_setting_is_reported_as_ignored_with_the_reason_and_where_to_set_it` -->
 
+`vigil settings` is how an operator reads those records back and writes new ones at a running or a
+stopped deployment. Its executable forms, the requested/running/pending fields it reports, and the
+answers it gives when the store is busy or unreadable are in the
+[Settings section of the CLI reference](cli.md#settings).
+
+<!-- vigil-unenforced: classification=non-contract-context; reason=`This is a cross-reference to the CLI reference page, not an independent runtime promise.` -->
+
 The fabric enrollment ticket is the exception, and it is an exception about secrets rather than
 about fabric: it is settable through the ordinary surfaces and through `VIGIL_FABRIC_TICKET`, and a
 secret found in the environment wins, because that is the per-process injection a rotation just
 handed this run. The hub switch is an ordinary setting resolved from the store like any other.
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`Secret precedence is proven for the camera password by vigil::secret_source_precedence, and the fabric ticket is on the same product roster, but no test names the ticket or the hub switch as the instances this paragraph states.` -->
+
+## The settings listing, line by line
+
+`vigil settings` and `vigil settings list` render one report over these records. Read it by line
+kind: six of them, each opening with the word naming what the line is about, then whitespace-free
+`key=value` tokens, and — where the line carries one — a trailing `reason=` that is prose and runs
+to the end of the line.
+
+| Line | What it says | Fields after the opening word |
+|---|---|---|
+| `served-by=af_unix` | The whole answer below was served by the process that owns this deployment's store, over Context Graph's owner channel. It is the first line when it is there at all, it is the entire line, and an answer read straight from an idle store file carries no such line | none |
+| `identity` | This node's service identifier, read-only | `value=`, `derivation=`, `access=` |
+| `setting` | One resolved setting, one line each | `name=`, `value=`, `control=`, `author=`, `surface=`, `scope=`, `requested=`, `running=`, `pending=`, `applies=`, `when=`, `control_phrase=`, `reason=` |
+| `held` | One stored record that exists but did not win, under the `setting` line it lost to. Absent when nothing is held | `name=`, `value=`, `author=`, `surface=`, `scope=`, `reason=` |
+| `domain` | One setting an automatic-management domain governs, one line per member | `switch=`, `on=`, `member=`, `choice=`, `reason=` |
+| `secret` | Where one secret is coming from, never the secret itself | `name=`, `source=`, `stored=`, `reason=` |
+
+<!-- vigil-claim: `vigil.docs-configuration.the-settings-listing-line-by-line` -->
+<!-- enforced by: `vigil-bin::settings_operator_surface_fields::listing_reports_value_state_author_surface_scope_and_reason_for_every_touched_setting` -->
+<!-- enforced by: `vigil-bin::settings_operator_surface_fields::listing_shows_the_service_identifier_read_only_with_how_it_was_arrived_at` -->
+<!-- enforced by: `vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store` -->
+<!-- enforced by: `vigil-bin::settings_live_operator_visibility::listing_answers_by_direct_read_when_no_runtime_owns_the_store` -->
+
+`served-by=af_unix` is the literal token, so a script can grep for it: its presence means a running
+owner answered, and its absence means the answer was read from the store file with no runtime
+holding it. Both routes render the identical report beneath it.
+
+<!-- vigil-claim: `vigil.docs-configuration.served-by-af-unix-is-the-literal-token` -->
+<!-- enforced by: `vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store` -->
+<!-- enforced by: `vigil-bin::settings_live_operator_visibility::listing_answers_by_direct_read_when_no_runtime_owns_the_store` -->
+<!-- enforced by: `vigil-bin::a_refusal_reads_the_same_on_both_routes::a_failed_request_reads_the_same_served_by_the_owner_and_read_directly` -->
+
+On a `setting` line, `requested=` is the value this deployment asks for and `value=` repeats it.
+`running=` is the value the process that answered has actually brought into force, and `none` means
+that process has no value in force for this setting — which happens whenever no runtime is up to
+answer, and equally while one is: a running node reports `running=none` for every setting it has
+not applied anything for, such as the recognition settings on a node with recognition switched off
+or a backend setting on a node whose pipeline never built one. `running=none` is therefore not
+evidence that the daemon is down; the `served-by=af_unix` line is what answers that question.
+
+<!-- vigil-claim: `vigil.docs-configuration.on-a-setting-line-requested-is-the-value` -->
+<!-- enforced by: `vigil-bin::settings_operator_surface_fields::listing_reports_requested_running_and_pending_side_by_side` -->
+<!-- enforced by: `vigil-bin::settings_operator_surface_fields::listing_answers_requested_from_the_store_while_the_runtime_is_stopped` -->
+<!-- enforced by: `vigil-bin::settings_live_operator_visibility::listing_answers_while_the_runtime_owns_the_store` -->
+
+`pending=` names what closes a gap between the two — `restart`, `camera-reconnect`, `model-reload`,
+or `live-transition` for a gap the node is already closing by itself — and is `none` when there is
+no gap. `applies=` answers what those leave open: `live` for a value the running process takes on
+without a restart, `next-restart` for one only a start brings into force. While a preparation is
+outstanding the line also carries `preparing-since=` and that preparation's own `progress=`, and a
+setting that predates the domain now governing it carries `predates_domain=true`. `when=` is when
+the winning record was authored, in milliseconds since the epoch, and `0` where nothing authored it.
+
+<!-- vigil-claim: `vigil.docs-configuration.pending-names-what-closes-a-gap-between` -->
+<!-- enforced by: `vigil::settings_application_timing_roster::every_setting_the_surface_answers_for_declares_when_it_takes_effect` -->
+<!-- enforced by: `vigil::settings_application_timing_roster::a_value_a_start_can_only_take_on_at_startup_is_declared_restart_pending` -->
+<!-- enforced by: `vigil::pending_cause_truthfulness::no_setting_that_waits_for_a_restart_names_anything_else_as_what_closes_it` -->
+
+`control=` and `control_phrase=` are the same fact twice: who is in charge of this value, once as a
+token a script can match and once as the phrase a person reads. They move together, and the pairs
+are `automatic`/`Automatic`, `auto-adjusted`/`Auto-adjusted`, `managed-by:<domain>`/`Managed by
+<domain>`, `set-by-management-server`/`Set by your management server`, and
+`set-by-you`/`Set by you`. A field value cannot carry spaces, which is why the phrase is not simply
+the token.
+
+<!-- vigil-claim: `vigil.docs-configuration.control-and-control-phrase-are-the-same-fact` -->
+<!-- enforced by: `vigil-bin::settings_operator_surface_fields::listing_reports_value_state_author_surface_scope_and_reason_for_every_touched_setting` -->
+<!-- enforced by: `vigil::settings_authority_ranking::an_older_local_pin_outranks_a_newer_pushed_record` -->
+
+The three attribution fields say where a value came from, and they are read together. `author=` is
+the rank that won — `local-explicit`, `management-server`, or `automatic`. `surface=` is the
+concrete surface that recorded it — `config-file`, `add-on-options`, `startup-options`,
+`vigil-settings`, `management-server`, or `automatic`. `scope=` is the target the winning record was
+written at. This attribution is stored, not recomputed, so a stopped deployment answers with the
+surface that actually authored the value rather than with a fresh product default. Where an
+environment lever supplied the running value instead, the line names it with
+`running-source=environment:<VARIABLE>` and `shadowed-setting=<value>`.
+
+<!-- vigil-claim: `vigil.docs-configuration.the-three-attribution-fields-say-where-a` -->
+<!-- enforced by: `vigil-bin::settings_live_operator_visibility::listing_after_the_run_stops_serves_what_was_persisted` -->
+<!-- enforced by: `vigil-bin::settings_operator_surface_fields::listing_answers_requested_from_the_store_while_the_runtime_is_stopped` -->
+
+On an `identity` line, `derivation=` is how this node arrived at its name —
+`derived-at-first-start`, `set-explicitly`, `derived-not-yet-persisted`, or
+`configured-not-yet-persisted` — and `access=` is always `read-only`, because the identifier is
+shown here and moved only by `vigil settings identity change`. On a `domain` line, `switch=` names
+the domain, `on=` is whether it is currently governing, `member=` is the setting this line is about
+and `choice=` is what the domain currently picks for it. On a `secret` line, `source=` is
+`environment` or `stored` and `stored=` is whether a stored value exists at all; neither carries the
+secret.
+
+<!-- vigil-claim: `vigil.docs-configuration.on-an-identity-line-derivation-is-how-this` -->
+<!-- enforced by: `vigil-bin::settings_operator_surface_fields::listing_shows_the_service_identifier_read_only_with_how_it_was_arrived_at` -->
+<!-- enforced by: `vigil::service_identity_persistence::the_deliberate_change_operation_states_the_consequence_before_it_takes_effect` -->
+
+A listing that could not be served carries different lines again — `unmanaged`, `busy`, `reader`
+and `unavailable` — and those belong to
+[When a read command cannot open the store](cli.md#when-a-read-command-cannot-open-the-store),
+which is where each condition and its stream and exit status are stated.
+
+<!-- vigil-unenforced: classification=non-contract-context; reason=`This paragraph points at the CLI reference's own store-failure section rather than restating that contract here.` -->
 
 ## Minimal standalone configuration
 

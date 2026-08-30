@@ -11,6 +11,19 @@
 //! a message string, because an operator surface that has to parse prose to name
 //! the holder cannot render it reliably.
 //!
+//! The holder is OPTIONAL and 64 bits wide, because that is exactly what the
+//! substrate reports and an operator surface may not improve on it. Three
+//! answers, three renderings:
+//!
+//! - the holder published a pid: Vigil names that pid, exactly as reported;
+//! - the holder published none: Vigil says plainly that it does not know which
+//!   process holds the store. It never prints pid 0 and never invents a number
+//!   — an operator sent after a process that does not exist spends their outage
+//!   chasing it;
+//! - the holder published a pid wider than 32 bits: Vigil prints the whole of
+//!   it. A truncated process id names a DIFFERENT process to the operator
+//!   reading it, which is worse than saying nothing.
+//!
 //! The lock in the locked test is held by a SEPARATE PROCESS — this test binary
 //! re-executed against the same deployment directory — because a holder pid
 //! taken from the classifying process itself is a number the classifier already
@@ -200,15 +213,16 @@ fn a_locked_store_still_refuses_a_second_runtime_naming_the_holder() {
     assert_eq!(
         class,
         StoreOpenClass::LockedByAnotherRuntime {
-            holder_pid: holder.pid()
+            holder_pid: Some(u64::from(holder.pid()))
         },
         "the classification must name the holder as a process id in the typed variant, so an \
-         operator surface can render it without parsing prose"
+         operator surface can render it without parsing prose — and a holder that DID publish a \
+         pid is carried as a known one, never flattened into the unknown-holder answer"
     );
     match &class {
         StoreOpenClass::LockedByAnotherRuntime { holder_pid } => assert_ne!(
             *holder_pid,
-            std::process::id(),
+            Some(u64::from(std::process::id())),
             "the holder pid must come from whoever actually owns the lock; reporting the \
              classifying process's own pid names nobody"
         ),
@@ -220,16 +234,22 @@ fn a_locked_store_still_refuses_a_second_runtime_naming_the_holder() {
         Err(SettingsError::LockedByAnotherRuntime { holder_pid }) => {
             assert_eq!(
                 holder_pid,
-                holder.pid(),
+                Some(u64::from(holder.pid())),
                 "the refusal names the runtime that actually owns the directory, carried typed on \
                  the error itself so a caller renders the holder without a second lookup and \
                  without parsing prose"
             );
             assert_ne!(
                 holder_pid,
-                std::process::id(),
+                Some(u64::from(std::process::id())),
                 "a refusal naming the refused process itself names nobody: the holder pid must \
                  come from whoever owns the lock"
+            );
+            let rendered = SettingsError::LockedByAnotherRuntime { holder_pid }.to_string();
+            assert!(
+                rendered.contains(&holder.pid().to_string()),
+                "and a holder this deployment really does know must be NAMED to the operator, \
+                 not summarised away: {rendered:?}"
             );
         }
         Err(SettingsError::Store(detail)) => panic!(
@@ -244,6 +264,27 @@ fn a_locked_store_still_refuses_a_second_runtime_naming_the_holder() {
         Err(SettingsError::ScopeLabelViolation { requested, allowed }) => panic!(
             "a second runtime on a held store has nothing to do with which rank a handle may \
              write at; got a scope-label violation requesting {requested:?} against {allowed:?}"
+        ),
+        Err(SettingsError::StoreHeldByReaders {
+            observed_direct_readers,
+            readers,
+            path,
+        }) => panic!(
+            "a store held by another RUNTIME is a writer owning it, not readers reading it — the \
+             two are different conditions with different answers for the operator: this one names \
+             the holding runtime and stays until that runtime lets go, while a reader-held store \
+             is healthy and clears on its own. Got {observed_direct_readers} direct reader(s) \
+             {readers:?} on {path:?}"
+        ),
+        Err(SettingsError::StoreNeedsWritableRecovery { path, reason }) => panic!(
+            "another runtime is holding this store, which says nothing about its committed image \
+             — sending the operator to open it writable to settle it points them at a store that \
+             is already open. Got a needs-recovery refusal for {path:?}: {reason}"
+        ),
+        Err(SettingsError::StoreMissing { path }) => panic!(
+            "the store is sitting right there and another runtime is holding it — telling the \
+             operator nothing has ever started this deployment sends them to run a node that is \
+             already running. Got a missing-store refusal for {path:?}"
         ),
         Ok(_) => panic!(
             "two runtimes on one store is not a configuration problem: the second runtime is \
@@ -291,4 +332,134 @@ fn an_absent_store_is_created_rather_than_treated_as_a_failure() {
         store_file.exists(),
         "and opening an absent store is what creates it, at the location the product decides"
     );
+}
+
+/// A pid wider than 32 bits whose low half is itself a plausible process id.
+/// Truncating this one does not produce an obviously-wrong number an operator
+/// would question — it produces `4242`, a perfectly ordinary pid belonging to
+/// some OTHER process on the machine, which is the whole reason the holder is
+/// carried at the width it was reported in.
+const WIDE_HOLDER_PID: u64 = (1u64 << 32) + 4242;
+
+/// The same width, chosen so the truncation is zero. A refusal reading
+/// "holder pid 0" sends an operator after a process that cannot exist.
+const WIDE_HOLDER_PID_TRUNCATING_TO_ZERO: u64 = 1u64 << 32;
+
+#[test]
+fn a_holder_that_published_no_pid_is_reported_as_unknown_rather_than_as_a_number() {
+    // Unfakeable: the two renderings are produced from the same variant with
+    // the only difference being whether the substrate reported a holder, and
+    // they are checked against each other. An implementation that printed the
+    // Option through `Debug` is caught by the `None`/`Some(` checks; one that
+    // substituted a placeholder number is caught by the digit check — there is
+    // no digit anywhere in an honest unknown-holder answer; and one that
+    // dropped the condition or the remedy to say "unknown" and nothing else is
+    // caught by the two clauses both renderings must keep.
+    let known = SettingsError::LockedByAnotherRuntime {
+        holder_pid: Some(4242),
+    }
+    .to_string();
+    let unknown = SettingsError::LockedByAnotherRuntime { holder_pid: None }.to_string();
+
+    assert!(
+        known.contains("4242"),
+        "a holder that published its pid is named by it, so the operator can go and stop that \
+         exact process: {known:?}"
+    );
+    assert!(
+        !known.contains("Some("),
+        "the operator reads a process id, not a Rust Option rendered through Debug: {known:?}"
+    );
+
+    assert!(
+        !unknown.chars().any(|character| character.is_ascii_digit()),
+        "when the holder published no pid, Vigil does not know which process holds the store and \
+         must say so — any number here is invented, and an operator sent after a process that is \
+         not there spends their outage chasing it: {unknown:?}"
+    );
+    assert!(
+        !unknown.contains("None"),
+        "an unknown holder is stated in the operator's words, never as a Rust Option rendered \
+         through Debug: {unknown:?}"
+    );
+    assert_ne!(
+        unknown, known,
+        "an unknown holder and a known one are different answers and must read differently"
+    );
+
+    for rendered in [&known, &unknown] {
+        assert!(
+            rendered.contains("locked") && rendered.contains("another process"),
+            "both answers still say what happened — this store is held by another process — \
+             because that is the condition the operator has to act on: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("stop"),
+            "and both still say what to do about it; not knowing which process holds the store \
+             does not remove the remedy: {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn a_holder_pid_wider_than_thirty_two_bits_is_reported_whole() {
+    // Unfakeable: each width is checked BOTH for the full number appearing and
+    // for its 32-bit truncation NOT appearing, and the two constants are
+    // chosen so the truncated forms (`4242` and `0`) are strings that cannot
+    // occur inside the correct rendering by accident. An implementation that
+    // narrowed the holder to a `u32` anywhere on the path — the error type, the
+    // classification, or the format call — produces exactly the truncated
+    // string this asserts is absent.
+    for holder_pid in [WIDE_HOLDER_PID, WIDE_HOLDER_PID_TRUNCATING_TO_ZERO] {
+        let truncated = holder_pid as u32;
+        let rendered = SettingsError::LockedByAnotherRuntime {
+            holder_pid: Some(holder_pid),
+        }
+        .to_string();
+        assert!(
+            rendered.contains(&holder_pid.to_string()),
+            "the holder is reported at the width the substrate reported it in: {rendered:?} must \
+             name {holder_pid}"
+        );
+        assert!(
+            !rendered.contains(&truncated.to_string()),
+            "a truncated process id names a DIFFERENT process to the operator reading it, which \
+             is worse than saying nothing: {rendered:?} must not carry {truncated}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_holder_is_never_classified_as_a_holder_called_zero() {
+    // Unfakeable: these are the classifications every operator surface renders
+    // from, compared directly. "Nobody published a pid" and "the holder is
+    // process 0" are different facts, and a classification that cannot tell
+    // them apart hands every surface downstream of it the same lie. The wide
+    // value is carried through the classification too, so the narrowing that
+    // this contract forbids cannot hide one layer up from the rendering.
+    assert_ne!(
+        StoreOpenClass::LockedByAnotherRuntime { holder_pid: None },
+        StoreOpenClass::LockedByAnotherRuntime {
+            holder_pid: Some(0)
+        },
+        "a holder that published no pid is an unknown holder, never a holder called zero"
+    );
+    assert_ne!(
+        StoreOpenClass::LockedByAnotherRuntime { holder_pid: None },
+        StoreOpenClass::LockedByAnotherRuntime {
+            holder_pid: Some(WIDE_HOLDER_PID)
+        },
+        "and an unknown holder is not the same classification as any known one"
+    );
+    match (StoreOpenClass::LockedByAnotherRuntime {
+        holder_pid: Some(WIDE_HOLDER_PID),
+    }) {
+        StoreOpenClass::LockedByAnotherRuntime { holder_pid } => assert_eq!(
+            holder_pid,
+            Some(WIDE_HOLDER_PID),
+            "the classification carries the holder at the width it was reported in, so the \
+             surfaces that render it are not handed an already-truncated number"
+        ),
+        other => panic!("a locked classification is what was constructed, not {other:?}"),
+    }
 }

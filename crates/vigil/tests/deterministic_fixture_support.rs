@@ -17,7 +17,7 @@ use std::fs;
 use std::io::Read;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -771,4 +771,89 @@ pub fn assert_cpu_detection_action_in_rendered_block(surface: &str, label: &str)
         "{label} detection block must render the action rows: {block}"
     );
     assert_cpu_detection_action_text(&block);
+}
+
+// ── Owner-route readiness ──────────────────────────────────────────────────
+
+/// Ask the process that owns the store at `store_path` for the deployment's
+/// counters — the one operator read that can be used as a readiness probe.
+///
+/// `stats` is chosen deliberately, and it is the only safe choice. A probe has
+/// to be able to run BEFORE the runtime owns anything and AFTER it has let go,
+/// and on both of those legs a read command falls back to answering for itself.
+/// Every other read falls back by opening the store, and a direct reader
+/// hydrating the store is exactly what makes a starting runtime's own writable
+/// open fail — the probe would be the thing that stopped the runtime becoming
+/// ready. `stats` falls back to the deployment's counters snapshot instead and
+/// never touches the store file at all; the owner leg never touches it either,
+/// because context-graph's owner route is addressed by path and answered by the
+/// live owner without the file being hydrated, locked, inspected or created.
+fn ask_owner_for_stats(data_dir: &Path, store_path: &Path) -> Output {
+    Command::new(vigil_binary_path())
+        .arg("stats")
+        .env("VIGIL_DATA_DIR", data_dir)
+        // The owner route is addressed by the store path alone, so a probe
+        // aimed at a deployment whose store lives outside its data directory
+        // has to say where the store actually is — otherwise it addresses a
+        // store nobody owns and would answer for the wrong deployment.
+        .env("VIGIL_STORE_PATH", store_path)
+        .env_remove("VIGIL_CONTROL_SOCKET")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap_or_else(|error| panic!("spawn `vigil stats`: {error}"))
+}
+
+/// Whether that answer came back from the process holding the store, rather
+/// than from the asking process answering for itself — and whether that owner
+/// was actually able to answer.
+///
+/// The owner route comes up BEFORE the store behind it does: a runtime
+/// registers its handler as part of the open, so a frame that lands inside that
+/// window is answered honestly with `owner-error the runtime is still opening
+/// its store`. That is a served answer and not a ready one, and treating it as
+/// readiness hands the next command a runtime that owns nothing yet.
+fn answered_by_the_owner(answer: &Output) -> bool {
+    let rendered = String::from_utf8_lossy(&answer.stdout);
+    let Some(body) = rendered.strip_prefix(vigil::OWNER_SERVED_PREFIX) else {
+        return false;
+    };
+    answer.status.success() && !body.starts_with("owner-error")
+}
+
+/// Wait until the runtime holding the store at `store_path` is answering
+/// operator requests through that store's owner route.
+///
+/// This is the readiness a live-command test needs: not that a process exists,
+/// but that a command aimed at this deployment reaches the owner instead of
+/// being answered by the asking process. It is proven by asking a real question
+/// and getting an owner-served answer, never by a clock and never by a printed
+/// line — a runtime that printed "ready" and registered no owner route would
+/// satisfy a log wait while failing the contract entirely.
+pub fn wait_for_store_owner(data_dir: &Path, store_path: &Path) -> Result<(), String> {
+    wait_until(
+        &format!(
+            "the process owning the store at {} to answer operator requests",
+            store_path.display()
+        ),
+        RUNTIME_STARTUP_TIMEOUT,
+        || Ok(answered_by_the_owner(&ask_owner_for_stats(data_dir, store_path)).then_some(())),
+    )
+}
+
+/// Wait until nobody owns the store at `store_path` any more.
+///
+/// The inverse readiness, and the one a restart test needs: it says the store
+/// is genuinely free, so the next start is a second process rather than a
+/// second question to the first one. Store ownership is the fact that matters
+/// here — a stopped runtime that had not yet released the store would let a
+/// second start be refused as locked.
+pub fn wait_for_store_owner_to_release(data_dir: &Path, store_path: &Path) -> Result<(), String> {
+    wait_until(
+        &format!(
+            "the store at {} to stop being owned by a running process",
+            store_path.display()
+        ),
+        RUNTIME_STARTUP_TIMEOUT,
+        || Ok((!answered_by_the_owner(&ask_owner_for_stats(data_dir, store_path))).then_some(())),
+    )
 }

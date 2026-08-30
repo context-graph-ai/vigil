@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use context_graph::{
-    CgError, ConsumerSchema, ConsumerTable, EmbedderConfig, ScopeLabel, Store, StoreConfig,
+    CgError, ConsumerDeclaration, ConsumerReader, ConsumerSchema, ConsumerTable, EmbedderConfig,
+    ScopeLabel, Store, StoreConfig,
 };
 use contextdb_core::Value;
 
@@ -375,6 +376,41 @@ impl HandleRole {
     }
 }
 
+/// The refusal both ordinary verbs owe this node's service identity, decided
+/// from the SETTING NAME alone.
+///
+/// It opens nothing, which is what makes it the same answer on every
+/// deployment: an operator who typed `settings set service_identity` is owed
+/// the orphaned-history consequence and the operation that states it, whether
+/// their node is running, stopped, or has never been started at all. Deciding
+/// it after an open would answer a different question on a deployment that does
+/// not exist yet — "nothing has ever run here" — which says nothing about what
+/// they tried to do and would still be true after they created one.
+///
+/// The command surface runs it before it reaches for a door, and the store runs
+/// it again on every write, so no other writer can get past it either.
+pub fn refuse_setting_no_ordinary_verb_may_touch(
+    setting: &str,
+    proposed: &str,
+) -> Result<(), SettingsError> {
+    if setting == crate::settings_model::SERVICE_IDENTITY_SETTING {
+        return Err(SettingsError::Refused(
+            crate::service_identity::refuse_ordinary_edit(proposed),
+        ));
+    }
+    Ok(())
+}
+
+/// The store configuration every settings open uses, so the reading door and
+/// the writing door are looking at the same file described the same way.
+fn store_config(store_path: &Path) -> StoreConfig {
+    StoreConfig {
+        db_path: store_path.to_path_buf(),
+        default_text_embedder: Some(EmbedderConfig::disabled()),
+        ..StoreConfig::default()
+    }
+}
+
 /// The consumer-schema declaration handed to the context-graph seam.
 fn vigil_consumer_schema() -> ConsumerSchema {
     ConsumerSchema {
@@ -389,12 +425,69 @@ fn vigil_consumer_schema() -> ConsumerSchema {
     }
 }
 
+/// How one `SettingsStore` reaches the deployment's store.
+///
+/// The two doors are not two spellings of one thing. A QUESTION takes the
+/// read-only one: context-graph's `ConsumerReader` is a single no-create read
+/// session over the store's committed image, so two operators asking at the
+/// same moment coexist instead of contending, and the store's bytes are the
+/// same after the answer as before it. A CHANGE takes the writable one, which
+/// is the store itself and the only thing that may author a record.
+///
+/// Which one a handle carries is decided at the open and never afterwards, so
+/// there is no surface on which a read could quietly become a write.
+#[derive(Clone)]
+enum SettingsHandle {
+    /// The writable store: the runtime's own handle, and every settings change.
+    Writable(Arc<Store>),
+    /// Context-graph's read-only consumer reader, for a stopped deployment's
+    /// questions.
+    ReadOnly {
+        reader: Arc<ConsumerReader>,
+        /// Which of Vigil's declared tables this store actually HOLDS, taken
+        /// once from the reader's own inventory.
+        ///
+        /// A writable open creates every declared table on the way in, so the
+        /// question never arises there. The reading door creates nothing, and
+        /// context-graph is explicit that a declared table the store does not
+        /// hold is passed over rather than refused — so a store written before
+        /// a table was declared, or by a writer that never touched settings at
+        /// all, is a store Vigil can still answer about. What it holds for
+        /// those tables is no rows, which is the truth; asking for them by name
+        /// instead would turn a deployment with nothing recorded into a store
+        /// the operator is told is unreadable.
+        tables: BTreeSet<String>,
+    },
+}
+
 /// A live handle over the settings tables.
 pub struct SettingsStore {
     path: PathBuf,
     role: HandleRole,
-    store: Arc<Store>,
+    store: SettingsHandle,
     clock: PersistedClock,
+}
+
+/// Every settings-store open this process has made — reading and writing
+/// alike — counted at the places opens happen.
+///
+/// Not a shipped surface: no artifact builds `test-support`
+/// (`artifact_never_enables_test_support.rs`). It exists so a pin can say that a
+/// listing an operator asked for opened this deployment's store ONCE — a
+/// question no operator-facing answer can be asked, because the number of opens
+/// behind an answer is invisible from the answer.
+#[cfg(feature = "test-support")]
+static SETTINGS_STORE_OPENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many settings-store opens this process has made so far, whichever door
+/// they came through. A pin reads it either side of an answer and asserts on
+/// the difference — which only means anything if BOTH doors are counted: a
+/// listing that moved from one writable open to one read-only open has not
+/// become cheaper, and a counter blind to the read door would report it as
+/// costing nothing at all.
+#[cfg(feature = "test-support")]
+pub fn settings_store_opens() -> u64 {
+    SETTINGS_STORE_OPENS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 impl SettingsStore {
@@ -407,6 +500,239 @@ impl SettingsStore {
     /// never creates a store.
     pub fn open(data_dir: &Path) -> Result<Self, SettingsError> {
         Self::open_role(data_dir, HandleRole::Node, PersistedClock::default())
+    }
+
+    /// Open the store file a caller ALREADY resolved, rather than working the
+    /// location out again from a directory.
+    ///
+    /// The runtime resolves its store once, from `--store-path` or the
+    /// deployment default, and every operation it serves has to act on that
+    /// exact file. Re-deriving it from a data directory would answer about a
+    /// different file the moment an operator configured their store somewhere
+    /// else — and would CREATE that other file to do it.
+    pub fn open_at(store_path: &Path) -> Result<Self, SettingsError> {
+        Self::open_role_at(store_path, HandleRole::Node, PersistedClock::default())
+    }
+
+    /// The one door a settings CHANGE goes through, and it never brings a
+    /// deployment into existence.
+    ///
+    /// Named for what it is for, because the distinction is load-bearing: a
+    /// change has to take the store as a writer, and a question does not. A
+    /// read-only surface that opens this way is contending with the very store
+    /// it is answering about — and a surface that opens this way to find out
+    /// why an earlier open was refused is asking a second time and can be told
+    /// something different. Both are defects with an operator on the other end,
+    /// so the write door carries its own name and the command surfaces reach
+    /// for it deliberately rather than for a generic open.
+    ///
+    /// It used to be [`SettingsStore::open_at`] under another name, and that
+    /// aliasing is what let `vigil settings set` against a directory nobody had
+    /// ever run anything in CREATE a store, record the operator's value into
+    /// it, and report success — leaving a store no runtime ever wrote for the
+    /// next `vigil run` to open. This is now context-graph's atomic
+    /// open-existing-for-change door: the open is ATTEMPTED, the engine's typed
+    /// outcome is the only authority on whether the store was there, nothing
+    /// asks the filesystem first, and a refusal leaves the store, its companion
+    /// and the directory holding them exactly as they were found.
+    pub fn open_existing_for_change(store_path: &Path) -> Result<Self, SettingsError> {
+        Self::open_existing_for_change_in_role(store_path, HandleRole::Node)
+    }
+
+    fn open_existing_for_change_in_role(
+        store_path: &Path,
+        role: HandleRole,
+    ) -> Result<Self, SettingsError> {
+        #[cfg(feature = "test-support")]
+        SETTINGS_STORE_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let store = Store::open_existing_for_change(
+            store_config(store_path),
+            Vec::new(),
+            ConsumerDeclaration {
+                schema: vigil_consumer_schema(),
+                // The node's own label stays on the WRITABLE handle: this is
+                // where it belongs and where it bites, because it is the engine
+                // that refuses a node-authored write to the hub's pushed table.
+                scope_labels: BTreeSet::from([ScopeLabel::new(role.scope_label())]),
+            },
+        )
+        .map_err(|error| map_consumer_open_error(store_path, error))?;
+        Ok(Self {
+            path: store_path.to_path_buf(),
+            role,
+            store: SettingsHandle::Writable(Arc::new(store)),
+            clock: PersistedClock::default(),
+        })
+    }
+
+    /// The one door a settings QUESTION goes through: ONE no-create read of the
+    /// store, over context-graph's read-only consumer reader.
+    ///
+    /// Everything about this is what the writable door is not. It creates
+    /// nothing, it takes no write lock, so a second operator asking at the same
+    /// moment is served rather than told to go and stop a runtime that does not
+    /// exist, and the store's bytes are identical after the answer. A store
+    /// that is not there and a store that is there and cannot be looked at come
+    /// back as two different typed refusals, because they send an operator to
+    /// opposite places.
+    ///
+    /// The declaration carries NO scope label, deliberately. A label on this
+    /// reader would be a request to narrow what it may SEE, and read narrowing
+    /// is the engine's `SCOPE_LABEL_READ` vocabulary; the pushed table's plain
+    /// `SCOPE_LABEL ('server')` constrains WRITES only. A stopped node must
+    /// still see the rows its hub pushed and how they stand against its own, so
+    /// the reader declares no narrowing and is served the whole of its own
+    /// tables — which is also the only declaration context-graph would accept
+    /// here, since labels over a write-scoping column are refused at open.
+    pub fn open_read_only(store_path: &Path) -> Result<Self, SettingsError> {
+        #[cfg(feature = "test-support")]
+        SETTINGS_STORE_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let reader = ConsumerReader::open(
+            store_path,
+            ConsumerDeclaration {
+                schema: vigil_consumer_schema(),
+                scope_labels: BTreeSet::new(),
+            },
+        )
+        .map_err(|error| map_consumer_open_error(store_path, error))?;
+        let tables = reader
+            .table_inventory()
+            .map_err(|error| map_consumer_open_error(store_path, error))?
+            .into_iter()
+            .collect();
+        Ok(Self {
+            path: store_path.to_path_buf(),
+            role: HandleRole::Node,
+            store: SettingsHandle::ReadOnly {
+                reader: Arc::new(reader),
+                tables,
+            },
+            clock: PersistedClock::default(),
+        })
+    }
+
+    /// The door every stopped-deployment QUESTION takes.
+    ///
+    /// It is [`SettingsStore::open_read_only`], and for every store that can be
+    /// read at all that is the whole of it: one no-create read session, no
+    /// write lock, the store's bytes identical afterwards, and two operators
+    /// asking at the same moment both served.
+    ///
+    /// Exactly ONE store cannot be read that way, and the substrate is the one
+    /// that says so, by type: a deployment whose last runtime did not shut down
+    /// cleanly — it was killed, the machine lost power, the container was
+    /// stopped hard — leaves a file the storage engine will not hand out a
+    /// committed image of until a WRITABLE open has settled it. That is
+    /// `CgError::StoreNeedsWritableRecovery`, carried here as
+    /// [`SettingsError::StoreNeedsWritableRecovery`]. Nothing is damaged, the
+    /// deployment is stopped so nothing is contending for it, and the writable
+    /// open is the only thing in existence that can make the store readable —
+    /// so the question is asked once more through the atomic
+    /// open-existing-for-change door, which creates nothing and refuses an
+    /// absent store by type. An operator whose node crashed still gets their
+    /// settings instead of being told their store is unreadable.
+    ///
+    /// That arm fires on that outcome and on NOTHING else. Every other refusal
+    /// is this question's own answer and stands as it is: a store that is
+    /// genuinely unreadable — a permission wall, a mount that is gone, real
+    /// damage — is answered unreadable with no writable open attempted at all,
+    /// because reaching for a mutating handle on damage nobody has diagnosed is
+    /// how a store somebody could still have recovered by hand stops being
+    /// recoverable. A store somebody is holding, and a store that is not there,
+    /// are complete answers already, and asking a second time would answer
+    /// about a different moment. Both arms are pinned by
+    /// `crates/vigil-bin/tests/a_recoverable_store_is_recovered_and_a_damaged_one_is_left_alone.rs`.
+    pub fn open_to_read(store_path: &Path) -> Result<Self, SettingsError> {
+        let recovery = match Self::open_read_only(store_path) {
+            Ok(store) => return Ok(store),
+            // The ONE refusal a question may answer by opening the store for
+            // writing. Nothing is damaged: the last runtime left a committed
+            // image only a writable hydration settles, which is what a killed
+            // process, a power cut or a hard container stop leaves behind.
+            Err(SettingsError::StoreNeedsWritableRecovery { path, reason }) => {
+                SettingsError::StoreNeedsWritableRecovery { path, reason }
+            }
+            // Every other refusal is this question's own answer and stands as
+            // it is. A store that is genuinely unreadable — a permission, a
+            // mount that is gone, real damage — must NOT be opened for writing
+            // to find out more: a mutating open on damage nobody has diagnosed
+            // is the worst available move, and it is how a store that could
+            // have been recovered by hand stops being recoverable at all. A
+            // store somebody is holding, and a store that is not there, are
+            // complete answers already, and asking a second time would answer
+            // about a different moment.
+            Err(error) => return Err(error),
+        };
+        // Recovering IS the read here: this deployment is stopped, nothing is
+        // contending for it, and the writable existing-only door is the only
+        // thing in existence that can make the store readable. It creates
+        // nothing, and if it too refuses, the answer is the recovery refusal
+        // the question actually met.
+        Self::open_existing_for_change(store_path).map_err(|_| recovery)
+    }
+
+    /// One read over the settings tables, whichever door this handle came
+    /// through. Every statement this type issues goes through here, so a
+    /// read-only handle has no way to reach a writable database.
+    /// The answer is handed back as the ROWS alone, which is the whole of what
+    /// this type reads. The two doors return the substrate's result in the same
+    /// shape but reach it through different crates, and naming that type here
+    /// would put the storage engine into vigil's own dependency list to
+    /// describe a value nothing in vigil looks at beyond its rows.
+    fn query(
+        &self,
+        statement: &str,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Vec<Value>>, SettingsError> {
+        match &self.store {
+            SettingsHandle::Writable(store) => store
+                .sync_database()
+                .execute(statement, params)
+                .map(|answered| answered.rows)
+                .map_err(|error| map_engine_error(&error)),
+            SettingsHandle::ReadOnly { reader, .. } => reader
+                .execute(statement, params)
+                .map(|answered| answered.rows)
+                .map_err(map_open_error),
+        }
+    }
+
+    /// One read over ONE named settings table.
+    ///
+    /// A table this store does not hold answers with no rows, which is what it
+    /// holds. Decided from the reader's own inventory rather than by asking and
+    /// reading the refusal back — a store with nothing recorded in it is not an
+    /// unreadable store, and that is what an operator was being told.
+    fn query_table(
+        &self,
+        table: &str,
+        statement: &str,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Vec<Value>>, SettingsError> {
+        if let SettingsHandle::ReadOnly { tables, .. } = &self.store
+            && !tables.contains(table)
+        {
+            return Ok(Vec::new());
+        }
+        self.query(statement, params)
+    }
+
+    /// The writable store behind this handle, for the operations that genuinely
+    /// need one.
+    ///
+    /// A read-only handle answers this with a refusal rather than a panic, and
+    /// no shipped path reaches it: the surfaces that write open through
+    /// [`SettingsStore::open_existing_for_change`], and the surfaces that ask
+    /// open through [`SettingsStore::open_to_read`].
+    fn writable(&self) -> Result<&Arc<Store>, SettingsError> {
+        match &self.store {
+            SettingsHandle::Writable(store) => Ok(store),
+            SettingsHandle::ReadOnly { .. } => Err(SettingsError::Store(format!(
+                "the settings store at {} is open for reading only, so this operation has no \
+                 writable handle to act through",
+                self.path.display()
+            ))),
+        }
     }
 
     /// Open the hub-role handle over the same deployment directory.
@@ -427,7 +753,19 @@ impl SettingsStore {
         role: HandleRole,
         clock: PersistedClock,
     ) -> Result<Self, SettingsError> {
-        let path = Self::store_path(data_dir);
+        Self::open_role_at(&Self::store_path(data_dir), role, clock)
+    }
+
+    fn open_role_at(
+        store_path: &Path,
+        role: HandleRole,
+        clock: PersistedClock,
+    ) -> Result<Self, SettingsError> {
+        // Every creating writable settings-store open this process makes
+        // passes through here, so this is where those are counted.
+        #[cfg(feature = "test-support")]
+        SETTINGS_STORE_OPENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let path = store_path.to_path_buf();
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -438,14 +776,9 @@ impl SettingsStore {
                 ))
             })?;
         }
-        let config = StoreConfig {
-            db_path: path.clone(),
-            default_text_embedder: Some(EmbedderConfig::disabled()),
-            ..StoreConfig::default()
-        };
         let labels = BTreeSet::from([ScopeLabel::new(role.scope_label())]);
         let store = Store::open_with_consumer_schema_scoped(
-            config,
+            store_config(&path),
             Vec::new(),
             vigil_consumer_schema(),
             labels,
@@ -454,7 +787,7 @@ impl SettingsStore {
         Ok(Self {
             path,
             role,
-            store: Arc::new(store),
+            store: SettingsHandle::Writable(Arc::new(store)),
             clock,
         })
     }
@@ -474,7 +807,7 @@ impl SettingsStore {
     /// The ledger is rows in this same store, so a caller that has a handle
     /// never opens a second one to reach it.
     pub fn echo_ledger(&self) -> Result<crate::settings_reflection::EchoLedger, SettingsError> {
-        crate::settings_reflection::EchoLedger::over_store(Arc::clone(&self.store))
+        crate::settings_reflection::EchoLedger::over_store(Arc::clone(self.writable()?))
     }
 
     /// The detector class allowlist, as INDICES, that the detector construction
@@ -543,7 +876,7 @@ impl SettingsStore {
             inner: SettingsStore {
                 path: self.path.clone(),
                 role: HandleRole::Node,
-                store: Arc::clone(&self.store),
+                store: self.store.clone(),
                 clock: self.clock.clone(),
             },
         }
@@ -577,7 +910,7 @@ impl SettingsStore {
         record.written_at_ms = self.next_stamp(record.written_at_ms)?;
         let table = table_for(record.author);
         let params = write_params(&record, table == PUSHED_RECORDS_TABLE);
-        self.store
+        self.writable()?
             .sync_database()
             .execute(&upsert_statement(table), &params)
             .map_err(|error| map_engine_error(&error))?;
@@ -600,15 +933,12 @@ impl SettingsStore {
             PUSHED_RECORDS_TABLE,
             MACHINE_RECORDS_TABLE,
         ] {
-            let result = self
-                .store
-                .sync_database()
-                .execute(
-                    &format!("SELECT written_at_ms FROM {table}"),
-                    &HashMap::new(),
-                )
-                .map_err(|error| map_engine_error(&error))?;
-            for row in &result.rows {
+            let rows = self.query_table(
+                table,
+                &format!("SELECT written_at_ms FROM {table}"),
+                &HashMap::new(),
+            )?;
+            for row in &rows {
                 if let Some(Value::Int64(stamp)) = row.first() {
                     newest = newest.max(*stamp);
                 }
@@ -656,12 +986,8 @@ impl SettingsStore {
                  value, reason, written_at_ms, domain_generation, reset_record FROM {table} \
                  WHERE setting_name = $setting_name"
             );
-            let result = self
-                .store
-                .sync_database()
-                .execute(&statement, &params)
-                .map_err(|error| map_engine_error(&error))?;
-            for row in &result.rows {
+            let rows = self.query_table(table, &statement, &params)?;
+            for row in &rows {
                 records.push(record_from_row(row)?);
             }
         }
@@ -951,12 +1277,7 @@ impl SettingsStore {
         setting: &str,
         proposed: &str,
     ) -> Result<(), SettingsError> {
-        if setting == crate::settings_model::SERVICE_IDENTITY_SETTING {
-            return Err(SettingsError::Refused(
-                crate::service_identity::refuse_ordinary_edit(proposed),
-            ));
-        }
-        Ok(())
+        refuse_setting_no_ordinary_verb_may_touch(setting, proposed)
     }
 
     /// The automatic-management gate, run before the ranking on every write.
@@ -1216,12 +1537,8 @@ impl SettingsStore {
              reason, written_at_ms, domain_generation, reset_record FROM {table} WHERE \
              surface = $surface AND scope_level = $scope_level AND scope_target = $scope_target"
         );
-        let result = self
-            .store
-            .sync_database()
-            .execute(&statement, &params)
-            .map_err(|error| map_engine_error(&error))?;
-        result.rows.iter().map(|row| record_from_row(row)).collect()
+        let rows = self.query_table(table, &statement, &params)?;
+        rows.iter().map(|row| record_from_row(row)).collect()
     }
 
     /// Every camera one surface has a record at, whatever setting it is about.
@@ -1248,13 +1565,9 @@ impl SettingsStore {
             "SELECT scope_target FROM {table} WHERE surface = $surface AND \
              scope_level = $scope_level"
         );
-        let result = self
-            .store
-            .sync_database()
-            .execute(&statement, &params)
-            .map_err(|error| map_engine_error(&error))?;
+        let rows = self.query_table(table, &statement, &params)?;
         let mut cameras: Vec<String> = Vec::new();
-        for row in &result.rows {
+        for row in &rows {
             if let Some(Value::Text(camera)) = row.first()
                 && !cameras.contains(camera)
             {
@@ -1274,15 +1587,12 @@ impl SettingsStore {
             PUSHED_RECORDS_TABLE,
             MACHINE_RECORDS_TABLE,
         ] {
-            let result = self
-                .store
-                .sync_database()
-                .execute(
-                    &format!("SELECT setting_name FROM {table}"),
-                    &HashMap::new(),
-                )
-                .map_err(|error| map_engine_error(&error))?;
-            for row in &result.rows {
+            let rows = self.query_table(
+                table,
+                &format!("SELECT setting_name FROM {table}"),
+                &HashMap::new(),
+            )?;
+            for row in &rows {
                 if let Some(Value::Text(name)) = row.first()
                     && !names.contains(name)
                 {
@@ -1486,13 +1796,6 @@ pub enum SurfaceChange {
         setting: String,
         error: SettingsError,
     },
-}
-
-/// Whether this deployment has a store at all. Asking what a never-started
-/// deployment would run at is purely a READ: opening a store to answer would
-/// create one, leaving a store on disk nobody chose to create.
-pub fn store_exists(data_dir: &Path) -> bool {
-    SettingsStore::store_path(data_dir).exists()
 }
 
 /// What closes the gap between what a listing answers with and what this
@@ -2021,12 +2324,66 @@ fn map_engine_error(error: &contextdb_core::Error) -> SettingsError {
 
 /// A store that cannot be opened is classified, not flattened: another runtime
 /// holding this data directory is a different answer from a store that will
-/// not open at all.
-fn map_open_error(error: CgError) -> SettingsError {
+/// not open at all. The holder detail moves across whole — `Some` pid or the
+/// honest `None` — because the layer that knows whether a holder published a
+/// process record is the one below, not this one.
+pub(crate) fn map_open_error(error: CgError) -> SettingsError {
     match error {
         CgError::StoreLocked { holder_pid, .. } => {
             SettingsError::LockedByAnotherRuntime { holder_pid }
         }
+        // Readers reading the store hold an open off while they hydrate. That
+        // is healthy, temporary, and NOT the store failing to open — flattening
+        // it into `Store` is what made a busy moment arrive at the operator as
+        // a storage fault. Every field moves across whole; nothing about who is
+        // holding it is reconstructed here.
+        CgError::StoreHeldByReaders {
+            observed_direct_readers,
+            readers,
+            path,
+        } => SettingsError::StoreHeldByReaders {
+            observed_direct_readers,
+            readers,
+            path,
+        },
         other => SettingsError::Store(other.to_string()),
     }
+}
+
+/// The same classification for the two doors that distinguish a store which is
+/// NOT THERE from one that is there and cannot be read.
+///
+/// Only [`ConsumerReader`] and [`Store::open_existing_for_change`] make that
+/// distinction, because only they refuse an absent store instead of creating
+/// one — so only they can carry it, and it is folded in here rather than into
+/// [`map_open_error`], which every creating opener still goes through.
+///
+/// A missing store is refined ONCE more, and never by asking whether anything
+/// exists: the store this command was pointed at is read back as a LINK. If the
+/// configured pathname is a symbolic link, something really is named there and
+/// context-graph has just said its target holds no store — a volume that did
+/// not mount, a target removed underneath it. That is a deployment whose store
+/// could not be RESOLVED, not a node that has never started, and answering it
+/// as a first start puts this artifact's own defaults where the operator's
+/// values belong with nothing on the line to say so. Nothing is asked before
+/// the open; this reads what the refusal was about, after it.
+pub(crate) fn map_consumer_open_error(store_path: &Path, error: CgError) -> SettingsError {
+    if let CgError::StoreNeedsWritableRecovery { path, reason } = &error {
+        return SettingsError::StoreNeedsWritableRecovery {
+            path: path.clone(),
+            reason: reason.clone(),
+        };
+    }
+    if let CgError::StoreMissing { path } = &error {
+        return match std::fs::read_link(store_path) {
+            Ok(target) => SettingsError::Store(format!(
+                "the configured store {} is a link to {}, and there is no store at the other end \
+                 of it; check that the volume holding it is mounted",
+                store_path.display(),
+                target.display()
+            )),
+            Err(_) => SettingsError::StoreMissing { path: path.clone() },
+        };
+    }
+    map_open_error(error)
 }

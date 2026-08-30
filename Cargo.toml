@@ -89,6 +89,7 @@ contextdb-core = { path = "../contextdb/crates/contextdb-core" }
 
 [dependencies]
 context-graph.workspace = true
+contextdb-core.workspace = true
 libc.workspace = true
 
 [features]

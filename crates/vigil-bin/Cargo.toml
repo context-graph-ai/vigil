@@ -32,7 +32,14 @@ fabric = ["vigil/fabric"]
 chrono.workspace = true
 context-graph.workspace = true
 contextdb-core.workspace = true
-contextdb-engine.workspace = true
+# `test-seams` opens contextdb's park-mid-hydration checkpoint
+# (`read_persistence_test_scaffold::arm_read_image_hydration_pause_for_test`),
+# which is the ONLY way to hold a reader inside hydration long enough for a
+# starting runtime to be refused for that reason: an ordinary held read session
+# releases the store the moment its image decodes, so a test that used one
+# would be asserting on a condition it never created. Dev-dependency edge only
+# — the shipped binary builds no dev-dependency, so no artifact compiles a seam.
+contextdb-engine = { workspace = true, features = ["test-seams"] }
 contextdb-server.workspace = true
 image.workspace = true
 libc.workspace = true

@@ -128,6 +128,12 @@ const BENIGN_COMMAND_NEW_EXPRESSIONS: &[(&str, &str)] = &[
         "this test binary's own resolved path, re-executed as the settings-store lock holder so the \
          holder pid the classification reports can only come from real cross-process lock ownership",
     ),
+    (
+        "&parked_reader_binary",
+        "this test binary's own resolved path, re-executed as the reader that parks inside store \
+         hydration; a starting runtime can only be refused by a reader in a DIFFERENT process, and \
+         the refusal has to name that process, so the holder cannot be this one",
+    ),
 ];
 
 /// Whether the exact token `token` occurs at `masked[pos..]` — matched
@@ -1274,12 +1280,38 @@ fn process_cleanup_violations_in(path_display: &str, source: &str) -> (Vec<Strin
     (violations, has_libc_kill)
 }
 
-/// The one file allowed to call `libc::kill` directly — the acceptance
-/// harness's own positive, target-checked direct-child cleanup helper.
-/// Kept as a real path (not a bare filename) so the check below is exact
-/// about WHICH file, not merely that some file somewhere is allowed.
-fn allowed_libc_kill_path(root: &std::path::Path) -> PathBuf {
-    root.join("tests/acceptance/common.rs")
+/// The files allowed to call `libc::kill` directly, each with the reason it
+/// needs a raw signal and nothing weaker.
+///
+/// The invariant this protects is not "one file" for its own sake — it is that
+/// every raw signal site in the estate is NAMED and reviewed, targets a
+/// positive pid this process owns, and sends a signal that means what it says.
+/// A wildcard target, a negative process-group target, or a pid formatted from
+/// anywhere but a `Child` handle is refused by the argument scan regardless of
+/// which file it sits in. So the list is kept as real paths, matched exactly,
+/// and grows one reviewed line at a time — the same discipline
+/// `BENIGN_COMMAND_NEW_EXPRESSIONS` above uses — rather than by relaxing what a
+/// signal site may do.
+const ALLOWED_LIBC_KILL_FILES: &[(&str, &str)] = &[
+    (
+        "tests/acceptance/common.rs",
+        "the acceptance harness's own positive, target-checked direct-child cleanup helper",
+    ),
+    (
+        "crates/vigil-bin/tests/a_waiting_runtime_still_stops_when_asked.rs",
+        "the orderly-stop regression: SIGTERM is the SUBJECT of that proof, not cleanup — the \
+         installable substrate promises an orderly exit inside its stop grace, and the standard \
+         library offers only SIGKILL, which would prove the opposite of what is being asked",
+    ),
+];
+
+fn allowed_libc_kill_paths(root: &std::path::Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = ALLOWED_LIBC_KILL_FILES
+        .iter()
+        .map(|(path, _)| root.join(path))
+        .collect();
+    paths.sort();
+    paths
 }
 
 #[test]
@@ -1314,7 +1346,7 @@ fn no_unsafe_cleanup_or_nested_artifact_builds_in_test_sources() {
         );
     }
 
-    let allowed_libc_kill_path = allowed_libc_kill_path(&root);
+    let allowed_libc_kill_paths = allowed_libc_kill_paths(&root);
     let mut libc_kill_locations = Vec::new();
     let mut violations = Vec::new();
 
@@ -1339,10 +1371,11 @@ fn no_unsafe_cleanup_or_nested_artifact_builds_in_test_sources() {
         "acceptance tests must not contain unsafe cleanup or nested artifact builds:\n{}",
         violations.join("\n")
     );
+    libc_kill_locations.sort();
     assert_eq!(
-        libc_kill_locations,
-        vec![allowed_libc_kill_path.clone()],
-        "raw signal syscalls must stay centralized in the positive direct-child cleanup helper"
+        libc_kill_locations, allowed_libc_kill_paths,
+        "every raw signal syscall must sit in a file this scan names and vouches for; the \
+         reviewed set is {ALLOWED_LIBC_KILL_FILES:#?}"
     );
 
     // Cargo-subcommand awareness. `dependency_direction_contract.rs` runs

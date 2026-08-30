@@ -12,17 +12,15 @@ release artifacts exist.
 
 <!-- vigil-unenforced: classification=non-contract-context; reason=`This paragraph explains the draft guide’s purpose and future transition.` -->
 
-## Install the Home Assistant add-on
+## What you can run today
 
-There is no supported public install step yet. The repository contains a Home Assistant add-on
-definition, but its build expects a staged Vigil binary and no public pipeline currently produces
-and publishes that image. A manually copied add-on directory is therefore not a supported install.
+Three things work end to end on a source checkout of this repository, and the sections below walk
+them in that order: build and start the runtime on a data directory of your own; ask it whether it
+is healthy with `curl http://HOST:8099/health`; and read back what it did with the five review
+commands. Installing Vigil the way an ordinary Home Assistant user would is release work, and
+[What is not available yet](#what-is-not-available-yet) is the one place this guide says so.
 
-<!-- vigil-unenforced: classification=external-procedure; reason=`No public add-on image, repository URL, or supported install publication exists.` -->
-
-**Not yet available before OSS release:** a Home Assistant add-on repository URL, published images,
-version-coupled updates, and a clean-HAOS install check.
-<!-- vigil-unenforced: classification=external-procedure; reason=`Repository publication, versioned updates, and clean-HAOS installation are not available.` -->
+<!-- vigil-unenforced: classification=non-contract-context; reason=`This paragraph is a reading order for the sections below and points at the consolidated release-status section; each thing it names is stated and classified in its own section.` -->
 
 ## Configure one camera
 
@@ -128,10 +126,6 @@ test for that behavior yet; it is therefore not tagged as an enforced documentat
 
 <!-- vigil-unenforced: classification=documentation-gap; reason=`No end-to-end restart test proves the disabled camera marker is restored.` -->
 
-**Not yet release-complete:** public installation of the companion Home Assistant integration and
-camera card. Their code exists in sibling repositories, but release packaging remains open.
-<!-- vigil-unenforced: classification=external-procedure; reason=`Companion integration and camera-card packaging are not publicly distributed together.` -->
-
 ## See the first detection
 
 When a motion-positive segment contains a detection above the configured confidence threshold,
@@ -161,29 +155,50 @@ VIGIL_DATA_DIR=/var/lib/vigil vigil events
 VIGIL_DATA_DIR=/var/lib/vigil vigil why --latest
 VIGIL_DATA_DIR=/var/lib/vigil vigil why EVENT_ID
 VIGIL_DATA_DIR=/var/lib/vigil vigil stats
+VIGIL_DATA_DIR=/var/lib/vigil vigil settings
 ```
 
-Replace `/var/lib/vigil` with the `data_dir` used by the running daemon. These commands do not read
-the daemon's `--config` TOML. Without `VIGIL_DATA_DIR` or an exact `VIGIL_STORE_PATH`, they fall
-back to `./vigil-data` and can silently show a different or empty store.
+Replace `/var/lib/vigil` with the `data_dir` the running daemon was started on. That variable is
+how a review command finds the deployment: these commands do not read the daemon's `--config` TOML,
+so without `VIGIL_DATA_DIR` or an exact `VIGIL_STORE_PATH` they read `./vigil-data` instead and can
+answer for a deployment you did not mean.
 
-<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent CLI test binds data_dir selection and silent wrong-store fallback.` -->
+<!-- vigil-unenforced: classification=documentation-gap; reason=`No adjacent CLI test binds data_dir selection and silent wrong-store fallback; the CLI reference carries the same statement under its own classification.` -->
 
-`vigil events` lists recent detections. `vigil why` walks the selected observation back to its local
-clip, detector configuration decision, watch intention, camera, and site context. `vigil stats`
-prints local pipeline and acceleration receipts. These commands query the running owner over a Unix
-socket when possible and fall back to a direct local read when the store is not owned by the daemon.
+On a node that is up but has caught nothing yet, the whole answer is the owner-served marker:
 
-<!-- vigil-claim: `vigil.docs-getting-started.vigil-events-lists-recent-detections-vigil-why` -->
-<!-- enforced by: `vigil-bin::first_light_loop::vigil_why_walks_observation_to_clip_to_decision_to_context` -->
-<!-- enforced by: `vigil-bin::first_light_loop::vigil_events_lists_recent_events_newest_first` -->
-<!-- enforced by: `vigil-bin::first_light_loop::vigil_stats_reports_live_pipeline_counters` -->
+```console
+$ VIGIL_DATA_DIR=/var/lib/vigil vigil events
+served-by=af_unix
+```
 
-Commands from the old documentation outline such as `vigil status`, `vigil config check`,
-`vigil scan onvif`, `vigil state-at`, and `vigil support-bundle` do not exist and are not valid
-instructions.
+What each of these commands answers, the fields the settings listing carries, and what they do when
+the store is busy or cannot be read are in the [CLI reference](cli.md#events), which is where that
+contract lives; this guide does not restate it.
 
-<!-- vigil-unenforced: classification=future-surface; reason=`The old status, config, scan, replay, and support commands do not exist.` -->
+<!-- vigil-unenforced: classification=non-contract-context; reason=`This paragraph points at the CLI reference, which owns the review-command contract, rather than duplicating it here.` -->
+
+## What is not available yet
+
+Vigil is not installable from a public Home Assistant add-on repository. The repository contains a
+Home Assistant add-on definition, but its build expects a staged Vigil binary and no public pipeline
+currently produces and publishes that image, so a manually copied add-on directory is not a
+supported install. Missing with it: an add-on repository URL, published images, version-coupled
+updates, and a clean-HAOS install check.
+
+<!-- vigil-unenforced: classification=external-procedure; reason=`No public add-on image, repository URL, versioned update path, or clean-HAOS installation check exists.` -->
+
+Public installation of the companion Home Assistant integration and camera card is also open. Their
+code exists in sibling repositories, but release packaging does not distribute them together yet.
+
+<!-- vigil-unenforced: classification=external-procedure; reason=`Companion integration and camera-card packaging are not publicly distributed together.` -->
+
+Commands from the older documentation outline — `vigil status`, `vigil config check`,
+`vigil scan onvif`, `vigil state-at`, `vigil support-bundle` — were never implemented; the binary's
+own list of names that remain unavailable is in the
+[CLI reference](cli.md#unavailable-commands).
+
+<!-- vigil-unenforced: classification=future-surface; reason=`The old status, config, scan, replay, and support commands do not exist, and the CLI reference owns the full list.` -->
 
 ## Where next
 

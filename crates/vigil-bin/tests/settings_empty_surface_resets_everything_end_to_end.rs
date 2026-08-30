@@ -21,10 +21,8 @@
 //! attributed to the config file, rather than resetting to automatic.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
 
 use vigil::settings_model::{
     Author, DETECTOR_QUEUE_CAPACITY_SETTING, MOTION_SENSITIVITY_SETTING, ScopeTarget,
@@ -32,13 +30,15 @@ use vigil::settings_model::{
 use vigil::settings_projection::{AUTHOR_KEY, SETTING_LINE_PREFIX, SURFACE_KEY};
 
 const VALUE_KEY: &str = "value";
+use vigil::settings_store::SettingsStore;
 const NAME_KEY: &str = "name";
 const DRIVEWAY: &str = "driveway";
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    TcpPortReservation, capture_pipe, vigil_binary_path, wait_for_store_owner,
+    wait_for_store_owner_to_release,
 };
 
 struct LiveVigil {
@@ -84,32 +84,23 @@ impl Drop for LiveVigil {
     }
 }
 
-fn wait_for_control_socket(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!("the control socket at {} to appear", socket_path.display()),
-        Duration::from_secs(30),
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .expect("the runtime must publish its control socket");
+/// Readiness is the store's OWNER ROUTE answering: the runtime holds this
+/// deployment's store, so a command aimed at the deployment reaches that
+/// runtime instead of being answered by the asking process. Proven by asking a
+/// real question and getting an owner-served answer — never a sleep, and never
+/// a printed line, which a runtime that started nothing could also produce.
+fn wait_for_the_store_owner(data_dir: &Path) {
+    wait_for_store_owner(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the runtime must own this deployment's store and answer through it");
 }
 
-fn wait_for_control_socket_to_go_away(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!(
-            "the control socket at {} to stop accepting connections",
-            socket_path.display()
-        ),
-        Duration::from_secs(30),
-        || {
-            Ok(match UnixStream::connect(&socket_path) {
-                Ok(_) => None,
-                Err(_) => Some(()),
-            })
-        },
-    )
-    .expect("the previous runtime must be fully stopped before the restart");
+/// The inverse wait: nobody owns the store any more, so the previous process
+/// is genuinely down and the store is free. That is what makes the next start a
+/// real second process rather than a second question to the first one — and a
+/// store still held would refuse it outright.
+fn wait_for_the_store_to_be_free(data_dir: &Path) {
+    wait_for_store_owner_to_release(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the previous runtime must release the store before the next one starts");
 }
 
 fn token_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -136,8 +127,14 @@ fn setting_line_at(data_dir: &Path, camera: Option<&str>, setting: &str) -> Stri
         node,
         camera: camera.map(str::to_string),
     };
-    let report = vigil::settings_projection::report_by_direct_read_at(data_dir, &target)
-        .expect("direct store read must succeed");
+    // The store this deployment actually owns — these runs carry --data-dir
+    // and no --store-path, so it is the store the product puts there.
+    let report = vigil::settings_projection::report_by_direct_read_at(
+        data_dir,
+        &SettingsStore::store_path(data_dir),
+        &target,
+    )
+    .expect("direct store read must succeed");
     let lines = report.render_lines();
     setting_named(&lines, setting)
         .unwrap_or_else(|| panic!("no `{setting}` line, got:\n{}", lines.join("\n")))
@@ -168,9 +165,9 @@ fn an_emptied_config_file_resets_every_record_it_authored_at_node_and_camera_sco
     )
     .expect("write config: everything pinned");
     let run1 = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     run1.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     // Sanity: all three are pinned before the empty file is tried.
     for (camera, setting, expected) in [
@@ -191,9 +188,9 @@ fn an_emptied_config_file_resets_every_record_it_authored_at_node_and_camera_sco
     // no deployment-wide key and no `[[cameras]]` entry.
     fs::write(&config_path, "").expect("write config: emptied");
     let run2 = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     run2.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     for (camera, setting) in [
         (None, MOTION_SENSITIVITY_SETTING),

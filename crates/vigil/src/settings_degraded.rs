@@ -21,29 +21,120 @@ pub enum StoreOpenClass {
     /// A first start on a new machine. Vigil creates the store; not an error.
     Absent,
     /// Another Vigil runtime owns this data directory. Vigil refuses to start a
-    /// second runtime and names the holder.
-    LockedByAnotherRuntime { holder_pid: u32 },
+    /// second runtime and names the holder when there is a holder to name.
+    ///
+    /// `holder_pid` carries the refusal's holder detail exactly as the layers
+    /// below reported it: `Some` when the holder published a process record,
+    /// `None` when it published none. The classification — and the refusal to
+    /// start a second runtime — is identical either way; narrowing this to a
+    /// bare `u32` would force a fabricated pid for the unknown case, which
+    /// sends the operator after the wrong process.
+    LockedByAnotherRuntime { holder_pid: Option<u64> },
+    /// Other processes are reading this store right now. Healthy, managed, and
+    /// temporary: the open is held off only while they hydrate, and the same
+    /// question answers normally the moment they finish. Kept apart from
+    /// `Unreadable` because the two send an operator to opposite places — one
+    /// to repair their storage, the other to wait a moment.
+    HeldByReaders {
+        observed_direct_readers: u64,
+        readers: Vec<context_graph::ReaderIdentity>,
+        path: std::path::PathBuf,
+    },
     /// Corrupt file, unreadable volume, a storage layer that fails to open.
     /// Vigil starts anyway and says continuously that it is running unmanaged.
     Unreadable { detail: String },
 }
 
-/// Classify a store-open failure for `path`.
+/// Classify a store-open failure for the deployment directory `path`.
 pub fn classify_store_open(path: &Path) -> Result<StoreOpenClass, String> {
-    let store_file = SettingsStore::store_path(path);
-    if !store_file.exists() {
-        // A first start on a new machine. Classifying must not itself create
-        // the store: creation is the runtime's decision, taken after this.
-        return Ok(StoreOpenClass::Absent);
-    }
-    match SettingsStore::open(path) {
+    classify_store_open_at(&SettingsStore::store_path(path))
+}
+
+/// The same classification for a store file a caller ALREADY resolved. A
+/// runtime knows exactly which file it opened, and a question asked about that
+/// file must not be answered about a different one reconstructed from a
+/// directory.
+pub fn classify_store_open_at(store_file: &Path) -> Result<StoreOpenClass, String> {
+    // The question this answers is a WRITER's — can this runtime take the store
+    // — so it is asked through the atomic open-existing-for-change door and not
+    // through the reading one. A reader coexists with the runtime that owns the
+    // store, so classifying by reading would report a deployment another
+    // runtime is holding as one that opens perfectly well, and a second runtime
+    // would start against it.
+    //
+    // What the door removed is the existence question that used to stand in
+    // front of it. `Path::exists()` answered about a different moment than the
+    // open that followed, answered `false` for a configured store whose volume
+    // never mounted exactly as it did for a directory nobody has run anything
+    // in, and the open it guarded CREATED the store it was asked to classify.
+    // The engine's typed outcome decides instead, and nothing is created either
+    // way.
+    match SettingsStore::open_existing_for_change(store_file) {
         Ok(_) => Ok(StoreOpenClass::Opens),
-        Err(crate::settings_model::SettingsError::LockedByAnotherRuntime { holder_pid }) => {
-            Ok(StoreOpenClass::LockedByAnotherRuntime { holder_pid })
+        // An open failure classified from the failure this open itself
+        // returned. A store that refused an open for a reason this classifier
+        // does not recognise as an open failure is still a store that would
+        // not open, so it is reported as unreadable with that reason attached
+        // rather than dropped.
+        Err(error) => Ok(
+            classify_open_failure(&error).unwrap_or(StoreOpenClass::Unreadable {
+                detail: error.to_string(),
+            }),
+        ),
+    }
+}
+
+/// Classify a store-open failure FROM THE FAILURE ITSELF — nothing is opened,
+/// nothing is asked twice.
+///
+/// A command that was refused is holding the only observation that matters:
+/// the one its own request met. Going back to look again answers about a
+/// different moment, and the two can disagree — a holder that lets go in
+/// between turns a busy store into a healthy one, and the operator is told
+/// about a world their command never saw. Worse, the second look is a WRITABLE
+/// open, so a read-only question would be contending with the store it is
+/// diagnosing. Classifying what is in hand makes that race not rare but
+/// absent.
+///
+/// `None` means this error is not about opening at all — the store opened and
+/// then decided something, as a refused write or a scope-label violation does.
+/// Those must never be dressed up as a store that could not be read.
+pub fn classify_open_failure(
+    error: &crate::settings_model::SettingsError,
+) -> Option<StoreOpenClass> {
+    match error {
+        crate::settings_model::SettingsError::LockedByAnotherRuntime { holder_pid } => {
+            Some(StoreOpenClass::LockedByAnotherRuntime {
+                holder_pid: *holder_pid,
+            })
         }
-        Err(other) => Ok(StoreOpenClass::Unreadable {
-            detail: other.to_string(),
+        crate::settings_model::SettingsError::StoreHeldByReaders {
+            observed_direct_readers,
+            readers,
+            path,
+        } => Some(StoreOpenClass::HeldByReaders {
+            observed_direct_readers: *observed_direct_readers,
+            readers: readers.clone(),
+            path: path.clone(),
         }),
+        // A store that is NOT THERE is a first start on a new machine, and
+        // vigil creates it. Typed here rather than decided by looking, because
+        // the look and the open are two different moments.
+        crate::settings_model::SettingsError::StoreMissing { .. } => Some(StoreOpenClass::Absent),
+        // The store is there and this process could not read it. It is
+        // recoverable rather than damaged, and the surfaces that can recover it
+        // already tried; anything still holding this failure met a store it
+        // could not serve from, which is what the operator is told.
+        crate::settings_model::SettingsError::StoreNeedsWritableRecovery { .. } => {
+            Some(StoreOpenClass::Unreadable {
+                detail: error.to_string(),
+            })
+        }
+        crate::settings_model::SettingsError::Store(_) => Some(StoreOpenClass::Unreadable {
+            detail: error.to_string(),
+        }),
+        crate::settings_model::SettingsError::Refused(_)
+        | crate::settings_model::SettingsError::ScopeLabelViolation { .. } => None,
     }
 }
 
@@ -258,8 +349,8 @@ pub fn degraded_refusal(capability: UnavailableCapability) -> Refusal {
 
 /// The marker a refused capability carries on its first line, so a caller sets
 /// a failing exit status without parsing prose — and so an answer that came
-/// back over the control socket is never mistaken for a served request just
-/// because the socket replied. Recording, review history, corrections and
+/// back over the owner route is never mistaken for a served request just
+/// because the route replied. Recording, review history, corrections and
 /// recognition are not the settings surface: a clip that cannot be served is
 /// not a settings error, and labelling it one sends the operator to look at
 /// their settings.
@@ -279,8 +370,39 @@ pub fn refusal_prefix(capability: UnavailableCapability) -> &'static str {
     }
 }
 
+/// What a command owes a deployment that has NEVER STARTED.
+///
+/// Deliberately not the degraded refusal beside it: that one says the store is
+/// unreadable and sends the operator to repair or replace it, and here there is
+/// nothing to repair — no runtime has ever run in this directory, so there is
+/// no store, nothing is broken, and the remedy is to start one. Telling them to
+/// repair a file that was never created is the wrong instruction, and creating
+/// the file to have something to answer about would make the mistake permanent:
+/// a directory an operator pointed a command at by accident would become a
+/// deployment.
+/// `store_path` is named beside the directory because it is the thing that is
+/// not there, and on a deployment whose operator configured their store
+/// somewhere else the two are different places. A refusal that named only the
+/// directory would leave them looking in it for a file they deliberately put
+/// elsewhere.
+pub fn never_started_refusal(
+    capability: UnavailableCapability,
+    data_dir: &Path,
+    store_path: &Path,
+) -> String {
+    format!(
+        "{} {} is unavailable: nothing has ever run in the deployment directory {}, so there is \
+         no store at {} to read and nothing here is broken. Start the runtime with `vigil run` — \
+         asking a deployment that has never started is not what brings one into existence.\n",
+        refusal_prefix(capability),
+        capability.as_str(),
+        data_dir.display(),
+        store_path.display()
+    )
+}
+
 /// Render a refusal as the line a surface hands back. One rendering, used by
-/// the control socket, the command line, and the review data plane alike.
+/// the owner route, the command line, and the review data plane alike.
 pub fn render_refusal(capability: UnavailableCapability, refusal: &Refusal) -> String {
     format!("{} {}\n", refusal_prefix(capability), refusal.statement())
 }

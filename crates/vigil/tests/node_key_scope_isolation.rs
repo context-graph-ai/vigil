@@ -123,7 +123,8 @@ fn a_read_of_a_never_started_deployment_creates_no_node_key_file() {
         "a never-started deployment has no recorded key"
     );
 
-    let report = report_by_direct_read(&data_dir).expect("read a never-started deployment");
+    let report = report_by_direct_read(&data_dir, &SettingsStore::store_path(&data_dir))
+        .expect("read a never-started deployment");
     assert!(
         !report.settings.is_empty(),
         "the read still answers with the automatic floor: {report:?}"
@@ -145,10 +146,21 @@ fn a_read_of_a_never_started_deployment_creates_no_node_key_file() {
     );
 }
 
-/// The identity value an operator reads is never the node key itself — on
-/// both the never-started listing and the degraded-run listing, it is the
-/// deployment directory's own name, even once a key has been generated for
-/// unrelated writes.
+/// The identity an operator reads is never the node key itself.
+///
+/// The never-started listing answers with the deployment directory's own name,
+/// even once a key has been generated for unrelated writes — that half is
+/// unchanged, and it is the half that carries the point: the key is a scope
+/// target, not a name for a person to read.
+///
+/// The degraded half is the owner ruling of 2026-08-25 (folded into
+/// `vigil-settings-autority-direction.md`). A process that is NOT the run has
+/// no store it can read and no route to the run that holds the answer, so it
+/// reports NO identity and says why. It used to answer with the directory's
+/// name here, and that derivation is exactly what the ruling retires: it is
+/// not a vaguer answer than the truth, it is a different node's answer, with
+/// nothing on the line to say so — an operator reading it against their broker
+/// or against another node cannot tell.
 #[test]
 fn the_operator_facing_identity_is_never_the_node_key_on_either_surface() {
     let root = tempfile::tempdir().expect("enclosing temp dir");
@@ -173,26 +185,35 @@ fn the_operator_facing_identity_is_never_the_node_key_on_either_surface() {
         "the node key is a generated v4 UUID: {key:?}"
     );
 
+    let store_path = SettingsStore::store_path(&data_dir);
     let never_started_report =
-        report_by_direct_read(&data_dir).expect("read the never-started listing");
+        report_by_direct_read(&data_dir, &store_path).expect("read the never-started listing");
+    let never_started_identity = never_started_report.identity.as_ref().unwrap_or_else(|| {
+        panic!(
+            "a never-started deployment's store is absent, not unreadable — this process can \
+                 answer for what it WOULD run at, and that includes what it would call itself: \
+                 {never_started_report:?}"
+        )
+    });
     assert_eq!(
-        never_started_report.identity.value, directory_name,
+        never_started_identity.value, directory_name,
         "the never-started listing must answer with the deployment directory's name, not the \
          node key: {never_started_report:?}"
     );
     assert!(
-        Uuid::parse_str(&never_started_report.identity.value).is_err(),
+        Uuid::parse_str(&never_started_identity.value).is_err(),
         "the never-started identity value must not itself parse as the node key's UUID shape"
     );
 
     let degraded_report = report_degraded(&data_dir);
-    assert_eq!(
-        degraded_report.identity.value, directory_name,
-        "the degraded listing must answer with the deployment directory's name, not the node \
-         key: {degraded_report:?}"
-    );
     assert!(
-        Uuid::parse_str(&degraded_report.identity.value).is_err(),
-        "the degraded identity value must not itself parse as the node key's UUID shape"
+        degraded_report.identity.is_none(),
+        "this process is not the run, so it has no identity to report: its store is unreadable \
+         and there is no route to the process that knows. Answering with the directory's name — \
+         which is what this surface used to do, and what {directory_name:?} would be here — \
+         reports a DIFFERENT node with nothing on the line to say so. What the command-side \
+         answer owes an operator INSTEAD is pinned end to end in \
+         `crates/vigil-bin/tests/storeless_command_answers_without_guessing.rs`; what is held \
+         here is only that nothing is invented. Got {degraded_report:?}"
     );
 }

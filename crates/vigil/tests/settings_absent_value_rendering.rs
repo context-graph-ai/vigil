@@ -55,7 +55,11 @@ fn line_for<'a>(rendered: &'a str, name: &str) -> &'a str {
 #[test]
 fn a_declared_path_setting_with_no_value_renders_as_absent() {
     let deployment = tempfile::tempdir().expect("temporary deployment directory");
-    let rendered = vigil::settings_command::answer(deployment.path(), "");
+    let rendered = vigil::settings_command::answer(
+        deployment.path(),
+        &SettingsStore::store_path(deployment.path()),
+        "",
+    );
 
     for setting in [DETECTOR_MODEL_PATH_SETTING, RECOGNITION_WEIGHTS_DIR_SETTING] {
         let line = line_for(&rendered, setting);
@@ -78,7 +82,11 @@ fn a_declared_path_setting_with_no_value_renders_as_absent() {
 fn an_absent_value_and_an_explicitly_empty_value_never_render_the_same() {
     let deployment = tempfile::tempdir().expect("temporary deployment directory");
 
-    let absent_rendering = vigil::settings_command::answer(deployment.path(), "");
+    let absent_rendering = vigil::settings_command::answer(
+        deployment.path(),
+        &SettingsStore::store_path(deployment.path()),
+        "",
+    );
     let absent_line = line_for(&absent_rendering, RECOGNITION_WEIGHTS_DIR_SETTING);
     let absent_value = token_field(absent_line, VALUE_KEY)
         .unwrap_or_else(|| panic!("every setting line carries a value field; got: {absent_line}"));
@@ -99,7 +107,11 @@ fn an_absent_value_and_an_explicitly_empty_value_never_render_the_same() {
         .expect("an operator may deliberately set a path setting to nothing at all");
     drop(store);
 
-    let empty_rendering = vigil::settings_command::answer(deployment.path(), "");
+    let empty_rendering = vigil::settings_command::answer(
+        deployment.path(),
+        &SettingsStore::store_path(deployment.path()),
+        "",
+    );
     let empty_line = line_for(&empty_rendering, RECOGNITION_WEIGHTS_DIR_SETTING);
     let empty_value = token_field(empty_line, VALUE_KEY)
         .unwrap_or_else(|| panic!("every setting line carries a value field; got: {empty_line}"));
@@ -120,7 +132,11 @@ fn an_absent_value_and_an_explicitly_empty_value_never_render_the_same() {
 #[test]
 fn an_absent_value_reads_automatic_and_names_nobody_as_its_author() {
     let deployment = tempfile::tempdir().expect("temporary deployment directory");
-    let rendered = vigil::settings_command::answer(deployment.path(), "");
+    let rendered = vigil::settings_command::answer(
+        deployment.path(),
+        &SettingsStore::store_path(deployment.path()),
+        "",
+    );
     let line = line_for(&rendered, DETECTOR_MODEL_PATH_SETTING);
 
     assert_eq!(

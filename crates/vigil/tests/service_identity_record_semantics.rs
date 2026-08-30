@@ -14,7 +14,7 @@
 //! neither can be satisfied by a reader that happens to work on today's row
 //! order or today's wording.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use vigil::service_identity::{
     IdentityDerivation, change_deliberately, describe_change, identity_paths, resolve_persisted,
@@ -49,6 +49,10 @@ impl Deployment {
         }
     }
 
+    fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     fn store_path(&self) -> PathBuf {
         identity_paths(&self.data_dir).store
     }
@@ -72,10 +76,12 @@ fn the_identity_derivation_survives_a_rewording_of_the_reason_prose() {
 
     // A first start, then a deliberate move: the ordinary way a node arrives at
     // an explicitly-set identity.
-    resolve_persisted(&store_path, SITE_NAME).expect("the first start resolves an identity");
-    describe_change(&store_path, CHOSEN_IDENTITY).expect("the consequence is stated first");
-    let changed =
-        change_deliberately(&store_path, CHOSEN_IDENTITY).expect("the deliberate change applies");
+    resolve_persisted(deployment.data_dir(), &store_path, SITE_NAME)
+        .expect("the first start resolves an identity");
+    describe_change(deployment.data_dir(), &store_path, CHOSEN_IDENTITY)
+        .expect("the consequence is stated first");
+    let changed = change_deliberately(deployment.data_dir(), &store_path, CHOSEN_IDENTITY)
+        .expect("the deliberate change applies");
     assert_eq!(
         changed.derivation,
         IdentityDerivation::SetExplicitly,
@@ -96,8 +102,8 @@ fn the_identity_derivation_survives_a_rewording_of_the_reason_prose() {
         .write_record(identity_record)
         .expect("store the reworded record");
 
-    let resolved =
-        resolve_persisted(&store_path, SITE_NAME).expect("a later start resolves the identity");
+    let resolved = resolve_persisted(deployment.data_dir(), &store_path, SITE_NAME)
+        .expect("a later start resolves the identity");
     assert_eq!(
         resolved.value, CHOSEN_IDENTITY,
         "the identity in force is still the one the operator chose"
@@ -123,7 +129,8 @@ fn a_deliberate_change_outranks_the_first_start_record_on_a_later_start() {
     let deployment = Deployment::prepare();
     let store_path = deployment.store_path();
 
-    let first = resolve_persisted(&store_path, SITE_NAME).expect("the first start persists one");
+    let first = resolve_persisted(deployment.data_dir(), &store_path, SITE_NAME)
+        .expect("the first start persists one");
     assert_eq!(
         first.derivation,
         IdentityDerivation::DerivedAtFirstStart,
@@ -135,10 +142,11 @@ fn a_deliberate_change_outranks_the_first_start_record_on_a_later_start() {
         "the chosen identity has to differ from the derived one, or this proves nothing"
     );
 
-    change_deliberately(&store_path, CHOSEN_IDENTITY).expect("the deliberate change applies");
+    change_deliberately(deployment.data_dir(), &store_path, CHOSEN_IDENTITY)
+        .expect("the deliberate change applies");
 
-    let resolved =
-        resolve_persisted(&store_path, SITE_NAME).expect("a later start resolves the identity");
+    let resolved = resolve_persisted(deployment.data_dir(), &store_path, SITE_NAME)
+        .expect("a later start resolves the identity");
     assert_eq!(
         resolved.value, CHOSEN_IDENTITY,
         "the later start runs under the identity the operator deliberately chose. Handing back \

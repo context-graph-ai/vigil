@@ -8,7 +8,6 @@ pub mod camera_hub;
 pub mod camera_track;
 mod clock;
 mod config;
-mod control_socket;
 pub mod correction;
 pub mod decode;
 #[cfg(feature = "decode-gstreamer")]
@@ -55,10 +54,7 @@ pub mod workgraph;
 mod yolox_detector;
 
 pub use clock::PersistedClock;
-/// Where the running runtime publishes its control socket for a deployment —
-/// the one place that fixes the filename, re-exported so a caller never has to
-/// assume it.
-pub use control_socket::control_socket_path;
+pub use config::{StoreLocation, StoreLocationEnvironment, resolve_store_location};
 pub use correction::{
     CorrectionError, CorrectionReceipt, CorrectionRequest, CorrectionType, EventRow, EventsView,
     RecordedCorrection, ReviewError, WhyView, correction_execution_fingerprint, record_correction,
@@ -74,7 +70,10 @@ pub use http_data_plane::{
 /// re-spelling it.
 pub use live_read::OWNER_SERVED_PREFIX;
 pub use media_pipeline::{DecodedRgbFrame, VideoCodec};
-pub use privilege::{PrivilegeStep, privilege_drop_plan};
+pub use privilege::{
+    PrivilegeStep, RuntimeUserStep, privilege_drop_plan, runtime_user_plan_for_daemon,
+    runtime_user_plan_for_live_command,
+};
 pub use secret::Secret;
 pub use site_channel::{
     CameraAnnouncement, CommandListener, ConnectionEndpoint, DetectionChannel, DetectionFact,
@@ -336,7 +335,8 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 
-use context_graph::{Store, request_control};
+use context_graph::Store;
+use context_graph::owner_control::{self, OwnerControlError};
 
 /// Every setting currently declared through the typed settings registry
 /// (see [`settings`]). Calls [`config::declare_settings`] — the single
@@ -370,10 +370,74 @@ pub fn run_cli_with_site_channel<I>(
 where
     I: IntoIterator<Item = OsString>,
 {
+    // Before anything is dispatched: a variable that was withdrawn cannot be
+    // allowed to sit in the environment doing nothing. Whatever the operator
+    // asked for, they asked for it believing a deployment wired the way they
+    // wrote it, so the answer is the migration refusal and not the command.
+    if let Some(refusal) = retired_variable_refusal() {
+        eprint!("{refusal}");
+        return ExitCode::from(2);
+    }
+
     let mut args = args.into_iter();
     let _program = args.next();
 
-    match args.next().and_then(|arg| arg.into_string().ok()) {
+    let command = args.next().and_then(|arg| arg.into_string().ok());
+
+    // A variable that names a behavior setting placed nothing either. That one
+    // is not a refusal — the command still runs and still answers — but it is
+    // never silently dropped: the operator is told which variable did nothing
+    // and where the value belongs instead. It goes on the error stream, because
+    // it is an advisory about their environment and never the answer to their
+    // question, and it is said on the two surfaces the statement belongs to:
+    // the settings surface, which is where what a value is and who authored it
+    // is discussed, and the startup output of the run that would have honored
+    // the variable if the environment still placed anything. Stapling it to a
+    // review answer instead would put an unrelated note on the thing the
+    // operator actually asked for.
+    if matches!(command.as_deref(), Some("settings") | Some("run")) {
+        let ignored = settings_environment::ignored_variable_report();
+        if !ignored.is_empty() {
+            eprint!("{ignored}");
+        }
+    }
+
+    let asks_running_deployment = command
+        .as_deref()
+        .is_some_and(|name| commands_that_ask_the_running_deployment().contains(&name));
+
+    // Supervisor owns the add-on options file and deliberately makes it
+    // root-readable only. Resolve the deployment's location while this command
+    // still has that narrow startup privilege, then carry only the resulting
+    // paths across the identity change below. No store or owner channel is
+    // opened here.
+    let live_locations = if asks_running_deployment {
+        match configured_locations() {
+            Ok(locations) => Some(locations),
+            Err(error) => {
+                eprintln!("{error}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    // The identity step for the WHOLE family, decided here from the
+    // deployment's own list rather than re-decided at each dispatch arm below.
+    // The owner channel every one of these subcommands answers over authorizes
+    // on the peer's operating-system user and nothing else, so a dispatch that
+    // skipped this opens that channel as whoever ran it and is refused for a
+    // mismatch the operator never chose and cannot see — which is exactly what
+    // `vigil settings` did while the read commands beside it were served. A
+    // subcommand added to the family is covered the day it is added.
+    if asks_running_deployment && let Err(error) = privilege::adopt_runtime_user_for_live_command()
+    {
+        eprintln!("{error}");
+        return ExitCode::from(2);
+    }
+
+    match command {
         Some(flag) if flag == "--version" => {
             println!("vigil {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
@@ -382,29 +446,56 @@ where
             print_help();
             ExitCode::SUCCESS
         }
-        Some(command) if command == "events" => print_control_or_direct("events", ""),
+        Some(command) if command == "events" => print_control_or_direct(
+            live_locations
+                .as_ref()
+                .expect("live-command locations were resolved before dispatch"),
+            "events",
+            "",
+        ),
         Some(command) if command == "why" => {
             let request = args
                 .next()
                 .and_then(|arg| arg.into_string().ok())
                 .unwrap_or_else(|| "--latest".to_string());
-            print_control_or_direct("why", &request)
+            print_control_or_direct(
+                live_locations
+                    .as_ref()
+                    .expect("live-command locations were resolved before dispatch"),
+                "why",
+                &request,
+            )
         }
-        Some(command) if command == "stats" => print_control_or_direct("stats", ""),
+        Some(command) if command == "stats" => print_control_or_direct(
+            live_locations
+                .as_ref()
+                .expect("live-command locations were resolved before dispatch"),
+            "stats",
+            "",
+        ),
         Some(command) if command == "settings" => {
             let request = args
                 .filter_map(|arg| arg.into_string().ok())
                 .collect::<Vec<String>>()
                 .join(" ");
-            print_settings(&request)
+            print_settings(
+                live_locations
+                    .as_ref()
+                    .expect("live-command locations were resolved before dispatch"),
+                &request,
+            )
         }
         Some(command) if command == "enroll" => {
             let detection_id = args.next().and_then(|a| a.into_string().ok());
             let name = args.next().and_then(|a| a.into_string().ok());
             match (detection_id, name) {
-                (Some(detection_id), Some(name)) => {
-                    print_control_or_direct("enroll", &format!("{detection_id} {name}"))
-                }
+                (Some(detection_id), Some(name)) => print_control_or_direct(
+                    live_locations
+                        .as_ref()
+                        .expect("live-command locations were resolved before dispatch"),
+                    "enroll",
+                    &format!("{detection_id} {name}"),
+                ),
                 _ => {
                     eprintln!("usage: vigil enroll <detection-id> <name>");
                     ExitCode::from(2)
@@ -413,7 +504,13 @@ where
         }
         Some(command) if command == "forget" => {
             match args.next().and_then(|a| a.into_string().ok()) {
-                Some(name) => print_control_or_direct("forget", &name),
+                Some(name) => print_control_or_direct(
+                    live_locations
+                        .as_ref()
+                        .expect("live-command locations were resolved before dispatch"),
+                    "forget",
+                    &name,
+                ),
                 None => {
                     eprintln!("usage: vigil forget <name>");
                     ExitCode::from(2)
@@ -473,11 +570,21 @@ pub fn decode_sampled_detector_rgb_frames(
 /// one is up, and directly from the store when none is. Both render the same
 /// projection; a refusal is a real answer that names its cause and its remedy,
 /// and it exits non-zero because it did not do what was asked.
-fn print_settings(request: &str) -> ExitCode {
-    let data_dir = data_dir_from_env();
-    let answer = match ask_runtime_owner("settings", request) {
+fn print_settings(locations: &config::StoreLocation, request: &str) -> ExitCode {
+    // Both were resolved ONCE at dispatch, before the Supervisor runtime-user
+    // transition, and carried here: the deployment's own directory and the
+    // exact store file this command is about.
+    let data_dir = locations.data_dir.clone();
+    let store_path = locations.store_path.clone();
+    let answer = match ask_runtime_owner(locations, "settings", request) {
         Ok(response) => response,
-        Err(_socket_error) => settings_command::answer(&data_dir, request),
+        Err(error) if may_read_the_store_directly(&error) => {
+            settings_command::answer(&data_dir, &store_path, request)
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(2);
+        }
     };
     if settings_command::answer_failed(&answer) {
         eprint!("{answer}");
@@ -493,8 +600,53 @@ fn print_settings(request: &str) -> ExitCode {
 /// prints it plainly and exits non-zero, with no transport note appended.
 const NO_RUNTIME_OWNER_REFUSAL: &str = "no runtime owns ";
 
-fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
-    match ask_runtime_owner(command, request) {
+/// Why a command could not be answered from this deployment's own store, and
+/// whether what it says is already a complete answer.
+///
+/// The distinction is delivered, not decorative. A REFUSAL names its own cause
+/// and its own remedy — the store is momentarily busy with a reader, this
+/// capability is unavailable on a degraded run, the snapshot belongs to nobody
+/// — so nothing may be appended to it. A FAILURE does not, so the note about
+/// the owner route is worth having beside it.
+///
+/// It is carried as a classification rather than recovered by reading the
+/// answer's own text: the busy answer is produced from context-graph's typed
+/// `StoreHeldByReaders` two layers down, and a caller that re-derived its
+/// meaning from a message prefix appended "no process is holding the store" to
+/// an answer that had just named the process holding it.
+struct DirectReadFailure {
+    text: String,
+    refusal: bool,
+}
+
+impl DirectReadFailure {
+    /// A complete answer that is not the one asked for.
+    fn refusal(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            refusal: true,
+        }
+    }
+
+    /// The command genuinely failed.
+    fn failed(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            refusal: false,
+        }
+    }
+}
+
+fn print_control_or_direct(
+    locations: &config::StoreLocation,
+    command: &str,
+    request: &str,
+) -> ExitCode {
+    // The location was resolved once while the Supervisor-owned options file
+    // was readable. The identity step then ran before the owner channel or
+    // store below was touched, because that channel authorizes on the peer's
+    // operating-system user and nothing else.
+    match ask_runtime_owner(locations, command, request) {
         // A refusal is a real answer — it names its cause and its remedy — but
         // it is never a served request: an operator who asked for review
         // history and got an explanation of why there is none did not get
@@ -503,37 +655,66 @@ fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
             eprint!("{response}");
             ExitCode::from(2)
         }
+        // The owner answered, and the answer is that it could not serve this
+        // request: no event under that id, or an id that is not one. Same
+        // delivery as the direct read gives, because a caller reading the
+        // status cannot see which road the answer came down.
+        Ok(response) if live_read::answer_failed(&response) => {
+            eprint!("{response}");
+            ExitCode::from(2)
+        }
         Ok(response) => {
             print!("{response}");
             ExitCode::SUCCESS
         }
-        Err(socket_error) => match direct_read_local(command, request) {
+        // A runtime IS holding this store and did not answer. The store is
+        // not free to read behind it, so the refusal is the answer.
+        Err(owner_error) if !may_read_the_store_directly(&owner_error) => {
+            eprintln!("{owner_error}");
+            ExitCode::from(2)
+        }
+        Err(owner_error) => match direct_read_local(locations, command, request) {
             Ok(response) => {
                 print!("{response}");
                 ExitCode::SUCCESS
             }
-            Err(error)
-                if settings_degraded::is_refusal(&error)
-                    || error.starts_with(NO_RUNTIME_OWNER_REFUSAL) =>
-            {
-                // The refusal already names its cause and its remedy; a
-                // socket-unavailable note appended to it would only tell the
-                // operator about a transport they never asked about — and it
-                // would put the word `error` into a stats answer that has no
-                // failure in it to report.
-                eprintln!("{error}");
+            Err(failure) if failure.refusal => {
+                // The refusal already names its cause and its remedy; a note
+                // about the owner route appended to it would only tell the
+                // operator about a road they never asked about — and on a
+                // store somebody is reading it would contradict the sentence
+                // in front of it, naming the holder and then saying nobody
+                // holds it.
+                eprintln!("{}", failure.text);
                 ExitCode::from(2)
             }
-            Err(error) => {
-                if error.to_ascii_lowercase().contains("not found") {
-                    eprintln!("{error}");
-                } else {
-                    eprintln!("{error}; runtime owner unavailable: {socket_error}");
-                }
+            Err(failure) => {
+                eprintln!("{}; runtime owner unavailable: {owner_error}", failure.text);
                 ExitCode::from(2)
             }
         },
     }
+}
+
+/// What every vigil command prints instead of running, when the environment
+/// still carries a variable this product withdrew.
+///
+/// Silently ignoring it is the one behavior that is never available: the
+/// operator set it on purpose, and a deployment that reads as configured while
+/// the value places nothing makes every later diagnosis start from a false
+/// premise. Reinterpreting it is no better — it would hand a retired knob
+/// authority over the road that replaced it. So the refusal names the
+/// variable, says it has no effect, and says to unset it.
+fn retired_variable_refusal() -> Option<String> {
+    let withdrawn = settings_environment::retired_variables_in_force();
+    if withdrawn.is_empty() {
+        return None;
+    }
+    let mut refusal = String::new();
+    for variable in withdrawn {
+        refusal.push_str(&format!("{}\n{}\n", variable.reason, variable.set_it_here));
+    }
+    Some(refusal)
 }
 
 /// The refusal a command aimed at an unreadable store gets, whichever surface
@@ -541,29 +722,150 @@ fn print_control_or_direct(command: &str, request: &str) -> ExitCode {
 /// degraded condition, so the answer names the capability, says it is
 /// unavailable, and names the store — never a bare open error the operator has
 /// to interpret.
-fn degraded_refusal_for(command: &str, error: &str) -> Option<String> {
-    if is_database_locked_error(error) {
+fn degraded_refusal_for(
+    command: &str,
+    class: &settings_degraded::StoreOpenClass,
+) -> Option<String> {
+    match class {
         // Another runtime owns this store. That is a different failure with a
         // different answer, and it must not be dressed up as degraded.
-        return None;
+        settings_degraded::StoreOpenClass::LockedByAnotherRuntime { .. } => None,
+        // Somebody is READING it. The operator keeps their review history —
+        // they are told who is holding the store and that the same question
+        // answers in a moment, rather than that this deployment is degraded and
+        // its history unavailable.
+        settings_degraded::StoreOpenClass::HeldByReaders {
+            observed_direct_readers,
+            readers,
+            path,
+        } => Some(settings_projection::render_busy_with_readers(
+            path,
+            *observed_direct_readers,
+            readers,
+        )),
+        settings_degraded::StoreOpenClass::Absent
+        | settings_degraded::StoreOpenClass::Unreadable { .. } => {
+            settings_degraded::capability_for_command(command).map(settings_degraded::refusal_line)
+        }
+        // An open that was REFUSED cannot have classified as opening cleanly.
+        // Enumerated rather than swept into a catch-all so that a future class
+        // stops the build here instead of quietly taking a refusal's answer.
+        settings_degraded::StoreOpenClass::Opens => None,
     }
-    settings_degraded::capability_for_command(command).map(settings_degraded::refusal_line)
 }
 
+/// Ask the process that owns this deployment's store to answer `command`.
+///
+/// The store path is the whole address: there is no transport location to
+/// configure, publish or clean up, and the frame is the same text the handler
+/// has always parsed. A refusal comes back typed, because the caller has to
+/// decide something on it — see [`may_read_the_store_directly`].
 #[cfg(unix)]
-fn ask_runtime_owner(command: &str, request: &str) -> Result<String, String> {
-    let socket_path = control_socket::control_socket_path(&data_dir_from_env());
-    request_control(&socket_path, &format!("{command} {request}\n"))
+fn ask_runtime_owner(
+    locations: &config::StoreLocation,
+    command: &str,
+    request: &str,
+) -> Result<String, OwnerControlError> {
+    owner_control::request_owner(&locations.store_path, &format!("{command} {request}\n"))
 }
 
+/// Off Unix there is no local owner channel to reach, which is the same
+/// situation as nobody holding the store: the caller does the work itself.
 #[cfg(not(unix))]
-fn ask_runtime_owner(_command: &str, _request: &str) -> Result<String, String> {
-    Err("runtime owner control socket is only available on Unix".to_string())
+fn ask_runtime_owner(
+    locations: &config::StoreLocation,
+    _command: &str,
+    _request: &str,
+) -> Result<String, OwnerControlError> {
+    Err(OwnerControlError::OwnerNotRunning {
+        store_path: locations.store_path.clone(),
+    })
 }
 
-fn direct_read_local(command: &str, request: &str) -> Result<String, String> {
+/// Whether a refused owner request leaves this command free to open the store
+/// and answer from it.
+///
+/// Two things say the file is free. "Nobody is holding this store" and "there
+/// is no store there" say it outright. And a request that never got an ANSWER
+/// out of the channel — it timed out, the channel took the connection and went
+/// quiet — says nothing about the store at all: the road failed, and the store
+/// beside it may be sitting there perfectly readable. Refusing to look costs
+/// the operator their review history over a transport they never asked about,
+/// and hands them a sentence naming "the process holding the store" when no
+/// process is holding it. The store's own lock is the real arbiter: if a
+/// runtime does hold it, the direct open is refused and that refusal is the
+/// answer they get.
+///
+/// And a holder whose channel does not serve this inspection at all is not an
+/// owner refusing this request. Every writable open of a context-graph store
+/// stands a channel up whether or not the opener asked to serve anything, so a
+/// store held by a process that registered no owner-request handler — another
+/// vigil command that opened it to read, a tool of the operator's own —
+/// answers on the channel and says it serves no such route. That answer will
+/// not change while that holder lives, so there is nothing to wait for and the
+/// caller answers for itself; it is the one refusal that names what a caller
+/// may still get. `vigil stats` is the sharpest case, because its figures come
+/// from the deployment's own snapshot and never from the store at all.
+///
+/// Every other variant is a live owner speaking for itself — it is winding
+/// down, it is already serving as many requests as it admits, it is holding
+/// the store and has not yet published a serving decision, it refused this one
+/// — and opening the store behind it would either be refused by the lock or,
+/// worse, put a second writer behind the first one's back. Answering from
+/// there is not a fallback; it is a different deployment's answer.
+fn may_read_the_store_directly(error: &OwnerControlError) -> bool {
+    error.owner_absent()
+        || matches!(
+            error,
+            OwnerControlError::OwnerTimedOut { .. }
+                | OwnerControlError::OwnerRouteUnsupported { .. }
+        )
+}
+
+/// What each live command answers on a deployment that has never started —
+/// decided from the deployment's own emptiness rather than from a store opened
+/// to discover it.
+///
+/// `events` and `why` keep exactly the answers they always gave here, because
+/// they were always the true ones: there are no events, and there is no event
+/// under the id asked for. `enroll` and `forget` are edits, and an edit has
+/// nothing to act on: they refuse, naming the deployment directory and what to
+/// do about it rather than a store to repair. `stats` never reaches this — it
+/// reads the deployment's own snapshot and opens no store at all.
+fn never_started_answer(
+    command: &str,
+    request: &str,
+    data_dir: &Path,
+    store_path: &Path,
+) -> Result<String, DirectReadFailure> {
+    match command {
+        // No rows, which is the whole answer, and it is a SERVED one.
+        "events" => Ok(String::new()),
+        "why" => Err(DirectReadFailure::refusal(
+            live_read::why_refusal_without_a_store(request),
+        )),
+        "enroll" | "forget" => Err(DirectReadFailure::refusal(
+            settings_degraded::never_started_refusal(
+                settings_degraded::UnavailableCapability::Corrections,
+                data_dir,
+                store_path,
+            )
+            .trim_end()
+            .to_string(),
+        )),
+        other => Err(DirectReadFailure::failed(format!(
+            "unknown control command {other}"
+        ))),
+    }
+}
+
+fn direct_read_local(
+    locations: &config::StoreLocation,
+    command: &str,
+    request: &str,
+) -> Result<String, DirectReadFailure> {
     if command == "stats" {
-        let data_dir = data_dir_from_env();
+        let data_dir = locations.data_dir.clone();
         // Three different questions arrive here as one, and each has its own
         // true answer. A directory nothing has run in has a real answer —
         // nothing has happened — which is served, minus any runtime fact about
@@ -584,12 +886,14 @@ fn direct_read_local(command: &str, request: &str) -> Result<String, String> {
             // Naming a stopped process here points an operator debugging a
             // hand-copied, permission-walled or corrupt snapshot at a cause
             // that was never established.
-            runtime_stats::SnapshotProvenance::Unattributable => Err(format!(
-                "{NO_RUNTIME_OWNER_REFUSAL}{}: the stats snapshot there carries no establishable \
-                 writer identity, so nothing in it can be read as this deployment's figures; \
-                 start the runtime to read what it is doing",
-                data_dir.display()
-            )),
+            runtime_stats::SnapshotProvenance::Unattributable => {
+                Err(DirectReadFailure::refusal(format!(
+                    "{NO_RUNTIME_OWNER_REFUSAL}{}: the stats snapshot there carries no \
+                     establishable writer identity, so nothing in it can be read as this \
+                     deployment's figures; start the runtime to read what it is doing",
+                    data_dir.display()
+                )))
+            }
             runtime_stats::SnapshotProvenance::StoppedRun(stats) => {
                 Ok(runtime_stats::format_stopped_run_stats(&stats))
             }
@@ -599,62 +903,98 @@ fn direct_read_local(command: &str, request: &str) -> Result<String, String> {
         };
     }
 
-    let store_path = store_path_from_env();
-    let open = store::open(&store_path).map_err(|error| {
-        if let Some(refusal) = degraded_refusal_for(command, &error) {
-            return refusal.trim_end().to_string();
-        }
-        let error_kind = if is_database_locked_error(&error) {
-            "database_locked"
-        } else {
-            "store_open_failed"
-        };
-        format!(
-            "runtime busy error_kind={error_kind}, retry through the running owner for {}: {error}",
-            store_path.display()
-        )
-    })?;
-    match command {
-        "events" => live_read::handle_events_read(&open.handle, 100)
-            .map(|response| live_read::format_events_cli(&response)),
-        "why" => live_read::handle_why_read(&open.handle, request)
-            .map(|response| live_read::format_why_cli(&response)),
-        // Offline enroll/forget work on a plain re-open: enrollment reads the
-        // sighting's stored probe vector (no embedder needed) and the embedding
-        // space is already persisted in the store.
-        "enroll" => {
-            let mut pieces = request.splitn(2, ' ');
-            let detection_id = pieces.next().unwrap_or_default().trim().to_string();
-            let name = pieces.next().unwrap_or_default().trim().to_string();
-            if detection_id.is_empty() || name.is_empty() {
-                return Err("usage: vigil enroll <detection-id> <name>".to_string());
+    let store_path = locations.store_path.clone();
+    // Each command takes the door that matches what it is DOING, and neither
+    // door asks whether the store is there first. `why` and `events` only ask
+    // questions, so they take Context Graph's no-create reader and its typed
+    // graph reads: two operators asking at once are both served, and the
+    // store's bytes are the same after the answer as before it. `enroll` and
+    // `forget` change this deployment's recognition, so they take the atomic
+    // open-existing-for-change door, which refuses an absent store instead of
+    // creating one.
+    //
+    // The existence check that used to stand in front of both is gone. It
+    // answered about a different moment than the open behind it, it answered
+    // `false` for a configured store whose volume never mounted exactly as it
+    // did for a directory nobody had run anything in, and the open it guarded
+    // CREATED the store it opened — so a mistyped path, or `./vigil-data` in
+    // the wrong shell, became a deployment. A deployment with no store holds no
+    // events and no event under any id, and both are true without a store
+    // existing to say so; the open's own typed refusal is what says it.
+    let rendered = match command {
+        "why" | "events" => match store::open_for_review_read(&store_path) {
+            Ok(reader) => live_read::render_read_only(&reader.graph(), command, request),
+            Err(refusal) => {
+                return refused_open_answer(command, request, locations, &refusal);
             }
-            correction::record_correction(
-                &open.handle,
-                correction::CorrectionRequest {
-                    detection_id,
-                    label: Some(name.clone()),
-                    correction_type: correction::CorrectionType::Enroll,
-                },
-            )
-            .map(|receipt| {
-                format!(
-                    "enrolled=true name={name} correction_id={}\n",
-                    receipt.correction_id
-                )
-            })
-            .map_err(|error| format!("{error:?}"))
-        }
-        "forget" => {
-            let name = request.trim();
-            if name.is_empty() {
-                return Err("usage: vigil forget <name>".to_string());
+        },
+        _ => match store::open_existing_for_edit(&store_path) {
+            Ok(store) => live_read::render_store_backed(&store, command, request),
+            Err(refusal) => {
+                return refused_open_answer(command, request, locations, &refusal);
             }
-            recognition::forget_named_entity(&open.handle, name, None)
-                .map(|removed| format!("forgotten=true name={name} references_removed={removed}\n"))
-        }
-        _ => Err(format!("unknown control command {command}")),
+        },
+    };
+    // The SAME rendering the owner route serves: one projection, both roads.
+    // The direct fallback used to format its own failures, so a stopped
+    // deployment answered a failed enrollment with a bare debug string nothing
+    // recognized as a refusal — and vigil then stapled the owner-route note
+    // onto it, telling the operator about a road they never asked about.
+    let Some(body) = rendered else {
+        return Err(DirectReadFailure::failed(format!(
+            "unknown control command {command}"
+        )));
+    };
+    // Classified once, on the markers that rendering already applied: an
+    // answer that names its own cause is a complete answer, and nothing is
+    // appended to it.
+    if live_read::answer_failed(&body) {
+        return Err(DirectReadFailure::refusal(body.trim_end().to_string()));
     }
+    Ok(body)
+}
+
+/// What a live command answers when the door it reached for refused to open.
+///
+/// The refusal this command's OWN open returned is the whole of what the answer
+/// is built from — nothing goes back to look again, because two looks are two
+/// moments and a holder that lets go in between makes the second one disagree
+/// with the world the operator's command actually met.
+///
+/// A store that is NOT THERE is answered on the type rather than on the class:
+/// a deployment that has never started and a store this process could not
+/// resolve share the `Absent` class in one direction only, and just one of them
+/// means nothing has ever run here.
+fn refused_open_answer(
+    command: &str,
+    request: &str,
+    locations: &config::StoreLocation,
+    refusal: &store::StoreOpenRefusal,
+) -> Result<String, DirectReadFailure> {
+    if matches!(
+        *refusal.settings_error,
+        settings_model::SettingsError::StoreMissing { .. }
+    ) {
+        return never_started_answer(command, request, &locations.data_dir, &locations.store_path);
+    }
+    // A store somebody is READING renders the busy answer, and it travels on as
+    // a refusal — a complete answer nothing may be appended to — rather than as
+    // a failure whose meaning a later caller has to guess back out of its
+    // wording.
+    if let Some(answer) = degraded_refusal_for(command, &refusal.class) {
+        return Err(DirectReadFailure::refusal(answer.trim_end().to_string()));
+    }
+    // Read off the classification this open already produced, never by matching
+    // the shape of its own message.
+    let error_kind = match refusal.class {
+        settings_degraded::StoreOpenClass::LockedByAnotherRuntime { .. } => "database_locked",
+        _ => "store_open_failed",
+    };
+    Err(DirectReadFailure::failed(format!(
+        "runtime busy error_kind={error_kind}, retry through the running owner for {}: {}",
+        locations.store_path.display(),
+        refusal.message
+    )))
 }
 
 pub(crate) fn is_database_locked_error(error: &str) -> bool {
@@ -662,41 +1002,139 @@ pub(crate) fn is_database_locked_error(error: &str) -> bool {
     lower.contains("database is locked") || (lower.contains("locked") && lower.contains("process"))
 }
 
+/// Every `vigil` subcommand whose answer comes from this deployment's RUNNING
+/// daemon over the owner channel.
+///
+/// The channel authorizes on the peer's operating-system user and nothing
+/// else, so membership of this list is exactly the question "must this
+/// subcommand become the deployment's runtime user before it asks?" — and the
+/// answer is stated once, here, rather than re-decided at each dispatch arm.
+pub fn commands_that_ask_the_running_deployment() -> &'static [&'static str] {
+    &["events", "why", "stats", "settings", "enroll", "forget"]
+}
+
+/// What the dispatch of `command` does to become this deployment's runtime
+/// user, before it opens a channel, a store, or anything else. `None` for a
+/// subcommand that performs no identity work at all.
+///
+/// Every member of [`commands_that_ask_the_running_deployment`] returns the
+/// plan [`runtime_user_plan_for_live_command`] builds: the daemon's identity
+/// drop, ordered the same way, and NOT the daemon's store preparation — a
+/// read or an edit brings no deployment into existence, and a command that
+/// created a store directory or moved the ownership of a store a daemon is
+/// holding would be rewriting the deployment it came to ask about.
+///
+/// The dispatch executes this same plan rather than a second spelling of it:
+/// `privilege::adopt_runtime_user_for_live_command` runs what
+/// `privilege::runtime_user_plan_for_live_command` builds, which is what this
+/// returns, so what is pinned here and what runs cannot drift.
+pub fn runtime_user_plan_for_dispatched_command(
+    command: &str,
+    uid: u32,
+    gid: u32,
+    supplemental_gids: Option<&str>,
+) -> Result<Option<Vec<RuntimeUserStep>>, String> {
+    if !commands_that_ask_the_running_deployment().contains(&command) {
+        return Ok(None);
+    }
+    runtime_user_plan_for_live_command(uid, gid, supplemental_gids).map(Some)
+}
+
+/// Where this deployment keeps its store and its directory, resolved ONCE at
+/// the entry point through the SAME location-only rule the daemon resolves
+/// them with ([`config::resolve_store_location`]) — the add-on's own
+/// `store_path` included.
+///
+/// The resolution happens at the entry point and the answer is carried from
+/// there — never re-read part-way through an operation, and never rebuilt by
+/// joining a default filename onto whatever directory happened to be in hand.
+/// A process that resolved the path twice could act on two different files in
+/// one command; a process that resolved it differently from the daemon looks
+/// for an owner that was never there.
+fn configured_locations() -> Result<config::StoreLocation, String> {
+    config::configured_store_location()
+}
+
+/// What this process's own environment states about where things are, read
+/// through the two accessors below and handed to the shared resolution.
+fn store_location_environment() -> config::StoreLocationEnvironment {
+    config::StoreLocationEnvironment {
+        data_dir: data_dir_from_env(),
+        store_path: store_path_from_env(),
+    }
+}
+
+/// `VIGIL_STORE_PATH`: the store pathname this process's environment states,
+/// or nothing when it states none.
 // VIGIL_STORE_PATH is an enumerated, reviewed override
 // (`environment_read_surface.baseline.txt`), not an ad-hoc read.
 #[allow(clippy::disallowed_methods)]
-fn store_path_from_env() -> std::path::PathBuf {
-    std::env::var_os("VIGIL_STORE_PATH")
-        .map(Into::into)
-        .unwrap_or_else(|| data_dir_from_env().join("store.contextgraph"))
+fn store_path_from_env() -> Option<std::path::PathBuf> {
+    std::env::var_os("VIGIL_STORE_PATH").map(Into::into)
 }
 
+/// `VIGIL_DATA_DIR`: the deployment directory this process's environment
+/// states.
+///
+/// A store pathname stated with no deployment directory beside it names the
+/// directory too — the deployment is where its store is — which is why this
+/// accessor also reads `VIGIL_STORE_PATH`. What neither variable states is
+/// left unstated here, for the shared resolution to default.
 // VIGIL_DATA_DIR/VIGIL_STORE_PATH are enumerated, reviewed overrides
 // (`environment_read_surface.baseline.txt`), not an ad-hoc read.
 #[allow(clippy::disallowed_methods)]
-fn data_dir_from_env() -> std::path::PathBuf {
+fn data_dir_from_env() -> Option<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("VIGIL_DATA_DIR") {
-        return path.into();
+        return Some(path.into());
     }
-    if let Some(path) = std::env::var_os("VIGIL_STORE_PATH").map(std::path::PathBuf::from)
-        && let Some(parent) = path.parent()
-    {
-        return parent.to_path_buf();
-    }
-    std::env::current_dir()
-        .unwrap_or_else(|_| ".".into())
-        .join("vigil-data")
+    std::env::var_os("VIGIL_STORE_PATH")
+        .map(std::path::PathBuf::from)
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+}
+
+/// Every subcommand this binary dispatches AND offers to an operator, paired
+/// with the arguments it takes, in the order `--help` prints them.
+///
+/// One list, rendered by [`print_help`] and read by the inventory regression
+/// beside it, so what the binary advertises and what an operator can actually
+/// run cannot become two different answers — which is what a hand-written help
+/// block had already let happen: `events`, `why`, `stats`, `settings`,
+/// `enroll`, `forget` and `doctor acceleration` all worked and none of them was
+/// named here, so the one place an operator looks said they did not exist.
+///
+/// `detector-probe` is dispatched and deliberately absent: it is the
+/// detection-probe machinery's own subprocess entry point with a wire argument
+/// list, not an operator workflow, and naming it here would invite somebody to
+/// run it by hand. That is the only dispatched subcommand this list omits.
+pub fn public_commands() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("run", "[OPTIONS]"),
+        ("events", ""),
+        ("why", "[<DETECTION-ID> | --latest]"),
+        ("stats", ""),
+        (
+            "settings",
+            "[list | find <TEXT> | set <SETTING> <VALUE> | reset <SETTING> | \
+             identity [change <IDENTIFIER> --confirm]]",
+        ),
+        ("enroll", "<DETECTION-ID> <NAME>"),
+        ("forget", "<NAME>"),
+        ("doctor acceleration", "[--service-user USER] [RUN OPTIONS]"),
+        ("fabric ticket", "[--data-dir PATH]"),
+    ]
 }
 
 fn print_help() {
     println!("Usage: vigil <COMMAND>");
     println!();
     println!("Commands:");
-    println!("  run");
-    println!(
-        "  settings [set <SETTING> <VALUE> | reset <SETTING> | domain <DOMAIN> | identity change <IDENTIFIER> --confirm]"
-    );
-    println!("  fabric ticket");
+    for (command, arguments) in public_commands() {
+        if arguments.is_empty() {
+            println!("  {command}");
+        } else {
+            println!("  {command} {arguments}");
+        }
+    }
     println!();
     println!("Options:");
     println!("  --help");

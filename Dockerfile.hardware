@@ -57,6 +57,12 @@ ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
+# The one runtime root both sides of the owner plane meet on — mirrors
+# addons/vigil/Dockerfile exactly (same script, same env value, same init
+# wiring): prepared at container init, not build time, because /data is a
+# volume mounted over the image after this build completes.
+ENV CONTEXTDB_OWNER_READ_RUNTIME_DIR=/data/owner-plane
+COPY --chmod=755 vigil/addons/vigil/provision-runtime-root.sh /etc/cont-init.d/10-runtime-root
 EXPOSE 8099 8098
 CMD ["/usr/local/bin/vigil", "run"]
 
@@ -113,5 +119,11 @@ ENV VIGIL_DATA_DIR=/data
 ENV VIGIL_DROP_PRIVILEGES=1
 ENV VIGIL_RUN_UID=1000
 ENV VIGIL_RUN_GID=1000
+# The one runtime root both sides of the owner plane meet on — mirrors
+# addons/vigil/Dockerfile exactly (same script, same env value, same init
+# wiring): prepared at container init, not build time, because /data is a
+# volume mounted over the image after this build completes.
+ENV CONTEXTDB_OWNER_READ_RUNTIME_DIR=/data/owner-plane
+COPY --chmod=755 vigil/addons/vigil/provision-runtime-root.sh /etc/cont-init.d/10-runtime-root
 EXPOSE 8099 8098
 CMD ["/usr/local/bin/vigil", "run"]

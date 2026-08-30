@@ -181,7 +181,8 @@ fn identity_is_derived_once_at_first_start_and_persisted() {
     let deployment = Deployment::prepare();
     let store = deployment.store();
 
-    let first = resolve_persisted(&store, FIRST_SITE).expect("first start resolves an identity");
+    let first = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
+        .expect("first start resolves an identity");
     assert!(
         !first.value.is_empty(),
         "a derived service identity must be a real value, not an empty string"
@@ -192,8 +193,8 @@ fn identity_is_derived_once_at_first_start_and_persisted() {
         "the first store-backed start derives the identity and records that it did"
     );
 
-    let second =
-        resolve_persisted(&store, FIRST_SITE).expect("a later start resolves the same identity");
+    let second = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
+        .expect("a later start resolves the same identity");
     assert_eq!(
         second.value, first.value,
         "a later start must use the persisted identity, not derive a fresh one"
@@ -269,7 +270,7 @@ fn a_storeless_first_start_persists_nothing_and_the_identity_is_persisted_at_the
 
     // The first successful store open: the identity is persisted now, and how
     // it was arrived at becomes the persisted fact.
-    let persisted = resolve_persisted(&store, FIRST_SITE)
+    let persisted = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
         .expect("the first successful store open resolves an identity");
     assert_eq!(
         persisted.value, ephemeral.value,
@@ -291,7 +292,7 @@ fn a_storeless_first_start_persists_nothing_and_the_identity_is_persisted_at_the
         "the sidecar caches the store record it was written from"
     );
 
-    let restarted = resolve_persisted(&store, FIRST_SITE)
+    let restarted = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
         .expect("a later start resolves against the now-persisted identity");
     assert_eq!(
         restarted.value, persisted.value,
@@ -308,9 +309,10 @@ fn a_site_rename_leaves_the_persisted_identity_unchanged_across_restart() {
     let deployment = Deployment::prepare();
     let store = deployment.store();
 
-    let before = resolve_persisted(&store, FIRST_SITE).expect("first start resolves an identity");
-    let after =
-        resolve_persisted(&store, RENAMED_SITE).expect("a restart after a rename still resolves");
+    let before = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
+        .expect("first start resolves an identity");
+    let after = resolve_persisted(deployment.data_dir(), &store, RENAMED_SITE)
+        .expect("a restart after a rename still resolves");
 
     assert_eq!(
         after.value, before.value,
@@ -351,10 +353,12 @@ fn the_deliberate_change_operation_states_the_consequence_before_it_takes_effect
     let deployment = Deployment::prepare();
     let store = deployment.store();
 
-    let current = resolve_persisted(&store, FIRST_SITE).expect("first start resolves an identity");
+    let current = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
+        .expect("first start resolves an identity");
     let proposed = "front-house-second-box";
 
-    let consequence = describe_change(&store, proposed).expect("the consequence is describable");
+    let consequence = describe_change(deployment.data_dir(), &store, proposed)
+        .expect("the consequence is describable");
     assert_eq!(
         consequence.current, current.value,
         "the consequence names the identity actually in force"
@@ -365,7 +369,7 @@ fn the_deliberate_change_operation_states_the_consequence_before_it_takes_effect
     );
     assert_consequence_stated(&consequence.statement, "the deliberate-change consequence");
 
-    let after_describing = resolve_persisted(&store, FIRST_SITE)
+    let after_describing = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
         .expect("describing a change leaves the deployment resolvable");
     assert_eq!(
         after_describing.value, current.value,
@@ -373,7 +377,8 @@ fn the_deliberate_change_operation_states_the_consequence_before_it_takes_effect
          the change takes effect"
     );
 
-    let changed = change_deliberately(&store, proposed).expect("the deliberate change applies");
+    let changed = change_deliberately(deployment.data_dir(), &store, proposed)
+        .expect("the deliberate change applies");
     assert_eq!(
         changed.value, proposed,
         "the deliberate change operation is what actually moves the identity"
@@ -383,8 +388,8 @@ fn the_deliberate_change_operation_states_the_consequence_before_it_takes_effect
         IdentityDerivation::SetExplicitly,
         "an identity moved by the deliberate operation is shown as set explicitly, not as derived"
     );
-    let after_changing =
-        resolve_persisted(&store, FIRST_SITE).expect("the changed identity is persisted");
+    let after_changing = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
+        .expect("the changed identity is persisted");
     assert_eq!(
         after_changing.value, proposed,
         "the deliberate change persists; a later start uses it"
@@ -400,8 +405,8 @@ fn the_degraded_storeless_run_never_rewrites_the_persisted_identity() {
     let deployment = Deployment::prepare();
     let store = deployment.store();
 
-    let persisted =
-        resolve_persisted(&store, FIRST_SITE).expect("a store-backed start persists an identity");
+    let persisted = resolve_persisted(deployment.data_dir(), &store, FIRST_SITE)
+        .expect("a store-backed start persists an identity");
     let cached_before =
         read_sidecar(deployment.data_dir()).expect("the sidecar cache exists after that start");
 
@@ -438,7 +443,7 @@ fn the_degraded_storeless_run_never_rewrites_the_persisted_identity() {
         cached_after.value, cached_before.value,
         "the degraded path never rewrites the persisted service identity"
     );
-    let after_degraded = resolve_persisted(&store, RENAMED_SITE)
+    let after_degraded = resolve_persisted(deployment.data_dir(), &store, RENAMED_SITE)
         .expect("the store-backed path still resolves after a degraded run");
     assert_eq!(
         after_degraded.value, persisted.value,
@@ -451,7 +456,7 @@ fn the_degraded_storeless_run_never_rewrites_the_persisted_identity() {
 /// failure inside a behavioral test.
 #[allow(dead_code)]
 fn resolution_entry_points_take_paths(store: &Path, data_dir: &Path) {
-    let _ = resolve_persisted(store, FIRST_SITE);
+    let _ = resolve_persisted(data_dir, store, FIRST_SITE);
     let _ = read_sidecar(data_dir);
     let _ = identity_paths(data_dir);
 }

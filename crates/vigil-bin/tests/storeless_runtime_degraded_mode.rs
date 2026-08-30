@@ -25,7 +25,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
@@ -33,19 +32,33 @@ use std::time::Duration;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use vigil::OWNER_SERVED_PREFIX;
 use vigil::settings_command::SETTINGS_ERROR_PREFIX;
 use vigil::settings_degraded::{
     CAPABILITY_REFUSAL_PREFIX, DegradedCapability, DeliveryAssurance, UnavailableCapability,
 };
-use vigil::settings_projection::UNMANAGED_LINE_PREFIX;
+use vigil::settings_projection::{
+    NAME_KEY, REQUESTED_KEY, SETTING_LINE_PREFIX, UNMANAGED_LINE_PREFIX,
+};
 use vigil::settings_store::SettingsStore;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    RtspFixture, TcpPortReservation, capture_pipe, get, request, rtsp_fixture_lock, toml_path,
-    vigil_binary_path, wait_for_tcp_port, wait_until, workspace_root,
+    RtspFixture, TcpPortReservation, capture_pipe, get, open_store_at, request, rtsp_fixture_lock,
+    toml_path, vigil_binary_path, wait_for_store_owner, wait_for_tcp_port, wait_until,
+    workspace_root,
 };
+
+/// The site name every fixture here configures. Deliberately NOT the name of
+/// the data directory it is deployed into (`data`), so an identity derived
+/// from the directory cannot coincide with the configured one and pass by
+/// accident.
+const CONFIGURED_SITE_NAME: &str = "home farm";
+
+/// The data directory's own basename — the answer a derivation would produce
+/// instead of reading the operator's configuration.
+const DATA_DIRECTORY_BASENAME: &str = "data";
 
 const FIRST_CAMERA_NAME: &str = "loading dock";
 const SECOND_CAMERA_NAME: &str = "north fence";
@@ -88,23 +101,28 @@ struct DegradedDeployment {
     /// including the data directory and anywhere a service-identity sidecar
     /// beside it would land.
     tmp: tempfile::TempDir,
-    /// Holds the control socket, outside the audited tree entirely.
-    _socket_tmp: tempfile::TempDir,
+    /// Keeps a configuration file that lives somewhere of its own alive for
+    /// the run, for the journeys where `--config` points outside this
+    /// deployment's tree entirely.
+    _config_home: Option<tempfile::TempDir>,
     data_dir: PathBuf,
     config_path: PathBuf,
-    socket_path: PathBuf,
     store_path: PathBuf,
+    /// The site name this run is given as a STARTUP OPTION rather than in its
+    /// configuration file, for the journey where the identity was never
+    /// written down anywhere a later command could read.
+    startup_site_name: Option<String>,
 }
 
 impl DegradedDeployment {
     /// A data directory holding a store file that exists and cannot be opened.
     ///
-    /// The control socket is deliberately placed in a SEPARATE temporary
-    /// directory, outside the audited tree, so the write audit is about what
-    /// Vigil recorded rather than about a transport endpoint the runtime needs
-    /// in order to answer at all — while the audit itself still covers the whole
-    /// directory the data directory sits in, because the identity sidecar lives
-    /// beside the data directory rather than inside it.
+    /// There is no endpoint to place anywhere: this run answers through the
+    /// store's own owner route or not at all, and it cannot hold a store it
+    /// cannot open. So the whole tree is audited without carving anything out
+    /// of it — including the directory the data directory sits in, because the
+    /// identity sidecar would land beside the data directory rather than
+    /// inside it.
     fn prepare() -> Self {
         // Well-formed but unreachable RTSP URLs on the closed TEST-NET-1 block:
         // the camera stack must come up from the configuration surfaces alone,
@@ -120,8 +138,7 @@ impl DegradedDeployment {
     /// one is refused outright rather than left hanging.
     fn prepare_with_camera_urls(cameras: &[(&str, &str)]) -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let socket_tmp = tempfile::tempdir().expect("tempdir for the control socket");
-        let data_dir = tmp.path().join("data");
+        let data_dir = tmp.path().join(DATA_DIRECTORY_BASENAME);
         fs::create_dir_all(&data_dir).expect("data dir");
 
         let store_path = data_dir.join("store.contextgraph");
@@ -136,8 +153,15 @@ impl DegradedDeployment {
         fs::set_permissions(&store_path, fs::Permissions::from_mode(0o000))
             .expect("clear store permissions");
 
+        // The configuration file sits OUTSIDE the deployment directory, where
+        // an operator's really does: `vigil run --config` takes any path, and
+        // nothing in the product says a configuration must live beside the
+        // store. An earlier version of this fixture put it inside the data
+        // directory so a separate command could find it by convention — that
+        // was the fixture arranging a product behaviour rather than testing
+        // one, and it hid the boundary the pins below exist to show.
         let config_path = tmp.path().join("vigil.toml");
-        let mut config = String::from("site_name = \"home farm\"\n");
+        let mut config = format!("site_name = \"{CONFIGURED_SITE_NAME}\"\n");
         for (name, url) in cameras {
             config.push_str(&format!(
                 "\n[[cameras]]\nname = \"{name}\"\nrtsp_url = \"{url}\"\n"
@@ -145,15 +169,55 @@ impl DegradedDeployment {
         }
         fs::write(&config_path, config).expect("write the camera config");
 
-        let socket_path = socket_tmp.path().join("control.sock");
         Self {
             tmp,
-            _socket_tmp: socket_tmp,
+            _config_home: None,
             data_dir,
             config_path,
-            socket_path,
             store_path,
+            startup_site_name: None,
         }
+    }
+
+    /// The same degraded deployment with its configuration file moved somewhere
+    /// of its own, outside this deployment's tree altogether.
+    ///
+    /// `vigil run --config` takes any path, so this is an ordinary deployment,
+    /// not an exotic one: a configuration in `/etc` and a data directory on a
+    /// data volume is the normal shape. It is separated here because a
+    /// configuration sitting beside the store can be found by convention, and
+    /// a fixture that relied on that convention would be testing an arrangement
+    /// it made rather than a behaviour the product has.
+    fn prepare_with_the_configuration_elsewhere() -> Self {
+        let mut deployment = Self::prepare();
+        let config_home = tempfile::tempdir().expect("tempdir for the configuration file");
+        let moved = config_home.path().join("vigil.toml");
+        fs::rename(&deployment.config_path, &moved).expect("move the configuration file");
+        deployment.config_path = moved;
+        deployment._config_home = Some(config_home);
+        deployment
+    }
+
+    /// The same degraded deployment named by a STARTUP OPTION, with no site
+    /// name in its configuration file at all — so the identity this run
+    /// announces was never written down anywhere a later command could read,
+    /// however it went looking.
+    fn prepare_named_by_a_startup_option(site_name: &str) -> Self {
+        let mut deployment = Self::prepare();
+        let config = fs::read_to_string(&deployment.config_path).expect("read the configuration");
+        let without_site_name: String = config
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("site_name"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(
+            !without_site_name.contains("site_name"),
+            "the fixture must carry no site name in its configuration, or this journey is the \
+             other one"
+        );
+        fs::write(&deployment.config_path, without_site_name).expect("rewrite the configuration");
+        deployment.startup_site_name = Some(site_name.to_string());
+        deployment
     }
 
     fn start(&self) -> DegradedRun {
@@ -191,13 +255,16 @@ impl DegradedDeployment {
             .arg("--detector-model-path")
             .arg(&model_path)
             .env("VIGIL_DATA_DIR", &self.data_dir)
-            .env("VIGIL_CONTROL_SOCKET", &self.socket_path)
             .env_remove("VIGIL_STORE_PATH")
+            .env_remove("VIGIL_CONTROL_SOCKET")
             .env_remove("VIGIL_FABRIC_TICKET")
             .env_remove("VIGIL_FABRIC_HUB")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(site_name) = self.startup_site_name.as_ref() {
+            command.arg("--site-name").arg(site_name);
+        }
         match service_id {
             Some(service_id) => {
                 command.env("VIGIL_SERVICE_ID", service_id);
@@ -220,19 +287,16 @@ impl DegradedDeployment {
             stdout,
         };
 
-        // Readiness is the control socket APPEARING and accepting a
-        // connection. Never a sleep and never a printed line: a degraded run
-        // that only printed a warning and started nothing would satisfy a
-        // log-line wait while failing the contract entirely.
-        wait_until(
-            &format!(
-                "the degraded runtime's control socket at {} to appear",
-                self.socket_path.display()
-            ),
-            Duration::from_secs(30),
-            || Ok(UnixStream::connect(&self.socket_path).ok().map(|_| ())),
-        )
-        .unwrap_or_else(|error| {
+        // Readiness is the run genuinely SERVING: its liveness answer comes
+        // back, and the review plane it kept is accepting connections. There
+        // is deliberately no owner-route wait here and there could not be one
+        // — this run cannot hold a store it cannot open, and it must not
+        // create one to get itself a channel, so it holds nothing and every
+        // operator command falls back to the direct path. Never a sleep and
+        // never a printed line: a degraded run that only printed a warning and
+        // started nothing would satisfy a log-line wait while failing the
+        // contract entirely.
+        wait_for_tcp_port(run.health_port, Duration::from_secs(30)).unwrap_or_else(|error| {
             panic!(
                 "{error}. An unreadable store must not stop Vigil starting — the storeless \
                  runtime path must come up and serve its operator surface. Process output so \
@@ -240,30 +304,78 @@ impl DegradedDeployment {
                 run.stdout()
             )
         });
+        wait_until(
+            "the degraded runtime's liveness answer to come back",
+            Duration::from_secs(30),
+            || Ok((get(run.health_port, "/health").status == 200).then_some(())),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}. A degraded run is live and functional, and its liveness answer says so. \
+                 Process output so far:\n{}",
+                run.stdout()
+            )
+        });
+        wait_for_tcp_port(run.review_port, Duration::from_secs(30)).unwrap_or_else(|error| {
+            panic!(
+                "{error}. A degraded run must still answer the surfaces it lost, so it can say \
+                 what is unavailable rather than leaving an operator with a connection error. \
+                 Process output so far:\n{}",
+                run.stdout()
+            )
+        });
 
         run
     }
 
-    /// The storage engine's own advisory PID lock file, sitting beside the
-    /// store file (`<store>.lock`). The engine deliberately never unlinks it —
-    /// the kernel's exclusive lock releases when the holding process exits, and
-    /// leaving the file in place avoids an unlink race with a concurrent
-    /// opener — so every open attempt against this store, including one that
-    /// goes on to fail, leaves this one file newly present. It is expected
-    /// open mechanics, not a write the degraded-run promise is about, so the
-    /// write audits below permit exactly this one path and nothing else.
+    /// The storage engine's own advisory companion lock file, named by
+    /// APPENDING `.lock` to the whole store filename
+    /// (`contextdb_core::store_companion_path`; `store.contextgraph` becomes
+    /// `store.contextgraph.lock`) — never by replacing the store's own
+    /// extension, which would silently discard it. Opening this corrupt store
+    /// claims the companion before the corruption is discovered, and
+    /// contextdb's own orderly-refusal cleanup
+    /// (`CompanionGuard::discard_created`) removes it again once the open is
+    /// refused — the engine does NOT "never unlink" it; whether it survives
+    /// to the end of this run is a race internal to the engine's own open
+    /// path, not a write the degraded-run promise is about. The write audits
+    /// below exempt exactly this one path from the "nothing new appeared"
+    /// check, whether or not it is actually present.
     fn advisory_lock_path(&self) -> PathBuf {
-        self.store_path.with_extension("lock")
+        contextdb_core::store_companion_path(&self.store_path)
     }
 
-    /// A `vigil` command aimed at this degraded deployment.
+    /// A `vigil` command aimed at this degraded deployment's own store.
+    ///
+    /// Nobody holds that store — the run could not open it — so the ask comes
+    /// back owner-absent and the command answers on the direct path, where the
+    /// same code refuses the same capability for the same reason. Naming the
+    /// store explicitly is what keeps that honest: the command is aimed at the
+    /// file the operator configured, so an implementation that quietly fell
+    /// back to some other store, or to an in-memory one, would be answering
+    /// about a deployment that does not exist.
     fn cli(&self, args: &[&str]) -> Output {
-        Command::new(vigil_binary_path())
+        self.cli_configured(args, None)
+    }
+
+    /// The same command on a deployment that configured a service identifier.
+    /// It carries the identifier because the DEPLOYMENT has it, not because
+    /// the runtime does: a run whose store cannot be opened holds nothing and
+    /// answers nothing, so what this command can report is whatever the
+    /// deployment itself makes reachable.
+    fn cli_configured(&self, args: &[&str], service_id: Option<&str>) -> Output {
+        let mut command = Command::new(vigil_binary_path());
+        command
             .args(args)
             .env("VIGIL_DATA_DIR", &self.data_dir)
-            .env("VIGIL_CONTROL_SOCKET", &self.socket_path)
-            .env_remove("VIGIL_STORE_PATH")
-            .stdin(Stdio::null())
+            .env("VIGIL_STORE_PATH", &self.store_path)
+            .env_remove("VIGIL_CONTROL_SOCKET")
+            .stdin(Stdio::null());
+        match service_id {
+            Some(service_id) => command.env("VIGIL_SERVICE_ID", service_id),
+            None => command.env_remove("VIGIL_SERVICE_ID"),
+        };
+        command
             .output()
             .unwrap_or_else(|error| panic!("spawn vigil {args:?}: {error}"))
     }
@@ -323,8 +435,26 @@ fn token_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
+/// One setting's line out of a rendered listing, found by the projection's own
+/// name field rather than by a substring of the whole answer — so a value that
+/// happens to appear somewhere else in the listing cannot be mistaken for this
+/// setting's.
+fn setting_line_named<'a>(rendered: &'a str, name: &str) -> Option<&'a str> {
+    rendered
+        .lines()
+        .filter(|line| line.starts_with(&format!("{SETTING_LINE_PREFIX} ")))
+        .find(|line| token_field(line, NAME_KEY) == Some(name))
+}
+
 fn settings_surface(deployment: &DegradedDeployment) -> String {
-    let output = deployment.cli(&["settings"]);
+    settings_surface_configured(deployment, None)
+}
+
+fn settings_surface_configured(
+    deployment: &DegradedDeployment,
+    service_id: Option<&str>,
+) -> String {
+    let output = deployment.cli_configured(&["settings"], service_id);
     assert!(
         output.status.success(),
         "the operator surface must answer while the run is degraded — that is where the \
@@ -332,7 +462,21 @@ fn settings_surface(deployment: &DegradedDeployment) -> String {
         output.status.code(),
         combined(&output)
     );
-    String::from_utf8_lossy(&output.stdout).to_string()
+    let rendered = String::from_utf8_lossy(&output.stdout).to_string();
+    // The mirror of the component-failure fixture beside this one, and the
+    // whole difference between the two: THIS run's store cannot be opened, so
+    // it holds nothing and there is no route to answer through. The answer is
+    // produced by the asking process, reading the same store and being stopped
+    // by the same condition — which is exactly why the statement below is
+    // still true. An owner marker here would mean the run had got itself a
+    // channel by holding something, and a run that writes nothing has nothing
+    // to hold.
+    assert!(
+        !rendered.starts_with(OWNER_SERVED_PREFIX),
+        "a run whose store cannot be opened owns nothing and must not answer as an owner; \
+         got:\n{rendered}"
+    );
+    rendered
 }
 
 /// The `/health` body carries JSON on its first line, with plain-text receipt
@@ -387,8 +531,10 @@ fn health_surface(port: u16) -> String {
 // ── The write audit ────────────────────────────────────────────────────────
 
 /// Every regular file under `root`, mapped to the SHA-256 of its contents.
-/// Sockets and directories are skipped: a transport endpoint is not a record,
-/// and this deployment keeps its socket outside the data directory anyway.
+/// Directories are walked into; anything that is not a regular file is skipped
+/// and separately accounted for by the no-second-transport audit below, which
+/// requires that a degraded run leaves no socket, pipe or device behind at
+/// all.
 fn snapshot_regular_files(root: &Path) -> BTreeMap<PathBuf, String> {
     let mut found = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
@@ -427,8 +573,9 @@ fn snapshot_regular_files(root: &Path) -> BTreeMap<PathBuf, String> {
 /// serving state, the two configured cameras must be counted from the
 /// configuration surfaces alone, and the operator surface must name live view,
 /// detection and broker alerting as the capabilities that came up. On `dev` the
-/// failed-open branch starts nothing at all, so the control-socket wait alone
-/// already fails.
+/// failed-open branch starts nothing at all, so the readiness wait alone —
+/// a real liveness answer and a review plane accepting connections — already
+/// fails.
 #[test]
 fn an_unreadable_store_still_starts_cameras_detection_and_broker_alerting() {
     let deployment = DegradedDeployment::prepare();
@@ -820,9 +967,10 @@ fn the_unmanaged_state_is_restated_on_every_operator_surface_for_as_long_as_it_l
 /// including the sidecar cache, which lives BESIDE the data directory rather
 /// than inside it and would sit outside a data-directory-only audit entirely. An
 /// unmanaged run must never later be mistaken for a recorded one, and a
-/// storeless first start derives its identity for that run only. The control
-/// socket lives in a separate temporary directory outside this tree, so no
-/// transport artifact can be mistaken for a record — or used to excuse one.
+/// storeless first start derives its identity for that run only. There is no
+/// transport artifact anywhere to mistake for a record — or to excuse one
+/// with: this run answers through the store's own route or not at all, and it
+/// holds no store.
 #[test]
 fn a_degraded_run_writes_nothing_including_the_persisted_service_identity() {
     let deployment = DegradedDeployment::prepare();
@@ -880,6 +1028,150 @@ fn a_degraded_run_writes_nothing_including_the_persisted_service_identity() {
             path.display()
         );
     }
+}
+
+/// What changed under `root` between two snapshots, as paths a reader can act
+/// on. A bare snapshot equality says only that something moved; an operator
+/// reading a failure needs to know WHAT appeared under their deployment
+/// directory.
+/// The deployment's own node key, which the settings surface generates on
+/// first use and which legitimately lives in the deployment directory —
+/// `node_key.rs` puts it there because that is the one path a deployment
+/// guarantees is writable. It is a scope, not a record: permitting it keeps
+/// this audit about STORES, which is what a second one of would cost the
+/// operator, rather than failing on a file the product openly owns.
+const DEPLOYMENT_NODE_KEY: &str = "node-key";
+
+fn snapshot_difference(
+    before: &BTreeMap<PathBuf, String>,
+    after: &BTreeMap<PathBuf, String>,
+) -> Vec<String> {
+    let mut differences = Vec::new();
+    for (path, digest) in after {
+        if path
+            .file_name()
+            .is_some_and(|name| name == DEPLOYMENT_NODE_KEY)
+        {
+            continue;
+        }
+        match before.get(path) {
+            None => differences.push(format!("appeared: {}", path.display())),
+            Some(previous) if previous != digest => {
+                differences.push(format!("changed: {}", path.display()));
+            }
+            Some(_) => {}
+        }
+    }
+    for path in before.keys() {
+        if !after.contains_key(path) {
+            differences.push(format!("removed: {}", path.display()));
+        }
+    }
+    differences.sort();
+    differences
+}
+
+/// Every non-regular filesystem entry under `root`: sockets, FIFOs, devices.
+/// A degraded run must leave none of them, because it has no transport of its
+/// own to publish.
+fn non_regular_entries(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => panic!("read {}: {error}", directory.display()),
+        };
+        for entry in entries {
+            let entry = entry.expect("directory entry");
+            let file_type = entry.file_type().expect("file type");
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if !file_type.is_file() {
+                found.push(entry.path());
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A degraded run must not buy itself an operator surface by inventing a store.
+///
+/// The route an operator's command travels is the store's own, addressed by
+/// the store path. A run whose store cannot be opened therefore has no route,
+/// and the honest answer is the direct one: the command opens nothing, is
+/// refused by the same code naming the same capability, and the operator learns
+/// the truth. The dishonest answers are all cheap to reach — hold a second
+/// store beside the broken one, open an in-memory store and answer from it,
+/// publish a private endpoint of Vigil's own — and each would leave the
+/// operator being answered about a deployment that does not exist. So: nothing
+/// new on disk but the storage engine's own advisory lock, no second store
+/// anywhere, no socket or pipe anywhere, and no answer claiming an owner served
+/// it.
+///
+/// Unfakeable: the whole tree is enumerated after the run, not just the data
+/// directory, so a sidecar one directory up is caught; the owner marker is read
+/// from `vigil::OWNER_SERVED_PREFIX`, the constant the product writes it with,
+/// so an answer that came over any owner route at all is caught whatever that
+/// route was addressed by. An in-memory store cannot hide behind either check
+/// on its own, which is why the marker check is here: contextdb gives
+/// `:memory:` no discoverable owner channel, so a run that answered through one
+/// would have had to publish something, and a run that answered WITHOUT
+/// publishing anything cannot have been an owner.
+#[test]
+fn a_degraded_run_creates_no_second_store_and_publishes_no_transport_of_its_own() {
+    let deployment = DegradedDeployment::prepare();
+    let audited_root = deployment.tmp.path().to_path_buf();
+    let before = snapshot_regular_files(&audited_root);
+
+    let run = deployment.start();
+    // Every surface an operator would reach for, so a run that only produced
+    // an artifact when asked something cannot slip through.
+    let listing = deployment.cli(&["settings"]);
+    let change = deployment.cli(&["settings", "set", "detector_sample_frames", "7"]);
+    let review = deployment.cli(&["events"]);
+    let correction = deployment.cli(&["enroll", "detection-1", "alice"]);
+    run.stop();
+
+    for (label, output) in [
+        ("settings", &listing),
+        ("settings set", &change),
+        ("events", &review),
+        ("enroll", &correction),
+    ] {
+        let answer = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !answer.contains(OWNER_SERVED_PREFIX),
+            "`vigil {label}` came back claiming an owner served it, but this run cannot hold the \
+             store it was pointed at and must not have held any other: {answer}"
+        );
+    }
+
+    let sockets_and_pipes = non_regular_entries(&audited_root);
+    assert!(
+        sockets_and_pipes.is_empty(),
+        "a degraded run publishes no endpoint of its own — the store is the address, and this \
+         run holds no store — but these non-file entries appeared: {sockets_and_pipes:?}"
+    );
+
+    let lock_path = deployment.advisory_lock_path();
+    let after = snapshot_regular_files(&audited_root);
+    let appeared: Vec<&PathBuf> = after
+        .keys()
+        .filter(|path| !before.contains_key(*path) && *path != &lock_path)
+        .collect();
+    assert!(
+        appeared.is_empty(),
+        "a degraded run creates nothing at all beyond the storage engine's own advisory lock at \
+         {}, and above all no second store to answer out of; these appeared: {appeared:?}",
+        lock_path.display()
+    );
+    assert_eq!(
+        SettingsStore::store_path(&deployment.data_dir),
+        deployment.store_path,
+        "sanity: the deployment's configured store is the one this audit watched"
+    );
 }
 
 // ── A degraded run with a stream that actually connects ────────────────────
@@ -1213,15 +1505,40 @@ fn each_camera_reports_its_own_condition_rather_than_the_nodes_unmanaged_state()
 /// would have created a SECOND, healthy store under `data_dir` — one the
 /// operator never configured and would never find at their real store
 /// location.
+///
+/// The store at `--store-path` is SEEDED here, before the daemon starts,
+/// because that is the deployment this test is about: an operator whose node
+/// has been running has a store, and a component failure does not remove it.
+/// It also decides which route the change travels. A degraded run holds the
+/// store when the file is already there and holds nothing when it is not
+/// (`runtime.rs` prints `degraded_owner_route=true` or
+/// `degraded_owner_route=false … reason=no-store-to-hold`), so seeding is what
+/// makes this the OWNER-route journey — asserted below by the route marker on
+/// the answer, not assumed. The first start, where no file exists and the
+/// change genuinely travels the direct path, is a different journey and is
+/// pinned separately beneath this one.
 #[test]
 fn a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let socket_tmp = tempfile::tempdir().expect("tempdir for the control socket");
-    let data_dir = tmp.path().join("data");
+    let data_dir = tmp.path().join(DATA_DIRECTORY_BASENAME);
     fs::create_dir_all(&data_dir).expect("data dir");
     let elsewhere = tmp.path().join("store-elsewhere");
     fs::create_dir_all(&elsewhere).expect("elsewhere dir");
-    let store_path = elsewhere.join("store.contextgraph");
+    // The store carries a name of its OWN, not the product's default. An
+    // earlier version of this fixture used the default name inside the outside
+    // directory, which meant a store path derived from a directory rather than
+    // read from the operator's configuration still landed on the same file —
+    // the fixture was hiding the defect it existed to catch.
+    let store_path = elsewhere.join("farm-graph.contextgraph");
+    // Seed the operator's configured store so it EXISTS and opens: a real
+    // store, created and closed before anything else runs.
+    drop(open_store_at(&store_path).expect("seed the operator's configured store"));
+    assert!(
+        store_path.exists(),
+        "the fixture must start with a real, readable store at the configured location, or the \
+         run below holds nothing and this proves the wrong journey: {}",
+        store_path.display()
+    );
     // A real, empty weights directory: the recognition component fails to
     // load (no model.safetensors), which is a fault the store is never even
     // reached for — the store at `store_path` stays genuinely openable, so a
@@ -1231,13 +1548,12 @@ fn a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir
 
     let config_path = tmp.path().join("vigil.toml");
     let config = format!(
-        "site_name = \"home farm\"\nrecognition_weights_dir = \"{}\"\n\n[[cameras]]\n\
+        "site_name = \"{CONFIGURED_SITE_NAME}\"\nrecognition_weights_dir = \"{}\"\n\n[[cameras]]\n\
          name = \"{FIRST_CAMERA_NAME}\"\nrtsp_url = \"rtsp://192.0.2.10:554/stream\"\n",
         toml_path(&weights_dir)
     );
     fs::write(&config_path, config).expect("write the camera config");
 
-    let socket_path = socket_tmp.path().join("control.sock");
     let health = TcpPortReservation::reserve_loopback().expect("reserve health port");
     let review = TcpPortReservation::reserve_loopback().expect("reserve review port");
     let health_port = health.port();
@@ -1265,10 +1581,10 @@ fn a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir
         .arg("--detector-model-path")
         .arg(&model_path)
         .env("VIGIL_DATA_DIR", &data_dir)
-        .env("VIGIL_CONTROL_SOCKET", &socket_path)
         // The CLI flag above carries the store location; the env var stays
         // unset so the two can never disagree about where it points.
         .env_remove("VIGIL_STORE_PATH")
+        .env_remove("VIGIL_CONTROL_SOCKET")
         .env_remove("VIGIL_FABRIC_TICKET")
         .env_remove("VIGIL_FABRIC_HUB")
         .env_remove("VIGIL_RECOGNITION_WEIGHTS_DIR")
@@ -1281,17 +1597,21 @@ fn a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir
     let stdout = capture_pipe(child.stdout.take());
     let _stderr = capture_pipe(child.stderr.take());
 
-    wait_until(
-        &format!(
-            "the degraded runtime's control socket at {} to appear",
-            socket_path.display()
-        ),
-        Duration::from_secs(30),
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .unwrap_or_else(|error| {
+    // Readiness is THAT store's owner route answering. The component failed
+    // before the store was reached, so the store is intact and this run holds
+    // it — and it is the run, not the asking process, that must answer, because
+    // only the run knows which component failed and where its store really is.
+    // A run that had instead taken a route at `<data_dir>/store.contextgraph`
+    // would be holding a store the operator never configured, which is the very
+    // confusion this test exists to catch, so the wait names the configured
+    // path explicitly.
+    wait_for_store_owner(&data_dir, &store_path).unwrap_or_else(|error| {
         let logs = stdout.lock().expect("stdout lock").clone();
-        panic!("{error}. Process output so far:\n{logs}")
+        panic!(
+            "{error}. The degraded run must hold and answer through the store the operator \
+             configured, at {}. Process output so far:\n{logs}",
+            store_path.display()
+        )
     });
 
     let before_data_dir = snapshot_regular_files(&data_dir);
@@ -1299,8 +1619,13 @@ fn a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir
     let settings_output = Command::new(vigil_binary_path())
         .args(["settings", "set", "detector_sample_frames", "7"])
         .env("VIGIL_DATA_DIR", &data_dir)
-        .env("VIGIL_CONTROL_SOCKET", &socket_path)
-        .env_remove("VIGIL_STORE_PATH")
+        // The command is aimed at the store the operator configured, which is
+        // also the store this run holds — so it reaches the running owner. It
+        // must never be left to derive a store location from the deployment
+        // directory: that would address `<data_dir>/store.contextgraph`, a file
+        // nobody configured, and creating it is the exact defect below.
+        .env("VIGIL_STORE_PATH", &store_path)
+        .env_remove("VIGIL_CONTROL_SOCKET")
         .stdin(Stdio::null())
         .output()
         .expect("spawn vigil settings set");
@@ -1320,19 +1645,39 @@ fn a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir
          --store-path is genuinely readable; exited {:?}, output:\n{settings_text}\nlogs:\n{logs}",
         settings_output.status.code()
     );
+    assert!(
+        String::from_utf8_lossy(&settings_output.stdout).starts_with(OWNER_SERVED_PREFIX),
+        "and it must be the RUNNING node that answered, through the store it holds: an answer \
+         the asking process produced for itself cannot know which component failed or where this \
+         deployment's store really is. Output:\n{settings_text}\nlogs:\n{logs}"
+    );
 
     let after_data_dir = snapshot_regular_files(&data_dir);
-    assert_eq!(
-        before_data_dir, after_data_dir,
-        "a landed settings change must create nothing at all under data_dir when the store lives \
-         outside it — the operator's real store location is --store-path's own directory, not the \
-         deployment directory this run happened to be pointed at; logs:\n{logs}"
-    );
+    let difference = snapshot_difference(&before_data_dir, &after_data_dir);
     assert!(
-        !SettingsStore::store_path(&data_dir).exists(),
-        "no second, healthy store may appear under data_dir just because the configured store \
-         lives elsewhere: {}",
-        SettingsStore::store_path(&data_dir).display()
+        difference.is_empty(),
+        "a landed settings change must create nothing at all under data_dir when the store lives \
+         outside it — the operator's real store location is the file they configured, not the \
+         deployment directory this run happened to be pointed at; under {} this changed: \
+         {difference:#?}\nlogs:\n{logs}",
+        data_dir.display()
+    );
+    // Anywhere, not just under the deployment directory: a second store is a
+    // second store wherever it lands, and the operator reads neither of them
+    // knowing the other exists.
+    let default_name = SettingsStore::store_path(&data_dir);
+    let default_name = default_name
+        .file_name()
+        .expect("the default store file name");
+    let stray: Vec<PathBuf> = snapshot_regular_files(tmp.path())
+        .into_keys()
+        .filter(|path| path.file_name() == Some(default_name))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "this deployment configured its store as {}, so no store carrying the product's default \
+         name may exist anywhere in it: {stray:?}\nlogs:\n{logs}",
+        store_path.display()
     );
 
     assert!(
@@ -1341,23 +1686,318 @@ fn a_degraded_run_with_the_store_outside_data_dir_writes_no_store_under_data_dir
          which never appeared; logs:\n{logs}",
         store_path.display()
     );
+    // Read the value back with the run reaped, so nothing can be answering but
+    // the file. The command keeps this deployment's OWN data directory: the
+    // deployment directory is what a record's scope is resolved from, so
+    // pointing it at the store's directory instead would ask a different node
+    // about a value it never had — a mistake this fixture made once and the
+    // independence pins in `store_and_data_directory_independence.rs` exist to
+    // stop making. What names the store is `VIGIL_STORE_PATH`, and it alone.
+    let readback = Command::new(vigil_binary_path())
+        .arg("settings")
+        .env("VIGIL_DATA_DIR", &data_dir)
+        .env("VIGIL_STORE_PATH", &store_path)
+        .env_remove("VIGIL_CONTROL_SOCKET")
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn vigil settings against the configured store");
+    let rendered = String::from_utf8_lossy(&readback.stdout).to_string();
+    let landed_line = setting_line_named(&rendered, "detector_sample_frames");
+    assert_eq!(
+        landed_line.and_then(|line| token_field(line, REQUESTED_KEY)),
+        Some("7"),
+        "the change must be readable back out of the operator's configured store at {}; that \
+         store answered:\n{rendered}\nlogs:\n{logs}",
+        store_path.display()
+    );
 }
 
-// ── What a storeless run says about its own identity ───────────────────────
-
-/// A run with no store behind it derives its identity for that run only, and
-/// two places say what it derived: the startup line an operator watches
-/// scroll by, and the degraded settings listing they read afterwards. If
-/// those two came from separate derivations, a rename between them — or a
-/// build that fixed one path and not the other — would let this node
-/// announce one identity on the broker and answer a different one to `vigil
-/// settings`, leaving an operator unable to tell which node they are even
-/// looking at. This fixture's site name (`home farm`) already differs from
-/// its data directory's own name (`data`), so a build that silently fell
-/// back to the directory name on one of the two surfaces cannot pass by
-/// accident.
+/// The same deployment on its FIRST start, where the operator has no store
+/// yet — a genuinely different journey, and one the test above must not be
+/// allowed to blur into itself.
+///
+/// Here the recognition component fails before any store file exists, so the
+/// run has nothing to hold: it must NOT create a store just to give itself a
+/// channel, and `runtime.rs` says so in as many words
+/// (`degraded_owner_route=false … reason=no-store-to-hold`). The operator's
+/// command is therefore answered by the asking process on the direct path,
+/// and the only thing that keeps that answer honest is the ADDRESS: whatever
+/// it says, it says it about the store the operator configured, and nothing
+/// appears under the deployment directory the run happened to be pointed at.
+///
+/// What the change itself does was RULED after this test was written, and the
+/// ruling reversed it. It used to create the store at the configured path and
+/// report success; under owner ruling R17 an edit takes the atomic
+/// open-existing-for-change door and brings no deployment into existence, so
+/// the change is REFUSED — held for the whole live-command family by
+/// `crates/vigil-bin/tests/a_read_of_a_never_started_deployment_creates_nothing.rs`.
+/// What an operator loses is nothing they had: a store created by a `settings
+/// set` is one no runtime ever wrote, holding a value at a path nobody chose,
+/// and the next `vigil run` opens it as though a runtime had. What they gain is
+/// a refusal that names both the directory and the store, and a `vigil run`
+/// that creates their deployment where they said.
+///
+/// The address promise is what this test still pins, and it is now pinned on
+/// the refusal rather than on a creation: the refusal names the operator's
+/// configured store, the run is proven not to have owned anything by the route
+/// marker's ABSENCE, and nothing at all appears anywhere in this deployment.
+///
+/// What a direct answer CANNOT carry is stated here rather than asserted:
+/// the asking process never saw this run, so it does not know which component
+/// failed. That gap is real and is tracked as its own finding; this test pins
+/// the route and the location, which are what an operator can act on.
 #[test]
-fn a_storeless_run_reports_the_same_identity_on_the_startup_line_and_the_degraded_listing() {
+fn a_first_start_with_the_store_outside_data_dir_answers_directly_and_creates_only_that_store() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data_dir = tmp.path().join(DATA_DIRECTORY_BASENAME);
+    fs::create_dir_all(&data_dir).expect("data dir");
+    let elsewhere = tmp.path().join("store-elsewhere");
+    fs::create_dir_all(&elsewhere).expect("elsewhere dir");
+    // A name of its own, for the same reason as the seeded journey above: a
+    // default-named store inside the outside directory could be reached by a
+    // path derived from that directory rather than read from the operator's
+    // configuration, and the test would pass on the wrong mechanism.
+    let store_path = elsewhere.join("farm-graph.contextgraph");
+    assert!(
+        !store_path.exists(),
+        "the fixture must start with no store at all, or this is the other journey"
+    );
+    let weights_dir = tmp.path().join("weights");
+    fs::create_dir_all(&weights_dir).expect("empty weights dir");
+
+    let config_path = tmp.path().join("vigil.toml");
+    let config = format!(
+        "site_name = \"{CONFIGURED_SITE_NAME}\"\nrecognition_weights_dir = \"{}\"\n\n[[cameras]]\n\
+         name = \"{FIRST_CAMERA_NAME}\"\nrtsp_url = \"rtsp://192.0.2.10:554/stream\"\n",
+        toml_path(&weights_dir)
+    );
+    fs::write(&config_path, config).expect("write the camera config");
+
+    let health = TcpPortReservation::reserve_loopback().expect("reserve health port");
+    let review = TcpPortReservation::reserve_loopback().expect("reserve review port");
+    let health_port = health.port();
+    let review_port = review.port();
+    let model_path = fixture_detector_model_path();
+    assert!(
+        model_path.is_file(),
+        "the repo's real detector-model fixture must be present: {}",
+        model_path.display()
+    );
+
+    let mut command = Command::new(vigil_binary_path());
+    command
+        .arg("run")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("--store-path")
+        .arg(&store_path)
+        .arg("--health-port")
+        .arg(health_port.to_string())
+        .arg("--review-port")
+        .arg(review_port.to_string())
+        .arg("--detector-model-path")
+        .arg(&model_path)
+        .env("VIGIL_DATA_DIR", &data_dir)
+        .env_remove("VIGIL_STORE_PATH")
+        .env_remove("VIGIL_CONTROL_SOCKET")
+        .env_remove("VIGIL_FABRIC_TICKET")
+        .env_remove("VIGIL_FABRIC_HUB")
+        .env_remove("VIGIL_RECOGNITION_WEIGHTS_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    health.release();
+    review.release();
+    let mut child = command.spawn().expect("spawn vigil run");
+    let stdout = capture_pipe(child.stdout.take());
+    let _stderr = capture_pipe(child.stderr.take());
+
+    // Readiness is the run SERVING, and it cannot be an owner route: there is
+    // no file to hold and the run must not make one.
+    wait_for_tcp_port(health_port, Duration::from_secs(30)).unwrap_or_else(|error| {
+        let logs = stdout.lock().expect("stdout lock").clone();
+        panic!("{error}. Process output so far:\n{logs}")
+    });
+    wait_for_tcp_port(review_port, Duration::from_secs(30)).unwrap_or_else(|error| {
+        let logs = stdout.lock().expect("stdout lock").clone();
+        panic!("{error}. Process output so far:\n{logs}")
+    });
+
+    let before_data_dir = snapshot_regular_files(&data_dir);
+    let settings_output = Command::new(vigil_binary_path())
+        .args(["settings", "set", "detector_sample_frames", "7"])
+        .env("VIGIL_DATA_DIR", &data_dir)
+        // The address is the whole of what keeps a direct answer honest: it
+        // must be the store the operator configured, never one derived from
+        // the deployment directory this run happened to be pointed at.
+        .env("VIGIL_STORE_PATH", &store_path)
+        .env_remove("VIGIL_CONTROL_SOCKET")
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn vigil settings set");
+
+    let logs = stdout.lock().expect("stdout lock").clone();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let settings_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&settings_output.stdout),
+        String::from_utf8_lossy(&settings_output.stderr)
+    );
+    assert!(
+        !settings_output.status.success(),
+        "a change against a deployment that has never started is refused rather than creating \
+         one: a store a `settings set` made is one no runtime ever wrote, holding a value at a \
+         path nobody chose. Exited {:?}, output:\n{settings_text}\nlogs:\n{logs}",
+        settings_output.status.code()
+    );
+    assert!(
+        !String::from_utf8_lossy(&settings_output.stdout).starts_with(OWNER_SERVED_PREFIX),
+        "nobody can have owned this store: the run found no file to hold and must not have made \
+         one to get itself a channel. Output:\n{settings_text}\nlogs:\n{logs}"
+    );
+    assert!(
+        settings_text.contains(&store_path.display().to_string()),
+        "and the refusal is about the store the operator CONFIGURED, {}: an answer naming only \
+         the deployment directory leaves them looking in it for a file they deliberately put \
+         somewhere else. Output:\n{settings_text}\nlogs:\n{logs}",
+        store_path.display()
+    );
+    assert!(
+        !store_path.exists(),
+        "and the refused change created nothing at the operator's configured location either, \
+         {}; logs:\n{logs}",
+        store_path.display()
+    );
+    let difference = snapshot_difference(&before_data_dir, &snapshot_regular_files(&data_dir));
+    assert!(
+        difference.is_empty(),
+        "and nothing at all may appear under data_dir — a second store there is one the operator \
+         never configured and will never look in; under {} this changed: {difference:#?}\n\
+         logs:\n{logs}",
+        data_dir.display()
+    );
+    let default_name = SettingsStore::store_path(&data_dir);
+    let default_name = default_name
+        .file_name()
+        .expect("the default store file name");
+    let stray: Vec<PathBuf> = snapshot_regular_files(tmp.path())
+        .into_keys()
+        .filter(|path| path.file_name() == Some(default_name))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "and no store carrying the product's default name may appear anywhere in this \
+         deployment, whichever directory it lands in: {stray:?}\nlogs:\n{logs}"
+    );
+}
+
+// ── The honest unavailable answer (owner ruling, 2026-08-25) ───────────────
+
+/// What a separate `vigil settings` owes an operator when the store it was
+/// pointed at cannot be read.
+///
+/// The ruling, folded into `vigil-settings-autority-direction.md`: the command
+/// says the selected store is unreadable, says that exact live settings and
+/// identity are not available THROUGH THIS COMMAND, and points at the running
+/// service's own output for them. It never guesses a configuration file it was
+/// not given, and it gains no sidecar, second socket, `:memory:` route or HTTP
+/// route to go and find one. This REPLACES the older promise that a separate
+/// command reproduces a storeless run's exact identity — that promise rested on
+/// the control socket, which is gone.
+///
+/// Why an honest refusal beats a derived answer, which is what these pins are
+/// really protecting: a derived identity is not a vaguer answer, it is a
+/// DIFFERENT NODE'S answer, and an operator comparing it against the broker or
+/// against another node has no way to tell that is what happened. "I cannot
+/// tell you, ask the service" costs them one command; a wrong name costs them
+/// the diagnosis.
+fn assert_honest_unavailable_answer(
+    label: &str,
+    rendered: &str,
+    store_path: &Path,
+    data_dir: &Path,
+) {
+    assert!(
+        rendered.contains(&store_path.display().to_string()),
+        "{label}: the answer must name the store it actually selected, because that is the thing \
+         the operator repairs — {} never appears in:\n{rendered}",
+        store_path.display()
+    );
+    assert!(
+        rendered.contains("unreadable"),
+        "{label}: the answer must say plainly that the selected store cannot be read, in the \
+         product's own word for that condition; got:\n{rendered}"
+    );
+    let lowered = rendered.to_ascii_lowercase();
+    assert!(
+        lowered.contains("health") || lowered.contains("startup"),
+        "{label}: the exact values live in the running service, so the answer must send the \
+         operator there rather than leaving them with a dead end; got:\n{rendered}"
+    );
+
+    // The sharp half, and the one an implementation cannot word its way past:
+    // no identity may be claimed at all. A command that could not read the
+    // store could only have guessed one.
+    if let Some(identity_line) = rendered.lines().find(|line| line.starts_with("identity ")) {
+        let claimed = token_field(identity_line, "value").unwrap_or("");
+        assert_ne!(
+            claimed,
+            data_dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            "{label}: the answer named this node after the directory it was handed. That is not a \
+             vaguer answer than the truth, it is a different node's answer, and nothing on the \
+             line says it was derived; got: {identity_line}"
+        );
+        for word in CONFIGURED_SITE_NAME.split_whitespace() {
+            assert!(
+                !claimed.contains(word),
+                "{label}: the answer produced the configured site name {CONFIGURED_SITE_NAME:?} \
+                 out of a store it cannot read and a configuration it was never given, so it \
+                 either guessed a path or grew a route to go and look — both are ruled out; got: \
+                 {identity_line}"
+            );
+        }
+    }
+
+    // And it must not have gone looking for a configuration file nobody named.
+    let guessed = data_dir.join("vigil.toml");
+    assert!(
+        !rendered.contains(&guessed.display().to_string()),
+        "{label}: the answer names {}, a configuration file this command was never given and \
+         guessed at from the deployment directory; got:\n{rendered}",
+        guessed.display()
+    );
+}
+
+// ── What a storeless command says about identity (owner ruling 2026-08-25) ─
+
+/// A separate command cannot see a storeless run, and must say so rather than
+/// make something up.
+///
+/// The startup line an operator watches scroll by carries this node's real
+/// identity, because the RUN knows it. The command they type next has an
+/// unreadable store, no route to the run — the route is the store's own, and
+/// this run holds nothing — and no configuration it was given. Under the owner
+/// ruling of 2026-08-25 the honest answer is the whole of what it owes: the
+/// selected store is unreadable, exact live settings and identity are not
+/// available through this command, and the running service's own output has
+/// them.
+///
+/// Unfakeable because the store genuinely cannot be opened, so nothing on the
+/// store-backed path can produce an answer; because the data directory's name
+/// and the configured site name are both known here and BOTH are refused as
+/// identities, so neither a derivation nor a guessed configuration read can
+/// pass; and because the startup line is captured from the same run, so the
+/// identity that exists is proven to exist while the command declines to
+/// repeat it.
+#[test]
+fn a_storeless_command_says_the_store_is_unreadable_instead_of_naming_a_node_it_cannot_see() {
     let deployment = DegradedDeployment::prepare();
     let run = deployment.start();
     let logs = run.stdout();
@@ -1370,61 +2010,127 @@ fn a_storeless_run_reports_the_same_identity_on_the_startup_line_and_the_degrade
         .unwrap_or_else(|| panic!("the startup log must announce `service_id=`; logs:\n{logs}"))
         .to_string();
     assert_ne!(
-        announced, "data",
-        "sanity: the fixture's data directory is literally named \"data\" — a build that fell \
-         back to the directory name would coincidentally still pass a bare equality check \
-         without this guard"
+        announced, DATA_DIRECTORY_BASENAME,
+        "sanity: the RUN knows its own identity and it is not the data directory's name, or the \
+         refusals below would be refusing a coincidence; logs:\n{logs}"
     );
 
-    let identity_line = rendered
-        .lines()
-        .find(|line| line.starts_with("identity "))
-        .unwrap_or_else(|| {
-            panic!("the degraded listing must carry an `identity` line; got:\n{rendered}")
-        });
-    let listed = token_field(identity_line, "value")
-        .unwrap_or_else(|| panic!("the identity line must carry `value=`; got: {identity_line}"));
-
-    assert_eq!(
-        announced, listed,
-        "the startup announcement and the degraded listing must name the SAME identity; \
-         startup said {announced:?}, the listing said {listed:?}. logs:\n{logs}\nrendered:\n\
-         {rendered}"
+    assert_honest_unavailable_answer(
+        "a storeless deployment asked through a separate command",
+        &rendered,
+        &deployment.store_path,
+        &deployment.data_dir,
     );
 }
 
-/// A deployment that configured a `service_id` but has no store to persist it
-/// into stated one, rather than working one out — and the derivation the
-/// listing carries has to say which of the two happened. Reporting
-/// `derived-not-yet-persisted` here would tell an operator this node picked
-/// its own name, when it was actually told one and just could not write it
-/// down yet.
+/// The same answer where the configuration file lives somewhere of its own.
+///
+/// `vigil run --config` takes any path, so this is the ordinary deployment
+/// shape, not an exotic one. It is pinned separately because a configuration
+/// sitting beside the store could be found by convention, and the ruling is
+/// explicit that the command never goes looking: it does not guess
+/// `<data-dir>/vigil.toml`, and it grows no route to fetch what it cannot see.
 #[test]
-fn a_configured_service_id_on_a_storeless_run_reports_configured_not_yet_persisted() {
+fn a_storeless_command_never_recovers_an_identity_from_a_configuration_it_was_not_given() {
+    let deployment = DegradedDeployment::prepare_with_the_configuration_elsewhere();
+    let run = deployment.start();
+    let logs = run.stdout();
+    let rendered = settings_surface(&deployment);
+    run.stop();
+
+    assert!(
+        logs.contains("service_id="),
+        "sanity: the run must announce an identity of its own, or the command below has nothing \
+         to decline to repeat; logs:\n{logs}"
+    );
+    assert_honest_unavailable_answer(
+        "a storeless deployment whose configuration lives outside it",
+        &rendered,
+        &deployment.store_path,
+        &deployment.data_dir,
+    );
+}
+
+/// The same answer again where the identity was never written down at all.
+///
+/// `vigil run --site-name` names a node on its command line, so there is no
+/// file anywhere holding this identity — which is what makes the ruled answer
+/// the only honest one available. A command that produced this name would have
+/// had to reach the running process, and there is no route to it.
+#[test]
+fn a_storeless_command_never_reports_a_name_that_only_ever_was_a_startup_option() {
+    let named = "north-paddock";
+    let deployment = DegradedDeployment::prepare_named_by_a_startup_option(named);
+    let run = deployment.start();
+    let logs = run.stdout();
+    let rendered = settings_surface(&deployment);
+    run.stop();
+
+    let announced = logs
+        .lines()
+        .find_map(|line| line.strip_prefix("service_id="))
+        .unwrap_or_else(|| panic!("the startup log must announce `service_id=`; logs:\n{logs}"))
+        .to_string();
+    assert!(
+        announced.contains("north") && announced.contains("paddock"),
+        "sanity: this run was named {named:?} on its command line and must announce that name, \
+         whatever normalization the product applies; it announced {announced:?}. logs:\n{logs}"
+    );
+
+    assert_honest_unavailable_answer(
+        "a storeless deployment named on its command line",
+        &rendered,
+        &deployment.store_path,
+        &deployment.data_dir,
+    );
+    if let Some(identity_line) = rendered.lines().find(|line| line.starts_with("identity ")) {
+        let claimed = token_field(identity_line, "value").unwrap_or("");
+        assert!(
+            !claimed.contains("north") && !claimed.contains("paddock"),
+            "the command answered with a name that exists nowhere on disk, so it can only have \
+             reached the running process — and there is no route to it; got: {identity_line}"
+        );
+    }
+}
+
+/// A deployment that configured a `service_id` it has no store to persist
+/// into. The run states it; a separate command still cannot see it.
+///
+/// This is the case most likely to be papered over, because the identifier is
+/// sitting in an environment variable and a command run from the same shell
+/// would find it there — which is exactly what must not be reported as this
+/// DEPLOYMENT's identity. The command below is given the identifier the way an
+/// operator's environment carries it, and the answer must still decline: what
+/// this deployment is running is a fact of the run, and the command cannot see
+/// the run.
+#[test]
+fn a_configured_service_id_is_not_reported_by_a_command_that_cannot_see_the_run() {
     let deployment = DegradedDeployment::prepare();
     let configured = "front-porch-node";
     let run = deployment.start_with_service_id(Some(configured));
-    let rendered = settings_surface(&deployment);
+    let rendered = settings_surface_configured(&deployment, Some(configured));
     let logs = run.stdout();
     run.stop();
 
-    let identity_line = rendered
-        .lines()
-        .find(|line| line.starts_with("identity "))
-        .unwrap_or_else(|| {
-            panic!("the degraded listing must carry an `identity` line; got:\n{rendered}")
-        });
-    assert_eq!(
-        token_field(identity_line, "value"),
-        Some(configured),
-        "a storeless run must announce the identifier it was configured with, not one it \
-         derived; got: {identity_line}\nlogs:\n{logs}"
+    assert!(
+        logs.contains(configured),
+        "sanity: the run must have taken the configured identifier, or there is nothing here to \
+         decline; logs:\n{logs}"
     );
-    assert_eq!(
-        token_field(identity_line, "derivation"),
-        Some("configured-not-yet-persisted"),
-        "a configured identifier on a storeless run must be labelled \
-         `configured-not-yet-persisted`, distinguishing it from an identifier this node worked \
-         out for itself; got: {identity_line}\nlogs:\n{logs}"
+    assert_honest_unavailable_answer(
+        "a storeless deployment that configured its own identifier",
+        &rendered,
+        &deployment.store_path,
+        &deployment.data_dir,
     );
+    if let Some(identity_line) = rendered.lines().find(|line| line.starts_with("identity ")) {
+        let claimed = token_field(identity_line, "value").unwrap_or("");
+        assert_ne!(
+            claimed, configured,
+            "the command reported this deployment's identity out of its own environment. That \
+             variable says what the SHELL was told, not what the running node took — they agree \
+             here only because this test set both — and an operator reading it cannot tell the \
+             difference; got: {identity_line}"
+        );
+    }
 }

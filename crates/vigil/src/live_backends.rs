@@ -40,6 +40,37 @@ use crate::settings_model::SettingValue;
 /// Building a detector again under a named backend.
 type DetectorBuild = dyn Fn(&str) -> Result<Box<dyn Detector>, String> + Send + Sync;
 
+/// Every physical detector BUILD this process has run, counted where a
+/// registered rebuild closure is INVOKED and nowhere else.
+///
+/// Not a shipped surface: no artifact builds `test-support`
+/// (`artifact_never_enables_test_support.rs`).
+///
+/// Counted at the build and never at the install, because those are different
+/// facts and only one of them costs anything: a camera returning to a backend
+/// it already has an instance for is a pointer swap with no model loaded, and a
+/// preparation proving a backend builds one detector nobody has entered yet. A
+/// request already recorded as applied must perform ZERO builds of any kind,
+/// and that is what this makes readable.
+#[cfg(feature = "test-support")]
+static DETECTOR_BUILDS_PERFORMED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// How many physical detector builds this process has run so far. A pin reads
+/// it either side of a second settings read and asserts on the difference.
+#[cfg(feature = "test-support")]
+pub fn detector_builds_performed() -> u64 {
+    DETECTOR_BUILDS_PERFORMED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Run a registered rebuild closure. THE one place a detector is physically
+/// built, so what is counted above is a build and never an install.
+fn run_detector_build(build: &DetectorBuild, backend: &str) -> Result<Box<dyn Detector>, String> {
+    #[cfg(feature = "test-support")]
+    DETECTOR_BUILDS_PERFORMED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    build(backend)
+}
+
 /// Where a selection receipt goes so the operator surfaces carry it.
 type ReceiptSink = dyn Fn(&AccelerationReceipt) + Send + Sync;
 
@@ -377,7 +408,7 @@ fn prepare_registered_handle(
         .flatten();
     let ready = match proved {
         Some(detector) => Ok(detector),
-        None => build(&identity.backend),
+        None => run_detector_build(build.as_ref(), &identity.backend),
     };
     match ready.and_then(|detector| {
         install_prepared_detector(
@@ -510,6 +541,10 @@ pub fn request_detection_backend(accelerated_detection: bool) {
         accelerated_detection,
         pinned_backend(DETECTION_BACKEND_SETTING),
     );
+    // Already carried out: the command answers, and starts nothing.
+    if request_already_carried_out(&request) {
+        return;
+    }
     // Asking again for what is already being prepared ATTACHES to that work.
     // Taking a new version for it would abandon a build that is doing exactly
     // what was asked for and start the cold work again from nothing.
@@ -525,9 +560,43 @@ pub fn request_detection_backend(accelerated_detection: bool) {
 /// coordinator answering about the machine, which is the only authority that
 /// can — a record of what was applied is a record of what was asked, not of
 /// what happened.
+/// Whether asking for this again has already been carried out, so that asking
+/// changes nothing and starts nothing.
+///
+/// Asked BEFORE a request version is taken, because taking one is not free: it
+/// schedules every handle that is not on the backend the ask NAMES, which on a
+/// node whose selection settled somewhere else is every handle — and the pass
+/// that follows then sees work in flight and rebuilds, for a request that was
+/// already met. So the question is put to the state the last pass left behind,
+/// before anything is scheduled on top of it.
+fn request_already_carried_out(requested: &BackendRequest) -> bool {
+    already_applied(applied_detection_request(), requested) && !work_is_outstanding()
+}
+
 fn work_is_outstanding() -> bool {
     let state = detection_transitions().state();
-    state.pending.is_some() || !state.unmoved_handles.is_empty()
+    if state.pending.is_some() {
+        return true;
+    }
+    // Measured against the backend this node is RUNNING — the one the last pass
+    // settled on — and NOT against the backend that was asked for.
+    //
+    // The two part company whenever a selection legitimately settles somewhere
+    // other than the ask: an accelerated request on a node whose forward test
+    // refuses the accelerator enters the processor backend, and every handle
+    // then sits on a backend that is not the one named in the request. Read
+    // against the ask, those handles look like work outstanding for ever, on a
+    // node that has finished and has nothing left to do. What that costs is not
+    // a stale surface reading: this answer is what tells a repeat of an
+    // already-applied request that there is nothing to do, so reading it
+    // against the ask made every repeat re-run the whole pass — a cold model
+    // load, beside a live camera, for a request already carried out.
+    //
+    // A handle that genuinely never moved still answers here: it is not on the
+    // running backend either, which is the case this check exists for.
+    !detection_transitions()
+        .handles_off_backend(&state.running_backend)
+        .is_empty()
 }
 
 /// The acceleration surfaces this process reports on, so a preparation's
@@ -742,6 +811,10 @@ pub fn reselect_detection_backend(accelerated_detection: bool) {
         accelerated_detection,
         pinned_backend(DETECTION_BACKEND_SETTING),
     );
+    // Already carried out: nothing to select, nothing to build, nothing to say.
+    if request_already_carried_out(&request) {
+        return;
+    }
     let (request, version) = take_request(accelerated_detection, request);
     prepare_for_request(request, version);
 }
@@ -793,7 +866,7 @@ fn prepare_for_request(requested: BackendRequest, version: u64) {
     // genuinely on the backend it named. A record of what was applied cannot
     // answer that on its own — a handle that never moved would be skipped for
     // ever on the strength of a matching value.
-    if already_applied(applied_detection_request(), &requested) && !work_is_outstanding() {
+    if request_already_carried_out(&requested) {
         return;
     }
 
@@ -817,7 +890,7 @@ fn prepare_for_request(requested: BackendRequest, version: u64) {
         accelerated_detection,
         &probing.model_id,
         crate::yolox_detector::MODEL_INPUT_SHAPE,
-        &|backend: &str| (probing.build)(backend),
+        &|backend: &str| run_detector_build(probing.build.as_ref(), backend),
         &|backend: &str| prepared_detector(&probing.camera, backend).is_some(),
     );
     let selection = prepared_pass.selection;
@@ -860,7 +933,8 @@ fn prepare_for_request(requested: BackendRequest, version: u64) {
             // would install something nothing proved.
             (Some(tested), _) => Ok(ReadyDetector::FreshlyBuilt(tested)),
             (None, Some(prepared)) => Ok(ReadyDetector::AlreadyLoaded(prepared)),
-            (None, None) => (entry.build)(&selection.backend).map(ReadyDetector::FreshlyBuilt),
+            (None, None) => run_detector_build(entry.build.as_ref(), &selection.backend)
+                .map(ReadyDetector::FreshlyBuilt),
         };
         match ready.and_then(|ready| {
             take_detector_on(
@@ -1166,8 +1240,15 @@ mod tests {
     use std::sync::mpsc;
 
     /// A detector whose only observable behavior is the model hash it
-    /// reports; `detect_segment` is never called by these contracts (no
-    /// segment is ever decoded), so it panics loudly if that ever changes.
+    /// reports.
+    ///
+    /// A build carrying the accelerated detector proves the backend by running
+    /// a forward pass through the very detector it is about to install, so
+    /// `detect_segment` IS reached on that shape — the preparation calls it.
+    /// It refuses, plainly: a stub decodes nothing, and refusing is what keeps
+    /// the backend these contracts run on the same on every machine, with a
+    /// graphics device or without one. Panicking here instead would put an
+    /// unreachable-guard panic inside the preparation's own forward test.
     struct StubDetector {
         sha: String,
     }
@@ -1184,10 +1265,48 @@ mod tests {
             _sample_frames: usize,
             _confidence_threshold: f64,
         ) -> Result<crate::yolox_detector::DetectorOutput, String> {
-            unreachable!(
-                "the live-backend take-on contracts never decode a segment; only the \
-                 rebuild path is under test"
-            )
+            Err("this stub detector decodes nothing".to_string())
+        }
+    }
+
+    /// How many times one preparation pass asks its FIRST camera to build.
+    ///
+    /// A build carrying the accelerated detector enters that backend only on
+    /// evidence from the machine in front of it: it builds the first
+    /// registered camera's detector and runs a forward pass through it. The
+    /// stub above refuses that pass, so the processor detector is then built
+    /// for that same camera and installed — two builds for the one camera the
+    /// preparation forward-tests. Where this artifact carries no accelerated
+    /// detector at all, or the machine shows no device to try, there is
+    /// nothing to prove and the install build is the whole of it. Every other
+    /// camera builds once per pass either way.
+    fn builds_per_pass_for_the_forward_tested_camera() -> usize {
+        #[cfg(feature = "detect-burn-wgpu")]
+        {
+            1 + usize::from(crate::yolox_detector::find_hardware_adapter().is_some())
+        }
+        #[cfg(not(feature = "detect-burn-wgpu"))]
+        {
+            1
+        }
+    }
+
+    /// Wait until the preparation threads — the production ones — have no work
+    /// left.
+    ///
+    /// The wait is on the work itself being over. Not on an amount of time
+    /// passing, and not on a fixed number of turns either: a preparation that
+    /// legitimately does more work, as the accelerated shape's forward test
+    /// does, outlives any count and is read as finished when it has not
+    /// started. Nothing here reads a clock, by the same standing rule the
+    /// production path follows — a bound here would judge by elapsed time the
+    /// very thing these contracts say is never judged that way. A preparation
+    /// that genuinely wedges is the harness's timeout to report, not this
+    /// helper's.
+    fn wait_for_preparations_to_finish() {
+        while PREPARATION_RUNNING.load(Ordering::SeqCst) || PREPARATION_OWED.load(Ordering::SeqCst)
+        {
+            std::thread::yield_now();
         }
     }
 
@@ -1335,7 +1454,12 @@ mod tests {
 
         reselect_detection_backend(true);
 
-        assert_eq!(front_builds.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            front_builds.load(AtomicOrdering::SeqCst),
+            builds_per_pass_for_the_forward_tested_camera(),
+            "front is the camera the preparation forward-tests, so its closure fires for \
+             the backend being proved as well as for the one installed"
+        );
         assert_eq!(back_builds.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(side_builds.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(
@@ -1468,7 +1592,12 @@ mod tests {
 
         reselect_detection_backend(true);
 
-        assert_eq!(front_builds.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            front_builds.load(AtomicOrdering::SeqCst),
+            builds_per_pass_for_the_forward_tested_camera(),
+            "front is the camera the preparation forward-tests, so its closure fires for \
+             the backend being proved as well as for the one installed"
+        );
         assert_eq!(back_builds.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(
             front_receipts.load(AtomicOrdering::SeqCst),
@@ -1492,6 +1621,12 @@ mod tests {
         reselect_detection_backend(true);
         assert_eq!(
             front_builds.load(AtomicOrdering::SeqCst),
+            2 * builds_per_pass_for_the_forward_tested_camera(),
+            "an all-fail attempt must not be recorded as applied, so a repeat call \
+             re-attempts every camera"
+        );
+        assert_eq!(
+            back_builds.load(AtomicOrdering::SeqCst),
             2,
             "an all-fail attempt must not be recorded as applied, so a repeat call \
              re-attempts every camera"
@@ -1528,7 +1663,7 @@ mod tests {
             SettingValue::text("seed-full-success"),
         );
 
-        let _front = register_camera(
+        let front = register_camera(
             "front",
             "yolox-test",
             false,
@@ -1536,7 +1671,7 @@ mod tests {
             Arc::clone(&front_builds),
             Arc::clone(&front_receipts),
         );
-        let _back = register_camera(
+        let back = register_camera(
             "back",
             "yolox-test",
             false,
@@ -1547,7 +1682,12 @@ mod tests {
 
         reselect_detection_backend(true);
 
-        assert_eq!(front_builds.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            front_builds.load(AtomicOrdering::SeqCst),
+            builds_per_pass_for_the_forward_tested_camera(),
+            "front is the camera the preparation forward-tests, so its closure fires for \
+             the backend being proved as well as for the one installed"
+        );
         assert_eq!(back_builds.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(
             front_receipts.load(AtomicOrdering::SeqCst),
@@ -1568,18 +1708,166 @@ mod tests {
              it on"
         );
 
-        // Recorded as applied: an identical repeat call must be a true
-        // no-op — no camera's build closure fires again.
+        // Recorded as applied: an identical repeat call loads nothing. Read on
+        // the cameras rather than on a build counter, because a build counter
+        // cannot tell a camera being rebuilt from the preparation proving a
+        // backend it has not entered — and it is the camera that must be left
+        // alone. Each one is still running the very instance it was already
+        // running: same pointer, so no model was loaded for either of them.
+        let front_running = front.snapshot();
+        let back_running = back.snapshot();
         reselect_detection_backend(true);
+        assert!(
+            Arc::ptr_eq(&front_running, &front.snapshot()),
+            "a request already recorded as applied must not rebuild a camera's detector — \
+             this camera must still be running the instance it already had"
+        );
+        assert!(
+            Arc::ptr_eq(&back_running, &back.snapshot()),
+            "a request already recorded as applied must not rebuild a camera's detector — \
+             this camera must still be running the instance it already had"
+        );
+        assert_eq!(
+            in_force(DETECTION_BACKEND_SETTING),
+            Some(SettingValue::text(
+                crate::detection_accel::CPU_DETECTION_BACKEND
+            )),
+            "and the running value must be untouched by the repeat"
+        );
+
+        println!("child_assertions_passed");
+    }
+
+    /// A request already recorded as applied performs ZERO physical builds.
+    ///
+    /// The neighbouring full-success contract reads the repeat on the CAMERAS
+    /// — same instance pointer, so no model was loaded for either of them — and
+    /// says in its own comment that a build counter cannot tell a camera being
+    /// rebuilt from the preparation proving a backend it has not entered. That
+    /// objection is answered here rather than argued with, because it holds for
+    /// the FIRST pass and not for this one: on a first pass the honest count is
+    /// some number that depends on whether this machine has a device to prove a
+    /// backend on, which is exactly what a counter cannot interpret. On a
+    /// REPEAT of a request already recorded as applied the honest count is
+    /// ZERO — zero rebuilds and zero proving builds alike — and zero is the one
+    /// number that needs no interpreting.
+    ///
+    /// What the pointer check cannot see is the whole reason to have this: a
+    /// preparation that rebuilt a detector and then installed the SAME instance
+    /// back onto every handle passes the pointer check while having loaded the
+    /// models all over again. The cost of a repeat is a cold model load per
+    /// camera, on a box beside a camera, for a request that had already been
+    /// carried out — so what is pinned is the load itself, counted where a
+    /// registered rebuild closure fires and never where an instance is
+    /// installed.
+    #[test]
+    fn a_repeat_of_an_applied_request_performs_zero_detector_builds() {
+        assert_isolated_child_passed("a_repeat_of_an_applied_request_performs_zero_builds_child");
+    }
+
+    #[test]
+    #[ignore = "re-executed in isolation by \
+                a_repeat_of_an_applied_request_performs_zero_detector_builds; mutates the \
+                process-global detector registry and running-value registry"]
+    fn a_repeat_of_an_applied_request_performs_zero_builds_child() {
+        let front_builds = Arc::new(AtomicUsize::new(0));
+        let back_builds = Arc::new(AtomicUsize::new(0));
+        let front_receipts = Arc::new(AtomicUsize::new(0));
+        let back_receipts = Arc::new(AtomicUsize::new(0));
+
+        // A running backend nothing has a detector loaded for yet, so the first
+        // pass has real work to do and the repeat below is a repeat of
+        // something that genuinely happened.
+        bring_into_force(
+            DETECTION_BACKEND_SETTING,
+            SettingValue::text("seed-zero-build-repeat"),
+        );
+
+        let front = register_camera(
+            "front",
+            "yolox-test",
+            false,
+            true,
+            Arc::clone(&front_builds),
+            Arc::clone(&front_receipts),
+        );
+        let back = register_camera(
+            "back",
+            "yolox-test",
+            false,
+            true,
+            Arc::clone(&back_builds),
+            Arc::clone(&back_receipts),
+        );
+
+        reselect_detection_backend(true);
+        wait_for_preparations_to_finish();
+
+        // Established before anything is concluded: the first pass really did
+        // build, so a zero delta below is a repeat doing nothing rather than a
+        // counter that never moves.
+        assert!(
+            detector_builds_performed() > 0,
+            "this run never established the condition it exists to test — the first pass \
+             performed no detector build at all, so a repeat performing none proves nothing"
+        );
+        assert_eq!(
+            in_force(DETECTION_BACKEND_SETTING),
+            Some(SettingValue::text(
+                crate::detection_accel::CPU_DETECTION_BACKEND
+            )),
+            "sanity: the first pass must have been carried out and recorded as applied"
+        );
+
+        let builds_before_the_repeat = detector_builds_performed();
+        let front_builds_before = front_builds.load(AtomicOrdering::SeqCst);
+        let back_builds_before = back_builds.load(AtomicOrdering::SeqCst);
+        let front_running = front.snapshot();
+        let back_running = back.snapshot();
+
+        reselect_detection_backend(true);
+        wait_for_preparations_to_finish();
+        let builds_after_the_repeat = detector_builds_performed();
+
+        assert_eq!(
+            builds_after_the_repeat - builds_before_the_repeat,
+            0,
+            "a request already recorded as applied must perform ZERO detector builds of any \
+             kind — not a rebuild for a camera already running that backend, and not a build \
+             to prove a backend this node has already entered. Each one is a cold model load \
+             nobody asked for"
+        );
+        // The per-camera closures say the same thing from the other side, so
+        // the process-wide count cannot be zero because it stopped counting.
         assert_eq!(
             front_builds.load(AtomicOrdering::SeqCst),
-            1,
-            "a request already recorded as applied must not re-attempt any rebuild"
+            front_builds_before,
+            "the repeat fired this camera's own rebuild closure"
         );
         assert_eq!(
             back_builds.load(AtomicOrdering::SeqCst),
+            back_builds_before,
+            "the repeat fired this camera's own rebuild closure"
+        );
+        // And the cameras are untouched, which is the other half of the same
+        // fact: nothing was built, so nothing was installed either.
+        assert!(
+            Arc::ptr_eq(&front_running, &front.snapshot()),
+            "this camera must still be running the instance it already had"
+        );
+        assert!(
+            Arc::ptr_eq(&back_running, &back.snapshot()),
+            "this camera must still be running the instance it already had"
+        );
+        assert_eq!(
+            front_receipts.load(AtomicOrdering::SeqCst),
             1,
-            "a request already recorded as applied must not re-attempt any rebuild"
+            "and no camera reported a second selection receipt for work that did not happen"
+        );
+        assert_eq!(
+            back_receipts.load(AtomicOrdering::SeqCst),
+            1,
+            "and no camera reported a second selection receipt for work that did not happen"
         );
 
         println!("child_assertions_passed");
@@ -1723,14 +2011,7 @@ mod tests {
         first.join().expect("the first request thread");
         // The preparation threads are the production ones; wait for the work
         // to be over rather than for any amount of time to pass.
-        for _ in 0..10_000 {
-            if !PREPARATION_RUNNING.load(Ordering::SeqCst)
-                && !PREPARATION_OWED.load(Ordering::SeqCst)
-            {
-                break;
-            }
-            std::thread::yield_now();
-        }
+        wait_for_preparations_to_finish();
 
         assert_eq!(
             detection_transitions().request_version(),
@@ -1971,6 +2252,7 @@ mod tests {
         // The real CLI answer path, with the real store underneath it.
         let answer = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DETECTION_BACKEND_SETTING} {}",
                 crate::detection_accel::CPU_DETECTION_BACKEND
@@ -2019,7 +2301,11 @@ mod tests {
             .pending
             .and_then(|pending| pending.latest_progress)
             .expect("the preparation reported progress");
-        let watching = crate::settings_command::answer(deployment.path(), "");
+        let watching = crate::settings_command::answer(
+            deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
+            "",
+        );
         assert!(
             watching.contains(&progress),
             "a read taken while the preparation runs must carry the last thing the preparation \
@@ -2959,6 +3245,7 @@ mod tests {
 
         let answer = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DETECTION_BACKEND_SETTING} {}",
                 crate::detection_accel::CPU_DETECTION_BACKEND
@@ -2982,7 +3269,11 @@ mod tests {
             let deployment = deployment.path().to_path_buf();
             move || {
                 while sampling.load(Ordering::SeqCst) {
-                    let answer = crate::settings_command::answer(&deployment, "");
+                    let answer = crate::settings_command::answer(
+                        &deployment,
+                        &crate::settings_store::SettingsStore::store_path(&deployment),
+                        "",
+                    );
                     let line = setting_line(&answer, DETECTION_BACKEND_SETTING);
                     let running =
                         field(line, crate::settings_projection::RUNNING_KEY).unwrap_or_default();
@@ -3131,6 +3422,7 @@ mod tests {
         // the running value.
         let refused = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DETECTION_BACKEND_SETTING} {}",
                 crate::detection_accel::CPU_DETECTION_BACKEND
@@ -3244,7 +3536,11 @@ mod tests {
             let floor_target = target_of(never_started.path());
             move || {
                 while sampling.load(Ordering::SeqCst) {
-                    let answer = crate::settings_command::answer(&directory, "");
+                    let answer = crate::settings_command::answer(
+                        &directory,
+                        &crate::settings_store::SettingsStore::store_path(&directory),
+                        "",
+                    );
                     let line = setting_line(&answer, DETECTION_BACKEND_SETTING);
                     record_sample(
                         "settings answer",
@@ -3433,6 +3729,7 @@ mod tests {
         // the running value.
         let refused = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DETECTION_BACKEND_SETTING} {}",
                 crate::detection_accel::CPU_DETECTION_BACKEND
@@ -3460,7 +3757,11 @@ mod tests {
         );
 
         let read_the_surface = |when: &str| {
-            let answer = crate::settings_command::answer(deployment.path(), "");
+            let answer = crate::settings_command::answer(
+                deployment.path(),
+                &crate::settings_store::SettingsStore::store_path(deployment.path()),
+                "",
+            );
             let line = setting_line(&answer, DETECTION_BACKEND_SETTING);
             let running = field(line, crate::settings_projection::RUNNING_KEY).unwrap_or_default();
             let pending = field(line, crate::settings_projection::PENDING_KEY).unwrap_or_default();
@@ -3606,6 +3907,7 @@ mod tests {
         // accelerated instance it stepped away from as the prepared way back.
         let forward = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DETECTION_BACKEND_SETTING} {}",
                 crate::detection_accel::CPU_DETECTION_BACKEND
@@ -3651,6 +3953,7 @@ mod tests {
 
         let answer = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DETECTION_BACKEND_SETTING} {}",
                 crate::detection_accel::ACCELERATED_DETECTION_BACKEND
@@ -3803,6 +4106,7 @@ mod tests {
 
         let pinned = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DECODE_BACKEND_SETTING} {}",
                 crate::settings_backends::HARDWARE_DECODE_BACKEND
@@ -3826,6 +4130,7 @@ mod tests {
 
         let reversed = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DECODE_BACKEND_SETTING} {}",
                 crate::settings_backends::SOFTWARE_DECODE_BACKEND
@@ -3903,6 +4208,7 @@ mod tests {
 
         let pinned = crate::settings_command::answer(
             deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
             &format!(
                 "set {DECODE_BACKEND_SETTING} {}",
                 crate::settings_backends::HARDWARE_DECODE_BACKEND
@@ -3938,7 +4244,11 @@ mod tests {
             "and it installs nothing: the running decode path is what a session belonging to the \
              current request reports, never an older one's outcome"
         );
-        let listing = crate::settings_command::answer(deployment.path(), "list");
+        let listing = crate::settings_command::answer(
+            deployment.path(),
+            &crate::settings_store::SettingsStore::store_path(deployment.path()),
+            "list",
+        );
         let line = setting_line(&listing, DECODE_BACKEND_SETTING);
         assert_eq!(
             field(line, crate::settings_projection::PENDING_KEY),

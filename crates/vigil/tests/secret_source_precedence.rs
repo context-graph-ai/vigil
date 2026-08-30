@@ -217,9 +217,12 @@ fn the_operator_surface_names_the_secret_source_and_never_prints_the_value() {
     // that carried the source line in the report but dropped it at rendering,
     // or that echoed the value into some other line, passes everything above
     // and fails here.
-    let rendered_lines = report_by_direct_read(dir.path())
-        .expect("the operator surface answers by direct read")
-        .render_lines();
+    let rendered_lines = report_by_direct_read(
+        dir.path(),
+        &vigil::settings_store::SettingsStore::store_path(dir.path()),
+    )
+    .expect("the operator surface answers by direct read")
+    .render_lines();
     let secret_line = rendered_lines
         .iter()
         .filter(|line| line.starts_with(&format!("{SECRET_LINE_PREFIX} ")))

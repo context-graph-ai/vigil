@@ -12,23 +12,24 @@
 //! no test claims an effect the process has not reported.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 
 use vigil::settings_backends::{DETECTION_BACKEND_SETTING, available_detection_backends};
 use vigil::settings_domains::ACCELERATED_DETECTION_DOMAIN;
+use vigil::settings_model::DETECTOR_CLASSES_SETTING;
 use vigil::settings_model::{Author, DETECTOR_SAMPLE_FRAMES_SETTING, Surface};
 use vigil::settings_projection::{
-    AUTHOR_KEY, HELD_LINE_PREFIX, NAME_KEY, NONE, PENDING_KEY, RUNNING_KEY, SETTING_LINE_PREFIX,
-    SURFACE_KEY, VALUE_KEY,
+    APPLIES_KEY, AUTHOR_KEY, HELD_LINE_PREFIX, LIVE_TOKEN, NAME_KEY, NONE, PENDING_KEY,
+    REQUESTED_KEY, RUNNING_KEY, SETTING_LINE_PREFIX, SURFACE_KEY, VALUE_KEY,
 };
+use vigil::settings_store::SettingsStore;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
     RUNTIME_STARTUP_TIMEOUT, RtspFixture, TcpPortReservation, capture_pipe, rtsp_fixture_lock,
-    vigil_binary_path, wait_until, workspace_root,
+    vigil_binary_path, wait_for_store_owner, wait_until, workspace_root,
 };
 
 /// The estate's own clip, served over RTSP so the deployment has a camera that
@@ -100,20 +101,20 @@ impl Deployment {
             stdout,
             stderr,
         };
-        let socket_path = self.data_dir.join("control.sock");
-        wait_until(
-            &format!("the control socket at {} to appear", socket_path.display()),
-            RUNTIME_STARTUP_TIMEOUT,
-            || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "{error}. The runtime must come up and publish its control socket. Output so \
-                 far:\n{}\n{}",
-                run.stdout(),
-                run.stderr()
-            )
-        });
+        // Readiness is the store's OWNER ROUTE answering: this runtime holds
+        // the deployment's store, so a command aimed at the deployment reaches
+        // it rather than being answered by the asking process. Proven by
+        // asking a real question — never a sleep, and never a printed line,
+        // which a runtime that started nothing could also produce.
+        wait_for_store_owner(&self.data_dir, &SettingsStore::store_path(&self.data_dir))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}. The runtime must come up and own this deployment's store. Output \
+                     so far:\n{}\n{}",
+                    run.stdout(),
+                    run.stderr()
+                )
+            });
         run
     }
 
@@ -137,6 +138,21 @@ impl Deployment {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// Withdraw this deployment's own record for `setting`, and give back the
+    /// answer the operator reads — the withdrawal statement and the listing
+    /// printed beneath it. The family had no reset helper at all, which is why
+    /// the take-back promise was only ever proven for a value being SET.
+    fn reset(&self, setting: &str) -> String {
+        let output = self.settings(&["reset", setting]);
+        assert!(
+            output.status.success(),
+            "`vigil settings reset {setting}` must be accepted; stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
     }
 
     /// A write the model is expected to refuse, returned rather than asserted
@@ -320,6 +336,76 @@ fn a_rate_change_made_while_running_takes_effect_without_a_restart() {
     );
 }
 
+/// Taking a rate BACK is the same promise as setting one, and this is the leg
+/// the family never had: every helper here spoke `set`, so a withdrawal was
+/// never asked whether it reached the running process.
+///
+/// Unfakeable because the withdrawal is made against a process that is
+/// demonstrably up and is never restarted, and what is asserted is what that
+/// same process reports it is running. An operator who withdraws a rate and is
+/// left running the value they just withdrew — indefinitely, until they restart
+/// the thing watching their property — has not taken anything back, and a line
+/// that says the value applies live while naming a restart as what closes the
+/// gap says both things at once.
+#[test]
+fn a_rate_withdrawn_while_running_is_taken_back_without_a_restart() {
+    // No rate in the configuration file, so what the withdrawal leaves in force
+    // is the automatic floor — the state a reset actually restores. A file that
+    // named the rate would leave a file-authored value standing and never
+    // exercise it.
+    let deployment = Deployment::with_config("cameras = []\n");
+    let run = deployment.start();
+
+    deployment.set(DETECTOR_SAMPLE_FRAMES_SETTING, "2");
+    let after_set = deployment.listing();
+    let set_line = setting_line(&after_set, DETECTOR_SAMPLE_FRAMES_SETTING);
+    assert_eq!(
+        token_field(set_line, RUNNING_KEY),
+        Some("2"),
+        "the set has to land live first, or the withdrawal below has nothing to take back: \
+         {set_line}"
+    );
+
+    let withdrawal = deployment.reset(DETECTOR_SAMPLE_FRAMES_SETTING);
+    let after_reset = deployment.listing();
+    let logs = format!("{}\n{}", run.stdout(), run.stderr());
+    run.stop();
+
+    for (surface, rendered) in [
+        ("the answer the withdrawal itself printed", &withdrawal),
+        ("the listing asked for afterwards", &after_reset),
+    ] {
+        let line = setting_line(rendered, DETECTOR_SAMPLE_FRAMES_SETTING);
+        let requested = token_field(line, REQUESTED_KEY);
+        assert_eq!(
+            token_field(line, APPLIES_KEY),
+            Some(LIVE_TOKEN),
+            "{surface}: this rate is a value the running process takes on without a restart, \
+             which is what makes the rest of this a promise: {line}"
+        );
+        assert_ne!(
+            token_field(line, RUNNING_KEY),
+            Some("2"),
+            "{surface}: the process is still running the value the operator just withdrew. It \
+             keeps running it until somebody restarts the node, which is exactly what taking a \
+             value back is supposed to spare them: {line}\n\nRun output:\n{logs}"
+        );
+        assert_eq!(
+            token_field(line, RUNNING_KEY),
+            requested,
+            "{surface}: what the withdrawal leaves in force is what this process is running: \
+             {line}\n\nRun output:\n{logs}"
+        );
+        assert_eq!(
+            token_field(line, PENDING_KEY),
+            Some(NONE),
+            "{surface}: nothing has to happen for the withdrawn value to be in force, so nothing \
+             is pending — naming a restart on a line that also says the value applies live tells \
+             one operator two different things: {line}"
+        );
+    }
+}
+
 /// Unfakeable because the deployment has a REAL camera, so a detector is
 /// genuinely built and fed frames, and the last assertion is read from the
 /// runtime's own account of the detector it is running rather than from the
@@ -343,6 +429,7 @@ fn turning_the_automation_off_makes_the_pinned_detection_backend_what_runs() {
     let deployment = Deployment::with_config(&format!(
         "site_name = \"home farm\"\ndetector_model_id = \"{DETECTOR_MODEL_ID}\"\n\
          detector_model_path = \"{}\"\ndetector_sample_frames = 1\n\
+         detector_classes = [\"person\", \"car\"]\n\
          \n[[cameras]]\nname = \"loading dock\"\nrtsp_url = \"{}\"\n",
         deterministic_fixture_support::toml_path(&detector_model()),
         deterministic_fixture_support::toml_string(&camera.url),
@@ -399,7 +486,27 @@ fn turning_the_automation_off_makes_the_pinned_detection_backend_what_runs() {
          backend has taken the wheel, and a build that keeps feeding frames through the detector \
          it happened to construct at startup has left them holding a setting that changed \
          nothing while every surface tells them it did. Started on {startup_backend:?}, pinned \
-         {backend:?}, still running {running_detector:?}\n\nRun output:\n{logs}"
+             {backend:?}, still running {running_detector:?}\n\nRun output:\n{logs}"
+    );
+
+    let classes = setting_line(&rendered, DETECTOR_CLASSES_SETTING);
+    assert_eq!(
+        token_field(classes, VALUE_KEY),
+        Some("person,car"),
+        "the authored detector classes remain the effective list: {classes}"
+    );
+    assert_eq!(
+        token_field(classes, RUNNING_KEY),
+        Some("person,car"),
+        "the settings answer must name the same classes the running detector was built to emit; \
+         a restarted process reporting running=none describes a detector that does not exist: \
+         {classes}\n\nRun output:\n{logs}"
+    );
+    assert_eq!(
+        token_field(classes, PENDING_KEY),
+        Some(NONE),
+        "classes already taken on by the running detector are not waiting for another restart: \
+         {classes}"
     );
 }
 

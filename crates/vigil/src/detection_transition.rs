@@ -460,6 +460,25 @@ impl DetectionTransitions {
         }
     }
 
+    /// Every registered handle that is NOT on `backend`.
+    ///
+    /// Asked against the backend this node is RUNNING, this answers "has every
+    /// handle taken on what the last pass settled?". That is a different
+    /// question from the one [`TransitionState::unmoved_handles`] answers,
+    /// which measures against the backend that was ASKED for — and the two part
+    /// company exactly when a selection legitimately settles somewhere other
+    /// than the ask, as an accelerated request does on a node whose forward
+    /// test refuses the accelerator.
+    pub fn handles_off_backend(&self, backend: &str) -> Vec<String> {
+        let inner = self.lock();
+        inner
+            .handles
+            .iter()
+            .filter(|handle| handle.backend != backend)
+            .map(|handle| handle.name.clone())
+            .collect()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()

@@ -78,7 +78,7 @@ fn the_environment_lever_names_itself_beside_the_pin_it_stands_in_front_of() {
         )
         .expect("write the operator's own pin");
 
-    let report = report_by_direct_read_at(directory.path(), &target())
+    let report = report_by_direct_read_at(directory.path(), store.path(), &target())
         .expect("build the operator report for this deployment");
 
     let before = setting_line(&report.render_lines(), DETECTOR_QUEUE_CAPACITY_SETTING).to_string();

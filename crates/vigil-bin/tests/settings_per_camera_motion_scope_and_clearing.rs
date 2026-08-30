@@ -21,13 +21,12 @@
 //! all, so the clearing test below fails to compile against that revision.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
 
 use vigil::settings_model::{Author, MOTION_SENSITIVITY_SETTING, ScopeTarget, Surface};
 use vigil::settings_projection::{AUTHOR_KEY, SCOPE_KEY, SETTING_LINE_PREFIX, SURFACE_KEY};
+use vigil::settings_store::SettingsStore;
 
 const VALUE_KEY: &str = "value";
 const NAME_KEY: &str = "name";
@@ -35,7 +34,8 @@ const NAME_KEY: &str = "name";
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    TcpPortReservation, capture_pipe, vigil_binary_path, wait_for_store_owner,
+    wait_for_store_owner_to_release,
 };
 
 const DRIVEWAY: &str = "driveway";
@@ -89,32 +89,23 @@ impl Drop for LiveVigil {
     }
 }
 
-fn wait_for_control_socket(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!("the control socket at {} to appear", socket_path.display()),
-        Duration::from_secs(30),
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .expect("the runtime must publish its control socket");
+/// Readiness is the store's OWNER ROUTE answering: the runtime holds this
+/// deployment's store, so a command aimed at the deployment reaches that
+/// runtime instead of being answered by the asking process. Proven by asking a
+/// real question and getting an owner-served answer — never a sleep, and never
+/// a printed line, which a runtime that started nothing could also produce.
+fn wait_for_the_store_owner(data_dir: &Path) {
+    wait_for_store_owner(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the runtime must own this deployment's store and answer through it");
 }
 
-fn wait_for_control_socket_to_go_away(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!(
-            "the control socket at {} to stop accepting connections",
-            socket_path.display()
-        ),
-        Duration::from_secs(30),
-        || {
-            Ok(match UnixStream::connect(&socket_path) {
-                Ok(_) => None,
-                Err(_) => Some(()),
-            })
-        },
-    )
-    .expect("the previous runtime must be fully stopped before the restart");
+/// The inverse wait: nobody owns the store any more, so the previous process
+/// is genuinely down and the store is free. That is what makes the next start a
+/// real second process rather than a second question to the first one — and a
+/// store still held would refuse it outright.
+fn wait_for_the_store_to_be_free(data_dir: &Path) {
+    wait_for_store_owner_to_release(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the previous runtime must release the store before the next one starts");
 }
 
 fn cameras_fragment(driveway_motion_sensitivity: Option<i64>) -> String {
@@ -170,8 +161,16 @@ fn setting_named<'a>(lines: &'a [String], name: &str) -> Option<&'a str> {
 
 fn motion_sensitivity_line_at(data_dir: &Path, camera: Option<&str>) -> String {
     let target = node_scope_target(data_dir, camera);
-    let report = vigil::settings_projection::report_by_direct_read_at(data_dir, &target)
-        .expect("direct store read must succeed");
+    // The store this deployment actually owns: these runs are started with
+    // --data-dir and no --store-path, so the store is the one the product puts
+    // in that directory. Named rather than left to be derived, because a report
+    // resolved against some other store would be a different deployment's.
+    let report = vigil::settings_projection::report_by_direct_read_at(
+        data_dir,
+        &SettingsStore::store_path(data_dir),
+        &target,
+    )
+    .expect("direct store read must succeed");
     let lines = report.render_lines();
     setting_named(&lines, MOTION_SENSITIVITY_SETTING)
         .unwrap_or_else(|| {
@@ -205,9 +204,9 @@ fn a_cameras_own_motion_sensitivity_authors_at_that_cameras_scope_and_an_unliste
     .expect("write config");
 
     let live = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     live.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     let driveway_line = motion_sensitivity_line_at(&data_dir, Some(DRIVEWAY));
     assert_eq!(
@@ -270,9 +269,9 @@ fn removing_a_cameras_key_clears_that_camera_alone_and_removing_its_row_clears_w
     )
     .expect("write config: driveway pinned");
     let run1 = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     run1.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
     assert_eq!(
         token_field(
             &motion_sensitivity_line_at(&data_dir, Some(DRIVEWAY)),
@@ -285,9 +284,9 @@ fn removing_a_cameras_key_clears_that_camera_alone_and_removing_its_row_clears_w
     // Step 2: the key is removed from the driveway's row, but the row stays.
     fs::write(&config_path, config_with_both_cameras(None)).expect("write config: key removed");
     let run2 = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     run2.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     let driveway_after_key_removed = motion_sensitivity_line_at(&data_dir, Some(DRIVEWAY));
     assert_eq!(
@@ -323,9 +322,9 @@ fn removing_a_cameras_key_clears_that_camera_alone_and_removing_its_row_clears_w
     )
     .expect("write config: driveway re-pinned");
     let run3 = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     run3.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
     assert_eq!(
         token_field(
             &motion_sensitivity_line_at(&data_dir, Some(DRIVEWAY)),
@@ -343,9 +342,9 @@ fn removing_a_cameras_key_clears_that_camera_alone_and_removing_its_row_clears_w
     );
     fs::write(&config_path, hallway_only).expect("write config: driveway row dropped");
     let run4 = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
     run4.stop();
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     // The driveway is no longer a camera this deployment watches, but the
     // record its row authored must be gone — asked about directly, since a

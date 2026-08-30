@@ -1035,6 +1035,10 @@ fn the_manifest_declares_a_key_for_every_setting_the_operator_surface_answers_fo
     let directory = tempfile::tempdir().expect("temporary data directory");
     let store = vigil::settings_store::SettingsStore::open(directory.path())
         .expect("open the node-side settings store");
+    // The path off the handle that just created it, so the report below is
+    // read from the very file this fixture owns rather than from one worked
+    // out separately.
+    let store_path = store.path().to_path_buf();
     drop(store);
     let target = vigil::settings_model::ScopeTarget {
         tenant: "node-a".to_string(),
@@ -1042,8 +1046,12 @@ fn the_manifest_declares_a_key_for_every_setting_the_operator_surface_answers_fo
         node: "node-a".to_string(),
         camera: None,
     };
-    let report = vigil::settings_projection::report_by_direct_read_at(directory.path(), &target)
-        .expect("the operator report for this deployment");
+    let report = vigil::settings_projection::report_by_direct_read_at(
+        directory.path(),
+        &store_path,
+        &target,
+    )
+    .expect("the operator report for this deployment");
     let prefix = format!(
         "{} {}=",
         vigil::settings_projection::SETTING_LINE_PREFIX,

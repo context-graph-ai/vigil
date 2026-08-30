@@ -23,7 +23,6 @@
 //! false.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
@@ -32,11 +31,12 @@ use vigil::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING;
 use vigil::settings_projection::{
     NAME_KEY, RUNNING_KEY, RUNNING_SOURCE_KEY, SETTING_LINE_PREFIX, SHADOWED_SETTING_KEY,
 };
+use vigil::settings_store::SettingsStore;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    TcpPortReservation, capture_pipe, vigil_binary_path, wait_for_store_owner,
 };
 
 /// The one documented environment lever over a behavior setting.
@@ -103,7 +103,7 @@ impl Deployment {
             stdout,
             stderr,
         };
-        wait_for_control_socket(&self.data_dir, &run);
+        wait_for_the_store_owner(&self.data_dir, &run);
         run
     }
 
@@ -159,20 +159,17 @@ impl Drop for LiveVigil {
     }
 }
 
-/// Readiness is the control socket APPEARING and accepting a connection —
-/// never a sleep and never a printed line. The "runtime loop ready" receipt is
-/// emitted before the listener binds, so a reader that trusts it races the
-/// listener and silently falls through to the direct store read.
-fn wait_for_control_socket(data_dir: &Path, run: &LiveVigil) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!("the control socket at {} to appear", socket_path.display()),
-        RUNTIME_STARTUP_TIMEOUT,
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .unwrap_or_else(|error| {
+/// Readiness is the store's OWNER ROUTE answering: the runtime holds this
+/// deployment's store, so a separate `vigil settings` process reaches it rather
+/// than answering out of its own environment — which is the whole point of the
+/// attribution this file checks. Never a sleep and never a printed line: the
+/// "runtime loop ready" receipt is emitted before the runtime owns anything, so
+/// a reader that trusts it races the open and silently falls through to a
+/// direct store read.
+fn wait_for_the_store_owner(data_dir: &Path, run: &LiveVigil) {
+    wait_for_store_owner(data_dir, &SettingsStore::store_path(data_dir)).unwrap_or_else(|error| {
         panic!(
-            "{error}. The runtime must publish its control socket. Output so far:\n{}",
+            "{error}. The runtime must own this deployment's store. Output so far:\n{}",
             run.logs()
         )
     });

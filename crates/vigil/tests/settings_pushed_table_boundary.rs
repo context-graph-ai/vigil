@@ -111,3 +111,121 @@ fn the_hub_role_handle_writes_the_pushed_table_successfully() {
     assert_eq!(pushed[0].value, SettingValue::Int(5));
     assert_eq!(pushed[0].surface, Surface::ManagementServer);
 }
+
+/// The label a node writes under is not the same question as what it may READ,
+/// and a stopped node must still see what its hub pushed.
+///
+/// The pushed table declares the plain `SCOPE_LABEL ('server')` form, which
+/// constrains WRITES — the refusal the two tests above hold. It says nothing
+/// about visibility, and the engine narrows reads only from a
+/// `SCOPE_LABEL_READ` set, which this table does not carry. So the stopped-store
+/// settings reader declares NO scope label and is served the whole of Vigil's
+/// own tables. A reader that carried the node's `edge` label instead would be
+/// asking to be narrowed over a column that narrows nothing, which
+/// context-graph refuses at open — and a reader that was somehow served under
+/// that label would show an operator a node with no fleet instruction on it at
+/// all, on a node the hub had just configured.
+///
+/// Unfakeable because it drives the SHIPPED stopped-store projection — the same
+/// call `vigil settings` makes when no runtime holds the store — against a
+/// store a real writer wrote and then closed, and reads the pushed record back
+/// out of the answer an operator would see.
+#[test]
+fn a_stopped_node_reads_the_record_its_hub_pushed_and_says_what_holds_it() {
+    use vigil::settings_model::{ControlState, HeldReason, ScopeTarget};
+    use vigil::settings_projection::report_by_direct_read_at;
+
+    const NODE: &str = "node-a";
+    let directory = tempfile::tempdir().expect("temporary data directory");
+    let store_path = SettingsStore::store_path(directory.path());
+    let target = ScopeTarget {
+        tenant: NODE.to_string(),
+        site: NODE.to_string(),
+        node: NODE.to_string(),
+        camera: None,
+    };
+
+    // The one legitimate road a pushed record travels: written at the pushed
+    // rank by a hub-role handle, then that writer LET GO — which is the state
+    // an operator's node is in between runs.
+    let hub =
+        SettingsStore::open_hub_role(directory.path()).expect("open the hub-role settings store");
+    hub.write_pushed_record(pushed_record())
+        .expect("the hub-role handle writes the down-only pushed table");
+    drop(hub);
+
+    let report = report_by_direct_read_at(directory.path(), &store_path, &target)
+        .expect("a stopped deployment answers its own settings");
+    let pushed = report
+        .settings
+        .iter()
+        .find(|setting| setting.setting == SETTING)
+        .unwrap_or_else(|| panic!("the listing carries {SETTING}: {:?}", report.settings));
+    assert_eq!(
+        (
+            pushed.requested.clone(),
+            pushed.author,
+            pushed.control_state.clone()
+        ),
+        (
+            SettingValue::Int(5),
+            Author::Pushed,
+            ControlState::SetByManagementServer
+        ),
+        "a stopped node reports the value its hub pushed, attributed to the hub, and says on the \
+         line that the management server is what set it — the node's own write label narrows what \
+         it may author, never what it may see: {pushed:?}"
+    );
+
+    // And the relationship, not just the row: a value this deployment's own
+    // operator sets outranks the hub's, and the hub's record stays visible
+    // underneath it saying what is holding it down.
+    let node = SettingsStore::open(directory.path()).expect("open the node-side settings store");
+    node.write_record(SettingRecord {
+        setting: SETTING.to_string(),
+        author: Author::LocalExplicit,
+        surface: Surface::VigilSettings,
+        scope: Scope::node(NODE),
+        value: SettingValue::Int(9),
+        reason: "the operator set this at the node".to_string(),
+        written_at_ms: 1_700_000_001_000,
+        domain_generation: 0,
+        reset: false,
+    })
+    .expect("a node authors its own local record");
+    drop(node);
+
+    let report = report_by_direct_read_at(directory.path(), &store_path, &target)
+        .expect("a stopped deployment answers its own settings");
+    let effective = report
+        .settings
+        .iter()
+        .find(|setting| setting.setting == SETTING)
+        .unwrap_or_else(|| panic!("the listing carries {SETTING}: {:?}", report.settings));
+    assert_eq!(
+        (effective.requested.clone(), effective.author),
+        (SettingValue::Int(9), Author::LocalExplicit),
+        "the operator's own value is what this node runs: {effective:?}"
+    );
+    let held = effective
+        .held
+        .iter()
+        .find(|held| held.record.author == Author::Pushed)
+        .unwrap_or_else(|| {
+            panic!(
+                "the hub's record is still readable underneath the operator's, on the face of the \
+                 answer rather than in history: {effective:?}"
+            )
+        });
+    assert_eq!(
+        (held.record.value.clone(), held.reason.clone()),
+        (
+            SettingValue::Int(5),
+            HeldReason::Shadowed {
+                by_author: Author::LocalExplicit,
+                by_surface: Surface::VigilSettings,
+            }
+        ),
+        "and the answer says exactly what is holding the hub's value down: {held:?}"
+    );
+}

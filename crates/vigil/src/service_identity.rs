@@ -60,10 +60,11 @@ enum Seed<'a> {
 /// Resolve the identity for a store-backed start: the persisted value if one
 /// exists, otherwise derive it once from the site name and persist it.
 pub fn resolve_persisted(
+    data_dir: &Path,
     store_path: &Path,
     site_name: &str,
 ) -> Result<ServiceIdentity, SettingsError> {
-    resolve_seeded(store_path, Seed::SiteName(site_name))
+    resolve_seeded(data_dir, store_path, Seed::SiteName(site_name))
 }
 
 /// Resolve the identity for a store-backed start where the deployment supplied
@@ -71,16 +72,27 @@ pub fn resolve_persisted(
 /// has already named a Home Assistant device moves only through the deliberate
 /// operation — so the supplied value seeds a FIRST start and nothing else.
 pub fn resolve_persisted_configured(
+    data_dir: &Path,
     store_path: &Path,
     configured: &str,
 ) -> Result<ServiceIdentity, SettingsError> {
-    resolve_seeded(store_path, Seed::Configured(configured))
+    resolve_seeded(data_dir, store_path, Seed::Configured(configured))
 }
 
-fn resolve_seeded(store_path: &Path, seed: Seed<'_>) -> Result<ServiceIdentity, SettingsError> {
-    let data_dir = deployment_directory(store_path);
-    let store = SettingsStore::open(&data_dir)?;
-    let identity = match persisted(&store, &data_dir)? {
+/// The deployment's own directory and its store file are BOTH given, never one
+/// worked out from the other: the identity record lives in the store the
+/// runtime resolved, while the scope it is written at and the sidecar cache
+/// belong to the deployment directory the runtime resolved. Deriving the
+/// directory from the store's parent moved this node's whole identity — key,
+/// cache and all — into whatever directory an operator happened to put their
+/// store file in, and created a second store there to hold it.
+fn resolve_seeded(
+    data_dir: &Path,
+    store_path: &Path,
+    seed: Seed<'_>,
+) -> Result<ServiceIdentity, SettingsError> {
+    let store = SettingsStore::open_at(store_path)?;
+    let identity = match persisted(&store, data_dir)? {
         Some(identity) => identity,
         None => {
             // First start: derive once, exactly as the storeless path would,
@@ -91,7 +103,7 @@ fn resolve_seeded(store_path: &Path, seed: Seed<'_>) -> Result<ServiceIdentity, 
                     let derived = derive(site_name);
                     let record = SettingRecord::automatic(
                         SERVICE_IDENTITY_SETTING,
-                        identity_scope(&data_dir),
+                        identity_scope(data_dir),
                         SettingValue::text(&derived),
                         DERIVED_AT_FIRST_START_REASON,
                     );
@@ -101,7 +113,7 @@ fn resolve_seeded(store_path: &Path, seed: Seed<'_>) -> Result<ServiceIdentity, 
                     let record = SettingRecord::local(
                         SERVICE_IDENTITY_SETTING,
                         Surface::StartupOptions,
-                        identity_scope(&data_dir),
+                        identity_scope(data_dir),
                         SettingValue::text(configured),
                         CONFIGURED_AT_FIRST_START_REASON,
                     );
@@ -113,7 +125,7 @@ fn resolve_seeded(store_path: &Path, seed: Seed<'_>) -> Result<ServiceIdentity, 
             ServiceIdentity { value, derivation }
         }
     };
-    write_sidecar(&data_dir, &identity)?;
+    write_sidecar(data_dir, &identity)?;
     Ok(identity)
 }
 
@@ -128,14 +140,6 @@ const CONFIGURED_AT_FIRST_START_REASON: &str =
 /// The reason an identity moved by the deliberate operation carries.
 const SET_EXPLICITLY_REASON: &str =
     "set explicitly through the deliberate identity-change operation";
-
-/// The deployment directory a store file sits in.
-fn deployment_directory(store_path: &Path) -> std::path::PathBuf {
-    store_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-}
 
 /// The identity is a fact about the node itself, so it is recorded at the
 /// deployment's own scope — never at a scope derived from the identity VALUE.
@@ -356,12 +360,15 @@ pub struct IdentityChangeConsequence {
 
 /// Describe what changing the identity to `proposed` would do, without doing it.
 pub fn describe_change(
+    data_dir: &Path,
     store_path: &Path,
     proposed: &str,
 ) -> Result<IdentityChangeConsequence, SettingsError> {
-    let data_dir = deployment_directory(store_path);
-    let store = SettingsStore::open(&data_dir)?;
-    let current = persisted(&store, &data_dir)?
+    // Stating a consequence is a QUESTION, so it takes the read-only door: an
+    // operator who has not confirmed anything must not have a store created for
+    // them, and must not contend with the deployment they are asking about.
+    let store = SettingsStore::open_to_read(store_path)?;
+    let current = persisted(&store, data_dir)?
         .map(|identity| identity.value)
         .unwrap_or_default();
     Ok(IdentityChangeConsequence {
@@ -384,15 +391,18 @@ fn consequence_statement(proposed: &str) -> String {
 /// The deliberate change operation. Applies only after the consequence has been
 /// stated.
 pub fn change_deliberately(
+    data_dir: &Path,
     store_path: &Path,
     proposed: &str,
 ) -> Result<ServiceIdentity, SettingsError> {
-    let data_dir = deployment_directory(store_path);
-    let store = SettingsStore::open(&data_dir)?;
+    // A confirmed change is a WRITE, and it takes the atomic door that refuses
+    // a store which is not there rather than creating one: moving the identity
+    // of a deployment nobody has started is not a rename, it is an invention.
+    let store = SettingsStore::open_existing_for_change(store_path)?;
     let record = SettingRecord::local(
         SERVICE_IDENTITY_SETTING,
         Surface::VigilSettings,
-        identity_scope(&data_dir),
+        identity_scope(data_dir),
         SettingValue::text(proposed),
         SET_EXPLICITLY_REASON,
     );
@@ -402,7 +412,7 @@ pub fn change_deliberately(
         value: proposed.to_string(),
         derivation,
     };
-    write_sidecar(&data_dir, &identity)?;
+    write_sidecar(data_dir, &identity)?;
     Ok(identity)
 }
 

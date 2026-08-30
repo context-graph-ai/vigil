@@ -642,11 +642,64 @@ pub enum SettingsError {
     Refused(Refusal),
     /// The store could not be opened or read.
     Store(String),
+    /// The store is there, and its committed image needs ONE writable open to
+    /// settle before anything can read it — the last runtime left state only a
+    /// writable hydration performs, which is what a killed process, a power cut
+    /// or a hard container stop leaves behind.
+    ///
+    /// Typed apart from [`SettingsError::Store`] because it is the one
+    /// unreadable-looking condition a caller may answer by opening the store for
+    /// writing. Nothing is damaged and nothing needs diagnosing; on every OTHER
+    /// unreadable store, reaching for a writable handle is the worst available
+    /// move, and a caller that could not tell the two apart would either abandon
+    /// a store it could have recovered or take a mutating open on a damaged one.
+    /// The distinction is context-graph's own
+    /// (`CgError::StoreNeedsWritableRecovery`), carried across whole.
+    StoreNeedsWritableRecovery {
+        path: std::path::PathBuf,
+        reason: String,
+    },
+    /// There is no store at this path — the deployment has never started.
+    ///
+    /// Typed apart from [`SettingsError::Store`] because the two send an
+    /// operator to opposite places: nothing has run here yet, which is not a
+    /// fault and is answered with what this node WOULD run at, against a store
+    /// that is sitting right there and cannot be read, which is a mount, a
+    /// permission or damage to repair. The distinction is context-graph's own
+    /// (`CgError::StoreMissing` beside `CgError::StoreUnreadable`), carried
+    /// across whole: no vigil surface asks the filesystem whether a store is
+    /// there, because the attempted open already answered.
+    StoreMissing { path: std::path::PathBuf },
     /// Another Vigil runtime owns this data directory. Carries the holder so a
     /// caller — and a test — binds the identity typed rather than parsing it
     /// back out of a message, and so the refusal can name the holder without a
     /// second lookup.
-    LockedByAnotherRuntime { holder_pid: u32 },
+    ///
+    /// `holder_pid` is optional and 64 bits wide because that is exactly what
+    /// the layers below report (`CgError::StoreLocked`): a holder that
+    /// published no process record is an UNKNOWN holder, and a process id is
+    /// carried at the width it was reported in. Vigil neither invents a pid for
+    /// `None` — an operator sent after process zero is sent after the wrong
+    /// process — nor truncates one into a narrower type, which would name a
+    /// different process again. The refusal still happens either way; only the
+    /// holder detail is absent, and the message says so.
+    LockedByAnotherRuntime { holder_pid: Option<u64> },
+    /// Other processes are READING this store right now, which holds an open
+    /// off while they hydrate. A different condition from every other one here
+    /// and the reason it is typed: the store is healthy, this is temporary, and
+    /// it clears on its own — so a caller can say who is holding it and that
+    /// asking again works, instead of reporting a store that cannot be read.
+    ///
+    /// The count and the identified readers are carried apart because that is
+    /// how the layers below report them: a reader counted but not identified
+    /// still holds the store, so a count taken from the list would under-report
+    /// who is in the way. The path travels with them because the caller that
+    /// knows which store was opened is the only one that can name it.
+    StoreHeldByReaders {
+        observed_direct_readers: u64,
+        readers: Vec<context_graph::ReaderIdentity>,
+        path: std::path::PathBuf,
+    },
     /// The write was refused by the engine's scope-label constraint: this
     /// handle may not write at the pushed rank.
     ScopeLabelViolation { requested: String, allowed: String },
@@ -659,11 +712,56 @@ impl fmt::Display for SettingsError {
             SettingsError::Store(detail) => {
                 write!(formatter, "the settings store could not be read: {detail}")
             }
-            SettingsError::LockedByAnotherRuntime { holder_pid } => write!(
+            SettingsError::StoreNeedsWritableRecovery { path, reason } => write!(
+                formatter,
+                "the settings store at {} needs one writable open to settle its committed image \
+                 before it can be read: {reason}",
+                path.display()
+            ),
+            SettingsError::StoreMissing { path } => write!(
+                formatter,
+                "there is no settings store at {}; nothing has started this deployment yet",
+                path.display()
+            ),
+            SettingsError::LockedByAnotherRuntime {
+                holder_pid: Some(holder_pid),
+            } => write!(
                 formatter,
                 "database is locked by another process (holder pid {holder_pid}); \
                  stop that runtime before starting a second one against this data directory"
             ),
+            // The holder published no process record, so there is no pid to
+            // print. The operator is told the truth — the directory is held,
+            // by a writer this layer cannot name — rather than being handed a
+            // fabricated identity to go and kill.
+            SettingsError::LockedByAnotherRuntime { holder_pid: None } => write!(
+                formatter,
+                "database is locked by another process, which published no process id; \
+                 stop that runtime before starting a second one against this data directory"
+            ),
+            SettingsError::StoreHeldByReaders {
+                observed_direct_readers,
+                readers,
+                path,
+            } => {
+                let named = readers
+                    .iter()
+                    .map(|reader| format!("{} ({})", reader.process_id, reader.process_name))
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                write!(
+                    formatter,
+                    "the settings store at {} is being read by {observed_direct_readers} \
+                     process(es) right now, so it cannot be opened yet; ask again once they \
+                     finish{}",
+                    path.display(),
+                    if named.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (reading now: {named})")
+                    }
+                )
+            }
             SettingsError::ScopeLabelViolation { requested, allowed } => write!(
                 formatter,
                 "this handle may not write at the {requested} rank; it carries {allowed}. \

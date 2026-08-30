@@ -1728,10 +1728,14 @@ pub(crate) fn load(args: Vec<OsString>) -> Result<RuntimeConfig, String> {
         }
     }
 
-    let data_dir = partial.data_dir.unwrap_or_else(default_data_dir);
-    let store_path = partial
-        .store_path
-        .unwrap_or_else(|| data_dir.join("store.contextgraph"));
+    // The daemon's locations come out of the SAME rule a live command resolves
+    // through (`resolve_store_location`), applied to the surfaces this merge
+    // has already collapsed — so a command asking about this deployment lands
+    // on the file this run is about to open.
+    let StoreLocation {
+        data_dir,
+        store_path,
+    } = store_location_from_stated(partial.data_dir, partial.store_path);
     let health_port = partial
         .health_port
         .unwrap_or(crate::settings_backends::automatic::HEALTH_PORT as u16);
@@ -2925,6 +2929,117 @@ fn merge(target: &mut PartialConfig, source: PartialConfig) {
     if source.bitrate_bps_above_2560x1440.is_some() {
         target.bitrate_bps_above_2560x1440 = source.bitrate_bps_above_2560x1440;
     }
+}
+
+/// One deployment's resolved locations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreLocation {
+    /// The deployment directory.
+    pub data_dir: PathBuf,
+    /// The store file itself.
+    pub store_path: PathBuf,
+}
+
+/// What this process's own environment states about where things are.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoreLocationEnvironment {
+    /// `VIGIL_DATA_DIR`.
+    pub data_dir: Option<PathBuf>,
+    /// `VIGIL_STORE_PATH`.
+    pub store_path: Option<PathBuf>,
+}
+
+/// The location keys of an add-on options file, and nothing else: a live
+/// command has no business failing on a camera list it never came to read.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct StoreLocationOptions {
+    #[serde(default)]
+    data_dir: Option<PathBuf>,
+    #[serde(default)]
+    store_path: Option<PathBuf>,
+}
+
+/// Where this deployment's store is, resolved from the LOCATION-ONLY
+/// configuration: the surfaces that say where things are, read without
+/// loading — or validating — anything else.
+///
+/// A live command has no command line to carry a store path and no business
+/// validating a camera list, but it must arrive at the SAME file the daemon
+/// opened or it asks its question of a store nobody is holding. Precedence is
+/// the deployment's, unchanged: the environment over the add-on's options, and
+/// a store pathname stated anywhere over any filename joined onto a directory.
+/// `options_json` is the add-on's options file, or `None` where there is none;
+/// a pathname that is not there is the same as none, because an install with
+/// no add-on behind it is the ordinary case rather than a fault.
+pub fn resolve_store_location(
+    environment: &StoreLocationEnvironment,
+    options_json: Option<&Path>,
+) -> Result<StoreLocation, String> {
+    let stated = match options_json {
+        Some(path) if path.exists() => read_store_location_options(path)?,
+        _ => StoreLocationOptions::default(),
+    };
+    Ok(store_location_from_stated(
+        environment.data_dir.clone().or(stated.data_dir),
+        environment.store_path.clone().or(stated.store_path),
+    ))
+}
+
+/// The one location rule, applied to whatever the deployment's surfaces
+/// stated. Used by [`resolve_store_location`] for a live command and by
+/// [`load`] for the daemon, off the same merged surfaces the daemon already
+/// resolves every other value from — so the two sides cannot land on
+/// different files.
+///
+/// A store pathname stated anywhere wins outright; with none stated, the store
+/// sits in this deployment's own directory under the product's filename, which
+/// is why the packaged `/data/store.contextgraph` falls OUT of a packaged
+/// deployment rather than being written down a second time inside the binary.
+fn store_location_from_stated(
+    data_dir: Option<PathBuf>,
+    store_path: Option<PathBuf>,
+) -> StoreLocation {
+    let data_dir = data_dir.unwrap_or_else(default_data_dir);
+    let store_path = store_path.unwrap_or_else(|| data_dir.join("store.contextgraph"));
+    StoreLocation {
+        data_dir,
+        store_path,
+    }
+}
+
+/// Read the add-on options file for its location keys alone. Its parse errors
+/// are described by LOCATION and KEY exactly as [`read_options_json`]
+/// describes them, so a mistyped credential elsewhere in the file can never
+/// ride out on a live command's error text.
+fn read_store_location_options(path: &Path) -> Result<StoreLocationOptions, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("could not read options {}: {error}", path.display()))?;
+    serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "could not parse options {}: {}",
+            path.display(),
+            describe_json_parse_error(&text, &error)
+        )
+    })
+}
+
+/// This process's locations as its ENVIRONMENT alone states them. No add-on
+/// options file is involved, so there is nothing here that can fail — which is
+/// what a caller that has no way to report a failure needs.
+pub(crate) fn store_location_from_environment(
+    environment: &StoreLocationEnvironment,
+) -> StoreLocation {
+    store_location_from_stated(environment.data_dir.clone(), environment.store_path.clone())
+}
+
+/// The same resolution against this process's real environment and the real
+/// `/data/options.json`. The ONE answer both [`load`] and live-command
+/// dispatch use.
+pub(crate) fn configured_store_location() -> Result<StoreLocation, String> {
+    resolve_store_location(
+        &crate::store_location_environment(),
+        Some(&default_options_json_path()),
+    )
 }
 
 fn default_data_dir() -> PathBuf {

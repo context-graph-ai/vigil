@@ -71,8 +71,11 @@ fn rendered_surface() -> (tempfile::TempDir, Vec<String>) {
     // Opening the store is what makes this a deployment with a surface to
     // read; the report is then built by the production direct read.
     let store = SettingsStore::open(directory.path()).expect("open the node-side settings store");
+    // Taken off the handle that created it, so the report is read from the very
+    // file this fixture owns.
+    let store_path = store.path().to_path_buf();
     drop(store);
-    let report = report_by_direct_read_at(directory.path(), &target())
+    let report = report_by_direct_read_at(directory.path(), &store_path, &target())
         .expect("build the operator report for this deployment");
     let lines = report.render_lines();
     (directory, lines)

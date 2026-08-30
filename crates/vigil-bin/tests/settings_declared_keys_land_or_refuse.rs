@@ -21,16 +21,15 @@
 //! refusal line was ever printed for the two backends.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use vigil::settings_backends::{DECODE_BACKEND_SETTING, DETECTION_BACKEND_SETTING};
 use vigil::settings_model::{Author, DETECTOR_QUEUE_CAPACITY_SETTING, MOTION_SENSITIVITY_SETTING};
 use vigil::settings_projection::{AUTHOR_KEY, SETTING_LINE_PREFIX, SURFACE_KEY};
 use vigil::settings_reflection::RESTART_ON_REFLECT_SETTING;
+use vigil::settings_store::SettingsStore;
 
 const VALUE_KEY: &str = "value";
 const NAME_KEY: &str = "name";
@@ -38,7 +37,8 @@ const NAME_KEY: &str = "name";
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, vigil_binary_path,
+    wait_for_store_owner, wait_until,
 };
 
 struct LiveVigil {
@@ -89,14 +89,14 @@ impl Drop for LiveVigil {
     }
 }
 
-fn wait_for_control_socket(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!("the control socket at {} to appear", socket_path.display()),
-        Duration::from_secs(30),
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .expect("the runtime must publish its control socket");
+/// Readiness is the store's OWNER ROUTE answering: the runtime holds this
+/// deployment's store, so a command aimed at the deployment reaches that
+/// runtime instead of being answered by the asking process. Proven by asking a
+/// real question and getting an owner-served answer — never a sleep, and never
+/// a printed line, which a runtime that started nothing could also produce.
+fn wait_for_the_store_owner(data_dir: &Path) {
+    wait_for_store_owner(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the runtime must own this deployment's store and answer through it");
 }
 
 fn vigil_settings(data_dir: &Path, args: &[&str]) -> Output {
@@ -165,7 +165,7 @@ fn the_five_previously_silent_add_on_keys_land_from_a_config_file_edit() {
     .expect("write config");
 
     let live = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
 
     // The refusal is printed once, at the point the config-file surface is
     // applied at startup — waited for explicitly rather than read once,

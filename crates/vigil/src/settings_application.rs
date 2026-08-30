@@ -59,6 +59,20 @@ const LIVE_SETTINGS: &[&str] = &[
     crate::settings_model::MOTION_SENSITIVITY_SETTING,
 ];
 
+/// The live values a consumer reads AFRESH on each pass, so the value standing
+/// in the running registry is what the next pass runs at.
+///
+/// Named once because two passes act on exactly this group: a change brings the
+/// authored value into force, and a withdrawal brings whatever the withdrawal
+/// left in force. A second spelling of the group would let one of the two move
+/// without the other.
+const READ_AFRESH_EACH_PASS: &[&str] = &[
+    crate::settings_model::DETECTOR_SAMPLE_FRAMES_SETTING,
+    crate::settings_model::DETECTOR_STATIONARY_INTERVAL_SETTING,
+    crate::settings_model::DETECTOR_CONFIDENCE_THRESHOLD_SETTING,
+    crate::settings_model::MOTION_SENSITIVITY_SETTING,
+];
+
 /// When `setting` takes effect. Every setting the operator surface answers for
 /// has an entry: a setting with no declared timing is a setting whose pending
 /// field cannot be rendered honestly.
@@ -268,12 +282,7 @@ pub fn apply_live_change<S: crate::settings_store::ResolvesSettings>(
     };
     // Read afresh on each pass by the seam that uses them, so the pass that
     // runs next runs at the new value: they are in force the moment they land.
-    for setting in [
-        crate::settings_model::DETECTOR_SAMPLE_FRAMES_SETTING,
-        crate::settings_model::DETECTOR_STATIONARY_INTERVAL_SETTING,
-        crate::settings_model::DETECTOR_CONFIDENCE_THRESHOLD_SETTING,
-        crate::settings_model::MOTION_SENSITIVITY_SETTING,
-    ] {
+    for setting in READ_AFRESH_EACH_PASS.iter().copied() {
         if let Some(value) = authored(setting) {
             bring_into_force(setting, value);
         }
@@ -328,6 +337,45 @@ pub fn apply_live_change<S: crate::settings_store::ResolvesSettings>(
     // what that camera's gate runs at, and every other camera keeps running
     // what it inherits.
     apply_camera_scoped_change(store, target);
+}
+
+/// Bring the value a WITHDRAWAL leaves in force onto this running process,
+/// then run the ordinary pass for everything else.
+///
+/// [`apply_live_change`] deliberately leaves a setting nobody has authored
+/// alone: what stands for it is the value this run started on, which the
+/// automatic floor sits beneath, and dropping a running process to that floor
+/// because no record exists would change a value the operator never touched.
+/// A reset is the one move where that reasoning does not hold, and reusing it
+/// there is what left a withdrawn value running. What a reset restores is not
+/// the value the run started on — it is whatever the withdrawn record was
+/// standing on top of, and until this brings it into force the process keeps
+/// running the value the operator just took back, until somebody restarts the
+/// node.
+///
+/// Only the withdrawn setting is treated this way, because only it changed
+/// author. The backends and the switches that govern them are left to the
+/// ordinary pass below, which answers a withdrawal by unpinning the choice and
+/// asking for a re-selection — bringing a resolved backend into force here
+/// instead would report a detector as running before one had been built for it.
+pub fn apply_live_withdrawal<S: crate::settings_store::ResolvesSettings>(
+    store: &S,
+    target: &crate::settings_model::ScopeTarget,
+    withdrawn: &str,
+) {
+    if is_running_process()
+        && let Ok(effective) = store.resolve(withdrawn, target)
+    {
+        if READ_AFRESH_EACH_PASS.contains(&withdrawn) {
+            bring_into_force(withdrawn, effective.requested);
+        } else if withdrawn == crate::settings_model::DETECTOR_QUEUE_CAPACITY_SETTING {
+            // Sized when this run started and holding work under that bound: it
+            // takes the withdrawn-to depth on when it next accepts work, which
+            // is the same road a set of it takes.
+            request_live(withdrawn, effective.requested);
+        }
+    }
+    apply_live_change(store, target);
 }
 
 /// Whether this process is the one running the cameras.

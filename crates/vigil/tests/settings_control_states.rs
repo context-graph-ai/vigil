@@ -79,9 +79,13 @@ fn lines_for(lines: &[String], prefix: &str, setting: &str) -> Vec<String> {
 /// `Scope::node(NODE)` under tenant [`TENANT`], leaving every assertion
 /// below unsatisfiable however the surface is implemented.
 fn rendered(deployment: &std::path::Path) -> Vec<String> {
-    report_by_direct_read_at(deployment, &target())
-        .expect("build the settings report by reading the store directly")
-        .render_lines()
+    report_by_direct_read_at(
+        deployment,
+        &vigil::settings_store::SettingsStore::store_path(deployment),
+        &target(),
+    )
+    .expect("build the settings report by reading the store directly")
+    .render_lines()
 }
 
 /// The phrase an operator reads for one control state, normalized the same

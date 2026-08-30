@@ -1289,6 +1289,7 @@ dependencies = [
 name = "contextdb-core"
 version = "1.0.0"
 dependencies = [
+ "bincode 2.0.1",
  "rand 0.9.4",
  "roaring",
  "serde",
@@ -1321,6 +1322,7 @@ dependencies = [
  "iroh-tickets",
  "irpc",
  "libc",
+ "nix",
  "parking_lot",
  "range-collections",
  "redb",
@@ -4973,6 +4975,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5377,6 +5388,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -8532,6 +8544,7 @@ name = "vigil-acceptance"
 version = "0.1.0"
 dependencies = [
  "context-graph",
+ "contextdb-core",
  "libc",
  "tempfile",
  "vigil",

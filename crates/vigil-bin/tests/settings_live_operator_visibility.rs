@@ -1,32 +1,30 @@
-//! Socket-first dispatch for the operator surface: an operator must be able to
-//! ask what Vigil is running at while Vigil is running, while it is stopped,
-//! and before it has ever started — and asking must never be the thing that
-//! brings a store into existence.
+//! `vigil settings` is the operator surface for asking what a deployment is
+//! running at — while it is running, while it is stopped, and before it has
+//! ever started — and asking is never the thing that brings a store into
+//! existence.
 //!
-//! `vigil settings` is the operator surface this arc authors, over the same
-//! ask-the-running-owner-first, fall-back-to-a-direct-read dispatch that
-//! `events`/`why`/`stats` already use (`crates/vigil/src/lib.rs`,
-//! `print_control_or_direct`). No HTTP settings route joins it in this arc.
-//! Neither the command nor the dispatch exists on `dev`
-//! (`crates/vigil/src/lib.rs:322-330`), so every test here fails today.
+//! It is answered by the same dispatch `events`/`why`/`stats` are answered by
+//! (`crates/vigil/src/lib.rs`, `print_settings` beside `print_control_or_direct`):
+//! ask the process that owns this deployment's store, through Context Graph's
+//! authenticated owner channel, and read the store directly only when no
+//! runtime is holding it. There is no Vigil control socket, and no HTTP
+//! settings route.
 //!
-//! Lineage: these four behaviors were proven on the closed run's salvage tag
-//! and are reused for their SHAPE only — two real, separate OS processes
-//! contending for one store file, which is the only way to exercise
-//! inter-process store ownership. The projection they assert against is
-//! re-authored: the tag's two-state `name=/value=/control=/source=` line is
-//! superseded by the ratified field set below.
+//! The four behaviors below are the two legs of that dispatch, the persistence
+//! witness and the read-purity witness. Each drives two real, separate
+//! operating-system processes contending for one store file, which is the only
+//! way to exercise inter-process store ownership; the projection they assert
+//! against is the field set `settings_projection` renders.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
-use std::time::Duration;
 
 use vigil::settings_model::{Author, DETECTOR_SAMPLE_FRAMES_SETTING, Surface};
 use vigil::settings_projection::{
     AUTHOR_KEY, CONTROL_STATE_KEY, REASON_KEY, SCOPE_KEY, SETTING_LINE_PREFIX, SURFACE_KEY,
 };
+use vigil::settings_store::SettingsStore;
 
 /// The effective-value field key. `settings_projection` declares the control,
 /// author, surface, scope and reason keys but not this one, so the spelling is
@@ -40,14 +38,18 @@ const NAME_KEY: &str = "name";
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    TcpPortReservation, capture_pipe, vigil_binary_path, wait_for_store_owner,
+    wait_for_store_owner_to_release,
 };
 
 /// The prefix `live_read::handle_owner_request` puts on an answer served by the
-/// running owner over its control socket. Its presence is what distinguishes
-/// the socket answer from the direct store read; both must render the same
-/// projection beneath it.
-const OWNER_SERVED_MARKER: &str = "served-by=af_unix";
+/// running owner. Its presence is what distinguishes the owner-served answer
+/// from the direct store read; both must render the same projection beneath it.
+/// Read from the one place that writes it rather than retyped, so a test never
+/// freezes the name of the road the answer travelled.
+fn owner_served_marker() -> &'static str {
+    vigil::OWNER_SERVED_PREFIX.trim_end_matches('\n')
+}
 
 struct LiveVigil {
     child: Child,
@@ -75,7 +77,7 @@ impl LiveVigil {
         review.release();
         let mut child = command.spawn().expect("spawn vigil run");
         // Drain both pipes so a full one can never stall the child; readiness
-        // is proven by the socket, never by anything printed.
+        // is proven by the owner route answering, never by anything printed.
         let _stdout = capture_pipe(child.stdout.take());
         let _stderr = capture_pipe(child.stderr.take());
         Self { child }
@@ -97,37 +99,23 @@ impl Drop for LiveVigil {
     }
 }
 
-/// Wait for the control socket to APPEAR and accept a connection — the salvage
-/// harness detail worth keeping. The runtime prints "ready" before it binds the
-/// listener, so a reader that waits on that line races the listener and
-/// silently falls through to the direct store read, which is the exact
-/// behavior these tests are here to tell apart. Never a sleep.
-fn wait_for_control_socket(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!("the control socket at {} to appear", socket_path.display()),
-        Duration::from_secs(30),
-        || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-    )
-    .expect("the runtime must publish its control socket");
+/// Readiness is the store's OWNER ROUTE answering: the runtime holds this
+/// deployment's store, so a command aimed at the deployment reaches that
+/// runtime instead of being answered by the asking process. Proven by asking a
+/// real question and getting an owner-served answer — never a sleep, and never
+/// a printed line, which a runtime that started nothing could also produce.
+fn wait_for_the_store_owner(data_dir: &Path) {
+    wait_for_store_owner(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the runtime must own this deployment's store and answer through it");
 }
 
-fn wait_for_control_socket_to_go_away(data_dir: &Path) {
-    let socket_path = data_dir.join("control.sock");
-    wait_until(
-        &format!(
-            "the control socket at {} to stop accepting connections",
-            socket_path.display()
-        ),
-        Duration::from_secs(30),
-        || {
-            Ok(match UnixStream::connect(&socket_path) {
-                Ok(_) => None,
-                Err(_) => Some(()),
-            })
-        },
-    )
-    .expect("the runtime must release its control socket when it stops");
+/// The inverse wait: nobody owns the store any more, so the previous process
+/// is genuinely down and the store is free. That is what makes the next start a
+/// real second process rather than a second question to the first one — and a
+/// store still held would refuse it outright.
+fn wait_for_the_store_to_be_free(data_dir: &Path) {
+    wait_for_store_owner_to_release(data_dir, &SettingsStore::store_path(data_dir))
+        .expect("the previous runtime must release the store before the next one starts");
 }
 
 fn vigil_settings(data_dir: &Path) -> Output {
@@ -171,11 +159,11 @@ fn setting_named<'a>(rendered: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Unfakeable because a second OS process genuinely cannot open a store the
-/// running owner holds: the answer can only come from the owner over its
-/// control socket, and the owner marker proves which path served it. This is
-/// the ordinary case — an operator checking settings on a running system — and
-/// the defect the salvage run found was that the settings command skipped the
-/// dispatch every other read-only surface already used and failed exactly here.
+/// running owner holds: the answer can only come from the owner over that
+/// store's own owner channel, and the owner marker proves which path served it.
+/// This is the ordinary case — an operator checking settings on a running
+/// system — and the defect it holds shut is a settings command that skips the
+/// dispatch every other read-only surface already uses and fails exactly here.
 #[test]
 fn listing_answers_while_the_runtime_owns_the_store() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -185,7 +173,7 @@ fn listing_answers_while_the_runtime_owns_the_store() {
     fs::write(&config_path, "cameras = []\n").expect("write config");
 
     let live = LiveVigil::spawn(&config_path, &data_dir);
-    wait_for_control_socket(&data_dir);
+    wait_for_the_store_owner(&data_dir);
 
     let output = vigil_settings(&data_dir);
     live.stop();
@@ -199,9 +187,10 @@ fn listing_answers_while_the_runtime_owns_the_store() {
     );
     let rendered = stdout_of(&output);
     assert!(
-        rendered.contains(OWNER_SERVED_MARKER),
-        "reading settings while the runtime owns the store must be served by the OWNER over its \
-         control socket, not by a direct-read fallback that would hit the store lock; got:\n{rendered}"
+        rendered.contains(owner_served_marker()),
+        "reading settings while the runtime owns the store must be served by the OWNER over that \
+         store's own owner channel, not by a direct-read fallback that would hit the store lock; \
+         got:\n{rendered}"
     );
 
     let lines = setting_lines(&rendered);
@@ -221,8 +210,8 @@ fn listing_answers_while_the_runtime_owns_the_store() {
         ] {
             assert!(
                 token_field(line, field).is_some_and(|value| !value.is_empty()),
-                "the socket answer renders the same projection as a direct read — `{name}` is \
-                 missing `{field}=`; got: {line}"
+                "the owner-served answer renders the same projection as a direct read — \
+                 `{name}` is missing `{field}=`; got: {line}"
             );
         }
         assert!(
@@ -233,7 +222,8 @@ fn listing_answers_while_the_runtime_owns_the_store() {
 }
 
 /// Unfakeable because the owner is gone before the question is asked and the
-/// socket is proven gone first, so the answer cannot have come over it — and
+/// store is proven unowned first, so the answer cannot have come over the owner
+/// channel — and
 /// the absence of the owner marker is asserted, not assumed. This is the
 /// fallback leg of the dispatch: same command, same projection, different path.
 #[test]
@@ -246,10 +236,10 @@ fn listing_answers_by_direct_read_when_no_runtime_owns_the_store() {
 
     {
         let live = LiveVigil::spawn(&config_path, &data_dir);
-        wait_for_control_socket(&data_dir);
+        wait_for_the_store_owner(&data_dir);
         live.stop();
     }
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     let store_path = data_dir.join("store.contextgraph");
     assert!(
@@ -267,7 +257,7 @@ fn listing_answers_by_direct_read_when_no_runtime_owns_the_store() {
     );
     let rendered = stdout_of(&output);
     assert!(
-        !rendered.contains(OWNER_SERVED_MARKER),
+        !rendered.contains(owner_served_marker()),
         "with no runtime owning the store, the answer cannot have been served by an owner — a \
          surface still claiming it was is lying about where its answer came from; got:\n{rendered}"
     );
@@ -295,10 +285,10 @@ fn listing_after_the_run_stops_serves_what_was_persisted() {
 
     {
         let live = LiveVigil::spawn(&config_path, &data_dir);
-        wait_for_control_socket(&data_dir);
+        wait_for_the_store_owner(&data_dir);
         live.stop();
     }
-    wait_for_control_socket_to_go_away(&data_dir);
+    wait_for_the_store_to_be_free(&data_dir);
 
     // The second process is given the data directory and nothing else: it does
     // not see the config file, so it cannot re-derive the file's assertion.

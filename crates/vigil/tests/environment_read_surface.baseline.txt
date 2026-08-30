@@ -31,7 +31,6 @@ vigil/config.rs|default_options_json_path|VIGIL_TEST_OPTIONS_JSON
 vigil/lib.rs|store_path_from_env|VIGIL_STORE_PATH
 vigil/lib.rs|data_dir_from_env|VIGIL_DATA_DIR
 vigil/lib.rs|data_dir_from_env|VIGIL_STORE_PATH
-vigil/control_socket.rs|control_socket_path|VIGIL_CONTROL_SOCKET
 vigil/privilege.rs|prepare_runtime_user|VIGIL_DROP_PRIVILEGES
 vigil/privilege.rs|env_u32|<dynamic>
 vigil/privilege.rs|prepare_runtime_user|VIGIL_RUN_UID

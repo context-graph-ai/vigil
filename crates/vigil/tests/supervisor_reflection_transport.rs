@@ -413,11 +413,19 @@ fn the_stored_restart_policy_decides_whether_a_mirror_is_followed_by_a_restart()
 #[test]
 fn a_local_settings_change_mirrors_onto_the_add_on_options() {
     let directory = tempfile::tempdir().expect("temporary data directory");
+    // A deployment that has been STARTED, which is the only kind a change can
+    // be made against: `settings set` refuses a directory nobody has ever run
+    // anything in rather than creating a store there, so a fixture that skipped
+    // this would be asserting about a refusal.
+    drop(open_store(&directory));
     let supervisor = SupervisorDouble::start(a_users_record());
     let client = supervisor.client();
 
     let answer = vigil::settings_command::answer_with_reflection(
         directory.path(),
+        // The store this deployment owns; a change mirrored out of any other
+        // store would be another deployment's.
+        &vigil::settings_store::SettingsStore::store_path(directory.path()),
         &format!("set {REFLECTED_SETTING} 2"),
         &client,
     );
@@ -450,11 +458,19 @@ fn a_local_settings_change_mirrors_onto_the_add_on_options() {
 #[test]
 fn what_was_written_out_survives_as_the_deployments_own_echo_record() {
     let directory = tempfile::tempdir().expect("temporary data directory");
+    // A deployment that has been STARTED, which is the only kind a change can
+    // be made against: `settings set` refuses a directory nobody has ever run
+    // anything in rather than creating a store there, so a fixture that skipped
+    // this would be asserting about a refusal.
+    drop(open_store(&directory));
     let supervisor = SupervisorDouble::start(a_users_record());
     let client = supervisor.client();
 
     let answer = vigil::settings_command::answer_with_reflection(
         directory.path(),
+        // The store this deployment owns; a change mirrored out of any other
+        // store would be another deployment's.
+        &vigil::settings_store::SettingsStore::store_path(directory.path()),
         &format!("set {REFLECTED_SETTING} 2"),
         &client,
     );

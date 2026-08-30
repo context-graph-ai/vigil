@@ -25,6 +25,13 @@ fn a_started_deployment() -> tempfile::TempDir {
     directory
 }
 
+/// The store this fixture's deployment actually owns — the file
+/// `a_started_deployment` just created, named rather than left to be derived,
+/// so the report below is read from that deployment and no other.
+fn store_of(directory: &tempfile::TempDir) -> std::path::PathBuf {
+    SettingsStore::store_path(directory.path())
+}
+
 #[test]
 fn the_automatic_choice_names_the_backend_the_detector_is_running() {
     // Unfakeable because the running fact is recorded exactly the way the
@@ -38,7 +45,8 @@ fn the_automatic_choice_names_the_backend_the_detector_is_running() {
         SettingValue::text(PROVED_BACKEND),
     );
 
-    let report = report_by_direct_read(directory.path()).expect("read the operator report");
+    let report = report_by_direct_read(directory.path(), &store_of(&directory))
+        .expect("read the operator report");
     let setting = report
         .settings
         .iter()
@@ -74,7 +82,8 @@ fn the_domain_view_agrees_with_the_running_detector() {
         SettingValue::text(PROVED_BACKEND),
     );
 
-    let report = report_by_direct_read(directory.path()).expect("read the operator report");
+    let report = report_by_direct_read(directory.path(), &store_of(&directory))
+        .expect("read the operator report");
     let choice = report
         .domains
         .iter()
@@ -105,7 +114,8 @@ fn the_reason_moves_onto_the_promoted_backend_with_the_choice() {
         SettingValue::text(PROVED_BACKEND),
     );
 
-    let report = report_by_direct_read(directory.path()).expect("read the operator report");
+    let report = report_by_direct_read(directory.path(), &store_of(&directory))
+        .expect("read the operator report");
     let setting = report
         .settings
         .iter()

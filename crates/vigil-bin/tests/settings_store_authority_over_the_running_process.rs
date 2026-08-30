@@ -22,7 +22,6 @@
 //! between two starts.
 
 use std::fs;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 
@@ -34,11 +33,13 @@ use vigil::settings_model::{
 use vigil::settings_projection::{
     AUTHOR_KEY, NAME_KEY, NONE, RUNNING_KEY, SETTING_LINE_PREFIX, SURFACE_KEY, VALUE_KEY,
 };
+use vigil::settings_store::SettingsStore;
 
 #[path = "../../vigil/tests/deterministic_fixture_support.rs"]
 mod deterministic_fixture_support;
 use deterministic_fixture_support::{
-    RUNTIME_STARTUP_TIMEOUT, TcpPortReservation, capture_pipe, vigil_binary_path, wait_until,
+    TcpPortReservation, capture_pipe, vigil_binary_path, wait_for_store_owner,
+    wait_for_store_owner_to_release,
 };
 
 /// What the configuration file says for the whole of every test below — the
@@ -109,46 +110,32 @@ impl Deployment {
             stdout,
             stderr,
         };
-        self.wait_for_control_socket(&run);
+        self.wait_for_the_store_owner(&run);
         run
     }
 
-    /// Readiness is the control socket accepting a connection — a state, never
-    /// a sleep and never a printed line.
-    fn wait_for_control_socket(&self, run: &LiveVigil) {
-        let socket_path = self.data_dir.join("control.sock");
-        wait_until(
-            &format!("the control socket at {} to appear", socket_path.display()),
-            RUNTIME_STARTUP_TIMEOUT,
-            || Ok(UnixStream::connect(&socket_path).ok().map(|_| ())),
-        )
-        .unwrap_or_else(|error| {
-            panic!(
-                "{error}. The runtime must come up and publish its control socket. Output so \
-                 far:\n{}\n{}",
-                run.stdout(),
-                run.stderr()
-            )
-        });
+    /// Readiness is the store's OWNER ROUTE answering: this runtime holds the
+    /// deployment's store, so a command aimed at the deployment reaches it
+    /// rather than being answered by the asking process. A state, proven by
+    /// asking a real question — never a sleep, and never a printed line, which
+    /// a runtime that started nothing could also produce.
+    fn wait_for_the_store_owner(&self, run: &LiveVigil) {
+        wait_for_store_owner(&self.data_dir, &SettingsStore::store_path(&self.data_dir))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}. The runtime must come up and own this deployment's store. Output \
+                     so far:\n{}",
+                    run.stdout()
+                )
+            });
     }
 
-    /// The inverse wait, so the next start is genuinely a second process.
+    /// The inverse wait: nobody owns the store any more, so the next start is
+    /// genuinely a second process rather than a second question to the first
+    /// one — and a store still held would refuse it outright.
     fn wait_for_shutdown(&self) {
-        let socket_path = self.data_dir.join("control.sock");
-        wait_until(
-            &format!(
-                "the control socket at {} to stop accepting connections",
-                socket_path.display()
-            ),
-            RUNTIME_STARTUP_TIMEOUT,
-            || {
-                Ok(match UnixStream::connect(&socket_path) {
-                    Ok(_) => None,
-                    Err(_) => Some(()),
-                })
-            },
-        )
-        .expect("the previous runtime must be fully stopped before the next start");
+        wait_for_store_owner_to_release(&self.data_dir, &SettingsStore::store_path(&self.data_dir))
+            .expect("the previous runtime must release the store before the next start");
     }
 
     fn settings(&self, args: &[&str]) -> Output {

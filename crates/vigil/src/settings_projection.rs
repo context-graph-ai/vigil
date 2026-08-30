@@ -31,12 +31,31 @@ pub const SECRET_LINE_PREFIX: &str = "secret";
 /// The line prefix carrying the continuous unmanaged statement.
 pub const UNMANAGED_LINE_PREFIX: &str = "unmanaged";
 
+/// The line a command uses to say that what was asked for is not available
+/// through it, and where it IS available.
+pub const UNAVAILABLE_LINE_PREFIX: &str = "unavailable";
+
+/// The line carrying a store that is momentarily being read by somebody else.
+/// Deliberately NOT the unmanaged line: this deployment is healthy and managed,
+/// and the condition clears on its own.
+pub const BUSY_LINE_PREFIX: &str = "busy";
+
+/// The line naming one process that is reading the store right now.
+pub const READER_LINE_PREFIX: &str = "reader";
+
+/// The key naming the store an answer is about.
+pub const PATH_KEY: &str = "path";
+
 /// Everything one operator-surface answer carries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsReport {
     pub settings: Vec<EffectiveSetting>,
     pub domains: Vec<DomainView>,
-    pub identity: ServiceIdentity,
+    /// The identity in force, when the process rendering this report is in a
+    /// position to KNOW one. A separate command whose store cannot be read is
+    /// not: it has no store to read the identity out of and no route to the run
+    /// that holds it, so it reports none rather than deriving one.
+    pub identity: Option<ServiceIdentity>,
     pub secrets: Vec<SecretSourceLine>,
     /// Present for as long as a degraded run lasts.
     pub unmanaged_statement: Option<String>,
@@ -50,7 +69,9 @@ impl SettingsReport {
         if let Some(statement) = &self.unmanaged_statement {
             lines.push(format!("{UNMANAGED_LINE_PREFIX} {statement}"));
         }
-        lines.push(self.render_identity_line());
+        if let Some(line) = self.render_identity_line() {
+            lines.push(line);
+        }
         for setting in &self.settings {
             lines.push(render_setting(setting));
             for held in &setting.held {
@@ -95,12 +116,13 @@ impl SettingsReport {
     /// was arrived at, and the fact that it is shown rather than offered as
     /// something to set. One rendering, so the listing and the identity
     /// operation can never disagree about it.
-    pub fn render_identity_line(&self) -> String {
-        format!(
+    pub fn render_identity_line(&self) -> Option<String> {
+        let identity = self.identity.as_ref()?;
+        Some(format!(
             "{IDENTITY_LINE_PREFIX} {VALUE_KEY}={} {DERIVATION_KEY}={} {ACCESS_KEY}={READ_ONLY}",
-            self.identity.value,
-            derivation_token(&self.identity.derivation),
-        )
+            identity.value,
+            derivation_token(&identity.derivation),
+        ))
     }
 }
 
@@ -386,14 +408,17 @@ fn applies_token(setting: &str) -> &'static str {
 
 /// Build the report by reading the store directly, for a deployment whose
 /// runtime is not up. Never creates a store.
-pub fn report_by_direct_read(data_dir: &std::path::Path) -> Result<SettingsReport, SettingsError> {
+pub fn report_by_direct_read(
+    data_dir: &std::path::Path,
+    store_path: &std::path::Path,
+) -> Result<SettingsReport, SettingsError> {
     let target = crate::settings_model::ScopeTarget {
         tenant: default_deployment_name(data_dir),
         site: default_deployment_name(data_dir),
         node: default_deployment_name(data_dir),
         camera: None,
     };
-    report_by_direct_read_at(data_dir, &target)
+    report_by_direct_read_at(data_dir, store_path, &target)
 }
 
 /// The deployment identity a direct read resolves at when the caller named
@@ -411,48 +436,68 @@ fn default_deployment_name(data_dir: &std::path::Path) -> String {
 /// tenant, site, node and camera the report resolves at.
 pub fn report_by_direct_read_at(
     data_dir: &std::path::Path,
+    store_path: &std::path::Path,
     target: &crate::settings_model::ScopeTarget,
 ) -> Result<SettingsReport, SettingsError> {
-    if !crate::settings_store::store_exists(data_dir) {
-        // A never-started deployment still reports what it WOULD run at, and
-        // answering must leave the data directory exactly as it was.
-        return Ok(SettingsReport {
-            settings: crate::settings_store::automatic_floor_listing(target),
-            domains: automatic_domain_views(),
-            identity: crate::service_identity::read_sidecar(data_dir).unwrap_or(ServiceIdentity {
-                // The identity is a name a person reads, so a deployment that
-                // has never written one down answers with the deployment's own
-                // directory name — never with the key its records are stored
-                // under, which is an identifier and names nothing.
-                value: crate::node_key::fallback_name(data_dir),
-                derivation: IdentityDerivation::DerivedNotYetPersisted,
-            }),
-            secrets: crate::settings_environment::secret_source_lines(
-                &crate::settings_store::SettingsStore::store_path(data_dir),
-            )?,
-            unmanaged_statement: None,
-        });
-    }
-    let store = crate::settings_store::SettingsStore::open(data_dir)?;
+    // ONE no-create read of the store, and its own outcome decides everything
+    // below. Nothing asks the filesystem whether a store is there first: an
+    // existence question answers about a different moment than the open that
+    // follows it, answers `false` for a configured store whose volume never
+    // mounted exactly as it does for a directory nobody has run anything in,
+    // and the open it guarded was a WRITABLE one — so a listing an operator
+    // asked for contended with the very store it was reporting on, and created
+    // that store when it was not there.
+    let store = match crate::settings_store::SettingsStore::open_to_read(store_path) {
+        Ok(store) => store,
+        // Nothing has ever run here. The deployment still reports what it WOULD
+        // run at, and answering leaves its directory exactly as it was.
+        Err(SettingsError::StoreMissing { .. }) => {
+            return Ok(SettingsReport {
+                settings: crate::settings_store::automatic_floor_listing(target),
+                domains: automatic_domain_views(),
+                identity: Some(crate::service_identity::read_sidecar(data_dir).unwrap_or(
+                    ServiceIdentity {
+                        // The identity is a name a person reads, so a deployment
+                        // that has never written one down answers with the
+                        // deployment's own directory name — never with the key its
+                        // records are stored under, which is an identifier and
+                        // names nothing.
+                        value: crate::node_key::fallback_name(data_dir),
+                        derivation: IdentityDerivation::DerivedNotYetPersisted,
+                    },
+                )),
+                secrets:
+                    crate::settings_environment::secret_source_lines_for_a_store_that_is_not_there(
+                    )?,
+                unmanaged_statement: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let settings = store.listing(target)?;
     let domains = domain_views(&store, target)?;
     // The stored record is the identity in force — the same one the running
     // node announces as its Home Assistant device. The sidecar answers only
     // for a deployment whose store holds no identity yet, and the deployment
     // directory's own name only when neither can say.
-    let identity = crate::service_identity::persisted(&store, data_dir)?
-        .or_else(|| crate::service_identity::read_sidecar(data_dir))
-        .unwrap_or_else(|| ServiceIdentity {
-            value: default_deployment_name(data_dir),
-            derivation: IdentityDerivation::DerivedNotYetPersisted,
-        });
+    let identity = Some(
+        crate::service_identity::persisted(&store, data_dir)?
+            .or_else(|| crate::service_identity::read_sidecar(data_dir))
+            .unwrap_or_else(|| ServiceIdentity {
+                value: default_deployment_name(data_dir),
+                derivation: IdentityDerivation::DerivedNotYetPersisted,
+            }),
+    );
     Ok(SettingsReport {
         settings,
         domains,
         identity,
-        secrets: crate::settings_environment::secret_source_lines(
-            &crate::settings_store::SettingsStore::store_path(data_dir),
-        )?,
+        // Through the handle this listing is already holding. Opening the store
+        // again — once per secret — contended with that very handle, and on a
+        // deployment somebody is momentarily reading it was the open that
+        // failed, throwing away the settings, domains and identity already read
+        // back through the handle that succeeded.
+        secrets: crate::settings_environment::secret_source_lines_from(&store)?,
         unmanaged_statement: None,
     })
 }
@@ -474,20 +519,101 @@ pub fn report_degraded(data_dir: &std::path::Path) -> SettingsReport {
         settings: crate::settings_store::automatic_floor_listing(&target),
         domains: automatic_domain_views(),
         // The identity this run resolved and is announcing, when this process
-        // is the run. Deriving one here instead would answer a question the
-        // run has already answered, from different inputs — and a node that
-        // names itself one thing on the broker and another on the surface an
-        // operator reads is a node they cannot identify at all.
-        identity: crate::service_identity::in_force().unwrap_or_else(|| {
-            // Derived from the deployment's own directory name, which is what
-            // a run derives from too — never from the key the records are
-            // stored under, which no person reads and which would rename this
-            // node's Home Assistant device the moment it appeared.
-            crate::service_identity::resolve_ephemeral(&crate::node_key::fallback_name(data_dir))
-        }),
+        // IS the run. It answers for itself out of what it already resolved,
+        // rather than working the question out a second time from different
+        // inputs — a node that names itself one thing on the broker and another
+        // on the surface an operator reads is a node they cannot identify.
+        //
+        // Any other process gets no identity at all, and says why. It could
+        // only produce one by deriving it from the directory it was handed or
+        // by guessing at a configuration file nobody named it, and that is not
+        // a vaguer answer than the truth — it is a DIFFERENT node's answer,
+        // with nothing on the line to say so. The operator who reads it against
+        // their broker, or against another node, has no way to tell.
+        identity: crate::service_identity::in_force(),
         secrets: Vec::new(),
         unmanaged_statement: Some(crate::settings_degraded::unmanaged_statement()),
     }
+}
+
+/// The whole answer a command gives when the store it selected cannot be read.
+///
+/// Two lines and nothing else. The unmanaged line, because the degraded
+/// capability contract is true of this deployment however the operator reached
+/// it; and one line naming the store — the thing they actually repair — saying
+/// that this deployment's settings and this node's identity are not available
+/// THROUGH THIS COMMAND, and where they are.
+///
+/// What is deliberately absent is the point. There is no settings listing, no
+/// domain roster, no secret line and no identity: this process could not read
+/// the store, so every one of those would be a value it made up — the
+/// artifact's own defaults standing where an operator expects their
+/// deployment's, and a node name derived from a directory. That is not a vaguer
+/// answer than the truth, it is a DIFFERENT deployment's answer, and nothing on
+/// the line would say so. One command's worth of redirection costs an operator
+/// far less than a confidently wrong reading costs their diagnosis.
+pub fn render_unreadable(store_path: &std::path::Path) -> String {
+    // Assembled from whole sentences rather than one wrapped literal: a
+    // continued string literal carries its own source indentation into the
+    // operator's line, and this line is read by a person.
+    let mut reason = String::new();
+    reason.push_str("the selected store is unreadable, so this command cannot report ");
+    reason.push_str("this deployment's settings or this node's identity; the running service ");
+    reason.push_str("prints its identity on its startup output, and its health surface reports ");
+    reason.push_str("this unmanaged condition");
+    let lines = [
+        format!(
+            "{UNMANAGED_LINE_PREFIX} {}",
+            crate::settings_degraded::unmanaged_statement()
+        ),
+        format!(
+            "{UNAVAILABLE_LINE_PREFIX} {PATH_KEY}={} {REASON_KEY}={reason}",
+            store_path.display()
+        ),
+    ];
+    format!("{}\n", lines.join("\n"))
+}
+
+/// The whole answer a command gives when the store it selected is being READ by
+/// another process right now.
+///
+/// This is not the unreadable answer with softer words. A store held by readers
+/// is healthy, managed, and free again the moment they finish — so the answer
+/// says who is holding it, how many of them there are, and which store, and it
+/// never tells an operator to go and repair working storage or that this node
+/// is unmanaged. Those two conditions send a person to two completely different
+/// places, and only one of them is a problem.
+///
+/// The count and the named readers come apart on purpose, exactly as the layers
+/// below report them: a reader that was counted but could not be identified
+/// still holds the store, so an answer that took its count from the list would
+/// under-report who is in the way. Every reader the layers below DID identify
+/// gets a line of its own, so a name with a space in it cannot run into the
+/// next field.
+pub fn render_busy_with_readers(
+    store_path: &std::path::Path,
+    observed_direct_readers: u64,
+    readers: &[context_graph::ReaderIdentity],
+) -> String {
+    // Assembled from whole sentences rather than one wrapped literal: a
+    // continued string literal carries its own source indentation into the
+    // operator's line, and this line is read by a person.
+    let mut reason = String::new();
+    reason.push_str("another process is reading this store right now, so this command cannot ");
+    reason.push_str("open it yet; the store itself is healthy and nothing needs repairing, and ");
+    reason.push_str("the same command answers as soon as the readers below finish");
+    let mut lines = vec![format!(
+        "{BUSY_LINE_PREFIX} {PATH_KEY}={} {READER_LINE_PREFIX}s={observed_direct_readers} \
+         {REASON_KEY}={reason}",
+        store_path.display()
+    )];
+    lines.extend(readers.iter().map(|reader| {
+        format!(
+            "{READER_LINE_PREFIX} pid={} process={}",
+            reader.process_id, reader.process_name
+        )
+    }));
+    format!("{}\n", lines.join("\n"))
 }
 
 /// The degraded answer as one operator-surface response, rendered through the

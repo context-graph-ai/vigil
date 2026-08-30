@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use context_graph::{
-    CreateEntity, Embedder, EmbedderConfig, EmbedderRegistration, EmbeddingInput,
+    ControlHandler, CreateEntity, Embedder, EmbedderConfig, EmbedderRegistration, EmbeddingInput,
     EmbeddingSpaceDecl, EntityId, EntityReferenceMatchOptions, EntityType, EvidenceKind,
     EvidenceProducer, EvidenceRef, ObservationId, RecordObservation, RetentionStatus, Store,
     StoreConfig,
@@ -435,7 +435,7 @@ pub struct RecognitionProvenance {
 }
 
 pub fn recognition_provenance(
-    store: &Store,
+    store: &impl crate::live_read::GraphReads,
     resolved_detection_id: &str,
 ) -> Option<RecognitionProvenance> {
     let uuid = uuid::Uuid::parse_str(resolved_detection_id).ok()?;
@@ -654,35 +654,101 @@ pub fn open_store_with_embedder(
     embedding_space_id: &str,
     embedder: Arc<dyn Embedder>,
 ) -> Result<Store, String> {
+    open_recognition_store(path, embedding_space_id, embedder, None)
+}
+
+/// Open the recognition store AND become the administrative owner of it on the
+/// same handle.
+///
+/// There is exactly one writable open of a store — contextdb refuses a second —
+/// so a deployment that recognizes what it sees must not have to choose
+/// between recognition and answering its operator. It does not: context-graph
+/// carries the composed door, and this is vigil's one call to it. Recognition
+/// and the owner handler are independent on the handle that comes back —
+/// serving a frame embeds nothing, embedding runs no handler — and neither has
+/// to be torn down for the other to work.
+///
+/// `handler` reaches the engine the same way it does on a recognition-free
+/// open: context-graph turns it into an owner-read configuration with
+/// `owner_control::owner_read_config`, so what an owner frame costs and which
+/// namespace it must travel under are the same numbers and the same name here
+/// as on every other context-graph store.
+pub fn open_store_with_embedder_and_owner_handler(
+    path: &Path,
+    embedding_space_id: &str,
+    embedder: Arc<dyn Embedder>,
+    handler: ControlHandler,
+) -> Result<Store, String> {
+    open_recognition_store(path, embedding_space_id, embedder, Some(handler))
+}
+
+/// The one place that builds the vision registration, whether or not the open
+/// also carries the owner handler. Two doors, one declaration of what this
+/// deployment embeds.
+fn open_recognition_store(
+    path: &Path,
+    embedding_space_id: &str,
+    embedder: Arc<dyn Embedder>,
+    handler: Option<ControlHandler>,
+) -> Result<Store, String> {
+    prepare_recognition_store_parent(path)?;
+    attempt_recognition_store_open(path, embedding_space_id, embedder, handler).map_err(|error| {
+        crate::store::classify_store_open_error("store open with vision embedder failed", error)
+    })
+}
+
+/// Create the store's parent directory, once, before any open attempt. Split
+/// out because an open that has to be RETRIED must not redo the filesystem
+/// work each time round.
+pub(crate) fn prepare_recognition_store_parent(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent).map_err(|e| format!("store parent: {e}"))?;
     }
+    Ok(())
+}
+
+/// ONE attempt at the recognition open, with context-graph's refusal still
+/// typed.
+///
+/// A caller that must wait a refusal out — a starting runtime refused because
+/// direct readers are hydrating the store — decides that on the variant it
+/// gets back, which is why this door stops short of flattening it into the
+/// operator sentence. Everything else about the open is unchanged: the same
+/// registration, the same composed door, the same handle.
+pub(crate) fn attempt_recognition_store_open(
+    path: &Path,
+    embedding_space_id: &str,
+    embedder: Arc<dyn Embedder>,
+    handler: Option<ControlHandler>,
+) -> Result<Store, context_graph::CgError> {
     let space = embedder.embedding_space();
-    let store = Store::open_with_embedder_registrations(
-        StoreConfig {
-            db_path: path.to_path_buf(),
-            default_text_embedder: Some(EmbedderConfig::disabled()),
-            ..StoreConfig::default()
+    let config = StoreConfig {
+        db_path: path.to_path_buf(),
+        default_text_embedder: Some(EmbedderConfig::disabled()),
+        ..StoreConfig::default()
+    };
+    let registrations = vec![EmbedderRegistration {
+        space: EmbeddingSpaceDecl {
+            embedding_space_id: embedding_space_id.to_string(),
+            dimension: space.dimension,
+            metric: space.metric,
+            model_family: space.model_family,
+            model_name: space.model_name,
+            model_version: space.model_version,
+            supported_evidence_kinds: space.supported_evidence_kinds,
+            default_for_evidence_kind: None,
+            bindings: Vec::new(),
         },
-        vec![EmbedderRegistration {
-            space: EmbeddingSpaceDecl {
-                embedding_space_id: embedding_space_id.to_string(),
-                dimension: space.dimension,
-                metric: space.metric,
-                model_family: space.model_family,
-                model_name: space.model_name,
-                model_version: space.model_version,
-                supported_evidence_kinds: space.supported_evidence_kinds,
-                default_for_evidence_kind: None,
-                bindings: Vec::new(),
-            },
-            embedder,
-        }],
-    )
-    .map_err(|error| {
-        crate::store::classify_store_open_error("store open with vision embedder failed", error)
-    })?;
-    Ok(store)
+        embedder,
+    }];
+    match handler {
+        Some(handler) => Store::open_with_control_handler_and_embedder_registrations(
+            config,
+            handler,
+            registrations,
+        ),
+        None => Store::open_with_embedder_registrations(config, registrations),
+    }
 }

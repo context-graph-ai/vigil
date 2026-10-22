@@ -21,6 +21,25 @@ on:
         required: true
         default: "dev-haos-artifact-v1"
 
+  workflow_call:
+    inputs:
+      vigil_sha:
+        description: "Exact current dev commit to build for HAOS"
+        type: string
+        required: true
+      context_graph_sha:
+        description: "Exact current Context Graph dev commit"
+        type: string
+        required: true
+      contextdb_sha:
+        description: "Exact current ContextDB dev commit"
+        type: string
+        required: true
+      cache_epoch:
+        description: "Explicit cache namespace for this deploy artifact"
+        type: string
+        required: true
+
 permissions:
   contents: read
 
@@ -73,32 +92,26 @@ jobs:
           }
 
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.vigil_sha }}
           fetch-depth: 0
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ inputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ inputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ inputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ inputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Prove clean current development tuple
         id: identity
         env:
-          GH_TOKEN: ${{ secrets.CG_CI_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           TRUSTED_BRANCH: ${{ github.ref_name }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
           EXPECTED_VIGIL_SHA: ${{ inputs.vigil_sha }}
           EXPECTED_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
           EXPECTED_CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
@@ -120,14 +133,24 @@ jobs:
           esac
           test "$context_graph_sha" = "$EXPECTED_CONTEXT_GRAPH_SHA"
           test "$contextdb_sha" = "$EXPECTED_CONTEXTDB_SHA"
-          test "$(gh api "repos/context-graph-ai/context-graph/git/ref/heads/$TRUSTED_BRANCH" --jq '.object.sha')" = "$context_graph_sha"
-          test "$(gh api "repos/context-graph-ai/contextdb/git/ref/heads/$TRUSTED_BRANCH" --jq '.object.sha')" = "$contextdb_sha"
+          case "$CALLER_WORKFLOW_REF" in
+            context-graph-ai/vigil/.github/workflows/dev-haos-artifact.yml@refs/heads/"$TRUSTED_BRANCH")
+              test "$(gh api "repos/context-graph-ai/context-graph/git/ref/heads/$TRUSTED_BRANCH" --jq '.object.sha')" = "$context_graph_sha"
+              test "$(gh api "repos/context-graph-ai/contextdb/git/ref/heads/$TRUSTED_BRANCH" --jq '.object.sha')" = "$contextdb_sha"
+              ;;
+            context-graph-ai/vigil/.github/workflows/build.yml@refs/heads/dev | context-graph-ai/vigil/.github/workflows/ci.yml@refs/heads/dev)
+              # Public checkout above enforces the exact committed dependency pins.
+              ;;
+            *) echo "untrusted delivery caller" >&2; exit 1 ;;
+          esac
           test -z "$(git -C vigil status --porcelain=v1)"
           test -z "$(git -C context-graph status --porcelain=v1)"
           test -z "$(git -C contextdb status --porcelain=v1)"
-          echo "vigil_sha=$vigil_sha" >> "$GITHUB_OUTPUT"
-          echo "context_graph_sha=$context_graph_sha" >> "$GITHUB_OUTPUT"
-          echo "contextdb_sha=$contextdb_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "vigil_sha=$vigil_sha"
+            echo "context_graph_sha=$context_graph_sha"
+            echo "contextdb_sha=$contextdb_sha"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build exact HAOS production binary
@@ -136,26 +159,19 @@ jobs:
     needs: exact-sources
     steps:
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Free hosted-runner build disk
         run: |
           df -h
@@ -163,7 +179,7 @@ jobs:
           docker system prune -af || true
           df -h
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
       - name: Stage the bounded production source context
         run: |
           mkdir -p haos-context
@@ -199,6 +215,31 @@ jobs:
               --cache-to "type=gha,mode=max,scope=vigil-haos-amd64-$CACHE_EPOCH" \
               --output type=local,dest=../haos-output/binary \
               ../haos-context
+      - name: Load the matching builder environment for offline CLI smoke
+        env:
+          CACHE_EPOCH: ${{ inputs.cache_epoch }}
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --target vigil-hw-builder-amd64 \
+            --file haos-context/vigil/Dockerfile.hardware \
+            --cache-from "type=gha,scope=vigil-haos-amd64-$CACHE_EPOCH" \
+            --load --tag vigil-haos-smoke-builder:local \
+            haos-context
+      - name: Smoke the unpacked exact package before upload
+        run: |
+          python3 vigil/scripts/ci-packaged-smoke.py \
+            haos-output/binary/vigil \
+            haos-output/vigil-haos-production-amd64.tar.gz \
+            vigil-haos-smoke-builder:local \
+            haos-output/receipts/dev-haos-artifact-smoke.json
+      - name: Create minimal delivery receipt with actual builder toolchain
+        working-directory: vigil
+        env:
+          OUTPUT_DIRECTORY: ../haos-output
+        run: |
+          builder_toolchain="$(docker run --rm --pull=never --network=none --entrypoint rustc vigil-haos-smoke-builder:local --version)"
+          python3 scripts/ci-development.py receipt "$OUTPUT_DIRECTORY" "$builder_toolchain"
       - name: Bind the artifact to its exact source tuple
         env:
           VIGIL_SHA: ${{ needs.exact-sources.outputs.vigil_sha }}
@@ -214,13 +255,15 @@ jobs:
             '{tier:"dev-haos-artifact",artifact:"native-alpine-production-binary",published:false,vigil_sha:$vigil_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,binary_sha256:$binary_sha256}' \
             > haos-output/receipts/dev-haos-artifact-source.json
       - name: Upload the exact HAOS deploy artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: vigil-haos-production-amd64-${{ needs.exact-sources.outputs.vigil_sha }}
           path: |
-            haos-output/binary/vigil
+            haos-output/vigil-haos-production-amd64.tar.gz
+            haos-output/delivery.json
             haos-output/receipts/dev-haos-artifact.json
             haos-output/receipts/dev-haos-artifact.sha256
             haos-output/receipts/dev-haos-artifact-source.json
+            haos-output/receipts/dev-haos-artifact-smoke.json
           if-no-files-found: error
           retention-days: 90

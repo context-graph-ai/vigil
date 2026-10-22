@@ -4524,7 +4524,9 @@ fn audit_ci_config(root: &Path, violations: &mut Vec<String>) -> Result<(), Stri
         let path = root.join(".github/workflows").join(name);
         fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))
     };
-    let change = read_workflow("ci.yml")?;
+    let orchestrator = read_workflow("ci.yml")?;
+    let reusable = read_workflow("default-checks.yml")?;
+    let change = resolved_change_workflow(&orchestrator, &reusable, violations);
     let closeout = read_workflow("dev-closeout.yml")?;
     let haos_artifact = read_workflow("dev-haos-artifact.yml")?;
     let integration = read_workflow("integrate-dev.yml")?;
@@ -4533,6 +4535,13 @@ fn audit_ci_config(root: &Path, violations: &mut Vec<String>) -> Result<(), Stri
     let haos_hardware_dockerfile = fs::read_to_string(&haos_hardware_dockerfile_path)
         .map_err(|error| format!("read {}: {error}", haos_hardware_dockerfile_path.display()))?;
     audit_ci_compartments(&change, &closeout, &release, violations);
+    let public_dependency_path = root.join("scripts/ci-public-dependencies");
+    let public_dependency_script = fs::read_to_string(&public_dependency_path)
+        .map_err(|error| format!("read {}: {error}", public_dependency_path.display()))?;
+    audit_public_dependency_script(&public_dependency_script, violations);
+    for workflow in [&closeout, &haos_artifact, &integration, &release] {
+        audit_public_dependency_workflow(workflow, violations);
+    }
     audit_dev_integration_workflow(&integration, violations);
     audit_dev_haos_artifact_workflow(&haos_artifact, violations);
     audit_haos_hardware_dockerfile(&haos_hardware_dockerfile, violations);
@@ -4640,6 +4649,78 @@ fn require_workflow_text(
     }
 }
 
+fn resolved_change_workflow(
+    orchestrator: &str,
+    reusable: &str,
+    violations: &mut Vec<String>,
+) -> String {
+    // Sole auxiliary exception: same-source development delivery after the real
+    // aggregate. All correctness jobs and their read-only audit remain intact.
+    // Python portable mutation controls independently enforce this exact route.
+    let auxiliary = "\n  # Auxiliary delivery is outside the correctness aggregate.\n  development-binaries:\n    needs: [change-gate]\n    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.repository == 'context-graph-ai/vigil' }}\n    permissions:\n      contents: write\n      actions: read\n    uses: ./.github/workflows/build.yml\n";
+    let orchestrator = if let Some(correctness) = orchestrator.strip_suffix(auxiliary) {
+        correctness
+    } else {
+        if orchestrator.contains("development-binaries:") {
+            violations.push("auxiliary development delivery must use the exact trusted same-commit route after change-gate".to_string());
+        }
+        orchestrator
+    };
+    let caller = "\n  change:\n    name: Default change gate\n    needs: source-revisions\n    uses: ./.github/workflows/default-checks.yml\n";
+    if !orchestrator.contains(caller) || orchestrator.contains("secrets:") {
+        violations.push("public change must invoke local integration at the same SHA after source validation, without secrets or skip conditions".to_string());
+    }
+    require_workflow_text(
+        "reusable integration",
+        reusable,
+        &["workflow_call:", "contents: read"],
+        violations,
+    );
+    let caller_block = orchestrator
+        .split_once("\n  change:\n")
+        .map_or("", |(_, tail)| {
+            tail.split_once("\n  change-gate:\n")
+                .map_or(tail, |(block, _)| block)
+        });
+    if caller_block.lines().any(|line| {
+        let key = line.trim().trim_start_matches("- ");
+        let permissions = key.replace(['\'', '"', ' ', '\t'], "");
+        key.starts_with("if:")
+            || permissions
+                .split([':', ',', '{', '}'])
+                .any(|value| matches!(value, "write" | "write-all"))
+    }) {
+        violations.push(
+            "public change caller must not skip checks or grant write permissions".to_string(),
+        );
+    }
+    let Some((_, jobs)) = reusable.split_once("\njobs:\n") else {
+        violations.push("reusable integration must contain the default change job".to_string());
+        return orchestrator.to_string();
+    };
+    // Exactly one reusable job; do not hide additional work outside the audited PR gate.
+    let job_names = jobs
+        .lines()
+        .filter(|line| line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':'))
+        .collect::<Vec<_>>();
+    if job_names != ["  change:"] || jobs.contains("    needs:") {
+        violations.push(
+            "reusable integration must preserve exactly the standalone default change job"
+                .to_string(),
+        );
+    }
+    let expanded = jobs.replace(
+        "    timeout-minutes: 30",
+        "    timeout-minutes: 30\n    needs: source-revisions",
+    );
+    // Audit permissions, environment and trigger safety alongside all executed steps.
+    format!(
+        "{}\n{}",
+        reusable.split_once("\njobs:\n").unwrap().0,
+        orchestrator.replace(caller, &format!("\n{}", expanded.trim_end()))
+    )
+}
+
 fn audit_ci_compartments(
     change: &str,
     closeout: &str,
@@ -4717,8 +4798,10 @@ fn audit_ci_compartments(
         &[
             "pull_request:",
             "branches: [dev]",
-            "github.event.pull_request.head.repo.full_name != github.repository",
-            "token: ${{ secrets.CG_CI_TOKEN }}",
+            "push:",
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            "github.event.pull_request.number || github.run_id",
+            "contents: read",
             "persist-credentials: false",
             "./scripts/verify workflow --step default-inventory",
             "./scripts/verify workflow --step default-estate",
@@ -4728,6 +4811,143 @@ fn audit_ci_compartments(
         ],
         violations,
     );
+    // Public PRs, including forks, cannot cross a private credential boundary.
+    for forbidden in [
+        "secrets.",
+        "token:",
+        "contents: write",
+        "statuses: write",
+        "persist-credentials: true",
+        "repository: context-graph-ai/",
+        "continue-on-error:",
+        "paths:",
+        "paths-ignore:",
+        "branches-ignore:",
+    ] {
+        if change.contains(forbidden) {
+            violations.push(format!("public change workflow forbids `{forbidden}`"));
+        }
+    }
+    if change.lines().any(|line| {
+        let key = line.trim().trim_start_matches("- ");
+        let permissions = key.replace(['\'', '"', ' ', '\t'], "");
+        permissions
+            .split([':', ',', '{', '}'])
+            .any(|value| matches!(value, "write" | "write-all"))
+    }) {
+        violations.push("public change permissions must never grant write access".to_string());
+    }
+    for action in change.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("uses:")
+            .or_else(|| line.trim().strip_prefix("- uses:"))
+    }) {
+        let revision = action.trim().rsplit_once('@').map(|(_, revision)| revision);
+        if !revision.is_some_and(|revision| {
+            revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            violations
+                .push("public change actions must use immutable full commit revisions".to_string());
+        }
+    }
+    for (job, required) in [
+        (
+            "source-revisions",
+            vec![
+                "./scripts/ci-public-dependencies check > change-source-revisions.json",
+                "persist-credentials: false",
+            ],
+        ),
+        (
+            "change",
+            vec![
+                "needs: source-revisions",
+                "./scripts/ci-public-dependencies checkout",
+                "persist-credentials: false",
+            ],
+        ),
+        (
+            "portable",
+            vec!["./scripts/ci-portable", "persist-credentials: false"],
+        ),
+        (
+            "change-gate",
+            vec![
+                "if: always()",
+                "needs: [portable, source-revisions, change]",
+                "PORTABLE_RESULT: ${{ needs.portable.result }}",
+                "PUBLIC_TUPLE_RESULT: ${{ needs.source-revisions.result }}",
+                "CHANGE_RESULT: ${{ needs.change.result }}",
+                "test \"$PORTABLE_RESULT\" = \"success\"",
+                "test \"$PUBLIC_TUPLE_RESULT\" = \"success\"",
+                "test \"$CHANGE_RESULT\" = \"success\"",
+            ],
+        ),
+    ] {
+        let marker = format!("\n  {job}:\n");
+        // Find the next job at exactly two spaces, not a step at deeper indent.
+        let block = change.split_once(&marker).map_or("", |(_, tail)| {
+            let end = tail
+                .lines()
+                .scan(0, |offset, line| {
+                    let start = *offset;
+                    *offset += line.len() + 1;
+                    Some((start, line))
+                })
+                .find(|(_, line)| line.starts_with("  ") && !line.starts_with("   "))
+                .map(|(offset, _)| offset)
+                .unwrap_or(tail.len());
+            &tail[..end]
+        });
+        require_workflow_text(
+            &format!("public change {job}"),
+            block,
+            &required,
+            violations,
+        );
+        let commands = workflow_run_command_lines(&workflow_run_scripts(block));
+        let executable = match job {
+            "source-revisions" => {
+                vec!["./scripts/ci-public-dependencies check > change-source-revisions.json"]
+            }
+            "portable" => vec!["./scripts/ci-portable"],
+            "change" => vec![
+                "./scripts/ci-public-dependencies checkout",
+                "./scripts/verify workflow --step runtime-harness",
+                "./scripts/verify workflow --step fmt",
+                "./scripts/verify workflow --step clippy",
+                "./scripts/verify workflow --step default-inventory",
+                "./scripts/verify workflow --step default-estate",
+                "./scripts/verify workflow --step default-tests",
+            ],
+            _ => vec![
+                "test \"$PORTABLE_RESULT\" = \"success\"",
+                "test \"$PUBLIC_TUPLE_RESULT\" = \"success\"",
+                "test \"$CHANGE_RESULT\" = \"success\"",
+            ],
+        };
+        for command in executable {
+            if commands
+                .iter()
+                .filter(|line| line.as_str() == command)
+                .count()
+                != 1
+            {
+                violations.push(format!(
+                    "public change {job} requires exactly one executed `{command}`"
+                ));
+            }
+        }
+        if block
+            .lines()
+            .any(|line| line.trim().trim_start_matches("- ").starts_with("if:"))
+            && job != "change-gate"
+        {
+            violations.push(format!(
+                "public change {job} must not skip forks or docs-only changes"
+            ));
+        }
+    }
     for forbidden in [
         "workflow_dispatch:",
         "cargo nextest archive",
@@ -4757,12 +4977,13 @@ fn audit_ci_compartments(
             "statuses: write",
             "test \"$GITHUB_REF\" = \"refs/heads/dev\"",
             "test \"$GITHUB_SHA\" = \"$DEV_BASE_SHA\"",
-            "GH_TOKEN: ${{ secrets.CG_CI_TOKEN }}",
+            "GH_TOKEN: ${{ github.token }}",
             "repos/context-graph-ai/context-graph/git/ref/heads/dev",
             "repos/context-graph-ai/contextdb/git/ref/heads/dev",
             "git -C vigil rev-parse origin/dev",
             "git -C vigil merge-base \"$vigil_sha\" \"$dev_sha\"",
             "normal feature closeout cannot change trusted verification control plane",
+            "scripts/verify|scripts/ci-public-dependencies|scripts/ci-performance|scripts/ci-portable|scripts/ci-checks|scripts/ci-integration|scripts/ci-publication|",
             ".github/workflows/*",
             ".config/dev-closeout-impact.toml|.config/nextest.toml",
             "xtask/*",
@@ -4911,6 +5132,97 @@ fn audit_ci_compartments(
             "release qualification must record observed cache state rather than accept a caller-supplied label"
                 .to_string(),
         );
+    }
+}
+
+fn audit_public_dependency_workflow(content: &str, violations: &mut Vec<String>) {
+    let active = active_workflow_text(content);
+    for forbidden in [
+        "CG_CI_TOKEN",
+        "repository: context-graph-ai/context-graph",
+        "repository: context-graph-ai/contextdb",
+    ] {
+        if active.contains(forbidden) {
+            violations.push(format!(
+                "public CI dependency boundary forbids `{forbidden}`"
+            ));
+        }
+    }
+    let mut job = String::new();
+    for line in active.lines().chain(std::iter::once("  end:")) {
+        if line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':') {
+            if job.contains("path: vigil") {
+                require_workflow_text(
+                    "public exact source job",
+                    &job,
+                    &[
+                        "CI_METADATA_TOKEN: ${{ github.token }}",
+                        "EXPECTED_CG_SHA:",
+                        "EXPECTED_DB_SHA:",
+                        "run: ./scripts/ci-public-dependencies checkout \"$EXPECTED_CG_SHA\" \"$EXPECTED_DB_SHA\"",
+                    ],
+                    violations,
+                );
+                let commands = workflow_run_command_lines(&workflow_run_scripts(&job));
+                let required = "./scripts/ci-public-dependencies checkout \"$EXPECTED_CG_SHA\" \"$EXPECTED_DB_SHA\"";
+                if commands
+                    .iter()
+                    .filter(|line| line.as_str() == required)
+                    .count()
+                    != 1
+                {
+                    violations.push(
+                        "public exact source job requires exactly one executed public checkout"
+                            .to_string(),
+                    );
+                }
+            }
+            job.clear();
+        }
+        job.push_str(line);
+        job.push('\n');
+    }
+}
+
+fn audit_public_dependency_script(content: &str, violations: &mut Vec<String>) {
+    for required in [
+        "^[0-9a-f]{40}$",
+        "return 1",
+        "check_tuple || return 1",
+        "load_pins || return 1",
+        "ci-dependency-pins.json",
+        "keys == [\"context_graph\", \"contextdb\"]",
+        "CONTEXT_GRAPH_SHA=\"$(jq -er '.context_graph' \"$PIN_FILE\")\" || return 1",
+        "CONTEXTDB_SHA=\"$(jq -er '.contextdb' \"$PIN_FILE\")\" || return 1",
+        "public_commit \"$repository\" || return 1",
+        "curl -q --fail",
+        ".private == false and .full_name == $name",
+        "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0",
+        "GIT_ASKPASS=/bin/false",
+        "-c credential.helper= -c http.extraHeader=",
+        "fetch --depth=1",
+        "test \"$(git -C \"$destination\" rev-parse HEAD)\" = \"$revision\"",
+    ] {
+        if !content.contains(required) {
+            violations.push(format!(
+                "public dependency script must preserve `{required}`"
+            ));
+        }
+    }
+    for forbidden in [
+        "CG_CI_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "ref: dev",
+        "refs/heads/dev",
+        "--branch",
+        "eval ",
+        "|| true",
+        "|| :",
+    ] {
+        if content.contains(forbidden) {
+            violations.push(format!("public dependency script forbids `{forbidden}`"));
+        }
     }
 }
 
@@ -5119,8 +5431,7 @@ fn audit_dev_integration_workflow(content: &str, violations: &mut Vec<String>) {
             "actions/workflows/dev-closeout.yml",
             ".workflow_id == $workflow_id and .event == \"workflow_dispatch\"",
             ".head_branch == \"dev\" and .head_sha == $dev_base_sha and .conclusion == \"success\"",
-            "CG_CI_TOKEN: ${{ secrets.CG_CI_TOKEN }}",
-            "GH_TOKEN=\"$CG_CI_TOKEN\" gh api repos/context-graph-ai/context-graph/git/ref/heads/dev",
+            "gh api repos/context-graph-ai/context-graph/git/ref/heads/dev",
             "run-id: ${{ inputs.closeout_run_id }}",
             "name: dev-closeout-sources",
             "name: dev-closeout-impact",
@@ -5128,6 +5439,7 @@ fn audit_dev_integration_workflow(content: &str, violations: &mut Vec<String>) {
             ".qualified == true and .fast_forward_only == true",
             "git merge-base \"$DEV_BASE_SHA\" \"$VIGIL_SHA\"",
             "normal feature integration cannot change trusted verification control plane",
+            "scripts/verify|scripts/ci-public-dependencies|scripts/ci-performance|scripts/ci-portable|scripts/ci-checks|scripts/ci-integration|scripts/ci-publication|",
             ".github/workflows/*",
             ".config/dev-closeout-impact.toml|.config/nextest.toml",
             "xtask/*",
@@ -5178,7 +5490,7 @@ fn audit_dev_haos_artifact_workflow(content: &str, violations: &mut Vec<String>)
             "dev-next) test \"$vigil_sha\" = \"$dev_next_sha\" ;;",
             "repos/context-graph-ai/context-graph/git/ref/heads/$TRUSTED_BRANCH",
             "repos/context-graph-ai/contextdb/git/ref/heads/$TRUSTED_BRANCH",
-            "docker/setup-buildx-action@v3",
+            "docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f",
             "Stage the bounded production source context",
             "./scripts/verify release",
             "--lane artifact-amd64",
@@ -5348,7 +5660,7 @@ fn audit_ci_text(content: &str, violations: &mut Vec<String>) {
             ));
         }
     }
-    let rust_cache_steps = active.matches("uses: Swatinem/rust-cache@v2").count();
+    let rust_cache_steps = active.matches("uses: Swatinem/rust-cache@").count();
     let epoch_keyed_rust_caches = active
         .matches("key: ${{ inputs.cache_epoch || 'rolling' }}")
         .count();
@@ -7376,11 +7688,265 @@ jobs:
         );
     }
 
-    #[test]
-    fn compartmented_workflows_reject_cross_tier_work_and_manual_downgrades() {
-        let change = include_str!("../../.github/workflows/ci.yml");
+    fn public_dependency_guard_requires_public_pins_and_unauthenticated_fetch() {
+        let script = include_str!("../../scripts/ci-public-dependencies");
+        let mut accepted = Vec::new();
+        audit_public_dependency_script(script, &mut accepted);
+        assert!(accepted.is_empty(), "{accepted:?}");
+        for (from, to) in [
+            ("load_pins || return 1", "true"),
+            ("curl -q --fail", "curl --fail"),
+            (".private == false and .full_name == $name", "true"),
+            (
+                "-c credential.helper= -c http.extraHeader=",
+                "-c credential.helper=store",
+            ),
+            ("check_tuple || return 1", "true"),
+        ] {
+            let weakened = script.replace(from, to);
+            assert_ne!(weakened, script);
+            let mut violations = Vec::new();
+            audit_public_dependency_script(&weakened, &mut violations);
+            assert!(!violations.is_empty(), "unsafe public script accepted");
+        }
+    }
+
+    fn public_change_guard_requires_token_free_exact_checkout_and_full_receipt() {
+        let orchestrator = include_str!("../../.github/workflows/ci.yml");
+        let reusable = include_str!("../../.github/workflows/default-checks.yml");
+        let mut routing = Vec::new();
+        let resolved = resolved_change_workflow(orchestrator, reusable, &mut routing);
+        assert!(routing.is_empty(), "{routing:?}");
+        for weakened in [
+            orchestrator.replace("needs: source-revisions", "needs: portable"),
+            orchestrator.replace(
+                "uses: ./.github/workflows/default-checks.yml",
+                "uses: owner/other/.github/workflows/default-checks.yml@dev",
+            ),
+            orchestrator.replace(
+                "    uses: ./.github/workflows/default-checks.yml",
+                "    if: false\n    uses: ./.github/workflows/default-checks.yml",
+            ),
+        ] {
+            let mut rejected = Vec::new();
+            resolved_change_workflow(&weakened, reusable, &mut rejected);
+            assert!(!rejected.is_empty(), "unsafe reuse accepted");
+        }
+        for key in ["paths", "paths-ignore", "branches-ignore"] {
+            for (caller, callee) in [
+                (
+                    orchestrator.replace(
+                        "pull_request:",
+                        &format!("pull_request:\n    {key}: ['**.md']"),
+                    ),
+                    reusable.to_string(),
+                ),
+                (
+                    orchestrator.to_string(),
+                    reusable.replace(
+                        "workflow_call:",
+                        &format!("workflow_call:\n    {key}: ['**.md']"),
+                    ),
+                ),
+            ] {
+                let mut rejected = Vec::new();
+                let expanded = resolved_change_workflow(&caller, &callee, &mut rejected);
+                audit_ci_compartments(
+                    &expanded,
+                    include_str!("../../.github/workflows/dev-closeout.yml"),
+                    include_str!("../../.github/workflows/release-qualification.yml"),
+                    &mut rejected,
+                );
+                assert!(!rejected.is_empty(), "workflow filtering accepted: {key}");
+            }
+        }
+        for workflow in [
+            include_str!("../../.github/workflows/dev-closeout.yml"),
+            include_str!("../../.github/workflows/dev-haos-artifact.yml"),
+            include_str!("../../.github/workflows/release-qualification.yml"),
+            include_str!("../../.github/workflows/integrate-dev.yml"),
+        ] {
+            let mut accepted = Vec::new();
+            audit_public_dependency_workflow(workflow, &mut accepted);
+            assert!(accepted.is_empty(), "{accepted:?}");
+            for weakened in [
+                workflow.replace("./scripts/ci-public-dependencies checkout", "echo bypass"),
+                workflow.replace(
+                    "CI_METADATA_TOKEN: ${{ github.token }}",
+                    "CI_METADATA_TOKEN: ${{ secrets.CG_CI_TOKEN }}",
+                ),
+            ] {
+                let mut rejected = Vec::new();
+                if weakened == workflow {
+                    continue; // Integration consumes receipts and does not fetch source dependencies.
+                }
+                audit_public_dependency_workflow(&weakened, &mut rejected);
+                assert!(
+                    !rejected.is_empty(),
+                    "private or missing public fetch accepted"
+                );
+            }
+        }
+        let change = resolved.as_str();
         let closeout = include_str!("../../.github/workflows/dev-closeout.yml");
         let release = include_str!("../../.github/workflows/release-qualification.yml");
+        let mut accepted = Vec::new();
+        audit_ci_compartments(change, closeout, release, &mut accepted);
+        assert!(accepted.is_empty(), "{accepted:?}");
+        for weakened in [
+            change.replace("./scripts/ci-public-dependencies check", "echo bypass"),
+            change.replace("./scripts/ci-public-dependencies checkout", "echo bypass"),
+            change.replace("needs: source-revisions", "needs: portable"),
+            change.replace(
+                "needs: [portable, source-revisions, change]",
+                "needs: [portable]",
+            ),
+            change.replace("test \"$PUBLIC_TUPLE_RESULT\" = \"success\"", "true"),
+            change.replace("test \"$CHANGE_RESULT\" = \"success\"", "true"),
+            change.replace("if: always()", "if: success()"),
+            change.replace("persist-credentials: false", "persist-credentials: true"),
+            format!(
+                "{change}\n  injected:\n    steps:\n      - run: echo ${{{{ secrets.CG_CI_TOKEN }}}}\n"
+            ),
+            format!(
+                "{change}\n  injected:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          repository: context-graph-ai/context-graph\n          ref: dev\n"
+            ),
+            change.replace("pull_request:", "pull_request_target:"),
+            change.replace("contents: read", "contents: write"),
+            change.replace("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/checkout@v4"),
+            change.replace("./scripts/ci-public-dependencies checkout", "./scripts/ci-public-dependencies checkout\n        if: github.event.pull_request.head.repo.full_name == github.repository"),
+            change.replace("./scripts/ci-portable", "./scripts/ci-portable\n        if: false"),
+
+        ] {
+            assert_ne!(weakened, change);
+            let mut violations = Vec::new();
+            audit_ci_compartments(&weakened, closeout, release, &mut violations);
+            assert!(
+                !violations.is_empty(),
+                "unsafe public change accepted: {weakened}"
+            );
+        }
+    }
+
+    #[test]
+    fn compartmented_workflows_reject_cross_tier_work_and_manual_downgrades() {
+        // Keep these adversarial fixtures in the registered guard identity.
+        public_dependency_guard_requires_public_pins_and_unauthenticated_fetch();
+        public_change_guard_requires_token_free_exact_checkout_and_full_receipt();
+        let orchestrator = include_str!("../../.github/workflows/ci.yml");
+        let reusable = include_str!("../../.github/workflows/default-checks.yml");
+        let mut routing = Vec::new();
+        let resolved = resolved_change_workflow(orchestrator, reusable, &mut routing);
+        assert!(routing.is_empty(), "{routing:?}");
+        let change = resolved.as_str();
+        let closeout = include_str!("../../.github/workflows/dev-closeout.yml");
+        let release = include_str!("../../.github/workflows/release-qualification.yml");
+        for command in [
+            "./scripts/ci-portable",
+            "./scripts/ci-public-dependencies check > change-source-revisions.json",
+            "./scripts/ci-public-dependencies checkout",
+            "./scripts/verify workflow --step runtime-harness",
+            "./scripts/verify workflow --step fmt",
+            "./scripts/verify workflow --step clippy",
+            "./scripts/verify workflow --step default-inventory",
+            "./scripts/verify workflow --step default-estate",
+            "./scripts/verify workflow --step default-tests",
+        ] {
+            for replacement in [
+                format!("echo {command}"),
+                format!("{command}; true"),
+                format!("{command} || true"),
+                format!("{command} || :"),
+                format!("{command}\n        - if: false"),
+            ] {
+                let weakened = change.replace(command, &replacement);
+                assert_ne!(weakened, change);
+                let mut rejected = Vec::new();
+                audit_ci_compartments(&weakened, closeout, release, &mut rejected);
+                assert!(
+                    !rejected.is_empty(),
+                    "inert, skipped or swallowed command accepted: {replacement}"
+                );
+            }
+        }
+        for command in [
+            "./scripts/ci-portable",
+            "./scripts/ci-public-dependencies checkout",
+            "./scripts/verify workflow --step default-tests",
+        ] {
+            let weakened = change
+                .replace(
+                    &format!("        run: {command}"),
+                    &format!("        if: false\n        run: {command}"),
+                )
+                .replace(
+                    &format!("      - run: {command}"),
+                    &format!("      - if: false\n        run: {command}"),
+                );
+            assert_ne!(weakened, change);
+            let mut rejected = Vec::new();
+            audit_ci_compartments(&weakened, closeout, release, &mut rejected);
+            assert!(!rejected.is_empty(), "skipped required step accepted");
+        }
+        for weakened in [
+            change.replace("contents: read", "permissions: write-all"),
+            change.replace("contents: read", "checks: write"),
+            change.replace("contents: read", "checks: 'write'"),
+            change.replace(
+                "permissions:\n  contents: read",
+                "permissions: {checks: write}",
+            ),
+        ] {
+            let mut rejected = Vec::new();
+            audit_ci_compartments(&weakened, closeout, release, &mut rejected);
+            assert!(!rejected.is_empty(), "write permission accepted");
+        }
+        for permission in [
+            "permissions: write-all",
+            "permissions:\n      checks: write",
+        ] {
+            let weakened = orchestrator.replace(
+                "    uses: ./.github/workflows/default-checks.yml",
+                &format!("    uses: ./.github/workflows/default-checks.yml\n    {permission}"),
+            );
+            let mut rejected = Vec::new();
+            resolved_change_workflow(&weakened, reusable, &mut rejected);
+            assert!(!rejected.is_empty(), "caller write permission accepted");
+        }
+        let integration = include_str!("../../.github/workflows/integrate-dev.yml");
+        let mut rejected = Vec::new();
+        audit_public_dependency_workflow(
+            &format!(
+                "{integration}\n# public credential boundary\nenv:\n  CG_CI_TOKEN: forbidden\n"
+            ),
+            &mut rejected,
+        );
+        assert!(!rejected.is_empty(), "integration private token accepted");
+        for entry in [
+            "scripts/ci-public-dependencies|",
+            "scripts/ci-performance|",
+            "scripts/ci-portable|",
+            "scripts/ci-checks|",
+            "scripts/ci-integration|",
+            "scripts/ci-publication|",
+        ] {
+            let weakened = closeout.replace(entry, "");
+            assert_ne!(weakened, closeout);
+            let mut rejected = Vec::new();
+            audit_ci_compartments(change, &weakened, release, &mut rejected);
+            assert!(
+                !rejected.is_empty(),
+                "CI logic self-qualification accepted: {entry}"
+            );
+            let weakened = integration.replace(entry, "");
+            assert_ne!(weakened, integration);
+            let mut rejected = Vec::new();
+            audit_dev_integration_workflow(&weakened, &mut rejected);
+            assert!(
+                !rejected.is_empty(),
+                "CI logic integration accepted: {entry}"
+            );
+        }
         let mut accepted = Vec::new();
         audit_ci_compartments(change, closeout, release, &mut accepted);
         assert!(accepted.is_empty(), "{accepted:?}");

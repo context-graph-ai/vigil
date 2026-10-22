@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+bash -n scripts/verify scripts/ci-portable scripts/ci-public-dependencies scripts/ci-checks scripts/ci-integration scripts/ci-publication
+python3 -c "import ast; ast.parse(open('scripts/ci-performance').read())"
+python3 scripts/ci-build-controls.py
+python3 scripts/ci-delivery-controls.py
+python3 scripts/ci-packaged-smoke-controls.py
+# These syntax/routing checks have no Rust dependency checkout requirement.
+command -v shellcheck >/dev/null || { echo 'shellcheck is required for portable CI parity' >&2; exit 1; }
+actionlint -version
+shellcheck --version
+shellcheck scripts/verify scripts/ci-checks scripts/ci-integration scripts/ci-portable scripts/ci-public-dependencies scripts/ci-publication
+python3 scripts/ci-workflow-lint.py
+echo 'Portable CI checks passed; full change qualification is a separate required result.'

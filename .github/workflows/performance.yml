@@ -1,0 +1,69 @@
+name: Controlled performance qualification report
+
+# Dormant placeholder. Performance measurement is manual: see docs/performance/README.md.
+# Both filters ignore every ref, so no push or tag starts this workflow, and it has no
+# dispatch, schedule or reusable-workflow trigger.
+on:
+  push:
+    branches-ignore: ['**']
+    tags-ignore: ['**']
+
+# Planned maintainer dispatch (not enabled):
+#   on:
+#     workflow_dispatch:
+# Enable it only after a maintainer registers a dedicated, isolated self-hosted runner for
+# Vigil performance work and an admission rule that keeps untrusted fork code off it.
+# Then point the job's runs-on at that runner and remove the refusal step below.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vigil-performance-report-${{ github.sha }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  qualification-report:
+    name: Native performance workload report
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse without an admitted measurement runner
+        run: |
+          echo 'No owner-admitted isolated performance runner exists; this run measures nothing.' >&2
+          echo 'Measure manually with docs/performance/README.md.' >&2
+          exit 1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Emit immutable workload commands and fixture identities
+        run: ./scripts/ci-performance manifest --output performance-manifest.json
+      - name: Explain controlled native command
+        run: |
+          {
+            echo 'On an isolated native host, allocate a private out-of-tree receipt parent and run:'
+            cat <<'COMMANDS'
+          receipt_dir="$(mktemp -d "$HOME/vigil-performance-receipts.XXXXXXXX")/run"
+          ./scripts/ci-performance run --operator-controlled --workload synthetic --receipt-dir "$receipt_dir"
+          COMMANDS
+            echo 'The run builds the clean exact-pinned workspace with the same explicit feature flags as the closeout archive (first-light-acceptance,acceptance), without test targets or explicit test-only feature flags, into a fresh private target, then measures its read-only receipt copy via VIGIL_ACCEPTANCE_BIN.'
+            echo 'The receipt records build argv/profile/features/results, the measured binary sha256 and ffmpeg/ffprobe/mediamtx versions; verify-receipt rehashes the saved executable.'
+            echo 'Physical coverage uses --workload physical and the existing camera/window environment inputs shown in the manifest.'
+            echo 'Existing dev-haos-artifact.yml and release-qualification.yml remain separate manual artifact mechanisms; this report publishes nothing.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain pending qualification manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-manifest-${{ github.sha }}
+          path: performance-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Report qualification scope
+        run: |
+          {
+            echo 'Manifest emitted; after the native run, verify its same out-of-tree receipt with:'
+            cat <<'COMMANDS'
+          ./scripts/ci-performance verify-receipt "$receipt_dir"
+          COMMANDS
+            echo 'Global product performance review remains pending; this report executes no native workload.'
+          } >> "$GITHUB_STEP_SUMMARY"

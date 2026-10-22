@@ -1,0 +1,115 @@
+name: Build development binaries
+
+# Trusted controller; the reusable HAOS workflow owns the only build recipe.
+on:
+  workflow_call:
+    inputs:
+      vigil_sha:
+        type: string
+        required: false
+      context_graph_sha:
+        type: string
+        required: false
+      contextdb_sha:
+        type: string
+        required: false
+      cache_epoch:
+        type: string
+        required: false
+  workflow_dispatch:
+    inputs:
+      vigil_sha:
+        description: "Exact current dev commit to build for HAOS"
+        type: string
+        required: true
+      context_graph_sha:
+        description: "Exact current Context Graph dev commit"
+        type: string
+        required: true
+      contextdb_sha:
+        description: "Exact current ContextDB dev commit"
+        type: string
+        required: true
+      cache_epoch:
+        description: "Explicit cache namespace for this deploy artifact"
+        type: string
+        required: true
+        default: "dev-haos-artifact-v1"
+
+permissions:
+  contents: read
+
+# Distinct from the callee's tuple lock: sharing its group would deadlock.
+concurrency:
+  group: vigil-build-controller-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      vigil_sha: ${{ steps.admission.outputs.vigil_sha }}
+      context_graph_sha: ${{ steps.admission.outputs.context_graph_sha }}
+      contextdb_sha: ${{ steps.admission.outputs.contextdb_sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Admit exact-source successful correctness and committed public pins
+        id: admission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VIGIL_SHA: ${{ inputs.vigil_sha }}
+          INPUT_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
+          INPUT_CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
+        run: python3 scripts/ci-development.py admit
+
+  package:
+    name: Exact development HAOS binary
+    needs: metadata
+    permissions:
+      contents: read
+    uses: ./.github/workflows/dev-haos-artifact.yml
+    with:
+      vigil_sha: ${{ needs.metadata.outputs.vigil_sha }}
+      context_graph_sha: ${{ needs.metadata.outputs.context_graph_sha }}
+      contextdb_sha: ${{ needs.metadata.outputs.contextdb_sha }}
+      cache_epoch: ${{ inputs.cache_epoch || 'dev-haos-artifact-v1' }}
+
+  publish:
+    name: Publish access-controlled development binaries
+    needs: [metadata, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: vigil-dev-binaries-publish
+      cancel-in-progress: false
+      queue: max
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ needs.metadata.outputs.vigil_sha }}
+      CONTEXT_GRAPH_SHA: ${{ needs.metadata.outputs.context_graph_sha }}
+      CONTEXTDB_SHA: ${{ needs.metadata.outputs.contextdb_sha }}
+    steps:
+      - name: Bind publisher and trusted control code to the reviewed source
+        run: |
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          test "$GITHUB_REPOSITORY" = context-graph-ai/vigil
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/contents/scripts/ci-development.py?ref=$SOURCE_SHA" \
+            --jq '.content' | base64 --decode > "$RUNNER_TEMP/ci-development.py"
+      - name: Download data only; never extract or execute the packaged payload
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vigil-haos-production-amd64-${{ needs.metadata.outputs.vigil_sha }}
+          path: delivery
+      - name: Publish verified allowlisted assets
+        run: python3 "$RUNNER_TEMP/ci-development.py" publish delivery

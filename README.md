@@ -144,3 +144,6 @@ Read next:
 ## License
 
 Vigil is licensed under the [Apache License 2.0](LICENSE).
+
+Automation: [workflow map](.github/CI.md), [automation rules](.github/AGENTS.md),
+[development downloads](docs/download.md), and [manual performance](docs/performance/README.md).

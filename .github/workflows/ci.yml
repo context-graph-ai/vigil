@@ -4,84 +4,64 @@ on:
   pull_request:
     branches: [dev]
     types: [opened, synchronize, reopened]
+  push:
+    branches: [dev]
 
 permissions:
   contents: read
 
 concurrency:
-  group: vigil-change-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: vigil-change-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 1
   CARGO_PROFILE_TEST_DEBUG: 1
+  RUSTFLAGS: ""
   CARGO_BUILD_JOBS: 2
   NEXTEST_TEST_THREADS: 2
 
 jobs:
-  private-dependency-boundary:
-    name: Private dependency boundary
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Reject fork code before any credential is available
-        if: github.event.pull_request.head.repo.full_name != github.repository
-        run: |
-          echo "Vigil's dependency checkout is restricted to trusted branches." >&2
-          echo "Fork code is not run with CG_CI_TOKEN; a maintainer must qualify the exact commit from a trusted branch." >&2
-          exit 1
-
-      - name: Confirm trusted pull-request source
-        if: github.event.pull_request.head.repo.full_name == github.repository
-        run: echo "Trusted pull-request code may resolve the private dependency boundary."
-
-  source-revisions:
-    name: Resolve dependency SHAs once
+  portable:
+    name: Portable CI checks (not full qualification)
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: private-dependency-boundary
-    if: github.event.pull_request.head.repo.full_name == github.repository
-    outputs:
-      context_graph_sha: ${{ steps.revisions.outputs.context_graph_sha }}
-      contextdb_sha: ${{ steps.revisions.outputs.contextdb_sha }}
     steps:
-      - name: Resolve Context Graph dev
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          repository: context-graph-ai/context-graph
-          ref: dev
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
           persist-credentials: false
-
-      - name: Resolve ContextDB dev
-        uses: actions/checkout@v4
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
         with:
-          repository: context-graph-ai/contextdb
-          ref: dev
-          path: contextdb
-          persist-credentials: false
-
-      - name: Record immutable dependency revisions
-        id: revisions
+          tool: shellcheck@0.11.0
+          fallback: none
+      - name: Install reviewed actionlint (not supported by install-action)
         run: |
-          context_graph_sha="$(git -C context-graph rev-parse HEAD)"
-          contextdb_sha="$(git -C contextdb rev-parse HEAD)"
-          test "${#context_graph_sha}" -eq 40
-          test "${#contextdb_sha}" -eq 40
-          echo "context_graph_sha=${context_graph_sha}" >> "$GITHUB_OUTPUT"
-          echo "contextdb_sha=${contextdb_sha}" >> "$GITHUB_OUTPUT"
-          jq -n \
-            --arg vigil_sha "$GITHUB_SHA" \
-            --arg context_graph_sha "$context_graph_sha" \
-            --arg contextdb_sha "$contextdb_sha" \
-            '{tier:"change",vigil_sha:$vigil_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha}' \
-            > change-source-revisions.json
+          tool_dir="$RUNNER_TEMP/vigil-portable-tools"
+          mkdir -p "$tool_dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$tool_dir/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $tool_dir/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$tool_dir/actionlint.tar.gz" -C "$tool_dir" actionlint
+          echo "$tool_dir" >> "$GITHUB_PATH"
+      - run: ./scripts/ci-portable
 
+  source-revisions:
+    name: Validate public exact dependency tuple
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Require publicly accessible immutable dependencies
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+        run: ./scripts/ci-public-dependencies check > change-source-revisions.json
       - name: Upload immutable source receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: change-source-revisions
           path: change-source-revisions.json
@@ -90,80 +70,31 @@ jobs:
 
   change:
     name: Default change gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
     needs: source-revisions
-    steps:
-      - name: Checkout exact Vigil change
-        uses: actions/checkout@v4
-        with:
-          path: vigil
-          persist-credentials: false
-
-      - name: Checkout exact Context Graph dependency
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.source-revisions.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-
-      - name: Checkout exact ContextDB dependency
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.source-revisions.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Install bounded runtime test tools
-        run: |
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
-
-      - name: Restore the trusted change cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: vigil
-          key: change-v1
-
-      - name: Set up the default runtime harness
-        working-directory: vigil
-        run: ./scripts/verify workflow --step runtime-harness
-
-      - name: Check formatting
-        working-directory: vigil
-        run: ./scripts/verify workflow --step fmt
-
-      - name: Lint default workspace targets
-        working-directory: vigil
-        run: ./scripts/verify workflow --step clippy
-
-      - name: Enumerate the exact default estate
-        working-directory: vigil
-        run: ./scripts/verify workflow --step default-inventory
-
-      - name: Enforce the test estate and default inventory
-        working-directory: vigil
-        run: ./scripts/verify workflow --step default-estate
-
-      - name: Run default tests
-        working-directory: vigil
-        run: ./scripts/verify workflow --step default-tests
+    uses: ./.github/workflows/default-checks.yml
 
   change-gate:
     name: Change qualification receipt
     runs-on: ubuntu-latest
     timeout-minutes: 2
     if: always()
-    needs: [private-dependency-boundary, source-revisions, change]
+    needs: [portable, source-revisions, change]
     steps:
-      - name: Require the trusted default gate
+      - name: Require every full change prerequisite
+        env:
+          PORTABLE_RESULT: ${{ needs.portable.result }}
+          PUBLIC_TUPLE_RESULT: ${{ needs.source-revisions.result }}
+          CHANGE_RESULT: ${{ needs.change.result }}
         run: |
-          test "${{ needs.private-dependency-boundary.result }}" = "success"
-          test "${{ needs.source-revisions.result }}" = "success"
-          test "${{ needs.change.result }}" = "success"
+          test "$PORTABLE_RESULT" = "success"
+          test "$PUBLIC_TUPLE_RESULT" = "success"
+          test "$CHANGE_RESULT" = "success"
+
+  # Auxiliary delivery is outside the correctness aggregate.
+  development-binaries:
+    needs: [change-gate]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.repository == 'context-graph-ai/vigil' }}
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/build.yml

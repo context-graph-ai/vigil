@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Pin data can change independently of this trusted public-fetch logic.
+PIN_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ci-dependency-pins.json"
+readonly PIN_FILE
+load_pins() {
+  jq -e 'type == "object" and keys == ["context_graph", "contextdb"] and
+    (.context_graph | type == "string") and (.contextdb | type == "string")' "$PIN_FILE" >/dev/null || return 1
+  CONTEXT_GRAPH_SHA="$(jq -er '.context_graph' "$PIN_FILE")" || return 1
+  CONTEXTDB_SHA="$(jq -er '.contextdb' "$PIN_FILE")" || return 1
+}
+
+public_commit() {
+  local repository="$1" metadata
+  # Optional read-only runner token is used ONLY for public metadata, never Git.
+  local headers=()
+  if [[ -n "${CI_METADATA_TOKEN:-}" ]]; then
+    headers=(-H "Authorization: Bearer ${CI_METADATA_TOKEN}")
+  fi
+  metadata="$(curl -q --fail --silent --show-error --connect-timeout 15 --max-time 60 \
+    "${headers[@]}" "https://api.github.com/repos/context-graph-ai/${repository}")" || return 1
+  jq -e --arg name "context-graph-ai/${repository}" \
+    '.private == false and .full_name == $name' <<< "$metadata" >/dev/null || return 1
+}
+
+check_tuple() {
+  if [[ ! "$CONTEXT_GRAPH_SHA" =~ ^[0-9a-f]{40}$ || ! "$CONTEXTDB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    echo 'PENDING: full public qualification requires a reviewed exact public Context Graph / ContextDB tuple; portable checks do not qualify Vigil.' >&2
+    return 1
+  fi
+}
+
+fetch_commit() {
+  local repository="$1" revision="$2" destination="$3"
+  public_commit "$repository" || return 1
+  test ! -e "$destination"
+  # All Git commands ignore host credentials, helpers, config and injected config.
+  local clean=(env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 \
+    GIT_ASKPASS=/bin/false)
+  "${clean[@]}" git -c credential.helper= -c http.extraHeader= init -q "$destination" || return 1
+  "${clean[@]}" git -C "$destination" -c credential.helper= -c http.extraHeader= \
+    fetch --depth=1 "https://github.com/context-graph-ai/${repository}.git" "$revision" || return 1
+  "${clean[@]}" git -C "$destination" -c credential.helper= -c http.extraHeader= checkout --detach FETCH_HEAD || return 1
+  test "$(git -C "$destination" rev-parse HEAD)" = "$revision" || return 1
+}
+
+main() {
+  local mode="${1:-}" repo_root parent temporary
+  case "$mode" in
+    --help|-h) echo 'usage: scripts/ci-public-dependencies {check|checkout|verify-checkouts} [EXACT_CG_SHA EXACT_DB_SHA]'; return 0 ;;
+    check|checkout|verify-checkouts) ;;
+    *) echo 'invalid public dependency mode' >&2; return 2 ;;
+  esac
+  [[ "$#" = 1 || "$#" = 3 ]] || return 2
+  load_pins || return 1
+  check_tuple || return 1
+  if [[ "$#" = 3 ]]; then
+    test "$2" = "$CONTEXT_GRAPH_SHA" && test "$3" = "$CONTEXTDB_SHA" || return 1
+  fi
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  parent="$(dirname "$repo_root")"
+  case "$mode" in
+    check|verify-checkouts)
+      # One metadata call and one anonymous exact fetch per repository, no commit API.
+      temporary="$(mktemp -d)"
+      (trap 'rm -rf "$temporary"' EXIT
+       fetch_commit context-graph "$CONTEXT_GRAPH_SHA" "$temporary/context-graph" &&
+       fetch_commit contextdb "$CONTEXTDB_SHA" "$temporary/contextdb") || return 1
+      if [[ "$mode" = verify-checkouts ]]; then
+        test "$(git -C "$parent/context-graph" rev-parse HEAD)" = "$CONTEXT_GRAPH_SHA"
+        test "$(git -C "$parent/contextdb" rev-parse HEAD)" = "$CONTEXTDB_SHA"
+        test -z "$(git -C "$parent/context-graph" status --porcelain)"
+        test -z "$(git -C "$parent/contextdb" status --porcelain)"
+      else
+        jq -n --arg vigil_sha "$(git -C "$repo_root" rev-parse HEAD)" \
+          --arg context_graph_sha "$CONTEXT_GRAPH_SHA" --arg contextdb_sha "$CONTEXTDB_SHA" \
+          '{tier:"change",public_access_verified:true,vigil_sha:$vigil_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha}'
+      fi ;;
+    checkout)
+      fetch_commit context-graph "$CONTEXT_GRAPH_SHA" "$parent/context-graph"
+      fetch_commit contextdb "$CONTEXTDB_SHA" "$parent/contextdb" ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

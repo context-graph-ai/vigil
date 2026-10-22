@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+case "${1:-}" in
+  --help|-h)
+    echo 'usage: scripts/ci-publication release OPTIONS...'
+    echo 'Forwards local packaging/qualification to existing scripts/verify release; publishes nothing.'
+    echo 'Optional trusted artifact entrypoints remain release-qualification.yml and dev-haos-artifact.yml (manual exact-tuple dispatch).'
+    echo 'Publication itself still requires the separate existing owner-authorized release procedure; no automatic release is added.'
+    exit 0 ;;
+  release) exec ./scripts/verify "$@" ;;
+  *) echo 'usage: scripts/ci-publication release OPTIONS...' >&2; exit 2 ;;
+esac

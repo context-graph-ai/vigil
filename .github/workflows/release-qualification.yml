@@ -77,14 +77,14 @@ jobs:
             exit 1
           }
       - name: Download exact prior dev-closeout source receipt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-sources
           path: prior-closeout/source
           run-id: ${{ inputs.closeout_run_id }}
           github-token: ${{ github.token }}
       - name: Download exact prior dev-closeout qualification
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-qualified-${{ inputs.vigil_sha }}
           path: prior-closeout/final
@@ -104,27 +104,19 @@ jobs:
             '.qualified == true and .fast_forward_only == true and .vigil_sha == $vigil and .context_graph_sha == $cg and .contextdb_sha == $db and .workflow_run == $run' \
             prior-closeout/final/dev-closeout-qualified.json >/dev/null
       - name: Checkout exact Vigil candidate and history
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.vigil_sha }}
           fetch-depth: 0
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ inputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ inputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ inputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ inputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
       - name: Prove main ancestry, current main, and clean identities
         id: identity
         env:
@@ -145,9 +137,11 @@ jobs:
           test -z "$(git -C vigil status --porcelain=v1)"
           test -z "$(git -C context-graph status --porcelain=v1)"
           test -z "$(git -C contextdb status --porcelain=v1)"
-          echo "vigil_sha=$vigil_sha" >> "$GITHUB_OUTPUT"
-          echo "context_graph_sha=$context_graph_sha" >> "$GITHUB_OUTPUT"
-          echo "contextdb_sha=$contextdb_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "vigil_sha=$vigil_sha"
+            echo "context_graph_sha=$context_graph_sha"
+            echo "contextdb_sha=$contextdb_sha"
+          } >> "$GITHUB_OUTPUT"
           jq -n \
             --arg workflow_sha "$GITHUB_SHA" \
             --arg vigil_sha "$vigil_sha" \
@@ -158,7 +152,7 @@ jobs:
             '{tier:"release",workflow_sha:$workflow_sha,vigil_sha:$vigil_sha,main_base_sha:$main_base_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,dev_closeout_run:$closeout_run,clean:true}' \
             > release-sources.json
       - name: Upload immutable release source receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-sources
           path: release-sources.json
@@ -172,33 +166,27 @@ jobs:
     needs: exact-sources
     steps:
       - name: Checkout exact Vigil candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
       - name: Prove the clean leg starts without build outputs
         run: |
           test ! -e vigil/target
           test ! -e context-graph/target
           test ! -e contextdb/target
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: cargo-nextest
       - name: Install bounded runtime tools
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
@@ -219,7 +207,7 @@ jobs:
             --step tests
       - name: Upload clean qualification receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-receipt-source
           path: vigil/target/verify-receipts/release-source.json
@@ -239,26 +227,18 @@ jobs:
           docker system prune -af || true
           df -h
       - name: Checkout exact Vigil candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
       - name: Verify static-build disk before compilation
         run: |
           mkdir -p vigil/target
@@ -308,7 +288,7 @@ jobs:
             --step arm64
       - name: Upload exact static binaries and receipts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: vigil-static-musl-${{ needs.exact-sources.outputs.vigil_sha }}
           path: |
@@ -325,28 +305,20 @@ jobs:
     needs: [exact-sources, clean-qualification, static]
     steps:
       - name: Checkout exact Vigil candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
       - name: Download exact static binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: vigil-static-musl-${{ needs.exact-sources.outputs.vigil_sha }}
           path: static-download
@@ -367,9 +339,9 @@ jobs:
           docker build --tag "vigil-static-smoke:${{ needs.exact-sources.outputs.vigil_sha }}" target/static-context
           docker run --rm "vigil-static-smoke:${{ needs.exact-sources.outputs.vigil_sha }}" --help
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
       - name: Build and receipt the exact multi-architecture fallback OCI
         working-directory: vigil
         run: |
@@ -385,7 +357,7 @@ jobs:
               --output type=oci,dest=target/vigil-static-fallback.oci.tar \
               target/static-context
       - name: Upload the installed static fallback OCI and receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: vigil-static-fallback-${{ needs.exact-sources.outputs.vigil_sha }}
           path: |
@@ -425,26 +397,18 @@ jobs:
           docker system prune -af || true
           df -h
       - name: Checkout exact Vigil candidate
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB release
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
       - name: Verify hardware-build disk
         run: |
           available_kb="$(df --output=avail . | tail -n 1)"
@@ -454,7 +418,7 @@ jobs:
           fi
           df -h .
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
       - name: Stage a bounded source context
         run: |
           mkdir -p release-context
@@ -545,7 +509,7 @@ jobs:
           docker run --rm --entrypoint /usr/local/bin/vigil "vigil-addon-smoke:${{ matrix.arch }}" --help
       - name: Upload exact feature-complete artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: vigil-production-${{ matrix.arch }}-${{ needs.exact-sources.outputs.vigil_sha }}
           path: release-output/${{ matrix.arch }}
@@ -568,7 +532,7 @@ jobs:
           test "${{ needs.static-image.result }}" = "success"
           test "${{ needs.hardware.result }}" = "success"
       - name: Download exact release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: vigil-*
           path: artifacts
@@ -583,7 +547,7 @@ jobs:
             '{tier:"release",qualified:true,published:false,vigil_sha:$vigil_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,workflow_run:$workflow_run}' \
             > release-qualified.json
       - name: Upload non-publishing release receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-qualified-${{ inputs.vigil_sha }}
           path: |

@@ -97,21 +97,21 @@ jobs:
           }
 
       - name: Download exact closeout source receipt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-sources
           path: closeout/source
           run-id: ${{ inputs.closeout_run_id }}
           github-token: ${{ github.token }}
       - name: Download exact closeout impact receipt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-impact
           path: closeout/impact
           run-id: ${{ inputs.closeout_run_id }}
           github-token: ${{ github.token }}
       - name: Download exact closeout qualification receipt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-qualified-${{ inputs.vigil_sha }}
           path: closeout/final
@@ -137,7 +137,7 @@ jobs:
             closeout/final/dev-closeout-qualified.json >/dev/null
 
       - name: Checkout exact qualified candidate and current dev
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.vigil_sha }}
           fetch-depth: 0
@@ -155,7 +155,7 @@ jobs:
           test -z "$(git status --porcelain=v1)"
           while IFS= read -r -d '' path; do
             case "$path" in
-              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/test-source-scan-allowlist.toml|clippy.toml|crates/vigil-ha/tests/contract-goldens/*|crates/vigil-ha/tests/ha_discovery_id_contract.rs|crates/vigil-ha/tests/mqtt_topic_contract.rs|crates/vigil/tests/automation_handle_capability_scan.rs|crates/vigil/tests/cli_secret_flag_surface.rs|crates/vigil/tests/contract-goldens/*|crates/vigil/tests/dependency_direction_contract.rs|crates/vigil/tests/environment_read_surface.rs|crates/vigil/tests/free_port_call_sites.rs|crates/vigil/tests/home_assistant_vocabulary_scan.rs|crates/vigil/tests/http_route_contract.rs|crates/vigil/tests/oss_cleanliness_scan.rs|crates/vigil/tests/process_cleanup_scan.rs|crates/vigil/tests/runtime_packages_manifest.rs|crates/vigil/tests/settings_registry_declare_boundary.rs|crates/vigil/tests/settings_surface_coverage.rs|crates/vigil/tests/source_scan_contract.rs|crates/vigil/tests/source_scan_lexer.rs|crates/vigil/tests/transport_purity.rs|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
+              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/test-source-scan-allowlist.toml|clippy.toml|crates/vigil-ha/tests/contract-goldens/*|crates/vigil-ha/tests/ha_discovery_id_contract.rs|crates/vigil-ha/tests/mqtt_topic_contract.rs|crates/vigil/tests/automation_handle_capability_scan.rs|crates/vigil/tests/cli_secret_flag_surface.rs|crates/vigil/tests/contract-goldens/*|crates/vigil/tests/dependency_direction_contract.rs|crates/vigil/tests/environment_read_surface.rs|crates/vigil/tests/free_port_call_sites.rs|crates/vigil/tests/home_assistant_vocabulary_scan.rs|crates/vigil/tests/http_route_contract.rs|crates/vigil/tests/oss_cleanliness_scan.rs|crates/vigil/tests/process_cleanup_scan.rs|crates/vigil/tests/runtime_packages_manifest.rs|crates/vigil/tests/settings_registry_declare_boundary.rs|crates/vigil/tests/settings_surface_coverage.rs|crates/vigil/tests/source_scan_contract.rs|crates/vigil/tests/source_scan_lexer.rs|crates/vigil/tests/transport_purity.rs|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|scripts/ci-public-dependencies|scripts/ci-performance|scripts/ci-portable|scripts/ci-checks|scripts/ci-integration|scripts/ci-publication|tests/convergence-smoke.sh|xtask/*)
                 echo "normal feature integration cannot change trusted verification control plane: $path" >&2
                 echo "route a reviewed control-plane update through the owner bootstrap path" >&2
                 exit 1
@@ -166,12 +166,11 @@ jobs:
       - name: Fast-forward dev without a bypass or force update
         env:
           GH_TOKEN: ${{ github.token }}
-          CG_CI_TOKEN: ${{ secrets.CG_CI_TOKEN }}
           VIGIL_SHA: ${{ inputs.vigil_sha }}
           CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
           CONTEXTDB_SHA: ${{ inputs.contextdb_sha }}
         run: |
-          test "$(GH_TOKEN="$CG_CI_TOKEN" gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$CONTEXT_GRAPH_SHA" || {
+          test "$(gh api repos/context-graph-ai/context-graph/git/ref/heads/dev --jq '.object.sha')" = "$CONTEXT_GRAPH_SHA" || {
             echo "Context Graph dev moved after closeout; qualify the current dependency tuple" >&2
             exit 1
           }

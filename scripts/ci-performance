@@ -1,0 +1,554 @@
+#!/usr/bin/env python3
+"""Report existing workloads and validate selected-workload native receipts."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import tempfile
+import time
+import subprocess
+import sys
+import tomllib
+
+ROOT = Path(__file__).resolve().parent.parent
+TESTS = {
+    "synthetic": "one_camera_acceptance::frigate_replacement_loop_runs_over_direct_rtsp_synthetic",
+    "physical": "one_camera_acceptance::frigate_replacement_real_camera_event_lands_and_walks",
+}
+FIXTURES = [
+    "tests/fixtures/video/one-by-one-person-detection.mp4",
+    "tests/fixtures/video/empty-scene-from-one-by-one-person-detection.mp4",
+    "tests/fixtures/models/yolox-tiny-coco.pth",
+]
+PHYSICAL_INPUTS = ["VIGIL_ACCEPTANCE_RTSP_URL", "VIGIL_ACCEPTANCE_AMBIENT_MINUTES",
+                   "VIGIL_ACCEPTANCE_HARD_EVENT_START_EPOCH", "VIGIL_ACCEPTANCE_HARD_EVENT_END_EPOCH"]
+BUILD_FEATURES = "first-light-acceptance,acceptance"
+TOOLS = {"ffmpeg": "VIGIL_FFMPEG_BIN", "ffprobe": "VIGIL_FFPROBE_BIN",
+         "mediamtx": "VIGIL_MEDIAMTX_BIN"}
+SCOPE = "Selected existing camera workload only; global product performance review pending. No new thresholds."
+CGROUP_LIMITS = ["memory.max", "memory.high", "cpu.max", "pids.max"]
+
+
+def selected_cgroup():
+    # Resolve this process's unified group, without exporting its private path.
+    membership = Path("/proc/self/cgroup")
+    mounts = Path("/proc/self/mountinfo")
+    if not membership.is_file() or not mounts.is_file():
+        return None
+    group = next((line[3:] for line in membership.read_text().splitlines()
+                  if line.startswith("0::")), None)
+    if group is None:
+        return None
+    for line in mounts.read_text().splitlines():
+        fields = line.split()
+        if " - cgroup2 " not in line:
+            continue
+        unescape = lambda value: re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+        mount_root, mountpoint = (Path(unescape(value)) for value in fields[3:5])
+        try:
+            relative = Path(group).relative_to(mount_root)
+        except ValueError:
+            continue
+        if ".." in relative.parts:
+            continue
+        path = mountpoint / relative
+        if path.is_dir():
+            return path
+    return None
+
+
+def git(path, *args):
+    return subprocess.check_output(["git", "-C", str(path), *args], text=True,
+                                   stderr=subprocess.DEVNULL).strip()
+
+
+def identity(path):
+    try:
+        return {"sha": git(path, "rev-parse", "HEAD"), "dirty": bool(git(path, "status", "--porcelain"))}
+    except subprocess.CalledProcessError:
+        return {"sha": None, "dirty": None}
+
+
+def pins():
+    data = json.loads((ROOT / "scripts/ci-dependency-pins.json").read_text())
+    if set(data) != {"context_graph", "contextdb"} or any(
+            not isinstance(value, str) or (value and not re.fullmatch(r"[0-9a-f]{40}", value))
+            for value in data.values()):
+        raise ValueError("dependency pins must be exact revisions or explicit pending values")
+    return {"vigil": git(ROOT, "rev-parse", "HEAD"), **data}
+
+
+def command(workload):
+    return ["cargo", "test", "--locked", "--release", "--features", "acceptance",
+            "--test", "acceptance", TESTS[workload], "--", "--exact",
+            *(["--ignored"] if workload == "physical" else []), "--nocapture", "--test-threads=1"]
+
+
+def build_command():
+    # Same explicit feature flags as the closeout archive; build without test targets.
+    return ["cargo", "build", "--locked", "--release", "--workspace",
+            "--features", BUILD_FEATURES]
+
+
+def capture(argv, log_path, env, redact):
+    with log_path.open("w") as log:
+        process = subprocess.Popen(argv, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
+        for line in process.stdout:
+            log.write(redact_log_line(line, redact))
+        return process.wait()
+
+
+def fixture_tools(env, redact):
+    versions = {}
+    for name, key in TOOLS.items():
+        override = Path(env[key]) if env.get(key) else None
+        found = shutil.which(name, path=env.get("PATH"))
+        cached = ROOT / "target/vigil-test-tools/mediamtx/v1.19.1" / name
+        path = override if override is not None and override.is_file() else (
+            Path(found) if found else cached)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise ValueError("required fixture tool unavailable: " + name)
+        env[key] = str(path.resolve())
+        flag = "--version" if name == "mediamtx" else "-version"
+        result = subprocess.run([env[key], flag], cwd=ROOT, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        output = result.stdout.strip()
+        if result.returncode or not output:
+            raise ValueError("fixture tool version probe failed: " + name)
+        versions[name] = {"argv": [name, flag], "version": redact(output.splitlines()[0]),
+                          "exit_code": result.returncode}
+    return versions
+
+
+def digest(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def manifest():
+    # Source declarations are pins, never an unrelated sibling's observed identity.
+    return {
+        "schema_version": 1, "tier": "performance", "qualified": False,
+        "qualification": "pending controlled native selected-workload receipt",
+        "source_pins": pins(),
+        "fixtures": [{"path": name, "sha256": digest(ROOT / name) if (ROOT / name).is_file() else None}
+                     for name in FIXTURES],
+        "profile": "release", "expected_test_count_per_workload": 1,
+        "build_command": build_command(), "build_features": BUILD_FEATURES,
+        "acceptance_binary": "<receipt-dir>/vigil",
+        "required_fixture_tools": list(TOOLS),
+        "commands": {name: command(name) for name in TESTS},
+        "physical_inputs": PHYSICAL_INPUTS, "scope": SCOPE,
+        "global_product_review": "pending",
+        "host": {"system": platform.system(), "machine": platform.machine(),
+                 "kernel": platform.release(), "cpu_count": os.cpu_count()},
+    }
+
+
+def write(path, value):
+    path.write_text(json.dumps(value, indent=2) + "\n")
+
+
+def redactor(include_physical=True):
+    values = {value for key, value in os.environ.items() if value and (
+        (include_physical and key in PHYSICAL_INPUTS
+         and key != "VIGIL_ACCEPTANCE_AMBIENT_MINUTES") or (
+            any(part in key.upper() for part in ["TOKEN", "SECRET", "PASSWORD", "ACCESS_KEY"])
+            and value.lower() not in {"true", "false", "yes", "no"}
+            and re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value) is None))}
+    values.update(str(path) for path in [ROOT, ROOT.parent, Path.home()])
+    def redact(text):
+        for value in sorted(values, key=len, reverse=True):
+            # Short credentials still redact as standalone values, without replacing
+            # ordinary substrings in hardware facts, public names or diagnostics.
+            if len(value) < 8:
+                text = re.sub(r"(?<!\w)" + re.escape(value) + r"(?!\w)", "[REDACTED]", text)
+            else:
+                text = text.replace(value, "[REDACTED]")
+        text = re.sub(r"(?i)((?:rtsps?|https?)://)[^\s/]*@", r"\1[REDACTED]@", text)
+        text = re.sub(r"(?i)([?&](?:[^\s=&?#]*(?:token|secret|password|access_key|api_key|signature)|auth|credential)=)[^\s&#]*",
+                      r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(\bbearer\s+)[^\s,;]+", r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(\b[\w-]*(?:token|secret|password|access_key|api_key|credential)[\w-]*\s*[=:]\s*)"
+                      r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)", r"\1[REDACTED]", text)
+        text = re.sub(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", "[REDACTED]", text)
+        # Compiler/runtime diagnostics may name machine paths beyond the source root.
+        return re.sub(r"(?<![\w:])/(?:[^\s\"<>]+)", "[REDACTED-PATH]", text)
+    return redact
+
+
+def redact_log_line(text, redact):
+    # Only known harness fields are public. Any trailing diagnostic is still private.
+    summary = re.match(r"test result: (?:ok|FAILED)\. \d+ passed; \d+ failed; \d+ ignored;"
+                       r"(?: \d+ measured; \d+ filtered out; finished in [0-9.]+s)?", text)
+    if summary:
+        return summary[0] + redact(text[summary.end():])
+    for name in TESTS.values():
+        prefix = "test " + name + " ... ok"
+        if text.startswith(prefix) and text[len(prefix):len(prefix) + 1] in {"", " ", "\n", "\r"}:
+            return prefix + redact(text[len(prefix):])
+    return redact(text)
+
+
+def redact_strings(value, redact):
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_strings(item, redact) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_strings(item, redact) for key, item in value.items()}
+    return value
+
+
+def private_receipt(receipt, data, workload):
+    # Protect only exact, public source/command/status values. All other strings,
+    # including unknown fields and nested diagnostics, pass through redaction.
+    public = {name + "_sha": sha for name, sha in data["source_pins"].items()}
+    public.update(tier="release", lane="source",
+                  command_contract="cargo test or nextest source qualification")
+    redact = redactor(include_physical=False)
+    sanitized = {key: value if key in public and value == public[key]
+                 else redact_strings(value, redact) for key, value in receipt.items()}
+    for original, step in zip(receipt.get("steps", []), sanitized.get("steps", [])):
+        if original.get("argv") == command(workload):
+            step["argv"] = original["argv"]
+        if original.get("status") in {"passed", "test_failed", "build_failed", "command_failed", "terminated"}:
+            step["status"] = original["status"]
+        measurement = original.get("measurement_status")
+        if isinstance(measurement, str) and re.fullmatch(
+                r"(?:unsupported_platform|rusage_complete; (?:process_tree_sampling_unavailable|process_tree_samples=[0-9]+))",
+                measurement):
+            step["measurement_status"] = measurement
+    sanitized["receipt_path"] = "<receipt-dir>/verify.json"
+    return sanitized
+
+
+def external_receipt_path(destination):
+    destination = destination.resolve()
+    sources = [ROOT, ROOT.parent / "context-graph", ROOT.parent / "contextdb"]
+    if os.environ.get("CARGO_TARGET_DIR"):
+        target = Path(os.environ["CARGO_TARGET_DIR"])
+        sources.append(target if target.is_absolute() else ROOT / target)
+    if any(destination.is_relative_to(source.resolve()) for source in sources):
+        raise ValueError("receipt directory must resolve outside every measured source tree and Cargo target cache")
+    return destination
+
+
+def compiler_inputs():
+    overrides = sorted(key for key, value in os.environ.items() if value and re.fullmatch(
+        r"(?:RUSTFLAGS|CARGO_ENCODED_RUSTFLAGS|RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|"
+        r"RUSTUP_TOOLCHAIN|CARGO_INCREMENTAL|CARGO_BUILD_\w+|CARGO_PROFILE_\w+|CARGO_TARGET_(?!DIR$)\w+|"
+        r"(?:HOST_|TARGET_)?(?:CC|CXX|AR|CFLAGS|CXXFLAGS|ARFLAGS|CXXSTDLIB|RANLIB|RANLIBFLAGS|CRATE_CC_NO_DEFAULTS)"
+        r"(?:[_-][\w.-]+)?)", key))
+    if overrides:
+        raise ValueError("compiler/profile overrides would change the measured binary: "
+                         + ", ".join(overrides))
+    # Every Cargo subprocess runs at ROOT, including with a relative CARGO_HOME.
+    cargo_home = Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
+    cargo_home = (cargo_home if cargo_home.is_absolute() else ROOT / cargo_home).resolve()
+    directories = [parent / ".cargo" for parent in ROOT.parents] + [cargo_home]
+    hashes = []
+    seen = set()
+    for directory in directories:
+        for name in ["config", "config.toml"]:
+            path = directory / name
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                content = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise ValueError("external Cargo config could not be read") from None
+            try:
+                config = tomllib.loads(content.decode("utf-8"))
+            except (ValueError, UnicodeError):
+                raise ValueError("external Cargo config is malformed") from None
+            build = config.get("build", {})
+            if not isinstance(build, dict):
+                raise ValueError("external Cargo config build table is malformed")
+            if any(key in config for key in ["profile", "target", "env"]) or any(key in build for key in [
+                    "rustc", "rustc-wrapper", "rustc-workspace-wrapper", "target", "incremental"]):
+                raise ValueError("external Cargo config compiler/profile overrides would change the measured binary")
+            hashes.append(hashlib.sha256(content).hexdigest())
+    return hashes
+
+
+def verify_receipt(destination):
+    destination = external_receipt_path(destination)
+    # A rejected recheck must not leave a previous acceptance result beside it.
+    (destination / "selected-workload-qualified.json").unlink(missing_ok=True)
+    data = json.loads((destination / "manifest.json").read_text())
+    expected = manifest()
+    workload = data.get("workload")
+    def require(ok, reason):
+        if not ok:
+            raise ValueError(reason)
+    require(type(data.get("schema_version")) is int and data["schema_version"] == 1
+            and data.get("tier") == "performance", "invalid manifest schema/tier")
+    require(workload in TESTS, "unknown selected workload")
+    host = data.get("host", {})
+    require(isinstance(host, dict)
+            and all(isinstance(host.get(key), str) and host[key] for key in ["system", "machine", "kernel"])
+            and type(host.get("cpu_count")) is int and host["cpu_count"] > 0, "hardware identity missing")
+    fact_files = ["cpu.txt", "memory.txt", "filesystem.json"]
+    for name in ["cpu.txt", "memory.txt"]:
+        require((destination / name).is_file() and bool((destination / name).read_text().strip()),
+                "hardware/memory facts missing: " + name)
+    filesystems = json.loads((destination / "filesystem.json").read_text())
+    require(isinstance(filesystems, list) and len(filesystems) == 2
+            and all(isinstance(item, dict) for item in filesystems)
+            and {item.get("role") for item in filesystems} == {"source", "receipt"}
+            and all(isinstance(item.get("type"), str) and item["type"]
+                    and type(item.get("same_filesystem")) is bool
+                    and "device_id" not in item
+                    and all(type(item.get(key)) is int and item[key] >= 0
+                            for key in ["size_bytes", "available_bytes"])
+                    for item in filesystems)
+            and filesystems[0]["same_filesystem"] == filesystems[1]["same_filesystem"],
+            "filesystem facts missing or invalid")
+    limits = data.get("cgroup_limits")
+    require(isinstance(limits, dict) and set(limits) == set(CGROUP_LIMITS),
+            "cgroup presence/absence record missing")
+    for name in CGROUP_LIMITS:
+        value = limits[name]
+        path = destination / name
+        if value is None:
+            require(not path.exists(), "absent cgroup limit has a fact file: " + name)
+        else:
+            pattern = r"(?:max|[0-9]+) [0-9]+" if name == "cpu.max" else r"(?:max|[0-9]+)"
+            require(isinstance(value, str) and re.fullmatch(pattern, value) is not None and path.is_file()
+                    and path.read_text().strip() == value, "cgroup limit fact differs: " + name)
+            fact_files.append(name)
+    require(all(re.fullmatch(r"[0-9a-f]{40}", sha or "") for sha in expected["source_pins"].values()),
+            "PENDING: no reviewed exact public tuple")
+    require(data.get("source_pins") == expected["source_pins"], "source pins differ")
+    sources = data.get("sources", {})
+    require(set(sources) == set(expected["source_pins"]) and all(
+        sources[name] == {"sha": sha, "dirty": False} for name, sha in expected["source_pins"].items()),
+        "sources must be the exact clean pinned tuple")
+    require(data.get("fixtures") == expected["fixtures"] and all(item["sha256"] for item in expected["fixtures"]),
+            "fixture identities differ or are missing")
+    require(data.get("profile") == "release" and data.get("commands") == expected["commands"]
+            and data.get("expected_test_count_per_workload") == 1, "workload/profile differs")
+    require(data.get("build_command") == build_command()
+            and data.get("build_features") == BUILD_FEATURES
+            and data.get("acceptance_binary") == "<receipt-dir>/vigil"
+            and data.get("required_fixture_tools") == list(TOOLS), "binary build contract differs")
+    build = data.get("build", {})
+    require(isinstance(build, dict) and build.get("compiler_overrides") == []
+            and build.get("rustflags") == ""
+            and isinstance(build.get("external_cargo_config_sha256"), list)
+            and all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                    for value in build["external_cargo_config_sha256"]),
+            "compiler/profile input receipt missing or invalid")
+    require(isinstance(build, dict) and build.get("argv") == build_command()
+            and build.get("profile") == "release" and build.get("features") == BUILD_FEATURES
+            and build.get("source_pins") == expected["source_pins"]
+            and build.get("fresh_target") is True
+            and type(build.get("exit_code")) is int and build["exit_code"] == 0
+            and build.get("status") == "passed"
+            and type(build.get("wall_ms")) is int and build["wall_ms"] >= 0,
+            "successful exact-source fresh binary build missing")
+    binary = data.get("measured_binary", {})
+    executable = destination / "vigil"
+    require(isinstance(binary, dict) and binary.get("path") == "vigil"
+            and binary.get("environment_key") == "VIGIL_ACCEPTANCE_BIN"
+            and isinstance(binary.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", binary["sha256"]) is not None
+            and executable.is_file() and not executable.is_symlink()
+            and os.access(executable, os.X_OK) and executable.stat().st_mode & 0o222 == 0
+            and digest(executable) == binary["sha256"], "measured binary missing, mutable or digest differs")
+    tools = data.get("fixture_tools", {})
+    require(isinstance(tools, dict) and set(tools) == set(TOOLS)
+            and all(isinstance(value, dict)
+                    and value.get("argv") == [name, "--version" if name == "mediamtx" else "-version"]
+                    and isinstance(value.get("version"), str) and value["version"].strip()
+                    and type(value.get("exit_code")) is int and value["exit_code"] == 0
+                    for name, value in tools.items()), "fixture tool versions missing or invalid")
+    require((destination / "build.log").is_file(), "build log missing")
+    require(type(data.get("exit_code")) is int and data["exit_code"] == 0
+            and data.get("workload_complete") is True and type(data.get("executed_test_count")) is int
+            and data["executed_test_count"] == 1, "workload failed or was incomplete")
+    if workload == "physical":
+        require(data.get("physical_inputs_present") == dict.fromkeys(PHYSICAL_INPUTS, True), "physical inputs incomplete")
+    raw = (destination / "raw.log").read_text()
+    summaries = re.findall(r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;", raw)
+    require(summaries == [("1", "0", "0")], "exact executed-test summary missing or duplicated")
+    require(re.search(r"test " + re.escape(TESTS[workload]) + r" \.\.\.", raw) is not None,
+            "selected test identity missing")
+    receipt = json.loads((destination / "verify.json").read_text())
+    require(type(receipt.get("schema_version")) is int and receipt["schema_version"] == 2
+            and receipt.get("tier") == "release" and receipt.get("lane") == "source", "invalid verify schema/tier/lane")
+    channel = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+    for tool in ["rustc", "cargo"]:
+        version = receipt.get(tool + "_version")
+        require(isinstance(version, str) and re.fullmatch(
+            re.escape(tool + " " + channel) + r" \([0-9a-f]{7,40} [0-9]{4}-[0-9]{2}-[0-9]{2}\)", version) is not None,
+            tool + " version missing, invalid or differs from pinned toolchain")
+    require(all(receipt.get(name + "_sha") == sha for name, sha in expected["source_pins"].items()), "verify source mismatch")
+    require(receipt.get("source_unchanged") is True and all(
+        receipt.get(field) == dict.fromkeys(expected["source_pins"], False) for field in ["dirty", "dirty_after"]),
+        "verify sources changed or dirty")
+    require(receipt.get("measured_binary") == binary and receipt.get("build") == build
+            and receipt.get("fixture_tools") == tools, "verify binary/build/tool binding differs")
+    steps = receipt.get("steps", [])
+    require(len(steps) == 1 and steps[0].get("argv") == command(workload)
+            and type(steps[0].get("exit_code")) is int and steps[0]["exit_code"] == 0
+            and steps[0].get("status") == "passed", "verify command/status mismatch")
+    require(all(type(steps[0].get(key)) is int and steps[0][key] >= 0
+                for key in ["wall_ms", "max_rss_bytes"]), "actual wall/RSS measurements missing")
+    # Recheck anonymous access now; metadata credentials never authorize Git fetch.
+    subprocess.run(["./scripts/ci-public-dependencies", "check"], cwd=ROOT, check=True,
+                   stdout=subprocess.DEVNULL)
+    qualified = {"schema_version": 1, "tier": "performance", "qualified": True,
+                 "qualification_scope": "selected-workload", "workload": workload,
+                 "source_pins": expected["source_pins"], "fixtures": expected["fixtures"],
+                 "measured_binary": binary, "build": build, "fixture_tools": tools,
+                 "scope": SCOPE, "global_product_review": "pending",
+                 "receipt_sha256": {name: digest(destination / name) for name in
+                                    ["manifest.json", "verify.json", "raw.log", "build.log", "vigil", *fact_files]}}
+    write(destination / "selected-workload-qualified.json", qualified)
+    print("Selected workload receipt qualified; global product performance review pending.")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="mode", required=True)
+    plan = sub.add_parser("manifest")
+    plan.add_argument("--output", type=Path)
+    verify = sub.add_parser("verify-receipt")
+    verify.add_argument("receipt_dir", type=Path)
+    run = sub.add_parser("run")
+    run.add_argument("--workload", choices=TESTS, required=True)
+    run.add_argument("--receipt-dir", type=Path, required=True)
+    run.add_argument("--operator-controlled", action="store_true", required=True)
+    args = parser.parse_args()
+    if args.mode == "verify-receipt":
+        return verify_receipt(args.receipt_dir)
+    if args.mode == "run":
+        try:
+            external_config_hashes = compiler_inputs()
+            destination = external_receipt_path(args.receipt_dir)
+        except ValueError as error:
+            parser.error(str(error))
+        if destination.exists():
+            parser.error("receipt directory must be new")
+    data = manifest()
+    if args.mode == "manifest":
+        if args.output:
+            write(args.output, data)
+        else:
+            print(json.dumps(data, indent=2))
+        return 0
+    if os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"):
+        parser.error("native workloads must not run on CI/shared GitHub runners")
+    subprocess.run(["./scripts/ci-public-dependencies", "verify-checkouts"], cwd=ROOT, check=True)
+    data["sources"] = {name: identity(path) for name, path in {
+        "vigil": ROOT, "context_graph": ROOT.parent / "context-graph", "contextdb": ROOT.parent / "contextdb"}.items()}
+    if any(data["sources"][name] != {"sha": sha, "dirty": False} for name, sha in data["source_pins"].items()):
+        parser.error("native qualification requires the clean pinned source tuple")
+    if any(not item["sha256"] for item in data["fixtures"]):
+        parser.error("accepted fixture/model inputs missing")
+    if args.workload == "physical" and any(not os.environ.get(key) for key in PHYSICAL_INPUTS):
+        parser.error("physical inputs missing; workload NOT RUN")
+    destination.mkdir(parents=True, mode=0o700)
+    redact = redactor()
+    for name, path in [("cpu", "/proc/cpuinfo"), ("memory", "/proc/meminfo")]:
+        if Path(path).is_file():
+            facts = Path(path).read_text()
+            if name == "cpu":
+                facts = "".join(line for line in facts.splitlines(keepends=True)
+                                if not re.match(r"(?i)^\s*(?:serial|hardware revision)\s*:", line))
+            (destination / (name + ".txt")).write_text(redact(facts))
+    cgroup = selected_cgroup()
+    data["cgroup_limits"] = dict.fromkeys(CGROUP_LIMITS)
+    for name in CGROUP_LIMITS:
+        path = cgroup / name if cgroup is not None else None
+        if path is not None and path.is_file():
+            # Limits contain only numeric values or "max", never operator paths/secrets.
+            value = path.read_text().strip()
+            data["cgroup_limits"][name] = value
+            (destination / name).write_text(value + "\n")
+    # Only the two relevant filesystems, without mountpoints or device names/paths.
+    facts = []
+    same_filesystem = ROOT.stat().st_dev == destination.stat().st_dev
+    for label, path in [("source", ROOT), ("receipt", destination)]:
+        fields = subprocess.check_output(["df", "--output=fstype,size,avail", "-B1", str(path)], text=True).splitlines()[-1].split()
+        facts.append({"role": label, "same_filesystem": same_filesystem, "type": fields[0],
+                      "size_bytes": int(fields[1]), "available_bytes": int(fields[2])})
+    write(destination / "filesystem.json", facts)
+    data["physical_inputs_present"] = {key: bool(os.environ.get(key)) for key in PHYSICAL_INPUTS}
+    env = dict(os.environ)
+    env["RUSTFLAGS"] = ""
+    # An operator override never supplies the measured process binary.
+    env.pop("VIGIL_ACCEPTANCE_BIN", None)
+    env.pop("CARGO_BIN_EXE_vigil", None)
+    data["fixture_tools"] = fixture_tools(env, redact)
+    data["workload"] = args.workload
+    data["build"] = {"argv": build_command(), "profile": "release", "features": BUILD_FEATURES,
+                     "compiler_overrides": [], "rustflags": "",
+                     "external_cargo_config_sha256": external_config_hashes,
+                     "source_pins": data["source_pins"], "fresh_target": True, "status": "pending"}
+    write(destination / "manifest.json", data)
+    # Unique empty target: Cargo cannot admit a cached or external Vigil executable.
+    with tempfile.TemporaryDirectory(prefix="vigil-performance-build-", dir=destination.parent) as target:
+        build_env = {**env, "CARGO_TARGET_DIR": target}
+        started = time.monotonic()
+        code = capture(build_command(), destination / "build.log", build_env, redact)
+        data["build"].update(exit_code=code, wall_ms=int((time.monotonic() - started) * 1000),
+                             status="passed" if code == 0 else "build_failed")
+        write(destination / "manifest.json", data)
+        if code:
+            return code
+        built = Path(target) / "release/vigil"
+        if not built.is_file() or built.is_symlink() or not os.access(built, os.X_OK):
+            raise ValueError("fresh build did not produce the Vigil executable")
+        executable = destination / "vigil"
+        shutil.copyfile(built, executable)
+        executable.chmod(0o500)
+    if any(identity(path) != data["sources"][name] for name, path in {
+            "vigil": ROOT, "context_graph": ROOT.parent / "context-graph",
+            "contextdb": ROOT.parent / "contextdb"}.items()):
+        raise ValueError("pinned sources changed during binary build")
+    data["measured_binary"] = {"path": "vigil", "environment_key": "VIGIL_ACCEPTANCE_BIN",
+                               "sha256": digest(executable)}
+    env["VIGIL_ACCEPTANCE_BIN"] = str(executable)
+    invocation = ["./scripts/verify", "release", "--lane", "source",
+                  "--vigil-sha", data["source_pins"]["vigil"],
+                  "--context-graph-sha", data["source_pins"]["context_graph"],
+                  "--contextdb-sha", data["source_pins"]["contextdb"],
+                  "--cache-state", "mixed", "--receipt", str(destination / "verify.json"), "--", *command(args.workload)]
+    data["invocation"] = [*invocation]
+    data["invocation"][invocation.index("--receipt") + 1] = "<receipt-dir>/verify.json"
+    write(destination / "manifest.json", data)
+    exit_code = capture(invocation, destination / "raw.log", env, redact)
+    verify_path = destination / "verify.json"
+    if verify_path.is_file():
+        receipt = json.loads(verify_path.read_text())
+        receipt = private_receipt(receipt, data, args.workload)
+        receipt.update({key: data[key] for key in ["measured_binary", "build", "fixture_tools"]})
+        write(verify_path, receipt)
+    output = (destination / "raw.log").read_text()
+    complete = exit_code == 0 and "1 passed; 0 failed; 0 ignored" in output
+    data.update({"workload": args.workload, "exit_code": exit_code,
+                 "workload_complete": complete, "executed_test_count": 1 if complete else None})
+    write(destination / "manifest.json", data)
+    if complete:
+        return verify_receipt(destination)
+    return exit_code or 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (ValueError, KeyError, OSError, subprocess.CalledProcessError) as error:
+        print(f"Receipt rejected: {error}", file=sys.stderr)
+        sys.exit(1)

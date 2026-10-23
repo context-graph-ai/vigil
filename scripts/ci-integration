@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+case "${1:-}" in
+  --help|-h)
+    echo 'usage: scripts/ci-integration --default | dev-closeout OPTIONS...'
+    echo 'Default coverage: default-checks.yml (also required by ci.yml at the same SHA).'
+    echo 'Extended feature/install/shard coverage: existing dev-closeout.yml; forwards exact tuple/lane/step arguments to scripts/verify.'
+    exit 0 ;;
+  --default)
+    test "$#" = 1
+    ./scripts/ci-public-dependencies verify-checkouts
+    for step in runtime-harness fmt clippy default-inventory default-estate default-tests; do
+      ./scripts/verify workflow --step "$step"
+    done ;;
+  dev-closeout) exec ./scripts/verify "$@" ;;
+  *) echo 'usage: scripts/ci-integration --default | dev-closeout OPTIONS...' >&2; exit 2 ;;
+esac

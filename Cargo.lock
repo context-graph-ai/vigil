@@ -860,8 +860,7 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd9895436c1ba5dc1037a19935d084b838db066ff4e15ef7dded020b7c12a4a"
+source = "git+https://github.com/context-graph-ai/context-graph?rev=09b1c591c49cd145436c763384639bbeb1472c86#09b1c591c49cd145436c763384639bbeb1472c86"
 dependencies = [
  "byteorder",
  "float8",
@@ -878,14 +877,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokenizers 0.22.2",
  "yoke",
- "zip 7.2.0",
+ "zip 9.0.4",
 ]
 
 [[package]]
 name = "candle-nn"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87"
+source = "git+https://github.com/context-graph-ai/context-graph?rev=09b1c591c49cd145436c763384639bbeb1472c86#09b1c591c49cd145436c763384639bbeb1472c86"
 dependencies = [
  "candle-core",
  "half",
@@ -900,8 +898,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f59d08c89e9f4af9c464e2f3a8e16199e7cc601e6f34538c2cfbb42b623b1783"
+source = "git+https://github.com/context-graph-ai/context-graph?rev=09b1c591c49cd145436c763384639bbeb1472c86#09b1c591c49cd145436c763384639bbeb1472c86"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -986,13 +983,16 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 [[package]]
 name = "cg-node-fs"
 version = "0.1.0"
+source = "git+https://github.com/context-graph-ai/context-graph?rev=09b1c591c49cd145436c763384639bbeb1472c86#09b1c591c49cd145436c763384639bbeb1472c86"
 dependencies = [
  "fs4",
+ "tempfile",
 ]
 
 [[package]]
 name = "cg-vision-embedder"
 version = "0.1.0"
+source = "git+https://github.com/context-graph-ai/context-graph?rev=09b1c591c49cd145436c763384639bbeb1472c86#09b1c591c49cd145436c763384639bbeb1472c86"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -1269,6 +1269,7 @@ checksum = "136d3e02915a2cea4d74caa8681e2d44b1c3254bdbf17d11d41d587ff858832c"
 [[package]]
 name = "context-graph"
 version = "0.1.0"
+source = "git+https://github.com/context-graph-ai/context-graph?rev=09b1c591c49cd145436c763384639bbeb1472c86#09b1c591c49cd145436c763384639bbeb1472c86"
 dependencies = [
  "cg-node-fs",
  "chrono",
@@ -1277,6 +1278,7 @@ dependencies = [
  "contextdb-parser",
  "fs4",
  "pollster",
+ "rayon",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1288,6 +1290,7 @@ dependencies = [
 [[package]]
 name = "contextdb-core"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "bincode 2.0.1",
  "rand 0.9.4",
@@ -1301,6 +1304,7 @@ dependencies = [
 [[package]]
 name = "contextdb-engine"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "bao-tree",
  "bincode 2.0.1",
@@ -1310,6 +1314,7 @@ dependencies = [
  "contextdb-graph",
  "contextdb-parser",
  "contextdb-planner",
+ "contextdb-redb",
  "contextdb-relational",
  "contextdb-tx",
  "contextdb-vector",
@@ -1322,10 +1327,9 @@ dependencies = [
  "iroh-tickets",
  "irpc",
  "libc",
- "nix",
+ "nix 0.30.1",
  "parking_lot",
  "range-collections",
- "redb",
  "rmp-serde",
  "roaring",
  "rustls-pki-types",
@@ -1345,6 +1349,7 @@ dependencies = [
 [[package]]
 name = "contextdb-graph"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "contextdb-core",
  "contextdb-tx",
@@ -1355,6 +1360,7 @@ dependencies = [
 [[package]]
 name = "contextdb-hnsw"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "anndists",
  "anyhow",
@@ -1378,6 +1384,7 @@ dependencies = [
 [[package]]
 name = "contextdb-parser"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "contextdb-core",
  "pest",
@@ -1387,14 +1394,24 @@ dependencies = [
 [[package]]
 name = "contextdb-planner"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "contextdb-core",
  "contextdb-parser",
 ]
 
 [[package]]
+name = "contextdb-redb"
+version = "4.1.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "contextdb-relational"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "contextdb-core",
  "contextdb-tx",
@@ -1405,6 +1422,7 @@ dependencies = [
 [[package]]
 name = "contextdb-server"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "blake3",
  "clap",
@@ -1432,6 +1450,7 @@ dependencies = [
 [[package]]
 name = "contextdb-tx"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "contextdb-core",
  "parking_lot",
@@ -1440,6 +1459,7 @@ dependencies = [
 [[package]]
 name = "contextdb-vector"
 version = "1.0.0"
+source = "git+https://github.com/context-graph-ai/contextdb?rev=bc9cce955eb85fb1488f5304426eedeb6d97e905#bc9cce955eb85fb1488f5304426eedeb6d97e905"
 dependencies = [
  "anndists",
  "contextdb-core",
@@ -5020,7 +5040,7 @@ dependencies = [
  "combine",
  "libc",
  "mach2",
- "nix",
+ "nix 0.30.1",
  "sysctl",
  "thiserror 2.0.18",
  "widestring",
@@ -5389,6 +5409,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -6565,15 +6597,6 @@ name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
-
-[[package]]
-name = "redb"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "redox_syscall"
@@ -9672,18 +9695,6 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "7.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c42e33efc22a0650c311c2ef19115ce232583abbe80850bc8b66509ebef02de0"
-dependencies = [
- "crc32fast",
- "indexmap",
- "memchr",
- "typed-path",
-]
-
-[[package]]
-name = "zip"
 version = "8.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
@@ -9707,6 +9718,19 @@ dependencies = [
  "zeroize",
  "zopfli",
  "zstd",
+]
+
+[[package]]
+name = "zip"
+version = "9.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+dependencies = [
+ "crc32fast",
+ "indexmap",
+ "memchr",
+ "nix 0.31.3",
+ "typed-path",
 ]
 
 [[package]]

@@ -145,3 +145,6 @@ a live command render the same projection.
 Run `scripts/verify` and `cargo xtask test-estate-check`. A new test file, a renamed test function,
 and a changed documentation paragraph each need their registration in `.config/` — the check names
 what is missing and prints the digests to record.
+
+Automation: [workflow map](.github/CI.md), [automation rules](.github/AGENTS.md),
+[development downloads](docs/download.md), and [manual performance](docs/performance/README.md).

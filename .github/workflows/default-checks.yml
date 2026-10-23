@@ -1,0 +1,82 @@
+name: Default checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 1
+  CARGO_PROFILE_TEST_DEBUG: 1
+  RUSTFLAGS: ""
+  CARGO_BUILD_JOBS: 2
+  NEXTEST_TEST_THREADS: 2
+
+# Required default coverage is shared with ci.yml at the caller SHA.
+# Broader exact-tuple feature/install/shard coverage remains in dev-closeout.yml.
+jobs:
+  change:
+    name: Default change gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact Vigil change
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: vigil
+          persist-credentials: false
+
+      - name: Fetch only the validated public exact tuple
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+        run: ./scripts/ci-public-dependencies checkout
+
+      - name: Reclaim unused hosted runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          df -h .
+
+      - name: Install nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: cargo-nextest
+
+      - name: Install bounded runtime test tools
+        run: |
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
+
+      - name: Restore public compiler outputs
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: vigil
+          key: public-change-v2-${{ runner.os }}-${{ hashFiles('vigil/Cargo.lock', 'vigil/.config/nextest.toml', 'vigil/scripts/ci-public-dependencies', 'vigil/scripts/ci-dependency-pins.json') }}
+          save-if: ${{ github.event_name == 'push' }}
+
+      - name: Set up the default runtime harness
+        working-directory: vigil
+        run: ./scripts/verify workflow --step runtime-harness
+
+      - name: Check formatting
+        working-directory: vigil
+        run: ./scripts/verify workflow --step fmt
+
+      - name: Lint default workspace targets
+        working-directory: vigil
+        run: ./scripts/verify workflow --step clippy
+
+      - name: Enumerate the exact default estate
+        working-directory: vigil
+        run: ./scripts/verify workflow --step default-inventory
+
+      - name: Enforce the test estate and default inventory
+        working-directory: vigil
+        run: ./scripts/verify workflow --step default-estate
+
+      - name: Run default tests
+        working-directory: vigil
+        run: ./scripts/verify workflow --step default-tests

@@ -23,8 +23,8 @@ keywords = ["home-assistant", "camera", "nvr", "local-first"]
 categories = ["command-line-utilities"]
 
 [workspace.dependencies]
-context-graph = { path = "../context-graph/crates/context-graph", default-features = false }
-cg-vision-embedder = { path = "../context-graph/crates/cg-vision-embedder" }
+context-graph = { git = "https://github.com/context-graph-ai/context-graph", rev = "09b1c591c49cd145436c763384639bbeb1472c86", default-features = false }
+cg-vision-embedder = { git = "https://github.com/context-graph-ai/context-graph", rev = "09b1c591c49cd145436c763384639bbeb1472c86" }
 burn = { version = "0.21.0", default-features = false }
 burn-flex = { version = "0.21.0" }
 burn-store = { version = "0.21.0", default-features = false, features = ["std", "pytorch"] }
@@ -81,11 +81,11 @@ yolox-burn = { git = "https://github.com/tracel-ai/models.git", rev = "ec1b9e42e
 # `fabric` feature (Design decision A — cg's own fabric.rs is work-class-#1
 # glue and would drag the understanding surface in for zero reuse; vigil
 # authors only its payloads/executor/policy, per the placement rule).
-contextdb-server = { path = "../contextdb/crates/contextdb-server", default-features = false, features = [
+contextdb-server = { git = "https://github.com/context-graph-ai/contextdb", rev = "bc9cce955eb85fb1488f5304426eedeb6d97e905", default-features = false, features = [
   "iroh",
 ] }
-contextdb-engine = { path = "../contextdb/crates/contextdb-engine" }
-contextdb-core = { path = "../contextdb/crates/contextdb-core" }
+contextdb-engine = { git = "https://github.com/context-graph-ai/contextdb", rev = "bc9cce955eb85fb1488f5304426eedeb6d97e905" }
+contextdb-core = { git = "https://github.com/context-graph-ai/contextdb", rev = "bc9cce955eb85fb1488f5304426eedeb6d97e905" }
 
 [dependencies]
 context-graph.workspace = true

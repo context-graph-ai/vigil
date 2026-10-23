@@ -74,34 +74,40 @@ jobs:
           done
 
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.vigil_sha }}
           fetch-depth: 0
           path: vigil
           persist-credentials: false
 
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ inputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
+      - name: Reject self-qualification of verification control-plane changes
+        env:
+          VIGIL_SHA: ${{ inputs.vigil_sha }}
+          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
+        run: |
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/test-source-scan-allowlist.toml|clippy.toml|crates/vigil-ha/tests/contract-goldens/*|crates/vigil-ha/tests/ha_discovery_id_contract.rs|crates/vigil-ha/tests/mqtt_topic_contract.rs|crates/vigil/tests/automation_handle_capability_scan.rs|crates/vigil/tests/cli_secret_flag_surface.rs|crates/vigil/tests/contract-goldens/*|crates/vigil/tests/dependency_direction_contract.rs|crates/vigil/tests/environment_read_surface.rs|crates/vigil/tests/free_port_call_sites.rs|crates/vigil/tests/home_assistant_vocabulary_scan.rs|crates/vigil/tests/http_route_contract.rs|crates/vigil/tests/oss_cleanliness_scan.rs|crates/vigil/tests/process_cleanup_scan.rs|crates/vigil/tests/runtime_packages_manifest.rs|crates/vigil/tests/settings_registry_declare_boundary.rs|crates/vigil/tests/settings_surface_coverage.rs|crates/vigil/tests/source_scan_contract.rs|crates/vigil/tests/source_scan_lexer.rs|crates/vigil/tests/transport_purity.rs|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|scripts/ci-public-dependencies|scripts/ci-performance|scripts/ci-portable|scripts/ci-checks|scripts/ci-integration|scripts/ci-publication|tests/convergence-smoke.sh|xtask/*)
+                echo "normal feature closeout cannot change trusted verification control plane: $path" >&2
+                echo "route a reviewed control-plane update through the owner bootstrap path" >&2
+                exit 1
+                ;;
+            esac
+          done < <(git -C vigil diff --name-only --no-renames -z --diff-filter=ACDMRTUXB "$DEV_BASE_SHA" "$VIGIL_SHA")
 
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ inputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ inputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ inputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
 
       - name: Prove immutable clean identities
         id: identity
         env:
-          GH_TOKEN: ${{ secrets.CG_CI_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           EXPECTED_VIGIL_SHA: ${{ inputs.vigil_sha }}
           EXPECTED_DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
           EXPECTED_CONTEXT_GRAPH_SHA: ${{ inputs.context_graph_sha }}
@@ -127,10 +133,12 @@ jobs:
           test -z "$(git -C vigil status --porcelain=v1)"
           test -z "$(git -C context-graph status --porcelain=v1)"
           test -z "$(git -C contextdb status --porcelain=v1)"
-          echo "vigil_sha=$vigil_sha" >> "$GITHUB_OUTPUT"
-          echo "dev_base_sha=$dev_sha" >> "$GITHUB_OUTPUT"
-          echo "context_graph_sha=$context_graph_sha" >> "$GITHUB_OUTPUT"
-          echo "contextdb_sha=$contextdb_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "vigil_sha=$vigil_sha"
+            echo "dev_base_sha=$dev_sha"
+            echo "context_graph_sha=$context_graph_sha"
+            echo "contextdb_sha=$contextdb_sha"
+          } >> "$GITHUB_OUTPUT"
           jq -n \
             --arg vigil_sha "$vigil_sha" \
             --arg workflow_sha "$GITHUB_SHA" \
@@ -141,23 +149,8 @@ jobs:
             '{tier:"dev-closeout",workflow_sha:$workflow_sha,vigil_sha:$vigil_sha,dev_base_sha:$dev_base_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,cache_epoch:$cache_epoch,clean:true}' \
             > dev-closeout-sources.json
 
-      - name: Reject self-qualification of verification control-plane changes
-        env:
-          VIGIL_SHA: ${{ inputs.vigil_sha }}
-          DEV_BASE_SHA: ${{ inputs.dev_base_sha }}
-        run: |
-          while IFS= read -r -d '' path; do
-            case "$path" in
-              .cargo/*|.config/dev-closeout-impact.toml|.config/nextest.toml|.config/test-source-scan-allowlist.toml|clippy.toml|crates/vigil-ha/tests/contract-goldens/*|crates/vigil-ha/tests/ha_discovery_id_contract.rs|crates/vigil-ha/tests/mqtt_topic_contract.rs|crates/vigil/tests/automation_handle_capability_scan.rs|crates/vigil/tests/cli_secret_flag_surface.rs|crates/vigil/tests/contract-goldens/*|crates/vigil/tests/dependency_direction_contract.rs|crates/vigil/tests/environment_read_surface.rs|crates/vigil/tests/free_port_call_sites.rs|crates/vigil/tests/home_assistant_vocabulary_scan.rs|crates/vigil/tests/http_route_contract.rs|crates/vigil/tests/oss_cleanliness_scan.rs|crates/vigil/tests/process_cleanup_scan.rs|crates/vigil/tests/runtime_packages_manifest.rs|crates/vigil/tests/settings_registry_declare_boundary.rs|crates/vigil/tests/settings_surface_coverage.rs|crates/vigil/tests/source_scan_contract.rs|crates/vigil/tests/source_scan_lexer.rs|crates/vigil/tests/transport_purity.rs|.github/CODEOWNERS|.github/workflows/*|rust-toolchain|rust-toolchain.toml|scripts/verify|tests/convergence-smoke.sh|xtask/*)
-                echo "normal feature closeout cannot change trusted verification control plane: $path" >&2
-                echo "route a reviewed control-plane update through the owner bootstrap path" >&2
-                exit 1
-                ;;
-            esac
-          done < <(git -C vigil diff --name-only --no-renames -z --diff-filter=ACDMRTUXB "$DEV_BASE_SHA" "$VIGIL_SHA")
-
       - name: Upload exact source identity
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-sources
           path: dev-closeout-sources.json
@@ -173,27 +166,20 @@ jobs:
       install_expanded: ${{ steps.classify.outputs.install_expanded }}
     steps:
       - name: Checkout exact Vigil candidate and history
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           fetch-depth: 0
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Run the repository-owned impact classifier
         id: classify
         working-directory: vigil
@@ -210,7 +196,7 @@ jobs:
           esac
           echo "install_expanded=$install_expanded" >> "$GITHUB_OUTPUT"
       - name: Upload the code-derived impact receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-impact
           path: vigil/target/closeout-impact.json
@@ -224,34 +210,29 @@ jobs:
     needs: exact-sources
     steps:
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: cargo-nextest
       - name: Install bounded runtime tools
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
       - name: Restore closeout cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: vigil
           key: ${{ inputs.cache_epoch }}
@@ -315,7 +296,7 @@ jobs:
             --step tests
       - name: Upload default closeout receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-receipt-fast
           path: vigil/target/verify-receipts/dev-*.json
@@ -348,38 +329,35 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: cargo-nextest
       - name: Install bounded feature tools
+        env:
+          FEATURES: ${{ matrix.features }}
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           packages=(ffmpeg mosquitto mosquitto-clients)
-          if [[ "${{ matrix.features }}" == *decode-gstreamer* ]]; then
+          if [[ "$FEATURES" == *decode-gstreamer* ]]; then
             packages+=(libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev)
           fi
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y "${packages[@]}"
       - name: Restore closeout cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: vigil
           key: ${{ inputs.cache_epoch }}
@@ -424,7 +402,7 @@ jobs:
             --step tests
       - name: Upload feature receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-receipt-feature-${{ matrix.shape }}
           path: vigil/target/verify-receipts/dev-feature-${{ matrix.shape }}-*.json
@@ -444,30 +422,25 @@ jobs:
           docker system prune -af || true
           df -h
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: cargo-nextest
       - name: Restore closeout cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: vigil
           key: ${{ inputs.cache_epoch }}
@@ -528,7 +501,7 @@ jobs:
           test -x target/release/vigil
           install -m 0755 target/release/vigil target/closeout/vigil-acceptance-bin
       - name: Upload the immutable archive and process binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-slow-archive
           path: |
@@ -539,7 +512,7 @@ jobs:
           retention-days: 7
       - name: Upload slow preflight receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-receipt-slow-preflight
           path: vigil/target/verify-receipts/dev-slow-*.json
@@ -560,28 +533,21 @@ jobs:
           docker system prune -af || true
           df -h
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Restore closeout cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: vigil
           key: ${{ inputs.cache_epoch }}
@@ -665,7 +631,7 @@ jobs:
             --receipt target/verify-receipts/dev-install-image-save.json \
             --step save
       - name: Upload the one prebuilt install-smoke image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-install-image
           path: vigil/target/closeout/vigil-acceptance-image.tar
@@ -674,7 +640,7 @@ jobs:
           retention-days: 7
       - name: Upload expanded-install receipts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-receipt-install-preflight
           path: vigil/target/verify-receipts/dev-install-*.json
@@ -692,39 +658,34 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: cargo-nextest
       - name: Install bounded runtime tools
         run: |
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
           sudo timeout --kill-after=30s 5m apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y ffmpeg mosquitto mosquitto-clients
       - name: Restore closeout cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: vigil
           key: ${{ inputs.cache_epoch }}
       - name: Download the exact preflight archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-slow-archive
           path: vigil/target/closeout
@@ -752,7 +713,7 @@ jobs:
             --step tests
       - name: Upload slow shard receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-receipt-slow-${{ matrix.shard }}
           path: vigil/target/verify-receipts/dev-slow-${{ matrix.shard }}.json
@@ -767,40 +728,35 @@ jobs:
     if: needs.impact.outputs.install_expanded == 'true'
     steps:
       - name: Checkout exact Vigil commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.exact-sources.outputs.vigil_sha }}
           path: vigil
           persist-credentials: false
-      - name: Checkout exact Context Graph commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/context-graph
-          ref: ${{ needs.exact-sources.outputs.context_graph_sha }}
-          path: context-graph
-          token: ${{ secrets.CG_CI_TOKEN }}
-          persist-credentials: false
-      - name: Checkout exact ContextDB commit
-        uses: actions/checkout@v4
-        with:
-          repository: context-graph-ai/contextdb
-          ref: ${{ needs.exact-sources.outputs.contextdb_sha }}
-          path: contextdb
-          persist-credentials: false
+      - name: Fetch validated public exact dependencies
+        working-directory: vigil
+        env:
+          CI_METADATA_TOKEN: ${{ github.token }}
+          EXPECTED_CG_SHA: ${{ needs.exact-sources.outputs.context_graph_sha }}
+          EXPECTED_DB_SHA: ${{ needs.exact-sources.outputs.contextdb_sha }}
+        run: ./scripts/ci-public-dependencies checkout "$EXPECTED_CG_SHA" "$EXPECTED_DB_SHA"
+
       - name: Install nextest
-        uses: taiki-e/install-action@nextest
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8
+        with:
+          tool: cargo-nextest
       - name: Restore closeout cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: vigil
           key: ${{ inputs.cache_epoch }}
       - name: Download the exact preflight archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-slow-archive
           path: vigil/target/closeout
       - name: Download the one prebuilt install image
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-install-image
           path: vigil/target/closeout
@@ -831,7 +787,7 @@ jobs:
             --step tests
       - name: Upload install-smoke receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-receipt-slow-install
           path: |
@@ -867,13 +823,13 @@ jobs:
             test "${{ needs.install-smoke.result }}" = "skipped"
           fi
       - name: Download all timing receipts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: dev-closeout-receipt-*
           path: receipts
           merge-multiple: true
       - name: Download the code-derived impact receipt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: dev-closeout-impact
           path: impact
@@ -906,7 +862,7 @@ jobs:
             '{tier:"dev-closeout",qualified:true,vigil_sha:$vigil_sha,dev_base_sha:$dev_base_sha,context_graph_sha:$context_graph_sha,contextdb_sha:$contextdb_sha,workflow_run:$workflow_run,install_expanded:$install_expanded,fast_forward_only:true}' \
             > dev-closeout-qualified.json
       - name: Upload fast-forward merge receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dev-closeout-qualified-${{ needs.exact-sources.outputs.vigil_sha }}
           path: |
